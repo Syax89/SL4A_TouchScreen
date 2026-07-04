@@ -1,7 +1,13 @@
 # MSHW0231 HID-over-SPI Driver — Documentazione Completa
 
 > **Repository**: https://github.com/Syax89/SL4A_TouchScreen
-> **Ultimo commit**: v5 (587d0a1) - SPI working, DESCREQ needs TX+RX opcode fix
+> **⚠️ 2026-07-05 — verifica incrociata CSV × decomp amdspi × decomp hidspi V0 × spec:
+> molte affermazioni di questo file e di HIDSPI_PROTOCOL/CSV_SEQUENCE/VERIFICATION_PLAN
+> sono SMENTITE. La fonte di verità per protocollo e controller è ora
+> [GROUND_TRUTH.md](GROUND_TRUTH.md)** (report completi in [verification/](verification/)).
+> In particolare: la teoria "DESCREQ TX+RX inline stesso opcode" è FALSA (write TX-only +
+> IRQ + read separata); gli "approval bytes" non esistono (artefatto buffer riusato);
+> VENDOR_INIT/fw upload appartengono a un SECONDO device SPB, non al touchscreen.
 > **File correlati**: [CSV_SEQUENCE.md](CSV_SEQUENCE.md) | [SPI_REGISTERS.md](SPI_REGISTERS.md) | [HIDSPI_PROTOCOL.md](HIDSPI_PROTOCOL.md)
 
 ---
@@ -32,24 +38,36 @@
 - **ACPI table**: MSHW0231 matches via PNP0C51 fallback
 - **No black screen**: `gpio_vendor_init` rimosso (ioremap 0xFED80000)
 
-### ❌ DA RISOLVERE
-1. **DESCREQ non produce type=7**: TX opcode 0x02 + RX separata opcode 0x0B
-   - Windows usa TX+RX **inline con stesso opcode** (0x02 per entrambi)
-   - La 0x0B read separata è un nuovo comando, non la completion di 0x02
-   - Il device risponde con ACK ma non avanza a DEVICE_DESC
-2. **Firmware non testato** con le fix SPI attuali
-3. **Nessun DESCREQ2** (il codice c'è ma state 1 non raggiunge mai type=7)
-4. **input_register per letture iniziali è 0x1000**: Windows usa 0x0000 prima del descriptor parse (approval byte7=0x00, register=0x0000). Il driver usa `SPI_HID_DEFAULT_INPUT_REGISTER 0x1000` (spi-hid-core.h:76) e non cambia mai a 0x0000 durante lo stato 0.
-5. **Bug `memcpy` nel parse descrittore (state 1)**: `memcpy(&raw, hdr+off, s)` copia i 4 byte dell'header HID invece del body (spi-hid-core.c:1237). Dovrebbe essere `hdr+off+4`. Il parse risulta corrotto — `wVendorID`, `wProductID` e tutti i campi del descrittore vengono letti 4 byte sfalsati.
+### ❌ DA RISOLVERE (ordinati per priorità, verificati 2026-07-04)
 
-### Teoria di Fix
-- TX con TXMODE=1 per inviare DESCREQ, poi RX con TXMODE=0
-- Oppure attendere GPIO IRQ prima di fare 0x0B read
-- Oppure path V1 (CTRL0 bit16) che gestisce TX+RX nativamente
-- **D**: Refactor `spi_hid_seq_write_then_read` to use a single `spi_transfer` with both `tx_buf` and `rx_buf` (same len). Then in `host_transfer`, detect this case and call `exec_segment(opcode, tx, tx_len, rx, rx_len)` as one operation.
+#### CRITICAL — HID Protocol
+1. **[C4]** **Bug `memcpy` nel parse descrittore (state 1)**: `memcpy(&raw, hdr+off, s)` copia i 4 byte dell'header HID invece del body (`spi-hid-core.c:1237`). Dovrebbe essere `hdr+off+4`. Tutti i campi del descrittore (vendor, product, registri) sono shiftati di 4 byte.
+2. **[C5]** **input_register iniziale = 0x1000**: Dovrebbe essere `0x0000` per le letture pre-descriptor (Windows approva con approval7=0x00 su register=0x0000). `spi-hid-core.h:76`, `spi-hid-core.c:1814`.
+3. **[C6/C7]** **Approval bytes errati a runtime**: approval7 deve essere `0x0A` (non 0x03) dopo state 4; approval8 deve essere sempre `0x00` (non 0x0A a state 4). `spi-hid-core.c:1129-1131`. Il device rifiuta report con approval errati.
+4. **DESCREQ non produce type=7**: TX opcode 0x02 + RX separata opcode 0x0B — La 0x0B read separata è un nuovo comando. Windows usa TX+RX **inline con stesso opcode** (0x02 per entrambi) in una singola transazione SPI.
 
-### Fix Proposti
-- **Opzione A (TX+RX inline stesso opcode)** — VIABLE. Richiede di modificare `spi_hid_seq_write_then_read` per creare un singolo `spi_transfer` con sia `tx_buf` che `rx_buf`, E modificare `host_transfer` per eseguire entrambi in una singola chiamata `exec_segment`. Questo emula il comportamento Windows osservato nel CSV (TXN #3: opcode 0x02 TX+RX come singola operazione).
+#### CRITICAL — SPI Controller
+5. **[C1]** **ALT_CS encoding errato**: `amd_spi_select_chip` usa `cs & 0x03`, Windows forza `AND 0xFC, OR 0x01`. Con CS=0 il nostro driver scrive 0x00 (strobe disabilitato). `spi-amd.c:106-108`.
+6. **[C2]** **`amd_spi_setup_v2_regs` chiamata in `host_transfer` ma NON in `exec_segment`**: i secret bits (30+29+18) vanno applicati per ogni segmento come fa Windows nella fcn.0x2be4. `spi-amd.c:426-427`.
+7. **[C3]** **Strobe 0x49/0x4A non in Windows**: write non necessarie, potenzialmente dannose. `spi-amd.c:269-270`.
+
+#### ACPI
+8. **[C8]** **GPIO pin documentato errato**: DSDT dice pin `0x55` (85), trigger `Edge/ActiveLow`. Documentato come `0x15` `Level/ActiveHigh`. Il driver legge da ACPI a runtime, ma la documentazione è fuorviante.
+
+### Piano Fix (2026-07-05 — sostituisce il precedente; vedi [GROUND_TRUTH.md](GROUND_TRUTH.md) §7)
+
+| Ordine | Fix | Fonte |
+|--------|-----|-------|
+| **G0** | Baseline: build repo attuale + reload + dmesg | — |
+| **G1** | Read Windows-shape: approval 5B `[0B][addr24 BE][FF]`, header read 9B, body read 5+blen, validazioni `hdr[3]==0x5A`/`(hdr[1]&0xF)==0`; **rimuovere** approval_byte7/8 (artefatto) | GT §3-4 |
+| **G2** | Write path exec_segment: dance 0x44 (opcode→word 0x44→opcode), FIFO clear single-set | GT §4 |
+| **G3** | Sequencer: header+body per IRQ; NIENTE read subito dopo la write (aspettare IRQ, timeout 2 s); su RESET_RESP ripetuta ri-inviare DESCREQ | GT §1-2 |
+| **G4** | Parse descriptor a **body+3** (28 byte, validare wDeviceDescLength==0x001C); DESCREQ2 a wReportDescRegister | GT §5 |
+| **G5** | Rimuovere VENDOR_INIT/fw_work dal path HID (device SPB sbagliato); runtime su type=1 | GT §6 |
+
+NB: i vecchi fix C6/C7 (approval bytes) erano basati su un artefatto del CSV; C4 era
+incompleto (+4 salta solo l'header: il descriptor inizia a body+3). La teoria "DESCREQ
+TX+RX inline" (vecchia Opzione A/D) è SMENTITA da spec+decomp hidspi+decomp amdspi.
 
 ---
 
@@ -69,13 +87,19 @@ Vedi [SPI_REGISTERS.md](SPI_REGISTERS.md) per dettagli completi.
 
 ---
 
-## 4. BUGS NOTI
+## 4. BUGS NOTI (aggiornato 2026-07-04 — verifica sub-agenti)
 
-| # | Bug | File:Line |
-|---|-----|-----------|
-| 1 | **Descriptor parse in state 1**: `memcpy(&raw, hdr+off, s)` copia l'header invece del body | `spi-hid-core.c:1237` |
-| 2 | **ACPI table manca MSHW0231**: il device matcha solo via `PNP0C51` fallback | `spi-hid-core.c:1604-1610` |
-| 3 | **input_register = 0x1000 per letture pre-descriptor**: Windows usa `0x0000` con approval byte7=0x00 prima del parse | `spi-hid-core.h:76`, `spi-hid-core.c:1814` |
+| # | Bug | File:Line | Priorità |
+|---|-----|-----------|----------|
+| C4 | **Descriptor parse offset +4**: `memcpy(&raw, hdr+off, s)` anziché `+4` | `spi-hid-core.c:1237` | **CRITICAL** |
+| C5 | **input_register = 0x1000**: deve essere 0x0000 pre-descriptor | `spi-hid-core.h:76`, `spi-hid-core.c:1814` | **CRITICAL** |
+| C6 | **approval7 = 0x03 a runtime**: deve essere 0x0A dopo state 4 | `spi-hid-core.c:1129` | **CRITICAL** |
+| C7 | **approval8 = 0x0A a runtime**: deve essere sempre 0x00 | `spi-hid-core.c:1131` | **CRITICAL** |
+| C1 | **ALT_CS encoding**: `cs & 0x03` anziché `OR 0x01` stile Windows | `spi-amd.c:106-108` | **CRITICAL** |
+| C2 | **Secret bits non in exec_segment**: setup_v2_regs chiamata solo in host_transfer | `spi-amd.c:234,426-427` | HIGH |
+| C3 | **Strobe 0x49/0x4A non in Windows**: write extra, verificare se necessarie | `spi-amd.c:269-270` | MEDIUM |
+| 8 | **ACPI table manca MSHW0231**: matcha solo via `PNP0C51` fallback | `spi-hid-core.c:1604-1610` | LOW |
+| 9 | **GPIO pin errato in docs**: DSDT dice `0x55` (85), documentato come `0x15` | DSDT/DRIVER_STATE.md | MEDIUM |
 
 ---
 
@@ -96,12 +120,11 @@ Diagnostico:
   /usr/src/spi-amd-amdi0060-1.0/  Modulo test register (amd_exec_v2_pure)
 
 Decomp:
-  ~/Scrivania/decomp/amdspi/     amdspi.sys (SPI controller Windows, locale)
-
-  ~/Scrivania/decomp/hidspicx_*.txt  hidspi.sys (HID protocol Windows, locale)
+  ~/Scrivania/decomp/amdspi/     amdspi.sys (SPI controller Windows)
+  ~/Scrivania/decomp/hidspicx_*.txt  hidspi.sys (HID protocol Windows)
 
 CSV:
-  traces/surface_boot_auto.csv   Trace ETW boot Windows
+  ~/Scrivania/wintrace/surface_boot_auto.csv  Trace ETW boot Windows
 ```
 
 ---
