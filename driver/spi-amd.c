@@ -165,8 +165,9 @@ static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 
 static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi)
 {
-	/* Secret bits from decomp: 0x60040000 (bits 30, 29, 18).
-	 * Do NOT set bit23 (TXMODE) — Windows never sets it. */
+	/* Bits 30,29,18,23. Bit 23 (TXMODE) forces MOSI drive for
+	 * all opcodes — required on AMD FCH V2 for real opcodes
+	 * like 0x00, 0x02, 0xB0 that Windows uses. */
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_CTRL0_REG,
 			       AMD_SPI_SECRET_BITS, 0);
 }
@@ -231,6 +232,8 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
  * Execute a single segment of transfers sharing the same opcode.
  * Returns the number of RX bytes read, or negative error.
  */
+#define AMD_SPI_DEBUG_TRACE 0
+
 static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 				const u8 *tx_data, u32 tx_len,
 				u8 *rx_data, u32 rx_len)
@@ -240,7 +243,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	int i, ret;
 	u16 old_reg_prefix = 0, old_reg44 = 0;
 
-	pr_info("spi-amd-multi: seg op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
+	pr_debug("spi-amd-multi: seg op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
 
 	/* Save the reg_prefix and 0x44 registers before the transaction */
 	if (amd_spi->version == AMD_SPI_V2) {
@@ -261,14 +264,11 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	 * 10. Trigger (reg 0x47 = 0x80)
 	 */
 
-	/* 1. Set reg 0x1D bit 0 = 1.
-	 * Windows amdspi.sys decomp (fcn.0x3c20, 0x4bac, 0x54d0):
-	 *   read8(0x1D) → AND 0xFC → OR 0x01 → write8(0x1D)
-	 * Only bit 0 is set. DO NOT set bit 7 — that was a DKMS
-	 * artifact that may disable write mode. */
+	/* 1. Set reg 0x1D bit 0 = 1 (SPI enable strobe).
+	 * Preserve CS bits 1-6, clear upper reserved bits 6-7, set bit 0. */
 	if (amd_spi->version == AMD_SPI_V2) {
 		u8 reg1d = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
-		reg1d = (reg1d & 0xFC) | 0x01;  /* match Windows: only bit 0 */
+		reg1d = (reg1d & 0x3F) | 0x01;  /* preserve bits 1-5 (incl CS), set bit 0 */
 		amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, reg1d);
 	}
 
@@ -278,9 +278,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	/* 3. Write opcode to 0x45 (first time — lets HW update CTRL0 bits 15-8) */
 	amd_spi_set_opcode(amd_spi, opcode);
 
-	/* 4. Write CTRL0 secret bits NOW (before FIFO fill, matching Windows).
-	 * Bits 30, 29, 18 only. Do NOT set bit 23 (TXMODE) or clear bit 21
-	 * (Windows preserves both from hardware defaults). */
+	/* 4. Write CTRL0 bits 30,29,18,23 (TXMODE) — required for MOSI drive */
 	if (amd_spi->version == AMD_SPI_V2) {
 		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
 	ctrl0 |= 0x60040000;   /* bits 30, 29, 18 */
@@ -302,6 +300,10 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	}
 
 	/* 6. TX_COUNT */
+	if (tx_len > AMD_SPI_FIFO_SIZE) {
+		pr_err("spi-amd-multi: tx_len %u exceeds FIFO size %u\n", tx_len, AMD_SPI_FIFO_SIZE);
+		return -EINVAL;
+	}
 	writeb(tx_len, base + AMD_SPI_TX_COUNT_REG);
 
 	/* 7. Fill FIFO (only if tx_len > 0) */
@@ -328,6 +330,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	ctrl0 |= 0x00800000;   /* bit 23: TXMODE — force MOSI drive (CRITICAL!) */
 	amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
+#if AMD_SPI_DEBUG_TRACE
 	{
 		u8 fdump[16];
 		int k;
@@ -348,6 +351,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 			amd_spi_readreg8(amd_spi, AMD_SPI_STATUS_REG),
 			16, fdump);
 	}
+#endif
 
 	/* Memory barrier: ensure all MMIO writes (FIFO, CTRL0, counts)
 	 * reach the controller before we trigger the transfer.
@@ -362,6 +366,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (ret)
 		return ret;
 
+#if AMD_SPI_DEBUG_TRACE
 	{
 		u8 fdump[24];
 		int k;
@@ -374,6 +379,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 			readw(base + 0x22),
 			24, fdump);
 	}
+#endif
 
 	/*
 	 * Windows amdspi.sys fcn.0x6f84 (restore_register_prefix):
@@ -388,14 +394,12 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (rx_len) {
 		u32 read_off = fifo_pos + tx_len;
 
-		for (i = 0; i < rx_len && i < 64; i++)
+		for (i = 0; i < rx_len && i < AMD_SPI_FIFO_SIZE; i++)
 			rx_data[i] = readb(base + read_off + i);
 
-		pr_info("spi-amd-multi: rx[0..15]=[%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
-			rx_data[0],rx_data[1],rx_data[2],rx_data[3],
-			rx_data[4],rx_data[5],rx_data[6],rx_data[7],
-			rx_data[8],rx_data[9],rx_data[10],rx_data[11],
-			rx_data[12],rx_data[13],rx_data[14],rx_data[15]);
+#if AMD_SPI_DEBUG_TRACE
+		pr_info("spi-amd-multi: rx[0..%u]=[%*ph]\n", rx_len, rx_len > 16 ? 16 : rx_len, rx_data);
+#endif
 	}
 
 	return rx_len;
@@ -546,8 +550,12 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 				u8 *tx_buf = (u8 *)xfer->tx_buf;
 				u32 tx_len = xfer->len;
 				u8 opcode = tx_buf[0];
+				u32 total_tx, total_rx;
 				tx_buf++;
 				tx_len--;
+
+				total_tx = tx_len;
+				total_rx = xfer->rx_buf ? xfer->len : 0;
 
 				sent = 0;
 				remaining = tx_len;
@@ -557,8 +565,8 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 					int ret;
 
 					u32 rx_chunk = ((remaining == chunk) && xfer->rx_buf) ?
-						       xfer->len : 0;
-					u8 *rx_ptr = (u8 *)xfer->rx_buf;
+						       min_t(u32, total_rx, AMD_SPI_FIFO_SIZE) : 0;
+					u8 *rx_ptr = (u8 *)xfer->rx_buf + sent; /* advance with TX */
 
 					ret = amd_spi_exec_segment(amd_spi, opcode,
 						tx_buf + sent, chunk,
@@ -571,12 +579,19 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 					remaining -= chunk;
 				}
 			} else if (xfer->rx_buf && xfer->len > 0) {
-				/* RX-only transfer: use 0x0B opcode */
-				int ret = amd_spi_exec_segment(amd_spi, 0x0B,
-					NULL, 0, (u8 *)xfer->rx_buf, xfer->len);
-				if (ret < 0) {
-					msg->status = ret;
-					goto out;
+				u32 rx_remaining = xfer->len;
+				u8 *rx_ptr = (u8 *)xfer->rx_buf;
+				while (rx_remaining > 0) {
+					u32 chunk = rx_remaining > AMD_SPI_FIFO_SIZE ?
+						    AMD_SPI_FIFO_SIZE : rx_remaining;
+					int ret = amd_spi_exec_segment(amd_spi, 0x0B,
+						NULL, 0, rx_ptr, chunk);
+					if (ret < 0) {
+						msg->status = ret;
+						goto out;
+					}
+					rx_ptr += chunk;
+					rx_remaining -= chunk;
 				}
 			}
 		}
