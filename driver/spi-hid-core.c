@@ -357,55 +357,14 @@ out:
 /* Forward declarations */
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len);
 
-static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len);
-static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len);
-static int spi_hid_seq_write_then_read(struct spi_hid *shid,
-	const u8 *tx, int tx_len, u8 *rx, int rx_len);
-
 static void spi_hid_fw_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, fw_work);
 	struct device *dev = &shid->spi->dev;
-	const struct firmware *fw = NULL;
-	int ret;
 
-	ret = request_firmware(&fw, "mshw0231_b0.bin", dev);
-	if (ret || !fw) {
-		dev_info(dev, "SEQ: fw_work: firmware not found (ret=%d)\n", ret);
-		return;
-	}
-	{
-		int b, nblocks = fw->size / 241, tail = fw->size % 241;
-		u8 rx[64];
-
-		/* DESCREQ: switch device from RESET_RSP to protocol mode */
-		{ static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
-		  spi_hid_seq_write_then_read(shid,dr,10,rx,10); }
-		usleep_range(5000,10000);
-
-		/* Activation: cmd1 (0x00 + 5B), cmd2 (0x00 + 1B), ACK read, cmd3 (0x70 + 1B+14B) */
-		{ static const u8 c1[]={0x00,0x0E,0x00,0x00,0x00}; spi_hid_seq_write(shid,c1,5); }
-		usleep_range(1000,1500);
-		{ u8 c=0; spi_hid_seq_write(shid,&c,1); } usleep_range(1500,2000);
-		spi_hid_seq_read(shid,rx,16); usleep_range(25000,30000);
-		{ u8 c=0x70; spi_hid_seq_write_then_read(shid,&c,1,rx,14); }
-		usleep_range(10000,15000);
-
-		dev_info(dev, "SEQ: fw_work: sending %d B0 blocks + %dB tail\n", nblocks, tail);
-		for (b = 0; b < nblocks && b * 241 + 240 < fw->size; b++) {
-			spi_hid_seq_write(shid, fw->data + b * 241, 241);
-			usleep_range(3000, 4000);
-		}
-		if (tail > 0) {
-			spi_hid_seq_write(shid, fw->data + nblocks * 241, tail);
-		}
-		dev_info(dev, "SEQ: fw_work: %d blocks + %dB tail sent\n", b, tail);
-	}
-	release_firmware(fw);
-	dev_info(dev, "SEQ: fw_work: waiting 41s for device init...\n");
-	msleep(41000);
-	shid->seq_state=2; shid->ready=true; shid->keep_powered=true;
-	if(!shid->hid) schedule_work(&shid->create_device_work);
+	dev_info(dev, "SEQ: fw_work: firmware disabled, skipping\n");
+	shid->ready = true;
+	shid->keep_powered = true;
 	dev_info(dev, "SEQ: fw_work complete\n");
 }
 
@@ -800,11 +759,13 @@ static void spi_hid_create_device_work(struct work_struct *work)
 	struct spi_hid *shid =
 		container_of(work, struct spi_hid, create_device_work);
 	struct device *dev = &shid->spi->dev;
+	u8 prev_state = shid->power_state;
 	int ret;
 
-	dev_info(dev, "Create device work\n");
+	trace_spi_hid_create_device_work(shid);
+	dev_err(dev, "Create device work\n");
 
-	if (!shid->seq_enabled && shid->desc.hid_version != SPI_HID_SUPPORTED_VERSION) {
+	if (shid->desc.hid_version != SPI_HID_SUPPORTED_VERSION) {
 		dev_err(dev, "Unsupported device descriptor version %4x\n",
 			shid->desc.hid_version);
 		schedule_work(&shid->error_work);
@@ -818,25 +779,25 @@ static void spi_hid_create_device_work(struct work_struct *work)
 	}
 
 	shid->attempts = 0;
-
-	if (!shid->seq_enabled) {
-		if (shid->irq_enabled) {
-			disable_irq(shid->irq);
-			shid->irq_enabled = false;
-		} else {
-			dev_err(dev, "%s called with interrupt already disabled\n",
-				__func__);
-			shid->logic_error_count++;
-			shid->logic_last_error = -ENOEXEC;
-		}
-		ret = spi_hid_power_down(shid);
-		if (ret) {
-			dev_err(dev, "%s: could not power down\n", __func__);
-			return;
-		}
+	if (shid->irq_enabled) {
+		disable_irq(shid->irq);
+		shid->irq_enabled = false;
+	} else {
+		dev_err(dev, "%s called with interrupt already disabled\n",
+								__func__);
+		shid->logic_error_count++;
+		shid->logic_last_error = -ENOEXEC;
+	}
+	ret = spi_hid_power_down(shid);
+	if (ret) {
+		dev_err(dev, "%s: could not power down\n", __func__);
+		return;
 	}
 
 	shid->power_state = SPI_HID_POWER_MODE_OFF;
+	dev_err(dev, "%s: %s -> %s\n", __func__,
+			spi_hid_power_mode_string(prev_state),
+			spi_hid_power_mode_string(shid->power_state));
 }
 
 static void spi_hid_refresh_device_work(struct work_struct *work)
@@ -1181,11 +1142,13 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 	return spi_sync(shid->spi, &msg);
 }
 static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
-{ return spi_hid_seq_read_reg(shid,0,rx,rx_len); }
+{ dev_err(&shid->spi->dev,"SEQ: read reg=0x%04X len=%d\n",shid->desc.input_register,rx_len);
+  return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len); }
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len)
-{ struct spi_transfer xf; struct spi_message msg;
+{ dev_err(&shid->spi->dev,"SEQ: write op=0x%02x len=%d\n",buf[0],len);
+  { struct spi_transfer xf; struct spi_message msg;
   memset(&xf,0,sizeof(xf)); xf.tx_buf=(void*)buf; xf.len=len;
-  spi_message_init_with_transfers(&msg,&xf,1); return spi_sync(shid->spi,&msg); }
+  spi_message_init_with_transfers(&msg,&xf,1); return spi_sync(shid->spi,&msg); } }
 static int spi_hid_seq_write_then_read(struct spi_hid *shid,
 	const u8 *tx, int tx_len, u8 *rx, int rx_len)
 { struct spi_transfer xf[2]; struct spi_message msg;
@@ -1194,53 +1157,165 @@ static int spi_hid_seq_write_then_read(struct spi_hid *shid,
   spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
   return spi_sync(shid->spi,&msg); }
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
-{ int i; for(i=0;i+3<len;i++){ if(rx[i+3]==0x5A&&(rx[i]&0x0F)==2)
-  { if(hdr_off)*hdr_off=i; return (rx[i]>>4)&0xF; } } return -1; }
+{
+	int i;
+	for (i = 0; i + 3 < len; i++) {
+		if (rx[i + 3] == 0x5A && (rx[i] & 0x0F) == 2) {
+			if (hdr_off) *hdr_off = i;
+			return (rx[i] >> 4) & 0xF;
+		}
+		if (rx[i] == 0x03 && rx[i + 1] == 0x00 &&
+		    rx[i + 2] == 0x00 && rx[i + 3] == 0x00) {
+			if (hdr_off) *hdr_off = i;
+			return 0;
+		}
+	}
+	return -1;
+}
+
 
 static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[24]; int type, off=0; u16 blen=0;
-	u8 *h;
+	u8 hdr[64]; int type, off = 0; u16 blen = 0;
 
-	if(!shid->seq_enabled) return IRQ_HANDLED;
-	if(spi_hid_seq_read(shid,hdr,sizeof(hdr))){ dev_err(dev,"SEQ: hdr fail\n"); return IRQ_HANDLED; }
-	type=spi_hid_seq_hdr_type(hdr,sizeof(hdr),&off);
-	dev_dbg(dev,"SEQ[state=%d] off=%d type=%d raw=[%*ph]\n",shid->seq_state,off,type,16,hdr);
-	if(type<0) return IRQ_HANDLED;
-	h=&hdr[off]; blen=((((h[1]>>4)&0xF)<<0)|(h[2]<<4))*4;
-	if(blen>sizeof(shid->input.content)) blen=sizeof(shid->input.content);
+	if (!shid->seq_enabled) return IRQ_HANDLED;
 
-	switch(shid->seq_state){
-	case 0: /* WAIT_RESET - wait for device to send type=3 (RESET_RSP) */
-	  if(type==3){
-	    shid->seq_state=1;
-	    schedule_work(&shid->fw_work); /* sends DESCREQ+activation+B0 from wq */
-	  } break;
-	case 1: /* FW_SENDING - fw_work handles everything */
-	  /* also handle device descriptor while waiting */
-	  if(type==7 || type==8){
-	    struct spi_hid_device_desc_raw raw;
-	    u32 s = blen < sizeof(raw) ? blen : sizeof(raw);
-	    memcpy(&raw, h, s);
-	    spi_hid_parse_dev_desc(&raw, &shid->desc);
-	    if(!shid->hid) schedule_work(&shid->create_device_work);
-	  } break;
-	case 2: /* DONE - after fw_work completes, forward touch reports */
-	  if(type==7 && shid->hid){
-	    /* type 7 content format: 2B report_len + report data */
-	    u16 rl=h[0]|(h[1]<<8);
-	    if(rl>2 && rl<=blen) hid_input_report(shid->hid,HID_INPUT_REPORT,h+2,rl-2,1);
-	  }
-	  if(type==8 && !shid->hid){
-	    struct spi_hid_device_desc_raw raw;
-	    u32 s = blen < sizeof(raw) ? blen : sizeof(raw);
-	    memcpy(&raw, h, s);
-	    spi_hid_parse_dev_desc(&raw, &shid->desc);
-	    schedule_work(&shid->create_device_work);
-	  } break;
-	default: break;
+	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
+		dev_err(dev, "SEQ: hdr fail\n");
+		return IRQ_HANDLED;
+	}
+	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &off);
+	dev_info(dev, "SEQ[state=%d] off=%d type=%d raw=[%*ph]\n",
+		 shid->seq_state, off, type, 16, hdr);
+	if (type < 0) {
+		dev_info(dev, "SEQ: no header found\n");
+		return IRQ_HANDLED;
+	}
+	{
+		u8 *hp = &hdr[off];
+		if (type == 0) {
+			blen = 4; /* ACK has no report length, drain 4 bytes */
+		} else {
+			blen = (((hp[1] >> 4) & 0xF) << 0) | (hp[2] << 4);
+			blen *= 4;
+		}
+		if (blen > sizeof(shid->input.content))
+			blen = sizeof(shid->input.content);
+	}
+
+	switch (shid->seq_state) {
+
+	case 0: /* WAIT_RESET → two drain reads, then DESCREQ */
+		if (type == 3) {
+			u8 dr_buf[64];
+			dev_info(dev, "SEQ: drain #1 (%u bytes)\n", blen);
+			spi_hid_seq_read(shid, dr_buf, blen > sizeof(dr_buf) ? sizeof(dr_buf) : blen);
+			msleep(5);
+			dev_info(dev, "SEQ: drain #2\n");
+			spi_hid_seq_read(shid, dr_buf, sizeof(dr_buf));
+			dev_info(dev, "SEQ: drain #2 rx=[%*ph]\n", 8, dr_buf);
+			msleep(5);
+		}
+		if (type == 3 || type == 0) {
+			/* Send DESCREQ */
+			{ static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
+			  u8 drx[10];
+			  spi_hid_seq_write_then_read(shid,dr,10,drx,10);
+			  dev_info(dev,"SEQ: DESCREQ rx=[%*ph]\n",10,drx); }
+			msleep(5);
+			shid->seq_state = 1;
+			spi_hid_seq_read(shid, shid->input.content, 64);
+		}
+		break;
+
+	case 1: /* WAIT_DESC → type=7 (DEVICE_DESC) */
+		if (type == 7) {
+			dev_info(dev, "SEQ: DEVICE_DESC! Parsing descriptor...\n");
+			{
+				struct spi_hid_device_desc_raw raw;
+				u32 s = blen < sizeof(raw) ? blen : sizeof(raw);
+				memcpy(&raw, hdr + off, s);
+				spi_hid_parse_dev_desc(&raw, &shid->desc);
+				dev_info(dev, "SEQ: desc vid=0x%04X pid=0x%04X ver=0x%04X inp_reg=0x%04X out_reg=0x%04X rpt_len=%u\n",
+					 shid->desc.vendor_id, shid->desc.product_id,
+					 shid->desc.version_id, shid->desc.input_register,
+					 shid->desc.output_register,
+					 shid->desc.report_descriptor_length);
+			}
+			/* DESCREQ2 */
+			{
+				static const u8 dr2[] = {
+					0x02, 0x00, 0x00, 0x02, 0x42,
+					0x00, 0x00, 0x03, 0x00, 0x00
+				};
+				u8 dr2x[10];
+				spi_hid_seq_write_then_read(shid, dr2, 10, dr2x, 10);
+				dev_info(dev, "SEQ: DESCREQ2 rx=[%*ph]\n", 10, dr2x);
+			}
+			msleep(5);
+			shid->seq_state = 2;
+			spi_hid_seq_read(shid, shid->input.content, blen);
+		} else if (type == 3) {
+			dev_info(dev, "SEQ: still RESET_RSP in state 1\n");
+		} else if (type == 0) {
+			dev_info(dev, "SEQ: ACK in state 1 (DESCREQ sent?)\n");
+		} else {
+			dev_info(dev, "SEQ: state 1 unexpected type=%d\n", type);
+		}
+		break;
+
+	case 2: /* WAIT_RPT → type=8 (RPT_DESC), then VENDOR_INIT */
+		if (type == 8) {
+			dev_info(dev, "SEQ: RPT_DESC! → VENDOR_INIT\n");
+			spi_hid_seq_read(shid, shid->input.content, blen);
+			goto vendor_init;
+		} else if (type == 7) {
+			dev_info(dev, "SEQ: still DEVICE_DESC in state 2\n");
+		} else if (type == 3) {
+			dev_info(dev, "SEQ: still RESET_RSP in state 2\n");
+		}
+		break;
+
+	case 3: /* VENDOR_INIT — activation commands */
+vendor_init:
+		{
+			u8 rx[64], ack[64];
+			dev_info(dev, "SEQ: VENDOR_INIT starting activation sequence\n");
+			/* cmd1: opcode 0x00, 5 bytes */
+			{ static const u8 c1[] = {0x00, 0x0E, 0x00, 0x00, 0x00};
+			  spi_hid_seq_write(shid, c1, 5); }
+			dev_info(dev, "SEQ: cmd1 sent (opcode 0x00)\n"); msleep(5);
+			/* cmd2: opcode 0x00, 1 byte */
+			{ u8 c = 0; spi_hid_seq_write(shid, &c, 1); }
+			dev_info(dev, "SEQ: cmd2 sent (opcode 0x00)\n"); msleep(5);
+			/* Read ACK via 0x0B */
+			spi_hid_seq_read(shid, ack, 16);
+			dev_info(dev, "SEQ: ACK[16]=[%*ph]\n", 16, ack);
+			msleep(30);
+			/* cmd3: opcode 0x70, TX=1 RX=14 */
+			{ u8 c = 0x70;
+			  spi_hid_seq_write_then_read(shid, &c, 1, rx, 14); }
+			dev_info(dev, "SEQ: cmd3 rx=[%*ph]\n", 14, rx);
+			msleep(5);
+			dev_info(dev, "SEQ: VENDOR_INIT done, scheduling fw_work+create_device\n");
+			shid->seq_state = 4; shid->ready = true; shid->keep_powered = true;
+			schedule_work(&shid->fw_work);
+			if (!shid->hid) schedule_work(&shid->create_device_work);
+		}
+		break;
+
+	case 4: /* DONE — forward touch reports */
+		if (type == 7 && shid->hid) {
+			u16 rl = hdr[off] | (hdr[off + 1] << 8);
+			dev_info(dev, "SEQ: DONE type=7 report len=%u blen=%u\n",
+				 rl, blen);
+			if (rl > 2 && rl <= blen)
+				hid_input_report(shid->hid, HID_INPUT_REPORT,
+						 hdr + off + 4, rl - 2, 1);
+		}
+		break;
 	}
 	return IRQ_HANDLED;
 }

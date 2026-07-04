@@ -117,7 +117,11 @@ static inline void amd_spi_clear_chip(struct amd_spi *amd_spi, u8 cs)
 
 static void amd_spi_clear_fifo_ptr(struct amd_spi *amd_spi)
 {
-	amd_spi_setclear_reg32(amd_spi, AMD_SPI_CTRL0_REG, AMD_SPI_FIFO_CLEAR, AMD_SPI_FIFO_CLEAR);
+	u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
+	ctrl0 &= ~AMD_SPI_FIFO_CLEAR;
+	amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
+	ctrl0 |= AMD_SPI_FIFO_CLEAR;
+	amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 }
 
 static const struct amd_spi_freq amd_spi_freq[] = {
@@ -165,9 +169,8 @@ static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 
 static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi)
 {
-	/* Bits 30,29,18,23. Bit 23 (TXMODE) forces MOSI drive for
-	 * all opcodes — required on AMD FCH V2 for real opcodes
-	 * like 0x00, 0x02, 0xB0 that Windows uses. */
+	/* Bits 30,29,18. Windows never sets bit23 (TXMODE).
+	 * TXMODE is only set for opcode 0xB0 firmware writes. */
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_CTRL0_REG,
 			       AMD_SPI_SECRET_BITS, 0);
 }
@@ -191,19 +194,7 @@ static int amd_spi_busy_wait(struct amd_spi *amd_spi)
 	u32 val;
 	int reg;
 
-	switch (amd_spi->version) {
-	case AMD_SPI_V1:
-		reg = AMD_SPI_CTRL0_REG;
-		break;
-	case AMD_SPI_V2:
-		/* On V1 hardware forced to V2, STATUS_REG(0x4C) is unreliable.
-		 * Use CTRL0 busy bit instead, plus a fixed delay fallback. */
-		reg = AMD_SPI_CTRL0_REG;
-		break;
-	default:
-		return -ENODEV;
-	}
-
+	reg = AMD_SPI_CTRL0_REG;
 	return readl_poll_timeout(amd_spi->io_remap_addr + reg, val,
 				  !(val & AMD_SPI_BUSY), 20, 2000000);
 }
@@ -216,16 +207,20 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 	if (ret)
 		return ret;
 
-	switch (amd_spi->version) {
-	case AMD_SPI_V1:
-		amd_spi_setclear_reg32(amd_spi, AMD_SPI_CTRL0_REG, AMD_SPI_EXEC_CMD, AMD_SPI_EXEC_CMD);
-		return 0;
-	case AMD_SPI_V2:
-		amd_spi_setclear_reg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, AMD_SPI_TRIGGER_CMD, AMD_SPI_TRIGGER_CMD);
-		return 0;
-	default:
-		return -ENODEV;
+	if (amd_spi->version == AMD_SPI_V2) {
+		u8 trig = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
+		trig &= ~AMD_SPI_TRIGGER_CMD;
+		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, trig);
+		trig |= AMD_SPI_TRIGGER_CMD;
+		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, trig);
+	} else {
+		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
+		ctrl0 &= ~AMD_SPI_EXEC_CMD;
+		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
+		ctrl0 |= AMD_SPI_EXEC_CMD;
+		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
+	return 0;
 }
 
 /*
@@ -234,6 +229,8 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
  */
 #define AMD_SPI_DEBUG_TRACE 0
 
+#define DBG_VERBOSE 0
+
 static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 				const u8 *tx_data, u32 tx_len,
 				u8 *rx_data, u32 rx_len)
@@ -241,167 +238,55 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	void __iomem *base = amd_spi->io_remap_addr;
 	u32 fifo_pos = AMD_SPI_FIFO_BASE;
 	int i, ret;
-	u16 old_reg_prefix = 0, old_reg44 = 0;
 
-	pr_debug("spi-amd-multi: seg op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
+	if (DBG_VERBOSE || opcode != 0x0B)
+		pr_err("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
 
-	/* Save the reg_prefix and 0x44 registers before the transaction */
-	if (amd_spi->version == AMD_SPI_V2) {
-		old_reg_prefix = readw(base + 0x22);
-		old_reg44 = readw(base + 0x44);
-	}
-
-	/* Windows amdspi.sys order (fcn.0x54d0 / fcn.0x4bac):
-	 * 1. Set reg 0x1D bit 0 = 1 (AND 0xFC, OR 1)
-	 * 2. Clear FIFO (CTRL0 bit 20)
-	 * 3. Write opcode to 0x45 (first time — hardware updates CTRL0 bits 15-8)
-	 * 4. Read CTRL0, set bits 30/29/18/23, clear bit 21, write CTRL0
-	 * 5. Speed config (reg 0x44, overwrites 0x45)
-	 * 6. TX_COUNT (reg 0x48)
-	 * 7. Fill FIFO
-	 * 8. RX_COUNT (reg 0x4B) — 0 for writes, rx_len+1 for reads
-	 * 9. Write opcode to 0x45 again (after speed config overwrote it)
-	 * 10. Trigger (reg 0x47 = 0x80)
-	 */
-
-	/* 1. Set reg 0x1D bit 0 = 1 (SPI enable strobe).
-	 * Preserve CS bits 1-6, clear upper reserved bits 6-7, set bit 0. */
-	if (amd_spi->version == AMD_SPI_V2) {
-		u8 reg1d = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
-		reg1d = (reg1d & 0x3F) | 0x01;  /* preserve bits 1-5 (incl CS), set bit 0 */
-		amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, reg1d);
-	}
-
-	/* 2. Clear FIFO (CTRL0 bit 20) */
+	/* Clear FIFO */
 	amd_spi_clear_fifo_ptr(amd_spi);
 
-	/* 3. Write opcode to 0x45 (first time — lets HW update CTRL0 bits 15-8) */
-	amd_spi_set_opcode(amd_spi, opcode);
-
-	/* 4. Write CTRL0 bits 30,29,18,23 (TXMODE) — required for MOSI drive */
-	if (amd_spi->version == AMD_SPI_V2) {
+	/* V2: write opcode to 0x45 */
+	if (amd_spi->version == AMD_SPI_V2)
+		amd_spi_set_opcode(amd_spi, opcode);
+	else {
 		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
-	ctrl0 |= 0x60040000;   /* bits 30, 29, 18 */
-	ctrl0 |= 0x00800000;   /* bit 23: TXMODE — force MOSI drive (CRITICAL!) */
-	amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
+		ctrl0 = (ctrl0 & ~0xFF) | opcode;
+		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
 
-	/* 5. Speed config (reg 0x44 — spans 0x44-0x45, overwrites opcode!)
-	 * Use same speed for all opcodes. Reg 0x45 gets fixed to 0x0B after. */
-	if (amd_spi->version == AMD_SPI_V2) {
-		u16 r44 = readw(base + 0x44);
-		u8 nibble = amd_spi->speed_hz_index & 0x0F;
-
-		r44 &= 0xF0FF;
-		r44 |= (nibble << 8);
-		r44 &= 0x0FFF;
-		r44 |= (nibble << 12);
-		writew(r44, base + 0x44);
-	}
-
-	/* 6. TX_COUNT */
 	if (tx_len > AMD_SPI_FIFO_SIZE) {
-		pr_err("spi-amd-multi: tx_len %u exceeds FIFO size %u\n", tx_len, AMD_SPI_FIFO_SIZE);
+		pr_err("spi-amd: tx_len %u exceeds FIFO size %u\n", tx_len, AMD_SPI_FIFO_SIZE);
 		return -EINVAL;
 	}
 	writeb(tx_len, base + AMD_SPI_TX_COUNT_REG);
 
-	/* 7. Fill FIFO (only if tx_len > 0) */
 	for (i = 0; i < tx_len; i++)
 		writeb(tx_data[i], base + fifo_pos + i);
 
-	/* 8. RX_COUNT — rx_len for full-duplex. CTRL0 bits 15-12
-	 * scale with RX count: 0→0x0, 10→0xA, 14→0xE(?) */
+	writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
+
 	if (amd_spi->version == AMD_SPI_V2) {
-		u32 rx_cnt = (opcode == 0x0B && rx_len) ? rx_len + 1 : rx_len;
-		writeb(rx_cnt, base + AMD_SPI_RX_COUNT_REG);
-	} else {
-		writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
+		writeb(0x00, base + 0x49);
+		writeb(0x00, base + 0x4a);
+		if (DBG_VERBOSE) pr_err("spi-amd: strobe done\n");
 	}
 
-	/* 9. Write opcode to 0x45 again (speed config overwrote it) */
-	amd_spi_set_opcode(amd_spi, opcode);
-
-	/* 10. CTRL0 bits 15-8 are set automatically by RX_COUNT.
-	 * Restore secret bits (speed config may have cleared them). */
-	if (amd_spi->version == AMD_SPI_V2) {
-		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
-	ctrl0 |= 0x60040000;   /* bits 30, 29, 18 */
-	ctrl0 |= 0x00800000;   /* bit 23: TXMODE — force MOSI drive (CRITICAL!) */
-	amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
-	}
-#if AMD_SPI_DEBUG_TRACE
-	{
-		u8 fdump[16];
-		int k;
-
-		for (k = 0; k < 16; k++)
-			fdump[k] = readb(base + AMD_SPI_FIFO_BASE + k);
-		pr_info("spi-amd-TRACE pre-trig: op=%02x CTRL0=%08x ENA=%08x SPD=%08x 1D=%02x 44=%04x 45=%02x 47=%02x 48=%02x 4B=%02x 4C=%02x FIFO=%*ph\n",
-			opcode,
-			amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG),
-			amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG),
-			amd_spi_readreg32(amd_spi, AMD_SPI_SPEED_REG),
-			amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG),
-			readw(base + 0x44),
-			amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG),
-			amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG),
-			amd_spi_readreg8(amd_spi, AMD_SPI_TX_COUNT_REG),
-			amd_spi_readreg8(amd_spi, AMD_SPI_RX_COUNT_REG),
-			amd_spi_readreg8(amd_spi, AMD_SPI_STATUS_REG),
-			16, fdump);
-	}
-#endif
-
-	/* Memory barrier: ensure all MMIO writes (FIFO, CTRL0, counts)
-	 * reach the controller before we trigger the transfer.
-	 * Windows uses lfence at this point. */
 	wmb();
 
 	ret = amd_spi_execute_opcode(amd_spi);
-	if (ret)
-		return ret;
+	if (ret) { pr_err("spi-amd: execute_opcode failed %d\n", ret); return ret; }
 
 	ret = amd_spi_busy_wait(amd_spi);
-	if (ret)
-		return ret;
-
-#if AMD_SPI_DEBUG_TRACE
-	{
-		u8 fdump[24];
-		int k;
-
-		for (k = 0; k < 24; k++)
-			fdump[k] = readb(base + AMD_SPI_FIFO_BASE + k);
-		pr_info("spi-amd-TRACE post:  47=%02x 4C=%02x 22=%04x FIFO=%*ph\n",
-			amd_spi_readreg8(amd_spi, 0x47),
-			amd_spi_readreg8(amd_spi, 0x4C),
-			readw(base + 0x22),
-			24, fdump);
-	}
-#endif
-
-	/*
-	 * Windows amdspi.sys fcn.0x6f84 (restore_register_prefix):
-	 * writes dev_ctx[0x58] back to MMIO+0x22 via write16 after
-	 * every transfer. Also restores reg 0x44 (speed/opcode).
-	 */
-	if (amd_spi->version == AMD_SPI_V2) {
-		writew(old_reg_prefix, base + 0x22);
-		writew(old_reg44, base + 0x44);
-	}
+	if (ret) { pr_err("spi-amd: busy_wait timeout %d\n", ret); return ret; }
 
 	if (rx_len) {
-		u32 read_off = fifo_pos + tx_len;
-
 		for (i = 0; i < rx_len && i < AMD_SPI_FIFO_SIZE; i++)
-			rx_data[i] = readb(base + read_off + i);
-
-#if AMD_SPI_DEBUG_TRACE
-		pr_info("spi-amd-multi: rx[0..%u]=[%*ph]\n", rx_len, rx_len > 16 ? 16 : rx_len, rx_data);
-#endif
+			rx_data[i] = readb(base + fifo_pos + 4 + i);
+		pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
+			(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), rx_data);
 	}
 
+	if (DBG_VERBOSE) pr_err("spi-amd: done\n");
 	return rx_len;
 }
 
@@ -550,12 +435,8 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 				u8 *tx_buf = (u8 *)xfer->tx_buf;
 				u32 tx_len = xfer->len;
 				u8 opcode = tx_buf[0];
-				u32 total_tx, total_rx;
 				tx_buf++;
 				tx_len--;
-
-				total_tx = tx_len;
-				total_rx = xfer->rx_buf ? xfer->len : 0;
 
 				sent = 0;
 				remaining = tx_len;
@@ -564,13 +445,9 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 						    AMD_SPI_FIFO_SIZE : remaining;
 					int ret;
 
-					u32 rx_chunk = ((remaining == chunk) && xfer->rx_buf) ?
-						       min_t(u32, total_rx, AMD_SPI_FIFO_SIZE) : 0;
-					u8 *rx_ptr = (u8 *)xfer->rx_buf + sent; /* advance with TX */
-
 					ret = amd_spi_exec_segment(amd_spi, opcode,
 						tx_buf + sent, chunk,
-						rx_ptr, rx_chunk);
+						NULL, 0);
 					if (ret < 0) {
 						msg->status = ret;
 						goto out;
