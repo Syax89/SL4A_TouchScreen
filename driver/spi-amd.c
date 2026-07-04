@@ -536,12 +536,62 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 	if (amd_spi->version == AMD_SPI_V2)
 		amd_spi_setup_v2_regs(amd_spi);
 
-	return amd_spi_fifo_xfer(amd_spi, host, msg);
+	/* Handle large transfers: chunk at FIFO_SIZE keeping CS asserted */
+	{
+		struct spi_transfer *xfer;
+		list_for_each_entry(xfer, &msg->transfers, transfer_list) {
+			u32 remaining, sent;
+
+			if (xfer->tx_buf && xfer->len > 0) {
+				u8 *tx_buf = (u8 *)xfer->tx_buf;
+				u32 tx_len = xfer->len;
+				u8 opcode = tx_buf[0];
+				tx_buf++;
+				tx_len--;
+
+				sent = 0;
+				remaining = tx_len;
+				while (remaining > 0) {
+					u32 chunk = remaining > AMD_SPI_FIFO_SIZE ?
+						    AMD_SPI_FIFO_SIZE : remaining;
+					int ret;
+
+					u32 rx_chunk = ((remaining == chunk) && xfer->rx_buf) ?
+						       xfer->len : 0;
+					u8 *rx_ptr = (u8 *)xfer->rx_buf;
+
+					ret = amd_spi_exec_segment(amd_spi, opcode,
+						tx_buf + sent, chunk,
+						rx_ptr, rx_chunk);
+					if (ret < 0) {
+						msg->status = ret;
+						goto out;
+					}
+					sent += chunk;
+					remaining -= chunk;
+				}
+			} else if (xfer->rx_buf && xfer->len > 0) {
+				/* RX-only transfer: use 0x0B opcode */
+				int ret = amd_spi_exec_segment(amd_spi, 0x0B,
+					NULL, 0, (u8 *)xfer->rx_buf, xfer->len);
+				if (ret < 0) {
+					msg->status = ret;
+					goto out;
+				}
+			}
+		}
+	}
+	msg->status = 0;
+	msg->actual_length = msg->frame_length;
+out:
+	amd_spi_clear_chip(amd_spi, spi_get_chipselect(msg->spi, 0));
+	spi_finalize_current_message(host);
+	return msg->status;
 }
 
 static size_t amd_spi_max_transfer_size(struct spi_device *spi)
 {
-	return AMD_SPI_FIFO_SIZE;
+	return 65536; /* chunking handled internally in host_transfer */
 }
 
 int amd_spi_probe_common(struct device *dev, struct spi_controller *host)
@@ -616,4 +666,3 @@ module_platform_driver(amd_spi_driver);
 
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("AMD SPI V2 Multi-Opcode Driver");
-                                       

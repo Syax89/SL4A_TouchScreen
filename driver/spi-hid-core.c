@@ -373,25 +373,11 @@ static void spi_hid_fw_work(struct work_struct *work)
 		int b, nblocks = fw->size / 241, tail = fw->size % 241;
 		dev_info(dev, "SEQ: fw_work: sending %d B0 blocks + %dB tail\n", nblocks, tail);
 		for (b = 0; b < nblocks && b * 241 + 240 < fw->size; b++) {
-			int off;
-			for (off = 0; off < 241; off += 70) {
-				int ch = 70;
-				if (off + ch > 241)
-					ch = 241 - off;
-				spi_hid_seq_write(shid, fw->data + b * 241 + off, ch);
-				usleep_range(500, 800);
-			}
+			spi_hid_seq_write(shid, fw->data + b * 241, 241);
 			usleep_range(3000, 4000);
 		}
 		if (tail > 0) {
-			int off;
-			for (off = 0; off < tail; off += 70) {
-				int ch = 70;
-				if (off + ch > tail)
-					ch = tail - off;
-				spi_hid_seq_write(shid, fw->data + nblocks * 241 + off, ch);
-				usleep_range(500, 800);
-			}
+			spi_hid_seq_write(shid, fw->data + nblocks * 241, tail);
 		}
 		dev_info(dev, "SEQ: fw_work: %d blocks + %dB tail sent\n", b, tail);
 	}
@@ -1188,7 +1174,7 @@ static int spi_hid_seq_write_then_read(struct spi_hid *shid,
   spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
   return spi_sync(shid->spi,&msg); }
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
-{ int i; for(i=4;i+3<len;i++){ if(rx[i+3]==0x5A&&(rx[i]&0x0F)==2)
+{ int i; for(i=0;i+3<len;i++){ if(rx[i+3]==0x5A&&(rx[i]&0x0F)==2)
   { if(hdr_off)*hdr_off=i; return (rx[i]>>4)&0xF; } } return -1; }
 
 #define GPIO_MMIO_BASE 0xFED80000
@@ -1223,10 +1209,10 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	  if(type==3){ dev_info(dev,"SEQ: RESET_RSP, skip DESCREQ\n");
 	    shid->seq_state=1; spi_hid_seq_read(shid,shid->input.content,9); } break;
 	case 1: /* WAIT_DESC */
-	  if(type==3){ dev_info(dev,"SEQ: WAIT_DESC -> hardcoded desc\n");
-	    shid->desc.hid_version=0x0100; shid->desc.vendor_id=0x045E; shid->desc.product_id=0x0C19;
-	    shid->desc.version_id=0x0004; shid->desc.max_input_length=4309;
-	    shid->desc.report_descriptor_length=936; shid->desc.output_register=0x0002;
+	  if(type==3){ /* RESET_RSP: DESCREQ not done yet, send it now */
+	    { static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
+	      u8 drx[10]; spi_hid_seq_write_then_read(shid,dr,10,drx,10);
+	      dev_info(dev,"SEQ: DESCREQ rx=[%*ph]\n",10,drx); }
 	    shid->seq_state=2; spi_hid_seq_read(shid,shid->input.content,9); } break;
 	case 2: /* WAIT_RPT */
 	  if(type==3){ dev_info(dev,"SEQ: WAIT_RPT -> hardcoded rpt\n");
