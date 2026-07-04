@@ -105,7 +105,9 @@ static void amd_spi_setclear_reg32(struct amd_spi *amd_spi, int idx, u32 set, u3
 
 static void amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs)
 {
-	amd_spi_setclear_reg8(amd_spi, AMD_SPI_ALT_CS_REG, cs, AMD_SPI_ALT_CS_MASK);
+	u8 tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
+	tmp = (tmp & 0xFC) | 0x01;
+	amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, tmp);
 }
 
 static inline void amd_spi_clear_chip(struct amd_spi *amd_spi, u8 cs)
@@ -242,6 +244,10 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (DBG_VERBOSE || opcode != 0x0B)
 		pr_err("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
 
+	/* V2: set secret bits (30+29+18) before each segment, like Windows fcn.0x2be4 */
+	if (amd_spi->version == AMD_SPI_V2)
+		amd_spi_setup_v2_regs(amd_spi);
+
 	/* Clear FIFO */
 	amd_spi_clear_fifo_ptr(amd_spi);
 
@@ -265,12 +271,6 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 
 	writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
 
-	if (amd_spi->version == AMD_SPI_V2) {
-		writeb(0x00, base + 0x49);
-		writeb(0x00, base + 0x4a);
-		if (DBG_VERBOSE) pr_err("spi-amd: strobe done\n");
-	}
-
 	wmb();
 
 	ret = amd_spi_execute_opcode(amd_spi);
@@ -280,9 +280,9 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (ret) { pr_err("spi-amd: busy_wait timeout %d\n", ret); return ret; }
 
 	if (rx_len) {
-		u32 read_off = fifo_pos + 4;
+		u32 read_off = fifo_pos + tx_len;
 		for (i = 0; i < rx_len && i < AMD_SPI_FIFO_SIZE; i++)
-			rx_data[i] = readb(base + read_off + i);
+			rx_data[i] = readw(base + read_off + i) & 0xFF;
 		pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
 			(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), rx_data);
 	}
@@ -423,9 +423,6 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 
 	amd_spi_select_chip(amd_spi, spi_get_chipselect(spi, 0));
 
-	if (amd_spi->version == AMD_SPI_V2)
-		amd_spi_setup_v2_regs(amd_spi);
-
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		u32 remaining, sent;
 
@@ -438,6 +435,24 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 
 			sent = 0;
 			remaining = tx_len;
+
+			/* Combined TX+RX: if next transfer is RX-only, merge into one segment */
+			if (remaining <= AMD_SPI_FIFO_SIZE &&
+			    !list_is_last(&xfer->transfer_list, &msg->transfers)) {
+				struct spi_transfer *next = list_next_entry(xfer, transfer_list);
+				if ((!next->tx_buf || next->len == 0) &&
+				    next->rx_buf && next->len > 0 &&
+				    next->len <= AMD_SPI_FIFO_SIZE) {
+					u32 rx_chunk = next->len;
+					int ret = amd_spi_exec_segment(amd_spi, opcode,
+						tx_buf, remaining,
+						(u8 *)next->rx_buf, rx_chunk);
+					if (ret < 0) { msg->status = ret; goto out; }
+					xfer = next;
+					continue;
+				}
+			}
+
 			while (remaining > 0) {
 				u32 chunk = remaining > AMD_SPI_FIFO_SIZE ?
 					    AMD_SPI_FIFO_SIZE : remaining;

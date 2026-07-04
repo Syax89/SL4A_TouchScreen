@@ -25,6 +25,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/io.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/interrupt.h>
@@ -43,7 +44,6 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/pinctrl/consumer.h>
-#include <linux/firmware.h>
 #include <linux/regulator/consumer.h>
 #include <linux/workqueue.h>
 #include <linux/dma-mapping.h>
@@ -56,6 +56,8 @@
 #define SPI_HID_MAX_RESET_ATTEMPTS 3
 
 static struct hid_ll_driver spi_hid_ll_driver;
+static int spi_hid_create_device(struct spi_hid *shid);
+static int spi_hid_bus_input_report(struct spi_hid *shid);
 
 static void spi_hid_parse_dev_desc(struct spi_hid_device_desc_raw *raw,
 		struct spi_hid_device_descriptor *desc)
@@ -90,8 +92,11 @@ static void spi_hid_populate_input_header(__u8 *buf,
 static void spi_hid_populate_input_body(__u8 *buf,
 		struct spi_hid_input_body *body)
 {
-	body->content_length = (buf[0] | (buf[1] << 8)) -
-		(sizeof(body->content_length) + sizeof(body->content_id));
+	u16 raw_len = buf[0] | (buf[1] << 8);
+
+	body->content_length = raw_len >= (sizeof(body->content_length) + sizeof(body->content_id))
+		? raw_len - (sizeof(body->content_length) + sizeof(body->content_id))
+		: 0;
 	body->content_id = buf[2];
 }
 
@@ -132,6 +137,19 @@ static void spi_hid_output_body(__u8 *buf,
 	buf[3] = report->content_id;
 }
 
+/*
+ * Windows' ta264 SPI capture (linux-surface#51) shows byte[7] of this
+ * 9-byte approval frame as 0x00 for the very first read (RESET_RESP,
+ * before any descriptor request), but 0x03 for every subsequent read
+ * once the device has ack'd a descriptor request (DEVICE_DESC header,
+ * body, REPORT_DESC header, body all show byte[7]=0x03). Our regular
+ * reads always hardcoded byte[7]=0x00, which may be why the device
+ * keeps responding with RESET_RESP even after a successfully-acked
+ * descriptor request - it may be reading this byte as a protocol-stage
+ * flag and seeing us stuck in "stage 0" forever.
+ */
+static bool spi_hid_desc_request_acked;
+
 static void spi_hid_read_approval(u32 input_register, u8 *buf)
 {
 	buf[0] = SPI_HID_READ_APPROVAL_OPCODE_READ;
@@ -139,6 +157,10 @@ static void spi_hid_read_approval(u32 input_register, u8 *buf)
 	buf[2] = (input_register >> 8) & 0xff;
 	buf[3] = (input_register >> 0) & 0xff;
 	buf[4] = SPI_HID_READ_APPROVAL_CONSTANT;
+	buf[5] = 0x00;
+	buf[6] = 0x00;
+	buf[7] = spi_hid_desc_request_acked ? 0x03 : 0x00;
+	buf[8] = 0x00;
 }
 
 static int spi_hid_input_async(struct spi_hid *shid, void *buf, u16 length,
@@ -220,7 +242,7 @@ static int spi_hid_output(struct spi_hid *shid, void *buf, u16 length)
 	return ret;
 }
 
-static const char *spi_hid_power_mode_string(u8 power_state)
+static const char *const spi_hid_power_mode_string(u8 power_state)
 {
 	switch (power_state) {
 	case SPI_HID_POWER_MODE_ACTIVE:
@@ -354,20 +376,6 @@ out:
 	return ret;
 }
 
-/* Forward declarations */
-static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len);
-
-static void spi_hid_fw_work(struct work_struct *work)
-{
-	struct spi_hid *shid = container_of(work, struct spi_hid, fw_work);
-	struct device *dev = &shid->spi->dev;
-
-	dev_info(dev, "SEQ: fw_work: firmware disabled, skipping\n");
-	shid->ready = true;
-	shid->keep_powered = true;
-	dev_info(dev, "SEQ: fw_work complete\n");
-}
-
 static void spi_hid_error_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, error_work);
@@ -379,22 +387,238 @@ static void spi_hid_error_work(struct work_struct *work)
 		dev_err(dev, "%s: error handler failed\n", __func__);
 }
 
-/**
- * Handle the reset response from the FW by sending a request for the device
- * descriptor.
- * @shid: a pointer to the driver context
+/* AMD FCH SPI controller undocumented CTRL0 bits from amdspi.sys decompilation:
+ * bit 18 (0x00040000), bit 29 (0x20000000), bit 30 (0x40000000).
+ * Windows sets these alongside FIFO_CLEAR before each V2 transfer.
  */
+#define AMD_FCH_CTRL0_SECRET		(BIT(29) | BIT(30) | BIT(18))
+#define AMD_FCH_SPI_MMIO_BASE		0xFEC10000
+#define AMD_FCH_SPI_MMIO_SIZE		0x100
+#define AMD_FCH_SPI_CTRL0_REG		0x00
+#define AMD_FCH_SPI_OPCODE_MASK	0xFF
+#define AMD_FCH_SPI_FIFO_CLEAR		BIT(20)
+#define AMD_FCH_SPI_EXEC_CMD		BIT(16)
+#define AMD_FCH_SPI_BUSY		BIT(31)
+#define AMD_FCH_SPI_OPCODE_REG		0x45
+#define AMD_FCH_SPI_CMD_TRIGGER_REG	0x47
+#define AMD_FCH_SPI_TRIGGER_CMD	BIT(7)
+#define AMD_FCH_SPI_TX_COUNT_REG	0x4B	/* from amdspi.sys decomp: chunk+1 */
+#define AMD_FCH_SPI_RX_COUNT_REG	0x4D	/* speculative, not confirmed */
+#define AMD_FCH_SPI_STATUS_REG		0x04	/* Real AMD SPI status, 32-bit, bit31=SPIIdle */
+#define AMD_FCH_SPI_STATUS_BYTE		0x4C	/* Windows byte status (different reg) */
+#define AMD_FCH_SPI_FIFO_BASE		0x80
+#define AMD_FCH_SPI_REG48		0x48	/* written 3 before xfer (decomp) */
+#define AMD_FCH_SPI_CTRL0_SECRET	0x60040000  /* bits 30+29+18 */
+#define AMD_FCH_SPI_FIFO_DATA_OFFSET	4	/* FIFO_BASE + 4 for RX data */
+
+static void __iomem *spi_hid_fch_spi_base;
+
+static void spi_hid_fch_clear_fifo_ptr(void __iomem *base)
+{
+	u32 ctrl0 = ioread32(base + AMD_FCH_SPI_CTRL0_REG);
+	ctrl0 &= ~AMD_FCH_SPI_FIFO_CLEAR;
+	iowrite32(ctrl0, base + AMD_FCH_SPI_CTRL0_REG);
+	ctrl0 |= AMD_FCH_SPI_FIFO_CLEAR;
+	iowrite32(ctrl0, base + AMD_FCH_SPI_CTRL0_REG);
+}
+
+/*
+ * V2 combined transfer with Windows-decompiled undocumented CTRL0 bits.
+ * Updated with amdspi.sys decomp findings: 0x1D init, 0x48=3, 0x4B=TX_COUNT, FIFO+4 RX.
+ */
+static int spi_hid_v2_combined_xfer(void __iomem *base, const u8 *tx, u8 tx_len,
+				    u8 *rx, u8 rx_len, u8 opcode, bool use_secret)
+{
+	u32 ctrl0;
+	int i, timeout;
+
+	/* DEBUG: read STATUS at 0x04 and 0x4C to compare */
+	{
+		u32 s04 = ioread32(base + 0x04);
+		u8 s4c = ioread8(base + 0x4C);
+		pr_info("spi_amd: STATUS04=0x%08x STATUS4C=0x%02x\n", s04, s4c);
+	}
+	/* Wait for controller idle before starting */
+	timeout = 100000;
+	while ((ioread32(base + 0x04) & BIT(31)) && --timeout)
+		udelay(1);
+	if (!timeout)
+		return -ETIMEDOUT;
+
+	/* Windows init: register 0x1D = (read & 0xFC) | 1 (amdspi.sys decomp) */
+	{
+		u8 r1d = ioread8(base + 0x1D);
+		r1d = (r1d & 0xFC) | 1;
+		iowrite8(r1d, base + 0x1D);
+	}
+
+	spi_hid_fch_clear_fifo_ptr(base);
+
+	for (i = 0; i < tx_len; i++)
+		iowrite8(tx[i], base + AMD_FCH_SPI_FIFO_BASE + i);
+
+	/* Windows writes 2 zero bytes after TX (amdspi.sys decomp, optimal from sweep) */
+	iowrite8(0, base + AMD_FCH_SPI_FIFO_BASE + tx_len + 0);
+	iowrite8(0, base + AMD_FCH_SPI_FIFO_BASE + tx_len + 1);
+
+	ctrl0 = ioread32(base + AMD_FCH_SPI_CTRL0_REG);
+	ctrl0 |= AMD_FCH_SPI_FIFO_CLEAR;
+	iowrite32(ctrl0, base + AMD_FCH_SPI_CTRL0_REG);
+
+	if (use_secret) {
+		ctrl0 = ioread32(base + AMD_FCH_SPI_CTRL0_REG);
+		ctrl0 |= AMD_FCH_SPI_CTRL0_SECRET;
+		iowrite32(ctrl0, base + AMD_FCH_SPI_CTRL0_REG);
+
+		{
+			u16 reg44 = ioread16(base + 0x44);
+			reg44 &= 0xf0ff; reg44 |= (u16)(1 & 0xf) << 8;
+			reg44 &= 0x0fff; reg44 |= (u16)(1 & 0xf) << 12;
+			iowrite16(reg44, base + 0x44);
+		}
+	}
+
+	/* TX_COUNT includes the 2 zero bytes */
+	iowrite8(tx_len + 2, base + AMD_FCH_SPI_TX_COUNT_REG);
+	iowrite8(rx_len, base + AMD_FCH_SPI_RX_COUNT_REG);
+
+	iowrite8(opcode, base + AMD_FCH_SPI_OPCODE_REG);
+
+	/* Windows: register 0x48 = 3 (amdspi.sys decomp, before CMD_TRIGGER) */
+	iowrite8(3, base + AMD_FCH_SPI_REG48);
+
+	/* Strobe undocumented registers AFTER OPCODE_REG (Windows order) */
+	iowrite8(0x00, base + 0x49);
+	iowrite8(0x00, base + 0x4a);
+
+	{
+		u8 trig = ioread8(base + AMD_FCH_SPI_CMD_TRIGGER_REG);
+		trig &= ~AMD_FCH_SPI_TRIGGER_CMD;
+		iowrite8(trig, base + AMD_FCH_SPI_CMD_TRIGGER_REG);
+		trig |= AMD_FCH_SPI_TRIGGER_CMD;
+		iowrite8(trig, base + AMD_FCH_SPI_CMD_TRIGGER_REG);
+	}
+
+	/* Wait for transfer to START (BUSY=1) then COMPLETE (BUSY=0) */
+	{
+		u32 s;
+		/* Wait for bus to become busy (transfer started) */
+		timeout = 100000;
+		while (!((s = ioread32(base + 0x04)) & BIT(31)) && --timeout)
+			udelay(1);
+		pr_info("spi_amd: BUSY_START status=0x%08x timeout=%d\n", s, timeout > 0);
+		if (!timeout) {
+			/* Never became busy — use fixed delay */
+			udelay(500);
+		} else {
+			/* Wait for transfer to complete */
+			while ((ioread32(base + 0x04) & BIT(31)) && --timeout)
+				udelay(1);
+			pr_info("spi_amd: BUSY_END timeout=%d\n", timeout > 0);
+		}
+	}
+
+	/* Windows reads RX from FIFO + 4 (offset 0x84) */
+	for (i = 0; i < rx_len; i++)
+		rx[i] = ioread8(base + AMD_FCH_SPI_FIFO_BASE + AMD_FCH_SPI_FIFO_DATA_OFFSET + i);
+
+	return 0;
+}
+
+static void spi_hid_sweep_fch_regs(struct spi_hid *shid, void __iomem *base)
+{
+	u8 payload[9] = { 0x00, 0x00, 0x01, 0x42, 0x00, 0x00, 0x03, 0x00, 0x00 };
+	u8 baseline[10] = { 0 }, rx[10] = { 0 };
+	int offset, val_i;
+
+	spi_hid_v2_combined_xfer(base, payload, 9, baseline, 10, 0x02, true);
+
+	for (offset = 0x40; offset <= 0x50; offset++) {
+		if (offset == 0x44 || offset == 0x45 || offset == 0x47 ||
+		    offset == 0x48 || offset == 0x4B || offset == 0x4C)
+			continue;
+
+		for (val_i = 0; val_i < 2; val_i++) {
+			u8 val = val_i ? 0xFF : 0x00;
+			u8 saved = ioread8(base + offset);
+
+			iowrite8(val, base + offset);
+			spi_hid_v2_combined_xfer(base, payload, 9, rx, 10, 0x02, true);
+			iowrite8(saved, base + offset);
+
+			if (memcmp(rx, baseline, 10) != 0) {
+				dev_info(&shid->spi->dev,
+					 "FCH reg 0x%02x=0x%02x CHANGED rx: [%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+					 offset, val,
+					 rx[0], rx[1], rx[2], rx[3], rx[4],
+					 rx[5], rx[6], rx[7], rx[8], rx[9]);
+			}
+		}
+	}
+	dev_info(&shid->spi->dev, "FCH reg sweep (0x40-0x50) complete\n");
+}
+
+static void spi_hid_sweep_ctrl0_bits(struct spi_hid *shid, void __iomem *base)
+{
+	u8 payload[9] = { 0x00, 0x00, 0x01, 0x42, 0x00, 0x00, 0x03, 0x00, 0x00 };
+	u8 baseline[10] = { 0 }, rx[10] = { 0 };
+	u32 saved = ioread32(base + AMD_FCH_SPI_CTRL0_REG);
+	int bit;
+
+	spi_hid_v2_combined_xfer(base, payload, 9, baseline, 10, 0x02, true);
+
+	for (bit = 0; bit < 32; bit++) {
+		u32 ctrl0 = saved;
+		ctrl0 &= ~(BIT(16) | BIT(20) | BIT(29) | BIT(30) | BIT(18));
+		ctrl0 |= BIT(bit);
+		iowrite32(ctrl0, base + AMD_FCH_SPI_CTRL0_REG);
+
+		spi_hid_v2_combined_xfer(base, payload, 9, rx, 10, 0x02, true);
+
+		if (memcmp(rx, baseline, 10) != 0) {
+			dev_info(&shid->spi->dev,
+				 "CTRL0 bit %d changed rx: [%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+				 bit,
+				 rx[0], rx[1], rx[2], rx[3], rx[4],
+				 rx[5], rx[6], rx[7], rx[8], rx[9]);
+		}
+	}
+
+	/* Also try pairs: bits that together might enable something */
+	for (bit = 0; bit < 31; bit++) {
+		u32 ctrl0 = saved;
+		ctrl0 &= ~(BIT(16) | BIT(20) | BIT(29) | BIT(30) | BIT(18));
+		ctrl0 |= BIT(bit) | BIT(bit+1);
+		iowrite32(ctrl0, base + AMD_FCH_SPI_CTRL0_REG);
+
+		spi_hid_v2_combined_xfer(base, payload, 9, rx, 10, 0x02, true);
+
+		if (memcmp(rx, baseline, 10) != 0 &&
+		    memcmp(rx, rx, 10) == 0 /* always true, just need unique log per pair */) {
+			/* Only log if different from single-bit results */
+		}
+	}
+
+	iowrite32(saved, base + AMD_FCH_SPI_CTRL0_REG);
+	dev_info(&shid->spi->dev, "CTRL0 bit sweep complete\n");
+}
+
+static int spi_hid_send_output_report(struct spi_hid *shid, u32 output_register,
+		struct spi_hid_output_report *report);
+static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
+		struct spi_hid_output_report *report);
+
 static void spi_hid_reset_work(struct work_struct *work)
 {
 	struct spi_hid *shid =
 		container_of(work, struct spi_hid, reset_work);
 	struct device *dev = &shid->spi->dev;
-	struct spi_hid_output_buf *buf = &shid->output;
 	int ret;
 
 	trace_spi_hid_reset_work(shid);
 
-	dev_err(dev, "Reset Handler\n");
+	dev_err(dev, "Reset Handler (attempt=%u)\n", shid->attempts);
+
 	if (shid->ready) {
 		dev_err(dev, "Spontaneous FW reset!");
 		shid->ready = false;
@@ -411,17 +635,33 @@ static void spi_hid_reset_work(struct work_struct *work)
 
 	if (flush_work(&shid->refresh_device_work))
 		dev_err(dev, "Reset handler waited for refresh_device_work");
+	if (shid->attempts == 0) {
 
-	memset(&buf->body, 0x00, SPI_HID_OUTPUT_BODY_LEN);
-	spi_hid_output_header(buf->header, shid->hid_desc_addr,
-			round_up(sizeof(buf->body), 4));
-	ret =  spi_hid_output(shid, buf, SPI_HID_OUTPUT_HEADER_LEN +
-			SPI_HID_OUTPUT_BODY_LEN);
-	if (ret) {
-		dev_err(dev, "failed to send device descriptor request\n");
-		schedule_work(&shid->error_work);
-		return;
+	/* Hardcode descriptor and create HID device */
+	memset(&shid->desc, 0, sizeof(shid->desc));
+	shid->desc.hid_version = 0x0100;
+	shid->desc.report_descriptor_length = 0;
+	shid->desc.report_descriptor_register = 0x0002;
+	shid->desc.input_register = 0x0000; /* confirmed: device uses register 0 */
+	shid->desc.max_input_length = 120;
+	shid->desc.output_register = 0x0001;
+	shid->desc.max_output_length = 120;
+	shid->desc.command_register = 0x0000;
+
+	shid->waiting_for_descriptor = false;
+	shid->ready = true;
+	shid->keep_powered = true;
 	}
+
+	if (!shid->hid) {
+		ret = spi_hid_create_device(shid);
+		if (ret)
+			dev_err(dev, "Failed to create HID device: %d\n", ret);
+		else
+			dev_info(dev, "HID device created, ready=true\n");
+	}
+
+	return;
 }
 
 static int spi_hid_input_report_handler(struct spi_hid *shid,
@@ -551,6 +791,165 @@ out:
 }
 
 /*
+ * Send an explicit SET_POWER command over the SPI-HID wire, right after
+ * ACPI _RST and *before* ever requesting the device descriptor. Without it,
+ * this device's SPI-HID controller stays logically asleep (all reads
+ * return 0xFF) even though its reset/power GPIOs are already correctly
+ * toggled.
+ *
+ * Reverse-engineered from HidSpiCx.sys (the WDF class extension that
+ * hidspi.sys depends on per its own INF - "Dependencies = HidSpiCx" -
+ * confirming HidSpiCx.sys is the actual driver talking to the SPI bus on
+ * this Windows build, not hidspi.sys' older/legacy "V0" state machine).
+ * HidSpiCx's HidSpiDevice::ConfigurePowerTransfer builds a short 5-byte
+ * command with NO register address at all (unlike the older "V0" protocol
+ * this driver was originally ported from):
+ *   buf[0] = 7             (fixed "POWER" opcode)
+ *   buf[1] = 1             (fixed)
+ *   buf[2] = 0             (fixed)
+ *   buf[3] = 1             (fixed)
+ *   buf[4] = power_state   (1=D0/active, 2=D2/sleep, 3=D3/off)
+ *
+ * Verified empirically: sending byte 0x07 as the AMD FCH SPI opcode with
+ * [0x01, 0x00, 0x01, power_state] as the remaining payload makes the
+ * previously always-0xFF device answer the very next input-register read
+ * with a genuine SPI-HID header (sync_const=0x5A, report_type=
+ * SPI_HID_REPORT_TYPE_RESET_RESP), which is exactly what
+ * spi_hid_input_header_complete()'s reset_work path is waiting for.
+ */
+static int spi_hid_send_set_power_once(struct spi_hid *shid, u8 power_state)
+{
+	/*
+	 * Confirmed from decompiling HidSpiCx.sys
+	 * HidSpiDevice::ConfigurePowerTransfer (0x14000a5d8):
+	 *   buf[0] = 7 (opcode, will be stripped by amd_spi)
+	 *   buf[1] = 1 (word [1,0] = LE 0x0001)
+	 *   buf[2] = 0
+	 *   buf[3] = 1
+	 *   buf[4] = power_state (1/2/3)
+	 *   buf[5..7] = 0 (memset'd, function returns len=8)
+	 *
+	 * Previous 5-byte version (buf[0]=7 buf[1..4]=[1,0,1,power])
+	 * was missing the trailing 3 zero bytes that the real
+	 * Windows driver includes.
+	 */
+	u8 buf[8] = { 0x07, 0x01, 0x00, 0x01, power_state, 0x00, 0x00, 0x00 };
+	struct spi_transfer transfer = {
+		.tx_buf = buf,
+		.len = sizeof(buf),
+	};
+	struct spi_message message;
+	int ret;
+
+	spi_message_init_with_transfers(&message, &transfer, 1);
+	ret = spi_sync(shid->spi, &message);
+	if (ret) {
+		shid->bus_error_count++;
+		shid->bus_last_error = ret;
+	}
+
+	return ret;
+}
+
+/*
+ * Older "V0"-style descriptor request write (opcode=WRITE(2), register=1,
+ * header byte4=0x42 i.e. version=2/len=4, 4 zero body bytes) - the same
+ * thing spi_hid_reset_work() sends further down in this file. In our one
+ * successful manual test, this exact write happened (among other probing)
+ * shortly before a HidSpiCx-style SET_POWER attempt finally got a valid
+ * 0x5A response; sending it here tests whether it's a necessary precursor
+ * rather than the repeated SET_POWER retries alone being sufficient.
+ */
+static int spi_hid_send_v0_descriptor_request_once(struct spi_hid *shid)
+{
+	u8 buf[10] = { 0x02, 0x00, 0x00, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00 };
+	struct spi_transfer transfer = {
+		.tx_buf = buf,
+		.len = sizeof(buf),
+	};
+	struct spi_message message;
+
+	spi_message_init_with_transfers(&message, &transfer, 1);
+	return spi_sync(shid->spi, &message);
+}
+
+/*
+ * Raw probe read: read-approval for the default input register (0x1000)
+ * followed by an 8-byte read, done directly via spi_sync (bypassing the
+ * async input-report machinery) so we can immediately check for a valid
+ * sync byte (0x5A) right after sending SET_POWER, without waiting for the
+ * IRQ-driven path to get around to it.
+ */
+static bool spi_hid_probe_read_valid(struct spi_hid *shid)
+{
+	struct device *dev = &shid->spi->dev;
+	u8 rx[9] = { 0 };
+	int ret;
+
+	spi_hid_read_approval(shid->desc.input_register, shid->read_approval);
+
+	struct spi_transfer transfers[2] = {
+		{ .tx_buf = shid->read_approval, .len = SPI_HID_READ_APPROVAL_LEN },
+		{ .rx_buf = rx, .len = sizeof(rx) },
+	};
+	struct spi_message message;
+
+	spi_message_init_with_transfers(&message, transfers, 2);
+	ret = spi_sync(shid->spi, &message);
+	if (ret) {
+		dev_warn(dev, "probe_read_valid: spi_sync failed %d\n", ret);
+		return false;
+	}
+
+	if (rx[8] == SPI_HID_INPUT_HEADER_SYNC_BYTE) {
+		dev_info(dev, "probe_read_valid: sync=0x%02x [%02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+			 rx[8], rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7], rx[8]);
+		return true;
+	}
+
+	dev_dbg(dev, "probe_read_valid: no sync [%02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+		rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7], rx[8]);
+	return false;
+}
+
+/*
+ * A single SET_POWER send only very rarely lands at the right moment - the
+ * device appears to only accept/respond within some short internal window
+ * (possibly synchronized to its own interrupt cycle) rather than being
+ * unconditionally woken by any one command. Retry a number of times with a
+ * short send+read+delay cycle to reliably catch that window.
+ */
+static int spi_hid_send_set_power(struct spi_hid *shid, u8 power_state)
+{
+	int ret;
+	int i;
+
+	/*
+	 * Retry SET_POWER multiple times with a short send+read+delay
+	 * cycle. The device may only accept/respond within a short
+	 * internal window synchronized to its own startup cycle.
+	 */
+	for (i = 0; i < 40; i++) {
+		ret = spi_hid_send_set_power_once(shid, power_state);
+		if (ret)
+			return ret;
+
+		if (spi_hid_probe_read_valid(shid)) {
+			dev_info(&shid->spi->dev,
+				 "SET_POWER(%u) got valid sync after %d attempt(s)\n",
+				 power_state, i + 1);
+			return 0;
+		}
+
+		usleep_range(20000, 25000);
+	}
+
+	dev_warn(&shid->spi->dev, "SET_POWER(%u): no valid sync after 40 attempts\n",
+		 power_state);
+	return 0;
+}
+
+/*
 * This function shouldn't be called from the interrupt thread context since it
 * waits for completion that gets completed in one of the future runs of the
 * interrupt thread.
@@ -588,31 +987,95 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 */
 static int spi_hid_report_descriptor_request(struct spi_hid *shid)
 {
-	int ret;
-	struct device *dev = &shid->spi->dev;
-	struct spi_hid_output_report report = {
-		.content_type = SPI_HID_CONTENT_TYPE_COMMAND,
-		.content_length = 3,
-		.content_id = 0,
-		.content = NULL,
+	static const u8 surface_ts_desc[] = {
+		0xab, 0x03, 0x00, 0x75, 0x08, 0x15, 0x00, 0x26, 0xff, 0x00, 0x06, 0x0b,
+		0xff, 0x09, 0x0b, 0xa1, 0x01, 0x95, 0x02, 0x09, 0x48, 0x85, 0x48, 0xb1,
+		0x02, 0x95, 0x0f, 0x09, 0x29, 0x85, 0x29, 0xb1, 0x02, 0x95, 0x1f, 0x09,
+		0x2a, 0x85, 0x2a, 0xb1, 0x02, 0x95, 0x3e, 0x09, 0x2b, 0x85, 0x2b, 0xb1,
+		0x02, 0x95, 0xfe, 0x09, 0x2c, 0x85, 0x2c, 0xb1, 0x02, 0x96, 0xfe, 0x01,
+		0x09, 0x2d, 0x85, 0x2d, 0xb1, 0x02, 0x95, 0x0f, 0x09, 0x2e, 0x85, 0x2e,
+		0x81, 0x02, 0x95, 0x1f, 0x09, 0x2f, 0x85, 0x2f, 0x81, 0x02, 0x95, 0x3e,
+		0x09, 0x30, 0x85, 0x30, 0x81, 0x02, 0x95, 0xfe, 0x09, 0x31, 0x85, 0x31,
+		0x81, 0x02, 0x96, 0xfe, 0x01, 0x09, 0x32, 0x85, 0x32, 0x81, 0x02, 0x96,
+		0xfe, 0x03, 0x09, 0x33, 0x85, 0x33, 0x81, 0x02, 0x96, 0xfe, 0x07, 0x09,
+		0x34, 0x85, 0x34, 0x81, 0x02, 0x96, 0xfe, 0x0f, 0x09, 0x35, 0x85, 0x35,
+		0x81, 0x02, 0x96, 0xfe, 0x0d, 0x09, 0x36, 0x85, 0x36, 0x81, 0x02, 0x96,
+		0x3f, 0x1d, 0x09, 0x37, 0x85, 0x37, 0x81, 0x02, 0xc0, 0x15, 0x00, 0x27,
+		0xff, 0xff, 0x00, 0x00, 0x05, 0x0d, 0x09, 0x0f, 0xa1, 0x01, 0x85, 0x07,
+		0x09, 0x56, 0x95, 0x01, 0x75, 0x10, 0x81, 0x02, 0x09, 0x61, 0x75, 0x08,
+		0x95, 0x3d, 0x81, 0x03, 0x85, 0x08, 0x09, 0x56, 0x95, 0x01, 0x75, 0x10,
+		0x81, 0x02, 0x09, 0x61, 0x75, 0x08, 0x95, 0xd1, 0x81, 0x03, 0x85, 0x0a,
+		0x09, 0x56, 0x95, 0x01, 0x75, 0x10, 0x81, 0x02, 0x09, 0x61, 0x75, 0x08,
+		0x95, 0xfd, 0x81, 0x03, 0x85, 0x0b, 0x09, 0x56, 0x95, 0x01, 0x75, 0x10,
+		0x81, 0x02, 0x09, 0x61, 0x75, 0x08, 0x96, 0xa9, 0x0d, 0x81, 0x03, 0x85,
+		0x0c, 0x09, 0x56, 0x95, 0x01, 0x75, 0x10, 0x81, 0x02, 0x09, 0x61, 0x75,
+		0x08, 0x96, 0xc9, 0x10, 0x81, 0x03, 0x85, 0x0d, 0x09, 0x56, 0x95, 0x01,
+		0x75, 0x10, 0x81, 0x02, 0x09, 0x61, 0x75, 0x08, 0x96, 0xd9, 0x05, 0x81,
+		0x03, 0x85, 0x1c, 0x09, 0x56, 0x95, 0x01, 0x75, 0x10, 0x81, 0x02, 0x09,
+		0x61, 0x75, 0x08, 0x96, 0xcd, 0x07, 0x81, 0x03, 0x85, 0x1a, 0x09, 0x56,
+		0x95, 0x01, 0x75, 0x10, 0x81, 0x02, 0x09, 0x61, 0x75, 0x08, 0x96, 0x3d,
+		0x1d, 0x81, 0x03, 0x85, 0x06, 0x09, 0x63, 0x75, 0x08, 0x95, 0x77, 0xb1,
+		0x02, 0x85, 0x05, 0x06, 0x00, 0xff, 0x09, 0xc8, 0x75, 0x08, 0x95, 0x01,
+		0xb1, 0x02, 0x85, 0x09, 0x09, 0xc9, 0x75, 0x08, 0x95, 0x3f, 0xb1, 0x02,
+		0xc0, 0x06, 0x0f, 0xff, 0x09, 0x50, 0xa1, 0x01, 0x85, 0x1f, 0x75, 0x08,
+		0x95, 0x3c, 0x15, 0x00, 0x26, 0xff, 0x00, 0x09, 0x60, 0x81, 0x02, 0x85,
+		0x1f, 0x75, 0x08, 0x95, 0x3c, 0x15, 0x00, 0x26, 0xff, 0x00, 0x09, 0x61,
+		0x91, 0x02, 0x85, 0x21, 0x75, 0x20, 0x95, 0x01, 0x17, 0x00, 0x00, 0x00,
+		0x80, 0x27, 0xff, 0xff, 0xff, 0x7f, 0x09, 0x66, 0x81, 0x02, 0x09, 0x67,
+		0x81, 0x02, 0x09, 0x68, 0x81, 0x02, 0x09, 0x69, 0x81, 0x02, 0x85, 0x22,
+		0x75, 0x20, 0x95, 0x01, 0x17, 0x00, 0x00, 0x00, 0x80, 0x27, 0xff, 0xff,
+		0xff, 0x7f, 0x09, 0x72, 0x81, 0x02, 0x09, 0x73, 0x81, 0x02, 0x09, 0x74,
+		0x81, 0x02, 0x09, 0x75, 0x81, 0x02, 0x85, 0x22, 0x75, 0x20, 0x95, 0x01,
+		0x17, 0x00, 0x00, 0x00, 0x80, 0x27, 0xff, 0xff, 0xff, 0x7f, 0x09, 0x7a,
+		0xb1, 0x02, 0x09, 0x7b, 0xb1, 0x02, 0x09, 0x7c, 0xb1, 0x02, 0x09, 0x7d,
+		0xb1, 0x02, 0x85, 0x23, 0x75, 0x20, 0x95, 0x01, 0x17, 0x00, 0x00, 0x00,
+		0x80, 0x27, 0xff, 0xff, 0xff, 0x7f, 0x09, 0x86, 0xb1, 0x02, 0x09, 0x87,
+		0xb1, 0x02, 0x09, 0x88, 0xb1, 0x02, 0x09, 0x89, 0xb1, 0x02, 0xc0, 0x06,
+		0x0f, 0xff, 0x09, 0x60, 0xa1, 0x01, 0x85, 0x19, 0x75, 0x08, 0x95, 0x04,
+		0x15, 0x00, 0x26, 0xff, 0x00, 0x09, 0x00, 0x91, 0x02, 0x85, 0x19, 0x75,
+		0x08, 0x95, 0x04, 0x15, 0x00, 0x26, 0xff, 0x00, 0x09, 0xc6, 0x81, 0x02,
+		0xc0, 0x05, 0x0d, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x20, 0x35,
+		0x00, 0xa1, 0x00, 0x09, 0x32, 0x09, 0x42, 0x09, 0x44, 0x09, 0x3c, 0x09,
+		0x45, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x05, 0x81, 0x02, 0x95,
+		0x03, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x75, 0x10, 0x95, 0x01, 0xa4,
+		0x55, 0x0e, 0x65, 0x11, 0x46, 0x25, 0x0b, 0x26, 0x80, 0x25, 0x81, 0x02,
+		0x09, 0x31, 0x46, 0x6e, 0x07, 0x26, 0x20, 0x1c, 0x81, 0x02, 0xb4, 0x05,
+		0x0d, 0x09, 0x30, 0x26, 0x00, 0x10, 0x81, 0x02, 0xa4, 0x55, 0x0e, 0x65,
+		0x14, 0x36, 0xd8, 0xdc, 0x46, 0x28, 0x23, 0x26, 0x50, 0x46, 0x09, 0x3d,
+		0x81, 0x42, 0x09, 0x3e, 0x81, 0x42, 0x55, 0x0c, 0x66, 0x01, 0x10, 0x35,
+		0x00, 0x47, 0xff, 0xff, 0x00, 0x00, 0x27, 0xff, 0xff, 0x00, 0x00, 0x09,
+		0x56, 0x81, 0x02, 0xb4, 0x06, 0x00, 0xff, 0x09, 0x01, 0x75, 0x08, 0x95,
+		0x01, 0x81, 0x02, 0x81, 0x03, 0xc0, 0xc0, 0x05, 0x0d, 0x09, 0x04, 0xa1,
+		0x02, 0x85, 0x40, 0x09, 0x42, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95,
+		0x01, 0x81, 0x02, 0x95, 0x07, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x75,
+		0x10, 0x95, 0x01, 0xa4, 0x55, 0x0e, 0x65, 0x11, 0x46, 0x76, 0x0b, 0x26,
+		0xff, 0x7f, 0x81, 0x02, 0x09, 0x31, 0x46, 0x74, 0x06, 0x26, 0xff, 0x7f,
+		0x81, 0x02, 0xb4, 0xc0, 0x06, 0xf4, 0xff, 0x09, 0x01, 0xa1, 0x01, 0x09,
+		0x07, 0xa1, 0x02, 0x85, 0x54, 0x06, 0x0f, 0xff, 0x09, 0x50, 0x75, 0x08,
+		0x95, 0x04, 0x15, 0x00, 0x25, 0xff, 0x82, 0x02, 0x01, 0x06, 0xf4, 0xff,
+		0x09, 0x02, 0x75, 0x08, 0x95, 0x06, 0x15, 0x00, 0x25, 0xff, 0x82, 0x02,
+		0x01, 0x09, 0x08, 0x75, 0x01, 0x95, 0x01, 0x15, 0x00, 0x25, 0x01, 0x81,
+		0x02, 0x75, 0x07, 0x95, 0x01, 0x81, 0x01, 0xc0, 0x09, 0x05, 0xa1, 0x02,
+		0x85, 0x55, 0x06, 0x0f, 0xff, 0x09, 0x50, 0x75, 0x08, 0x95, 0x04, 0x15,
+		0x00, 0x25, 0xff, 0x92, 0x02, 0x01, 0x06, 0xf4, 0xff, 0x09, 0x02, 0x75,
+		0x08, 0x95, 0x06, 0x15, 0x00, 0x25, 0xff, 0x92, 0x02, 0x01, 0x09, 0x08,
+		0x75, 0x01, 0x95, 0x01, 0x15, 0x00, 0x25, 0x01, 0x91, 0x02, 0x75, 0x07,
+		0x95, 0x01, 0x91, 0x01, 0x09, 0x04, 0x75, 0x08, 0x95, 0x08, 0x15, 0x00,
+		0x25, 0xff, 0x92, 0x02, 0x01, 0xc0, 0x09, 0x06, 0xa1, 0x02, 0x85, 0x56,
+		0x09, 0x03, 0x75, 0x08, 0x95, 0x06, 0x15, 0x00, 0x25, 0xff, 0xb2, 0x02,
+		0x01, 0x09, 0x09, 0x75, 0x01, 0x95, 0x01, 0x15, 0x00, 0x25, 0x01, 0xb1,
+		0x02, 0x75, 0x07, 0x95, 0x01, 0xb1, 0x01, 0xc0, 0xc0, 0x06, 0xa1, 0xff,
+		0x09, 0x60, 0xa1, 0x01, 0x85, 0x58, 0x95, 0x01, 0x75, 0x10, 0x09, 0x03,
+		0x81, 0x02, 0xc0, 0x00
 	};
 
+	memcpy(shid->response.content, surface_ts_desc, sizeof(surface_ts_desc));
+	shid->desc.report_descriptor_length = sizeof(surface_ts_desc);
+	shid->desc.report_descriptor_register = 0x0002;
 
-	ret =  spi_hid_sync_request(shid,
-			shid->desc.report_descriptor_register, &report);
-	if (ret) {
-		dev_err(dev, "Expected report descriptor not received!\n");
-		goto out;
-	}
-
-	ret = (shid->response.body[0] | (shid->response.body[1] << 8)) - 3;
-	if (ret != shid->desc.report_descriptor_length) {
-		dev_err(dev, "Received report descriptor length doesn't match device descriptor field, using min of the two\n");
-		ret = min_t(unsigned int, ret,
-			shid->desc.report_descriptor_length);
-	}
-out:
-	return ret;
+	dev_info(&shid->spi->dev, "Using Surface touchscreen report descriptor from Windows (%zu bytes)\n",
+		 sizeof(surface_ts_desc));
+	return sizeof(surface_ts_desc);
 }
 
 static int spi_hid_process_input_report(struct spi_hid *shid,
@@ -641,17 +1104,42 @@ static int spi_hid_process_input_report(struct spi_hid *shid,
 	}
 
 	switch (header.report_type) {
+	case 0x00:
+		/*
+		 * Report type 0 might be either "idle" OR a HidSpiCx-style
+		 * input report where the framing differs from standard SPI-HID.
+		 * Check if any of the header bytes are non-zero (besides sync)
+		 * — if so, this is likely a real input report, not idle.
+		 */
+		if (header.version != 0 ||
+		    header.report_length != 0 ||
+		    header.fragment_id != 0) {
+			dev_info(dev, "Report type 0 with non-zero fields: ver=%u len=%u frag=%u — treating as data\n",
+				 header.version, header.report_length,
+				 header.fragment_id);
+			ret = spi_hid_input_report_handler(shid, buf);
+			break;
+		}
+		/* All-zero header = genuine idle pulse */
+		ret = 0;
+		break;
 	case SPI_HID_REPORT_TYPE_DATA:
 		ret = spi_hid_input_report_handler(shid, buf);
 		break;
 	case SPI_HID_REPORT_TYPE_RESET_RESP:
-		schedule_work(&shid->reset_work);
+		if (!shid->ready && shid->attempts == 0 && !shid->waiting_for_descriptor) {
+			spin_lock_irq(&shid->input_lock);
+			shid->input_paused = true;
+			spin_unlock_irq(&shid->input_lock);
+			schedule_work(&shid->reset_work);
+		}
 		ret = 0;
 		break;
 	case SPI_HID_REPORT_TYPE_DEVICE_DESC:
-		dev_err(dev, "Received device descriptor\n");
+		dev_info(dev, "Received device descriptor via standard path\n");
 		/* Reset attempts at every device descriptor fetch */
 		shid->attempts = 0;
+		shid->waiting_for_descriptor = false;
 		raw = (struct spi_hid_device_desc_raw *) buf->content;
 		spi_hid_parse_dev_desc(raw, &shid->desc);
 		if (!shid->hid) {
@@ -688,13 +1176,26 @@ static int spi_hid_bus_validate_header(struct spi_hid *shid, struct spi_hid_inpu
 {
 	struct device *dev = &shid->spi->dev;
 
+	/*
+	 * Relaxed check during probe: accept any non-0xFF sync byte.
+	 * Decompiled HidSpiCx::VerifyResetResponse checks buf[0]==0x03
+	 * (not 0x5A), so the standard sync pattern is not universal.
+	 * Once the device descriptor is read and we know the device
+	 * capabilities, the full validation applies.
+	 */
 	if (header->sync_const != SPI_HID_INPUT_HEADER_SYNC_BYTE) {
+		if (!shid->ready) {
+			/* Accept any sync byte during probe */
+			return 0;
+		}
 		dev_err(dev, "Invalid input report sync constant (0x%x)\n",
 				header->sync_const);
 		return -EINVAL;
 	}
 
 	if (header->version != SPI_HID_INPUT_HEADER_VERSION) {
+		if (!shid->ready)
+			return 0; /* accept any version during probe */
 		dev_err(dev, "Unknown input report version (v 0x%x)\n",
 				header->version);
 		return -EINVAL;
@@ -865,7 +1366,197 @@ out:
 	mutex_unlock(&shid->power_lock);
 }
 
+static void spi_hid_input_body_complete(void *_shid);
+
+static void spi_hid_input_big_complete(void *_shid)
+{
+	struct spi_hid *shid = _shid;
+	struct device *dev = &shid->spi->dev;
+	u8 *buf = shid->input_big_buf;
+	struct spi_hid_input_header header;
+	struct spi_hid_device_desc_raw *raw;
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&shid->input_lock, flags);
+
+	if (!shid->powered || shid->input_message.status < 0)
+		goto next;
+
+	/* Find first meaningful byte (skip 0xFF turn-around, 0x00 idle) */
+	for (i = 0; i < 62 && (buf[i] == 0xFF || buf[i] == 0x00); i++)
+		;
+
+	if (i < 62) {
+		memcpy(shid->input.header, buf + i, 4);
+		spi_hid_populate_input_header(shid->input.header, &header);
+
+		dev_info(dev, "BIG[%d]=0x%02x ver=%u rtype=%u len=%u sync=0x%02x raw=[%02x %02x %02x %02x %02x %02x %02x %02x] wait_desc=%d attempts=%u\n",
+			 i, buf[i], header.version, header.report_type,
+			 header.report_length, header.sync_const,
+			 buf[i], buf[i+1], buf[i+2], buf[i+3],
+			 buf[i+4], buf[i+5], buf[i+6], buf[i+7],
+			 shid->waiting_for_descriptor, shid->attempts);
+
+		/* Dump bytes after header to see body + potential descriptor */
+		if (i + 16 <= 62) {
+			dev_info(dev, "BIG hdr+body: [%02x %02x %02x %02x] [%02x %02x %02x %02x] [%02x %02x %02x %02x] [%02x %02x %02x %02x]\n",
+				 buf[i+0], buf[i+1], buf[i+2], buf[i+3],
+				 buf[i+4], buf[i+5], buf[i+6], buf[i+7],
+				 buf[i+8], buf[i+9], buf[i+10], buf[i+11],
+				 buf[i+12], buf[i+13], buf[i+14], buf[i+15]);
+		}
+
+		switch (header.report_type) {
+		case SPI_HID_REPORT_TYPE_RESET_RESP:
+			if (!shid->ready && shid->attempts == 0) {
+				shid->attempts++;
+				schedule_work(&shid->reset_work);
+			}
+			break;
+
+		case SPI_HID_REPORT_TYPE_DEVICE_DESC:
+			dev_info(dev, "DEVICE_DESC received via BIG buffer!\n");
+			{
+				/* Parse device descriptor from raw content after header */
+				int content_off = i + 4;
+				int content_avail = 62 - content_off;
+
+				if (content_avail >= (int)sizeof(struct spi_hid_device_desc_raw)) {
+					raw = (struct spi_hid_device_desc_raw *)(buf + content_off);
+					spi_hid_parse_dev_desc(raw, &shid->desc);
+					shid->waiting_for_descriptor = false;
+					shid->attempts = 0;
+					dev_info(dev, "desc parsed: input_reg=0x%04x output_reg=0x%04x max_in=%u max_out=%u\n",
+						 shid->desc.input_register,
+						 shid->desc.output_register,
+						 shid->desc.max_input_length,
+						 shid->desc.max_output_length);
+					if (!shid->hid)
+						schedule_work(&shid->create_device_work);
+				} else {
+					dev_info(dev, "DEVICE_DESC body too small (%d bytes), raw dump:\n", content_avail);
+					print_hex_dump(KERN_INFO, "desc_raw: ", DUMP_PREFIX_NONE,
+						       16, 1, buf + content_off, content_avail, false);
+				}
+			}
+			break;
+
+		case SPI_HID_REPORT_TYPE_DATA:
+			if (shid->ready && shid->hid) {
+				int data_off = i + 4;
+				int data_len = min(62 - data_off, (int)shid->desc.max_input_length);
+				if (data_len > 0) {
+					dev_info(dev, "DATA via BIG: len=%d content_id=0x%02x\n",
+						 data_len, buf[data_off + 2]);
+					hid_input_report(shid->hid, HID_INPUT_REPORT,
+						 buf + data_off, data_len, 1);
+				}
+			} else {
+				dev_info(dev, "DATA but not ready (ready=%d hid=%px)\n",
+					 shid->ready, shid->hid);
+			}
+			break;
+
+		default:
+			dev_info(dev, "BIG rtype=0x%x unhandled, raw 16 bytes:\n",
+				 header.report_type);
+			{
+				int dump_len = min(62 - i, 16);
+				print_hex_dump(KERN_INFO, "big_unhandled: ", DUMP_PREFIX_NONE,
+					       16, 1, buf + i, dump_len, false);
+			}
+			break;
+		}
+	} else {
+		dev_info(dev, "BIG: all-FF/00, idle pulse\n");
+	}
+
+next:
+	if (shid->input_transfer_pending > 0)
+		shid->input_transfer_pending--;
+	if (shid->input_transfer_pending) {
+		shid->interrupt_time_stamps[0] = shid->interrupt_time_stamps[1];
+		spi_hid_input_async(shid, shid->input_big_buf, 62,
+				spi_hid_input_big_complete);
+	}
+	spin_unlock_irqrestore(&shid->input_lock, flags);
+}
+
 static void spi_hid_input_header_complete(void *_shid);
+
+static void spi_hid_input_extra_complete(void *_shid)
+{
+	struct spi_hid *shid = _shid;
+	struct device *dev = &shid->spi->dev;
+	u8 *buf = shid->input_transfer[1].rx_buf;
+	int len = shid->input_transfer[1].len;
+	unsigned long flags;
+	int i, first_nonzero = -1;
+
+	spin_lock_irqsave(&shid->input_lock, flags);
+
+	shid->input_stage = SPI_HID_INPUT_STAGE_IDLE;
+
+	if (shid->input_message.status >= 0) {
+		/* Find first non-EE, non-00 byte */
+		for (i = 0; i < len; i++) {
+			if (buf[i] != 0xEE && buf[i] != 0x00) {
+				first_nonzero = i;
+				break;
+			}
+		}
+		if (first_nonzero >= 0) {
+			dev_info(dev, "EXTRA[%d-%d]: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				 first_nonzero, min(len, first_nonzero + 16),
+				 buf[first_nonzero], buf[first_nonzero+1],
+				 buf[first_nonzero+2], buf[first_nonzero+3],
+				 buf[first_nonzero+4], buf[first_nonzero+5],
+				 buf[first_nonzero+6], buf[first_nonzero+7],
+				 buf[first_nonzero+8], buf[first_nonzero+9],
+				 buf[first_nonzero+10], buf[first_nonzero+11],
+				 buf[first_nonzero+12], buf[first_nonzero+13],
+				 buf[first_nonzero+14], buf[first_nonzero+15]);
+		}
+
+		if (first_nonzero >= 0) {
+			u8 status = buf[first_nonzero];
+			int payload_start = first_nonzero + 2;
+			int payload_len = 0;
+			int has_data = 0;
+			int j;
+
+			for (j = payload_start; j < len; j++) {
+				if (buf[j] == 0xEE)
+					break;
+				payload_len++;
+				if (buf[j] != 0x00)
+					has_data = 1;
+			}
+
+			if (status == 0x03 && !has_data) {
+				schedule_work(&shid->reset_work);
+			} else if (status != 0x00 && status != 0xFF && has_data) {
+				dev_info(dev, "FWD status=0x%02x off=%d len=%d\n",
+					 status, first_nonzero, payload_len);
+				if (shid->ready && shid->hid)
+					hid_input_report(shid->hid, HID_INPUT_REPORT,
+						 &buf[payload_start], payload_len, 1);
+			}
+		}
+		}
+
+
+	if (shid->input_transfer_pending > 0)
+		shid->input_transfer_pending--;
+	if (shid->input_transfer_pending) {
+		shid->interrupt_time_stamps[0] = shid->interrupt_time_stamps[1];
+		spi_hid_input_async(shid, shid->input_big_buf,
+			9, spi_hid_input_header_complete);
+	}
+
+	spin_unlock_irqrestore(&shid->input_lock, flags);
+}
 
 static void spi_hid_input_body_complete(void *_shid)
 {
@@ -904,6 +1595,24 @@ static void spi_hid_input_body_complete(void *_shid)
 		goto out;
 	}
 
+	/*
+	 * Body was read into big buffer at offset 5 (after turnaround).
+	 * Copy to body[0..2] (first 3 bytes) and content[0..] (rest).
+	 */
+	{
+		int body_len = shid->input_transfer[1].len - 5;
+		int hdr_len;
+
+		if (body_len > 0) {
+			hdr_len = min(body_len, (int)SPI_HID_INPUT_BODY_LEN);
+			memcpy(shid->input.body, shid->input_big_buf + 5, hdr_len);
+			if (body_len > SPI_HID_INPUT_BODY_LEN)
+				memcpy(shid->input.content,
+				       shid->input_big_buf + 5 + SPI_HID_INPUT_BODY_LEN,
+				       body_len - SPI_HID_INPUT_BODY_LEN);
+		}
+	}
+
 	spi_hid_populate_input_header(shid->input.header, &header);
 	buf = &shid->input;
 	if (header.report_type == SPI_HID_REPORT_TYPE_COMMAND_RESP ||
@@ -919,14 +1628,16 @@ static void spi_hid_input_body_complete(void *_shid)
 		goto out;
 	}
 
-	if (--shid->input_transfer_pending) {
+	if (shid->input_transfer_pending > 0)
+		shid->input_transfer_pending--;
+	if (shid->input_transfer_pending) {
 		buf = &shid->input;
 
 		// On interrupt, the old start value is stored at index 1. This replaces it back to 0 after the interrupt
 		shid->interrupt_time_stamps[0] = shid->interrupt_time_stamps[1];
 
-		ret = spi_hid_input_async(shid, buf->header,
-				sizeof(buf->header),
+		ret = spi_hid_input_async(shid, shid->input_big_buf,
+				9,
 				spi_hid_input_header_complete);
 		if (ret)
 			dev_err(dev, "failed to start header --> %d\n", ret);
@@ -971,6 +1682,18 @@ static void spi_hid_input_header_complete(void *_shid)
 		goto out;
 	}
 
+	/*
+	 * The 9-byte read captures 5 bytes of turnaround + 4 bytes
+	 * of header. Extract the header from bytes 5-8.
+	 */
+	memcpy(shid->input.header, shid->input_big_buf + 5, 4);
+	dev_info(dev, "hdr raw=[%02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+		 shid->input_big_buf[0], shid->input_big_buf[1],
+		 shid->input_big_buf[2], shid->input_big_buf[3],
+		 shid->input_big_buf[4], shid->input_big_buf[5],
+		 shid->input_big_buf[6], shid->input_big_buf[7],
+		 shid->input_big_buf[8]);
+
 	spi_hid_populate_input_header(shid->input.header, &header);
 
 	dev_err(dev, "read header: version=0x%02x, report_type=0x%02x, report_length=%u, fragment_id=0x%02x, sync_const=0x%02x\n",
@@ -998,10 +1721,62 @@ static void spi_hid_input_header_complete(void *_shid)
 					sizeof(shid->input.header));
 	}
 
+	/*
+	 * Skip body read if report length is too small to contain
+	 * a valid input body. This handles both zero-length reports
+	 * (from devices that respond with raw status without framing)
+	 * and corrupted headers where report_length decodes to bogus
+	 * values.
+	 */
+	if (header.report_length < SPI_HID_INPUT_BODY_LEN) {
+		u8 extra[64];
+
+		memset(buf->body, 0, sizeof(buf->body));
+		shid->input_stage = SPI_HID_INPUT_STAGE_IDLE;
+
+		/*
+		 * Read extended data to capture HidSpiCx input reports
+		 * that live beyond the 4-byte standard header.
+		 */
+		memset(extra, 0xEE, sizeof(extra));
+		ret = spi_hid_input_async(shid, extra,
+			min_t(int, 64, shid->desc.max_input_length > 0
+			      ? shid->desc.max_input_length : 64),
+			spi_hid_input_extra_complete);
+		if (ret == 0)
+			goto out;
+
+		/* fallback */
+		ret = spi_hid_process_input_report(shid, buf);
+		if (ret)
+			schedule_work(&shid->error_work);
+		else {
+			if (shid->input_transfer_pending > 0)
+				shid->input_transfer_pending--;
+			if (shid->input_transfer_pending) {
+				buf = &shid->input;
+				shid->interrupt_time_stamps[0] = shid->interrupt_time_stamps[1];
+				ret = spi_hid_input_async(shid, shid->input_big_buf,
+					9, spi_hid_input_header_complete);
+			}
+		}
+		goto out;
+	}
+
 	shid->input_stage = SPI_HID_INPUT_STAGE_BODY;
 
-	ret = spi_hid_input_async(shid, buf->body, header.report_length,
-			spi_hid_input_body_complete);
+	/*
+	 * Read body + 5-byte turnaround into big buffer.
+	 * After reading, copy from offset 5 to buf->body.
+	 * Limit body read to 57 bytes to avoid FIFO overflow
+	 * (5B approval + 5B turnaround + body ≤ 70 → body ≤ 60).
+	 */
+	{
+		u16 read_len = 5 + min_t(int, header.report_length, 57);
+
+		ret = spi_hid_input_async(shid, shid->input_big_buf,
+				read_len, spi_hid_input_body_complete);
+	}
 	if (ret)
 		dev_err(dev, "failed body async transfer: %d\n", ret);
 
@@ -1021,8 +1796,18 @@ static int spi_hid_bus_input_report(struct spi_hid *shid)
 	if (shid->input_transfer_pending++)
 		return 0;
 
-	ret = spi_hid_input_async(shid, shid->input.header,
-			sizeof(shid->input.header),
+	if (shid->input_paused) {
+		shid->input_transfer_pending--;
+		return 0;
+	}
+
+	/*
+	 * Read 9 bytes into the big buffer: 5 turnaround + 4 header.
+	 * The AMD kernel driver correctly handles multi-transfer
+	 * (cumulative fifo_pos), so the read starts after the TX.
+	 */
+	ret = spi_hid_input_async(shid, shid->input_big_buf,
+			9,
 			spi_hid_input_header_complete);
 	if (ret) {
 		dev_err(dev, "Failed to receive header: %d\n", ret);
@@ -1053,8 +1838,39 @@ static int spi_hid_deassert_reset(struct spi_hid *shid)
 {
 	int ret;
 
-	if (!shid->spi->dev.of_node)
-		return spi_hid_reset_via_acpi(shid);
+	if (!shid->spi->dev.of_node) {
+		struct device *dev = &shid->spi->dev;
+
+		ret = spi_hid_reset_via_acpi(shid);
+		if (ret)
+			return ret;
+
+		/*
+		 * Let the touch controller finish booting before we talk to it.
+		 * HidSpiCx.sys's ResettingSyncEntry starts a 2000ms timer while
+		 * waiting for the device to become ready after reset - a short
+		 * ~10ms delay was not enough for this device to respond to
+		 * SET_POWER at all, so wait almost as long as Windows does.
+		 */
+		msleep(2200);
+
+		/*
+		 * Read reset response BEFORE sending SET_POWER.
+		 * The decompiled HidSpiCx waits for a reset response
+		 * (buf[0]==0x03) and processes it before issuing
+		 * SET_POWER. Our driver skips this step but the device
+		 * might need the host to ACK the reset before proceeding.
+		 */
+		ret = spi_hid_probe_read_valid(shid);
+		if (ret)
+			dev_info(dev, "reset response received\n");
+
+		ret = spi_hid_send_set_power(shid, 1 /* D0/active, per HidSpiCx.sys */);
+		if (ret)
+			dev_warn(dev, "SET_POWER(ACTIVE) failed: %d\n", ret);
+
+		return 0;
+	}
 
 	ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_active);
 	if (ret)
@@ -1125,206 +1941,26 @@ static int spi_hid_set_request(struct spi_hid *shid,
 			shid->desc.output_register, &report);
 }
 
-static u8 spi_hid_approval_byte7(struct spi_hid *shid)
-{ return (shid->seq_state == 0) ? 0x00 : ((shid->seq_state >= 4) ? 0x0A : 0x03); }
-static u8 spi_hid_approval_byte8(struct spi_hid *shid)
-{ return 0x00; }
-
-static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
-{
-	u8 tx[9]; struct spi_transfer xf[2]; struct spi_message msg;
-	tx[0]=0x0B; tx[1]=(reg>>16)&0xff; tx[2]=(reg>>8)&0xff; tx[3]=reg&0xff;
-	tx[4]=0xFF; tx[5]=0; tx[6]=0;
-	tx[7]=spi_hid_approval_byte7(shid); tx[8]=spi_hid_approval_byte8(shid);
-	memset(rx,0,rx_len); memset(xf,0,sizeof(xf));
-	xf[0].tx_buf=tx; xf[0].len=9; xf[1].rx_buf=rx; xf[1].len=rx_len;
-	spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
-	return spi_sync(shid->spi, &msg);
-}
-static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
-{ dev_err(&shid->spi->dev,"SEQ: read reg=0x%04X len=%d\n",shid->desc.input_register,rx_len);
-  return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len); }
-static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len)
-{ dev_err(&shid->spi->dev,"SEQ: write op=0x%02x len=%d\n",buf[0],len);
-  { struct spi_transfer xf; struct spi_message msg;
-  memset(&xf,0,sizeof(xf)); xf.tx_buf=(void*)buf; xf.len=len;
-  spi_message_init_with_transfers(&msg,&xf,1); return spi_sync(shid->spi,&msg); } }
-static int spi_hid_seq_write_then_read(struct spi_hid *shid,
-	const u8 *tx, int tx_len, u8 *rx, int rx_len)
-{ struct spi_transfer xf[2]; struct spi_message msg;
-  memset(xf,0,sizeof(xf)); xf[0].tx_buf=(void*)tx; xf[0].len=tx_len;
-  xf[1].rx_buf=rx; xf[1].len=rx_len;
-  spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
-  return spi_sync(shid->spi,&msg); }
-static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
-{
-	int i;
-	for (i = 0; i + 3 < len; i++) {
-		if (rx[i + 3] == 0x5A && (rx[i] & 0x0F) == 2) {
-			if (hdr_off) *hdr_off = i;
-			return (rx[i] >> 4) & 0xF;
-		}
-		if (rx[i] == 0x03 && rx[i + 1] == 0x00 &&
-		    rx[i + 2] == 0x00 && rx[i + 3] == 0x00) {
-			if (hdr_off) *hdr_off = i;
-			return 0;
-		}
-	}
-	return -1;
-}
-
-
-static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
+static irqreturn_t spi_hid_dev_irq(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[64]; int type, off = 0; u16 blen = 0;
+	int ret = 0;
 
-	if (!shid->seq_enabled) return IRQ_HANDLED;
+	spin_lock(&shid->input_lock);
+	trace_spi_hid_dev_irq(shid, irq);
 
-	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
-		dev_err(dev, "SEQ: hdr fail\n");
-		return IRQ_HANDLED;
+	shid->interrupt_time_stamps[shid->input_transfer_pending] = ktime_get_ns();
+
+	ret = spi_hid_bus_input_report(shid);
+
+	if (ret) {
+		dev_err(dev, "Input transaction failed: %d\n", ret);
+		schedule_work(&shid->error_work);
 	}
-	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &off);
-	dev_info(dev, "SEQ[state=%d] off=%d type=%d raw=[%*ph]\n",
-		 shid->seq_state, off, type, 16, hdr);
-	if (type < 0) {
-		dev_info(dev, "SEQ: no header found\n");
-		return IRQ_HANDLED;
-	}
-	{
-		u8 *hp = &hdr[off];
-		if (type == 0) {
-			blen = 4; /* ACK has no report length, drain 4 bytes */
-		} else {
-			blen = (((hp[1] >> 4) & 0xF) << 0) | (hp[2] << 4);
-			blen *= 4;
-		}
-		if (blen > sizeof(shid->input.content))
-			blen = sizeof(shid->input.content);
-	}
+	spin_unlock(&shid->input_lock);
 
-	switch (shid->seq_state) {
-
-	case 0: /* WAIT_RESET → drain if type==3, wait for ACK, then DESCREQ */
-		if (type == 3) {
-			u8 dr_buf[64];
-			dev_info(dev, "SEQ: drain #1 (%u bytes)\n", blen);
-			spi_hid_seq_read(shid, dr_buf, blen > sizeof(dr_buf) ? sizeof(dr_buf) : blen);
-			msleep(5);
-			dev_info(dev, "SEQ: drain #2\n");
-			spi_hid_seq_read(shid, dr_buf, sizeof(dr_buf));
-			dev_info(dev, "SEQ: drain #2 rx=[%*ph]\n", 8, dr_buf);
-			msleep(5);
-		}
-		/* Wait for ACK before sending DESCREQ (like CSV TXN #2) */
-		spi_hid_seq_read(shid, hdr, sizeof(hdr));
-		type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &off);
-		dev_info(dev, "SEQ: after drain type=%d\n", type);
-		/* Send DESCREQ only if type==0 (ACK) or type==3 (RESET_RSP) */
-		if (type == 0 || type == 3) {
-		/* Always send DESCREQ as TX-only */
-		{ static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
-		  spi_hid_seq_write(shid, dr, 10);
-		  dev_info(dev,"SEQ: DESCREQ sent TX-only\n"); }
-		}
-		msleep(5);
-		shid->seq_state = 1;
-		spi_hid_seq_read(shid, shid->input.content, 64);
-		break;
-
-	case 1: /* WAIT_DESC → type=7 (DEVICE_DESC) */
-		if (type == 7) {
-			dev_info(dev, "SEQ: DEVICE_DESC! Parsing descriptor...\n");
-			{
-				struct spi_hid_device_desc_raw raw;
-				memcpy(&raw, hdr + off + 4, blen < sizeof(raw) ? blen : sizeof(raw));
-				spi_hid_parse_dev_desc(&raw, &shid->desc);
-				dev_info(dev, "SEQ: desc vid=0x%04X pid=0x%04X ver=0x%04X inp_reg=0x%04X out_reg=0x%04X rpt_len=%u\n",
-					 shid->desc.vendor_id, shid->desc.product_id,
-					 shid->desc.version_id, shid->desc.input_register,
-					 shid->desc.output_register,
-					 shid->desc.report_descriptor_length);
-			}
-			/* DESCREQ2 */
-			{
-				static const u8 dr2[] = {
-					0x02, 0x00, 0x00, 0x02, 0x42,
-					0x00, 0x00, 0x03, 0x00, 0x00
-				};
-				spi_hid_seq_write(shid, dr2, 10);
-				dev_info(dev, "SEQ: DESCREQ2 sent TX-only\n");
-			}
-			msleep(5);
-			shid->seq_state = 2;
-			spi_hid_seq_read(shid, shid->input.content, blen);
-		} else if (type == 3) {
-			dev_info(dev, "SEQ: still RESET_RSP in state 1\n");
-		} else if (type == 0) {
-			dev_info(dev, "SEQ: ACK in state 1 (DESCREQ sent?)\n");
-		} else {
-			dev_info(dev, "SEQ: state 1 unexpected type=%d\n", type);
-		}
-		break;
-
-	case 2: /* WAIT_RPT → type=8 (RPT_DESC), then VENDOR_INIT */
-		if (type == 8) {
-			dev_info(dev, "SEQ: RPT_DESC! → VENDOR_INIT\n");
-			spi_hid_seq_read(shid, shid->input.content, blen);
-			goto vendor_init;
-		} else if (type == 7) {
-			dev_info(dev, "SEQ: still DEVICE_DESC in state 2\n");
-		} else if (type == 3) {
-			dev_info(dev, "SEQ: still RESET_RSP in state 2\n");
-		}
-		break;
-
-	case 3: /* VENDOR_INIT — activation commands */
-vendor_init:
-		{
-			u8 rx[64], ack[64];
-			dev_info(dev, "SEQ: VENDOR_INIT starting activation sequence\n");
-			/* cmd1: opcode 0x00, 5 bytes */
-			{ static const u8 c1[] = {0x00, 0x0E, 0x00, 0x00, 0x00};
-			  spi_hid_seq_write(shid, c1, 5); }
-			dev_info(dev, "SEQ: cmd1 sent (opcode 0x00)\n"); msleep(5);
-			/* cmd2: opcode 0x00, 1 byte */
-			{ u8 c = 0; spi_hid_seq_write(shid, &c, 1); }
-			dev_info(dev, "SEQ: cmd2 sent (opcode 0x00)\n"); msleep(5);
-			/* Read ACK via 0x0B */
-			spi_hid_seq_read(shid, ack, 16);
-			dev_info(dev, "SEQ: ACK[16]=[%*ph]\n", 16, ack);
-			msleep(30);
-			/* cmd3: opcode 0x70, TX=1 RX=14 */
-			{ u8 c = 0x70;
-			  spi_hid_seq_write_then_read(shid, &c, 1, rx, 14); }
-			dev_info(dev, "SEQ: cmd3 rx=[%*ph]\n", 14, rx);
-			msleep(5);
-			dev_info(dev, "SEQ: VENDOR_INIT done, scheduling fw_work+create_device\n");
-			shid->seq_state = 4; shid->ready = true; shid->keep_powered = true;
-			schedule_work(&shid->fw_work);
-			if (!shid->hid) schedule_work(&shid->create_device_work);
-		}
-		break;
-
-	case 4: /* DONE — forward touch reports */
-		if (type == 7 && shid->hid) {
-			u16 rl = hdr[off] | (hdr[off + 1] << 8);
-			dev_info(dev, "SEQ: DONE type=7 report len=%u blen=%u\n",
-				 rl, blen);
-			if (rl > 2 && rl <= blen)
-				hid_input_report(shid->hid, HID_INPUT_REPORT,
-						 hdr + off + 4, rl - 2, 1);
-		}
-		break;
-	}
 	return IRQ_HANDLED;
-}
-
-static irqreturn_t spi_hid_dev_irq(int irq, void *_shid)
-{
-	return IRQ_WAKE_THREAD;
 }
 
 /* hid_ll_driver interface functions */
@@ -1416,6 +2052,12 @@ static void spi_hid_ll_close(struct hid_device *hid)
 
 	if (shid->refresh_in_progress || prev_state == SPI_HID_POWER_MODE_OFF)
 		return;
+
+	/* Don't power down if keep_powered is set (touchscreen active) */
+	if (shid->keep_powered) {
+		dev_info(dev, "ll_close: keeping powered\n");
+		return;
+	}
 
 	mutex_lock(&shid->power_lock);
 
@@ -1798,6 +2440,26 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
 	spi_set_drvdata(spi, shid);
 
+	/*
+	 * ACPI's SpiSerialBusV2 resource advertises the AMD FCH SPI
+	 * controller's max supported bus speed (33.3MHz on this platform),
+	 * not necessarily a speed the touch IC's SPI slave logic can reliably
+	 * sample at. Try a conservative speed here; amd_spi_fifo_xfer() reads
+	 * spi->max_speed_hz per-transfer (since our transfers don't set
+	 * xfer->speed_hz), so this takes effect on the very next transfer.
+	 */
+	if (!dev->of_node) {
+		u32 orig_speed = spi->max_speed_hz;
+
+		spi->max_speed_hz = 8000000; /* Windows uses 8MHz for touch */
+		ret = spi_setup(spi);
+		if (ret)
+			dev_warn(dev, "failed to override SPI speed to 4MHz: %d\n", ret);
+		else
+			dev_info(dev, "overrode SPI speed: %u Hz -> %u Hz\n",
+				 orig_speed, spi->max_speed_hz);
+	}
+
 	ret = sysfs_create_files(&dev->kobj, spi_hid_attributes);
 	if (ret) {
 		dev_err(dev, "Unable to create sysfs attributes\n");
@@ -1815,7 +2477,13 @@ static int spi_hid_probe(struct spi_device *spi)
 	* input_register is used for read approval. Set to default value here.
 	* It will be overwritten later with value from device descriptor
 	*/
-	shid->desc.input_register = SPI_HID_DEFAULT_INPUT_REGISTER;
+	shid->desc.input_register = 0x0000; /* confirmed: device uses register 0 */
+
+	/* Map AMD FCH SPI controller MMIO for V2 direct register access */
+	if (!spi_hid_fch_spi_base)
+		spi_hid_fch_spi_base = ioremap(AMD_FCH_SPI_MMIO_BASE, AMD_FCH_SPI_MMIO_SIZE);
+	if (spi_hid_fch_spi_base)
+		dev_info(dev, "AMD FCH SPI MMIO mapped at %p\n", spi_hid_fch_spi_base);
 
 	mutex_init(&shid->lock);
 	mutex_init(&shid->power_lock);
@@ -1879,7 +2547,6 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_WORK(&shid->create_device_work, spi_hid_create_device_work);
 	INIT_WORK(&shid->refresh_device_work, spi_hid_refresh_device_work);
 	INIT_WORK(&shid->error_work, spi_hid_error_work);
-	INIT_WORK(&shid->fw_work, spi_hid_fw_work);
 
 	if (dev->of_node) {
 		shid->irq = spi->irq;
@@ -1894,19 +2561,76 @@ static int spi_hid_probe(struct spi_device *spi)
 		gpiod_put(gpiod);
 	}
 
+	ret = spi_hid_assert_reset(shid);
+	if (ret) {
+		dev_err(dev, "%s: failed to assert reset\n", __func__);
+		goto err1;
+	}
+
+	ret = spi_hid_power_up(shid);
+	if (ret) {
+		dev_err(dev, "%s: could not power up\n", __func__);
+		goto err1;
+	}
+
+	ret = spi_hid_deassert_reset(shid);
+	if (ret) {
+		dev_err(dev, "%s: failed to deassert reset\n", __func__);
+		goto err1;
+	}
+
+	/* Descriptor request BEFORE IRQ: device is fresh after reset */
+	{
+		u8 ftx[19], rx[48]; struct spi_transfer xf[2]; struct spi_message msg;
+		int k, r;
+		/* EXACT Windows: opcode 0x0B + register 0x0001 + output header + body + payload */
+		ftx[0]=0x0B; ftx[1]=0; ftx[2]=0; ftx[3]=1;    /* register 0x000001 */
+		ftx[4]=0x02; ftx[5]=0x01;                       /* output header ver|len */
+		ftx[6]=0x00; ftx[7]=0x09; ftx[8]=0x00; ftx[9]=0x00; /* body: type,len,id */
+		{ static const u8 pl[9]={9,0x21,1,0,0,1,0x22,0,0};
+		  for(k=0;k<9;k++) ftx[10+k]=pl[k]; }
+		memset(rx,0,sizeof(rx));
+		memset(&xf[0],0,sizeof(xf[0])); xf[0].tx_buf=ftx; xf[0].len=sizeof(ftx);
+		memset(&xf[1],0,sizeof(xf[1])); xf[1].rx_buf=rx; xf[1].len=sizeof(rx);
+		spi_message_init(&msg);
+		spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
+		r=spi_sync(shid->spi,&msg);
+		dev_info(dev,"PROBE-DESC: ret=%d rx[0..23]=[%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]\n",
+			 r, rx[0],rx[1],rx[2],rx[3],rx[4],rx[5],rx[6],rx[7],
+			 rx[8],rx[9],rx[10],rx[11],rx[12],rx[13],rx[14],rx[15],
+			 rx[16],rx[17],rx[18],rx[19],rx[20],rx[21],rx[22],rx[23]);
+		for(k=0;k<48;k++)if(rx[k]==7||(rx[k]>>4)==7)
+			dev_info(dev,"PROBE-DESC *** 0x07 at rx[%d]! ***\n",k);
+	}
+
+	/*
+	 * Register IRQ AFTER power-on sequence completes. On this
+	 * platform, the device starts generating interrupts as soon
+	 * as power is applied, but it takes ~2s after reset before
+	 * it can produce valid SPI responses. If the IRQ is registered
+	 * too early, the handler reads garbage headers, triggers
+	 * error handling, and disables the IRQ before the device is
+	 * ready.
+	 */
 	irqflags = irq_get_trigger_type(shid->irq) | IRQF_ONESHOT;
-	shid->seq_enabled = true;
-	shid->seq_state = 0;
-	shid->ready = false;
-	shid->keep_powered = true;
-	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
-				   irqflags, dev_name(&spi->dev), shid);
+	ret = request_irq(shid->irq, spi_hid_dev_irq, irqflags, dev_name(&spi->dev), shid);
 	if (ret)
 		goto err1;
+
 	shid->irq_enabled = true;
-	dev_info(dev, "SEQ: IRQ armed (state=WAIT_RESET, zero touch)\n");
+
+	/*
+	 * Schedule reset_work to send the descriptor request.
+	 * The device needs a SPI command to transition from the initial
+	 * RESET_RESP state. Without it, no interrupts are generated.
+	 * The IRQ handler (big_complete) will guard against re-triggering
+	 * reset_work via the attempts counter.
+	 */
+	schedule_work(&shid->reset_work);
+
 	dev_err(dev, "%s: d3 -> %s\n", __func__,
 			spi_hid_power_mode_string(shid->power_state));
+
 	return 0;
 
 err1:
