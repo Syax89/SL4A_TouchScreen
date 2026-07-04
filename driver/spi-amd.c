@@ -280,8 +280,9 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (ret) { pr_err("spi-amd: busy_wait timeout %d\n", ret); return ret; }
 
 	if (rx_len) {
+		u32 read_off = fifo_pos + 4;
 		for (i = 0; i < rx_len && i < AMD_SPI_FIFO_SIZE; i++)
-			rx_data[i] = readb(base + fifo_pos + 4 + i);
+			rx_data[i] = readb(base + read_off + i);
 		pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
 			(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), rx_data);
 	}
@@ -418,58 +419,44 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 {
 	struct amd_spi *amd_spi = spi_controller_get_devdata(host);
 	struct spi_device *spi = msg->spi;
+	struct spi_transfer *xfer;
 
 	amd_spi_select_chip(amd_spi, spi_get_chipselect(spi, 0));
 
-	/* V2 register setup (secret bits, reg44, strobe, 0x1D) */
 	if (amd_spi->version == AMD_SPI_V2)
 		amd_spi_setup_v2_regs(amd_spi);
 
-	/* Handle large transfers: chunk at FIFO_SIZE keeping CS asserted */
-	{
-		struct spi_transfer *xfer;
-		list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-			u32 remaining, sent;
+	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
+		u32 remaining, sent;
 
-			if (xfer->tx_buf && xfer->len > 0) {
-				u8 *tx_buf = (u8 *)xfer->tx_buf;
-				u32 tx_len = xfer->len;
-				u8 opcode = tx_buf[0];
-				tx_buf++;
-				tx_len--;
+		if (xfer->tx_buf && xfer->len > 0) {
+			u8 *tx_buf = (u8 *)xfer->tx_buf;
+			u32 tx_len = xfer->len;
+			u8 opcode = tx_buf[0];
+			tx_buf++;
+			tx_len--;
 
-				sent = 0;
-				remaining = tx_len;
-				while (remaining > 0) {
-					u32 chunk = remaining > AMD_SPI_FIFO_SIZE ?
-						    AMD_SPI_FIFO_SIZE : remaining;
-					int ret;
-
-					ret = amd_spi_exec_segment(amd_spi, opcode,
-						tx_buf + sent, chunk,
-						NULL, 0);
-					if (ret < 0) {
-						msg->status = ret;
-						goto out;
-					}
-					sent += chunk;
-					remaining -= chunk;
-				}
-			} else if (xfer->rx_buf && xfer->len > 0) {
-				u32 rx_remaining = xfer->len;
-				u8 *rx_ptr = (u8 *)xfer->rx_buf;
-				while (rx_remaining > 0) {
-					u32 chunk = rx_remaining > AMD_SPI_FIFO_SIZE ?
-						    AMD_SPI_FIFO_SIZE : rx_remaining;
-					int ret = amd_spi_exec_segment(amd_spi, 0x0B,
-						NULL, 0, rx_ptr, chunk);
-					if (ret < 0) {
-						msg->status = ret;
-						goto out;
-					}
-					rx_ptr += chunk;
-					rx_remaining -= chunk;
-				}
+			sent = 0;
+			remaining = tx_len;
+			while (remaining > 0) {
+				u32 chunk = remaining > AMD_SPI_FIFO_SIZE ?
+					    AMD_SPI_FIFO_SIZE : remaining;
+				int ret = amd_spi_exec_segment(amd_spi, opcode,
+					tx_buf + sent, chunk, NULL, 0);
+				if (ret < 0) { msg->status = ret; goto out; }
+				sent += chunk;
+				remaining -= chunk;
+			}
+		} else if (xfer->rx_buf && xfer->len > 0) {
+			u8 *rx_ptr = (u8 *)xfer->rx_buf;
+			for (remaining = xfer->len; remaining > 0; ) {
+				u32 chunk = remaining > AMD_SPI_FIFO_SIZE ?
+					    AMD_SPI_FIFO_SIZE : remaining;
+				int ret = amd_spi_exec_segment(amd_spi, 0x0B,
+					NULL, 0, rx_ptr, chunk);
+				if (ret < 0) { msg->status = ret; goto out; }
+				rx_ptr += chunk;
+				remaining -= chunk;
 			}
 		}
 	}

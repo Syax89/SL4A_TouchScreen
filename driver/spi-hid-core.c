@@ -1207,7 +1207,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	switch (shid->seq_state) {
 
-	case 0: /* WAIT_RESET → two drain reads, then DESCREQ */
+	case 0: /* WAIT_RESET → drain if type==3, then DESCREQ */
 		if (type == 3) {
 			u8 dr_buf[64];
 			dev_info(dev, "SEQ: drain #1 (%u bytes)\n", blen);
@@ -1218,16 +1218,14 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			dev_info(dev, "SEQ: drain #2 rx=[%*ph]\n", 8, dr_buf);
 			msleep(5);
 		}
-		if (type == 3 || type == 0) {
-			/* Send DESCREQ */
-			{ static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
-			  u8 drx[10];
-			  spi_hid_seq_write_then_read(shid,dr,10,drx,10);
-			  dev_info(dev,"SEQ: DESCREQ rx=[%*ph]\n",10,drx); }
-			msleep(5);
-			shid->seq_state = 1;
-			spi_hid_seq_read(shid, shid->input.content, 64);
-		}
+		/* Always send DESCREQ */
+		{ static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
+		  u8 drx[10];
+		  spi_hid_seq_write_then_read(shid,dr,10,drx,10);
+		  dev_info(dev,"SEQ: DESCREQ rx=[%*ph]\n",10,drx); }
+		msleep(5);
+		shid->seq_state = 1;
+		spi_hid_seq_read(shid, shid->input.content, 64);
 		break;
 
 	case 1: /* WAIT_DESC → type=7 (DEVICE_DESC) */
