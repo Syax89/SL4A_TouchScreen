@@ -13,7 +13,6 @@ module/modules.order
 module/*.tmp
 module/*.bak
 
-# Large trace files
-*.csv
+# Large trace files (raw ETW)
 *.etl
 *.bin
