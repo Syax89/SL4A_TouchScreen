@@ -16,3 +16,15 @@ module/*.bak
 # Large trace files (raw ETW)
 *.etl
 *.bin
+
+# Build artifacts (driver/)
+driver/*.o
+driver/*.ko
+driver/*.mod
+driver/*.mod.c
+driver/*.mod.o
+driver/*.cmd
+driver/.*.cmd
+driver/.module*
+driver/Module.symvers
+driver/modules.order
