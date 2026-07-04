@@ -20,7 +20,7 @@
 - [ ] File: `~/ssdt*.dsl` — cercare `AMDI0060` per configurazione SPI controller
 
 ### 0.2 Report Descriptor
-- [ ] File: `~/Scrivania/wintrace/mshw0231_report_descriptor.txt`
+- [ ] File: `docs/mshw0231_report_descriptor.txt`
   - Verificare lunghezza (936 byte)
   - Verificare Usage Pages e Report IDs
 

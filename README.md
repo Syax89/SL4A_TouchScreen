@@ -3,7 +3,8 @@
 Linux HID-over-SPI driver for the Microsoft Surface Laptop 4 (AMD) touchscreen
 (ACPI HID `MSHW0231`, SPI controller `AMDI0060`).
 
-Windows supports this hardware out of the box via `amdspi.sys` + `hidspicx.sys`.
+Windows supports this hardware via `amdspi.sys` + `hidspicx.sys` (drivers downloaded
+through Windows Update, not included in the base OS image).
 This project reverse-engineers the Windows driver protocol to implement a native
 Linux kernel driver.
 

@@ -96,11 +96,12 @@ Diagnostico:
   /usr/src/spi-amd-amdi0060-1.0/  Modulo test register (amd_exec_v2_pure)
 
 Decomp:
-  ~/Scrivania/decomp/amdspi/     amdspi.sys (SPI controller Windows)
-  ~/Scrivania/decomp/hidspicx_*.txt  hidspi.sys (HID protocol Windows)
+  ~/Scrivania/decomp/amdspi/     amdspi.sys (SPI controller Windows, locale)
+
+  ~/Scrivania/decomp/hidspicx_*.txt  hidspi.sys (HID protocol Windows, locale)
 
 CSV:
-  ~/Scrivania/wintrace/surface_boot_auto.csv  Trace ETW boot Windows
+  traces/surface_boot_auto.csv   Trace ETW boot Windows
 ```
 
 ---
