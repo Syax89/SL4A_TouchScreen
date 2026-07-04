@@ -13,8 +13,8 @@ Tutti i file in `~/Scrivania/decomp/amdspi/` sono funzioni decompilate da `amdsp
 | Indirizzo | Nome File | Descrizione |
 |-----------|-----------|-------------|
 | 0x1000 | 0x1000_get_context.txt | Ottiene il device context |
-| 0x19c0 | 0x19c0_write8.txt | Scrittura MMIO 8-bit |
-| 0x19d0 | 0x19d0_read8.txt | Lettura MMIO 8-bit |
+| 0x19c0 | 0x19c0_read8.txt | Lettura MMIO 8-bit |
+| 0x19d0 | 0x19d0_read32.txt | Lettura MMIO 32-bit |
 | 0x19e0 | 0x19e0_read8b.txt | Lettura MMIO 8-bit (variante) |
 | 0x1e34 | 0x1e34.txt | (utility) |
 | 0x1fbc | 0x1fbc_write_mmio.txt | Write MMIO generico |
@@ -31,7 +31,7 @@ Tutti i file in `~/Scrivania/decomp/amdspi/` sono funzioni decompilate da `amdsp
 | **0x4bac** | **0x4bac.txt** | **Esecuzione segmento (TX+RX)** |
 | **0x54d0** | **0x54d0_submit_handler.txt** | **Entry point: submit I/O request** |
 | 0x6d50 | 0x6d50.txt | (timer/cleanup) |
-| 0x6f84 | 0x6f84_restore_register_prefix.txt | Ripristina 0x22 e 0x44 dopo trasferimento |
+| 0x6f84 | 0x6f84_restore_register_prefix.txt | Ripristina 0x22 dopo trasferimento |
 | 0x6fc0 | 0x6fc0_read_register_prefix.txt | Legge register prefix da 0x22 |
 | 0x7714 | 0x7714.txt | (completamento I/O) |
 | 0x7ba0 | 0x7ba0.txt | (utility) |
@@ -42,14 +42,14 @@ Tutti i file in `~/Scrivania/decomp/amdspi/` sono funzioni decompilate da `amdsp
 
 ### fcn.0x3c20 — Transfer (Esecuzione Completa)
 
-**Chiamata da**: 0x54d0 (submit handler)
+**Chiamata da**: 0x5c9c (dispatch)
 
 **Logica** (dall'assembly):
 1. Alloca buffer DMA (512 byte, tag 'SPI2')
 2. Chiama `fcn.0x3528` (sub_transfer) per configurare il trasferimento
 3. Se sub_transfer restituisce 0, errore
 4. Chiama `fcn.0x6fc0` — **legge register prefix da MMIO+0x22** (16-bit)
-5. Chiama `fcn.0x19c0` — write8 per scrivere a registro (context+0x4C)
+5. Chiama `fcn.0x19c0` — lettura 8-bit del registro di stato a context+0x4C (MMIO+0x4C), salva in variabile globale
 6. Salva valore letto in variabile globale `[0x14001e814]`
 7. Salva `[context+0x20]` — sembra un contatore di segmenti
 8. Divide per 64 (0x40) — calcola numero di segmenti?
@@ -112,8 +112,7 @@ Tutti i file in `~/Scrivania/decomp/amdspi/` sono funzioni decompilate da `amdsp
       pause/spin
 
 15. Restore (fcn.0x6f84):
-    write16(0x22, saved_prefix)       // ripristina register prefix
-    write16(0x44, saved_44)           // ripristina speed/opcode
+    write16(0x22, saved_prefix)       // ripristina register prefix (SOLO 0x22)
 ```
 
 ### fcn.0x54d0 — Submit Handler
@@ -121,8 +120,7 @@ Tutti i file in `~/Scrivania/decomp/amdspi/` sono funzioni decompilate da `amdsp
 **Entry point** per ogni richiesta I/O SPI.
 
 Chiama:
-1. `fcn.0x3c20` (transfer) — esecuzione principale
-2. `fcn.0x6f84` (restore) — ripristino registri
+1. `fcn.0x6f84` (restore) — ripristino registri
 
 ### fcn.0x2be4 — Transfer Data
 
@@ -136,11 +134,10 @@ Questo valore viene usato da `fcn.0x6f84` per il ripristino.
 
 ### fcn.0x6f84 — Restore Register Prefix
 
-Ripristina i valori salvati:
+Ripristina SOLO 0x22:
 - `write16(0x22, saved_value_from_0x6fc0)`
-- `write16(0x44, saved_44)`
 
-Questo garantisce che lo stato dei registri tra un trasferimento e l'altro sia consistente.
+Questo garantisce che lo stato del register prefix tra un trasferimento e l'altro sia consistente. Non ripristina 0x44.
 
 ---
 
@@ -199,7 +196,7 @@ Il flag `dil` controlla se il buffer è valido:
 1. **Due 0x0B read prima di DESCREQ** — drenaggio RESET_RSP
 2. **TX+RX con stesso opcode** in una singola operazione (0x02 TX + 0x02 RX)
 3. **Speed config** a 0x44 che sovrascrive 0x45, poi re-write opcode
-4. **Restore 0x22 e 0x44** dopo ogni trasferimento
+4. **Restore 0x22** dopo ogni trasferimento (NON 0x44)
 5. **0x1D strobe** (AND 0xFC, OR 0x01) prima di ogni trasferimento
 6. **Secret bits** (30, 29, 18) in CTRL0 — sempre settati
 7. **NON setta TXMODE** (bit 23) — Windows non ne ha bisogno
@@ -214,5 +211,4 @@ Il flag `dil` controlla se il buffer è valido:
 3. **Nessun speed config** (abbiamo rimosso per semplicità)
 4. **Nessun restore 0x22/0x44** (non necessario senza speed config)
 5. **Nessun 0x1D strobe** (rimosso per debug)
-6. **Nessun secret bits** (rimossi per semplicità)
-7. **Debug esteso** su ogni operazione SPI
+6. **Debug esteso** su ogni operazione SPI

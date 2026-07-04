@@ -17,13 +17,16 @@ Ogni risposta dal dispositivo inizia con sync bytes (0xFF) seguiti dall'header:
 ```
 Byte 0: [TYPE_4bit][VERSION_4bit]
         versione = 2 (HID-over-SPI)
-        tipo report:
-          0 = ACK/Ready
-          3 = RESET_RSP
-          7 = DEVICE_DESC  
-          8 = RPT_DESC
+         tipo report:
+           0 = ACK/Ready
+           1 = DATA
+           3 = RESET_RSP
+           4 = COMMAND_RESP
+           5 = GET_FEATURE_RESP
+           7 = DEVICE_DESC  
+           8 = RPT_DESC
 
-Byte 1: [RESERVED_4bit][LENGTH_LOW_4bit]
+Byte 1: [LENGTH_LOW_4bit][FRAGMENT_ID_4bit]
 Byte 2: [LENGTH_HIGH_8bit]
 Byte 3: 0x5A (marker)
 
@@ -33,9 +36,9 @@ Body length = (((Byte1 >> 4) << 0) | (Byte2 << 4)) * 4
 ### Esempi
 
 ```
-RESET_RSP:  32 10 00 5A    type=3, body_len = ((1>>4)<<0 | 0x00<<4)*4 = 0
-DEVICE_DESC: 72 80 00 5A    type=7, body_len = ((8>>4)<<0 | 0x00<<4)*4 = 0  
-RPT_DESC:   82 B0 0E 5A    type=8, body_len = ((0xB>>4)<<0 | 0x0E<<4)*4 = 0xE0*4 = 896
+RESET_RSP:  32 10 00 5A    type=3, body_len = ((0x10>>4) | 0x00<<4)*4 = 4
+DEVICE_DESC: 72 80 00 5A    type=7, body_len = ((0x80>>4) | 0x00<<4)*4 = 32
+RPT_DESC:   82 B0 0E 5A    type=8, body_len = ((0xB0>>4) | 0x0E<<4)*4 = 0xEB*4 = 940
 
 ACK pattern: 03 00 00 00    (non ha 0x5A! Pattern speciale)
 ```
@@ -53,7 +56,7 @@ TX: [0x0B] [ADDR_H] [ADDR_M] [ADDR_L] [0xFF] [0x00] [0x00] [APPR7] [APPR8]
 9 byte totali. Il dispositivo risponde con i dati dal registro specificato.
 
 Approval bytes:
-  APPR7: 0x00 stato iniziale, 0x03 dopo primo descrittore, 0x0A dopo attivazione
+  APPR7: 0x00 per state==0, 0x03 per state!=0 (spi_hid_approval_byte7: cambia alla transizione 0→1, non dopo descriptor parse)
   APPR8: 0x00 default
 
 Indirizzi registro:
@@ -168,7 +171,8 @@ TX only, nessuna risposta inline.
 ```
 State 0 (WAIT_RESET):
   ├── type==3: drain #1 (blen byte) + drain #2 (64 byte)
-  └── Sempre: DESCREQ (0x02 TX+RX 10B) → state=1 + drain
+  ├── Sempre: DESCREQ (0x02 TX+RX 10B) → state=1
+  └── Dopo state=1: extra spi_hid_seq_read(shid, shid->input.content, 64) per svuotare il buffer
 
 State 1 (WAIT_DESC):
   ├── type==7: parse device descriptor → DESCREQ2 → state=2 + drain
@@ -177,6 +181,7 @@ State 1 (WAIT_DESC):
 
 State 2 (WAIT_RPT):
   ├── type==8: drain → goto VENDOR_INIT
+  ├── NOTA: Il decomp di State2 (fcn.0xda9c) confronta con type==4 (COMMAND_RESP), non type==8. Il nostro codice confronta type==8. Discrepanza da verificare.
   └── type==3/7: log and retry
 
 State 3 (VENDOR_INIT):

@@ -29,6 +29,7 @@
 - **Device risponde**: ACK `03 00 00 00` ricevuto correttamente
 - **Header detection**: ACK pattern riconosciuto come type=0
 - **State machine avanza**: state 0 → DESCREQ → state 1
+- **ACPI table**: MSHW0231 matches via PNP0C51 fallback
 - **No black screen**: `gpio_vendor_init` rimosso (ioremap 0xFED80000)
 
 ### ❌ DA RISOLVERE
@@ -38,11 +39,17 @@
    - Il device risponde con ACK ma non avanza a DEVICE_DESC
 2. **Firmware non testato** con le fix SPI attuali
 3. **Nessun DESCREQ2** (il codice c'è ma state 1 non raggiunge mai type=7)
+4. **input_register per letture iniziali è 0x1000**: Windows usa 0x0000 prima del descriptor parse (approval byte7=0x00, register=0x0000). Il driver usa `SPI_HID_DEFAULT_INPUT_REGISTER 0x1000` (spi-hid-core.h:76) e non cambia mai a 0x0000 durante lo stato 0.
+5. **Bug `memcpy` nel parse descrittore (state 1)**: `memcpy(&raw, hdr+off, s)` copia i 4 byte dell'header HID invece del body (spi-hid-core.c:1237). Dovrebbe essere `hdr+off+4`. Il parse risulta corrotto — `wVendorID`, `wProductID` e tutti i campi del descrittore vengono letti 4 byte sfalsati.
 
 ### Teoria di Fix
 - TX con TXMODE=1 per inviare DESCREQ, poi RX con TXMODE=0
 - Oppure attendere GPIO IRQ prima di fare 0x0B read
 - Oppure path V1 (CTRL0 bit16) che gestisce TX+RX nativamente
+- **D**: Refactor `spi_hid_seq_write_then_read` to use a single `spi_transfer` with both `tx_buf` and `rx_buf` (same len). Then in `host_transfer`, detect this case and call `exec_segment(opcode, tx, tx_len, rx, rx_len)` as one operation.
+
+### Fix Proposti
+- **Opzione A (TX+RX inline stesso opcode)** — VIABLE. Richiede di modificare `spi_hid_seq_write_then_read` per creare un singolo `spi_transfer` con sia `tx_buf` che `rx_buf`, E modificare `host_transfer` per eseguire entrambi in una singola chiamata `exec_segment`. Questo emula il comportamento Windows osservato nel CSV (TXN #3: opcode 0x02 TX+RX come singola operazione).
 
 ---
 
@@ -62,7 +69,17 @@ Vedi [SPI_REGISTERS.md](SPI_REGISTERS.md) per dettagli completi.
 
 ---
 
-## 4. Codice — Organizzazione
+## 4. BUGS NOTI
+
+| # | Bug | File:Line |
+|---|-----|-----------|
+| 1 | **Descriptor parse in state 1**: `memcpy(&raw, hdr+off, s)` copia l'header invece del body | `spi-hid-core.c:1237` |
+| 2 | **ACPI table manca MSHW0231**: il device matcha solo via `PNP0C51` fallback | `spi-hid-core.c:1604-1610` |
+| 3 | **input_register = 0x1000 per letture pre-descriptor**: Windows usa `0x0000` con approval byte7=0x00 prima del parse | `spi-hid-core.h:76`, `spi-hid-core.c:1814` |
+
+---
+
+## 5. Codice — Organizzazione
 
 ```
 File                           Contenuto
@@ -88,7 +105,7 @@ CSV:
 
 ---
 
-## 5. Sequenza Completa (da CSV Windows)
+## 6. Sequenza Completa (da CSV Windows)
 
 Vedi [CSV_SEQUENCE.md](CSV_SEQUENCE.md) per analisi completa di ogni transazione.
 
@@ -119,34 +136,39 @@ FASE 4: Firmware (~410ms)
 
 ---
 
-## 6. State Machine Attuale
+## 7. State Machine Attuale
 
 Vedi [HIDSPI_PROTOCOL.md](HIDSPI_PROTOCOL.md) per dettagli.
 
 ```
 State 0 (WAIT_RESET):
   ├── type==3: drain #1 + drain #2
-  └── DESCREQ 0x02 TX+RX → state=1
+  └── SEMPRE: DESCREQ → state=1
+      └── spec_read: 64 byte dopo DESCREQ (spi-hid-core.c:1228)
 
 State 1 (WAIT_DESC):
   ├── type==7: parse desc → DESCREQ2 → state=2
+  │   └── BUG: memcpy(&raw, hdr+off, s) → hdr+off+4
   ├── type==3: "still RESET_RSP"
   └── type==0: "ACK in state 1"
 
 State 2 (WAIT_RPT):
-  ├── type==8: drain → VENDOR_INIT
+  ├── type==8: drain → goto VENDOR_INIT
   └── type==3/7: log and retry
 
 State 3 (VENDOR_INIT):
-  cmd1 → cmd2 → ACK read → cmd3 → fw_work + create_device → state=4
+  cmd1(0x00,5B TX) → cmd2(0x00,1B TX) → ACK read(0x0B,16B) → cmd3(0x70 TX+RX 14B)
+  → fw_work + create_device → state=4
+  approval byte7=0x03, byte8=0x00 fino a state=4
 
 State 4 (DONE):
-  type==7: hid_input_report()
+  ├── type==7: hid_input_report(hdr+off+4, rl-2)  ← CORRECT offset
+  └── approval byte8 passa a 0x0A (spi-hid-core.c:1130-1131)
 ```
 
 ---
 
-## 7. Comandi Rapidi
+## 8. Comandi Rapidi
 
 ```bash
 # Build

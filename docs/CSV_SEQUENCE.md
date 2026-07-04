@@ -16,7 +16,8 @@ Ogni riga contiene campi separati da virgola. Campi rilevanti:
 
 - **Opcode**: il primo byte del TX payload è l'opcode SPI
 - **Sync bytes**: 5 byte `0xFF` prima dell'header HID
-- **Header HID**: 4 byte `[TYPE][LEN_LOW][LEN_HIGH][0x5A]`
+- **Header HID** (RESET_RSP/DEVICE_DESC/RPT_DESC): 4 byte `[TYPE][LEN_LOW][LEN_HIGH][0x5A]`
+- **Header dati descrittore** (TXN#8): 3 byte `[TYPE][LEN_LOW][LEN_HIGH]` — 0x75 è il primo byte dati, NON 0x5A
 - **Tipo report**: `(TYPE >> 4) & 0xF`, versione: `TYPE & 0x0F` == 2
 - **Approval bytes**: byte 7 e 8 del TX payload 0x0B
 
@@ -37,7 +38,7 @@ PayloadStart: total=18 bytes, transfers=2
 │ FF FF FF FF FF 32 10 00 5A                          │
 │ └─sync (5)──┘ └─header──┘                          │
 │ TYPE=0x32 → (3<<4)|2 = RESET_RSP type=3            │
-│ report_length = ((0>>4)<<0 | 0x10<<4)*4 = 256?     │
+│ body_length = (0x10>>4)|(0x00<<4) = 1 → *4 = 4      │
 └─────────────────────────────────────────────────────┘
 ⏱ Durata totale: ~6.3 µs (63 tick da 100ns)
 ```
@@ -99,7 +100,7 @@ PayloadStart: total=18, transfers=2
 │ FF FF FF FF FF 72 80 00 5A                          │
 │ └─sync──┘ └─header──┘                              │
 │ TYPE=0x72 → (7<<4)|2 = DEVICE_DESC type=7 !!!      │
-│ report_length = ((8>>4)<<0 | 0x00<<4)*4 = 0?       │
+│ body_length = (0x80>>4)|(0x00<<4) = 8 → *4 = 32     │
 └─────────────────────────────────────────────────────┘
 ⏱ Gap da GPIO IRQ: ~112 µs
 ⏱ Durata: ~5.4 µs
@@ -156,7 +157,7 @@ PayloadStart: total=18, transfers=2
 │ FF FF FF FF FF 82 B0 0E 5A                          │
 │ └─sync──┘ └─header──┘                              │
 │ TYPE=0x82 → (8<<4)|2 = RPT_DESC type=8 !!!         │
-│ report_length = ((0xB>>4)<<0 | 0x0E<<4)*4 = ?      │
+│ body_length = (0xB0>>4)|(0x0E<<4) = 0xEB → *4 = 940 │
 └─────────────────────────────────────────────────────┘
 ⏱ Gap da GPIO IRQ: ~185 µs
 ⏱ Durata: ~6.7 µs
@@ -170,7 +171,8 @@ PayloadStart: total=1890, transfers=2
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 945 byte ──────────────────────────┐
 │ FF FF FF FF FF AB 03 00 75 08 15 00 26 FF 00 06... │
-│ └─sync──┘ └───HID Report Descriptor (944 byte)────┘ │
+│ └─sync──┘ └header┘ └──dati descrittore────────────┘ │
+│            (3 byte, NO 0x5A! 0x75 è 1° byte dati)    │
 │ Contiene Usage Pages, Logical Min/Max, Report IDs...│
 └─────────────────────────────────────────────────────┘
 ⏱ Gap da TXN #7: ~560 µs
@@ -208,7 +210,7 @@ PayloadStart: total=1, transfers=1 (TX only!)
 └─────────────────────────────────────────────────────┘
 ```
 
-### TXN #11 — 0x0B Read (checksum response)
+### TXN #11 — Checksum Response (RX-only, no 0x0B)
 ```
 ┌─ RX FromDevice: dati checksum                       │
 │ 84 26 AA...                                         │
@@ -247,6 +249,61 @@ PayloadStart: total=241, transfers=1 (TX only)
 
 ---
 
+## FASE 4: Post-FW — Secondo Binario e Runtime (~410ms+)
+
+### TXN #134 — 0xB1 Post-FW Execute (5 byte TX)
+```
+┌─ TX ToDevice: 5 byte ──────────────────────────────┐
+│ B1 [4 byte payload]                                  │
+│ │                                                    │
+│ opcode 0xB1 = comando esecuzione post-firmware       │
+└─────────────────────────────────────────────────────┘
+```
+
+### TXN #135-136 — 0x70 Read Status (×2)
+```
+┌─ TX ToDevice: 1 byte ──────────────────────────────┐
+│ 70                                                  │
+└─────────────────────────────────────────────────────┘
+┌─ RX FromDevice: N byte ─────────────────────────────┐
+│ stato firmware post-upload                           │
+└─────────────────────────────────────────────────────┘
+```
+
+### TXN #137 — 0x28 Comando Sconosciuto (7 byte TX+RX)
+```
+┌─ TX ToDevice: 7 byte ──────────────────────────────┐
+│ 28 [6 byte payload]                                  │
+└─────────────────────────────────────────────────────┘
+┌─ RX FromDevice: N byte ─────────────────────────────┐
+│ risposta comando 0x28                                │
+└─────────────────────────────────────────────────────┘
+```
+
+### TXN #138+ — 0x22 Second Binary Upload
+```
+┌─ TX ToDevice: N byte ──────────────────────────────┐
+│ 22 [payload]                                         │
+│ opcode 0x22 = upload secondo binario                 │
+└─────────────────────────────────────────────────────┘
+⏱ Blocchi multipli, simile a FASE 3
+```
+
+### Runtime — 0x0B Read con approval7=0x0A
+```
+┌─ TX ToDevice: 9+ byte ─────────────────────────────┐
+│ 0B ... 0A 00                                        │
+│        └─┘                                          │
+│   approval7=0x0A (runtime)                           │
+└─────────────────────────────────────────────────────┘
+┌─ RX FromDevice: N byte ─────────────────────────────┐
+│ dati sensore / report HID                           │
+└─────────────────────────────────────────────────────┘
+⏱ Intervallo tra letture: ~110 ms (resync periodico)
+```
+
+---
+
 ## RIEPILOGO TIMING
 
 | Evento | Durata/Gap |
@@ -277,17 +334,29 @@ PayloadStart: total=241, transfers=1 (TX only)
 | 0x00 | Attivazione | 1-5 byte | — | cmd1/cmd2 |
 | 0x70 | Read Status | 1 byte | 14 byte | Stato firmware |
 | 0xB0 | FW Block | 241 byte | — | Firmware write |
+| 0xB1 | Post-FW Execute | 5 byte | — | Esecuzione post-firmware |
+| 0x28 | Unknown | 7 byte | N byte | Comando sconosciuto post-FW |
+| 0x22 | Second Binary | N byte | — | Upload secondo binario |
 
 ### Approval Bytes
 ```
-Byte7 (approval):
+Byte7 (approval7):
   - 0x00: stato iniziale (prima di DESCREQ)
   - 0x03: dopo aver ricevuto almeno un descrittore
-  
-Byte8 (approval):
-  - 0x00: default
-  - 0x0A: dopo attivazione completa
+  - 0x0A: runtime (~52s dopo il boot)
+
+Byte8 (approval8):
+  - 0x00: SEMPRE (non cambia mai)
 ```
+
+### Formula Body Length
+```
+body_length = ((len_low >> 4) | (len_high << 4)) * 4
+```
+Esempi:
+- RESET_RSP: len_low=0x10, len_high=0x00 → (1|0)*4 = 4
+- DEVICE_DESC: len_low=0x80, len_high=0x00 → (8|0)*4 = 32
+- RPT_DESC: len_low=0xB0, len_high=0x0E → (0x0B|0xE0)*4 = 0xEB*4 = 940
 
 ### Header HID
 ```

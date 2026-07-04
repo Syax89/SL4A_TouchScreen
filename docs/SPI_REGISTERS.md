@@ -6,17 +6,18 @@
 |--------|------|------|-----|-------------|
 | 0x00 | CTRL0 | 32bit | R/W | Controllo principale |
 | 0x1D | ALT_CS | 8bit | R/W | Chip select alternativo |
-| 0x20 | ENA_REG | 32bit | R/W | Abilitazione (SPI100, etc.) |
+| 0x20 | ENA_REG | 32bit | R/W | Abilitazione (SPI100, ALT_SPD a bit 20-23) |
 | 0x22 | REG_PREFIX | 16bit | R/W | Registro prefisso (salvato/ripristinato) |
-| 0x44 | SPEED_OPCODE | 16bit | R/W | Speed config (high byte) + opcode (low byte) |
+| 0x44 | SPEED_OPCODE | 16bit | R/W | Speed config Windows-only (high byte speed + low byte opcode) |
 | 0x45 | OPCODE_REG | 8bit | R/W | Opcode per path V2 |
 | 0x47 | CMD_TRIGGER | 8bit | R/W | Trigger V2 (bit7 = start) |
 | 0x48 | TX_COUNT | 8bit | R/W | Byte da trasmettere |
 | 0x49 | STROBE_V2_A | 8bit | W | Strobe V2 (scrivi 0x00) |
 | 0x4A | STROBE_V2_B | 8bit | W | Strobe V2 (scrivi 0x00) |
 | 0x4B | RX_COUNT | 8bit | R/W | Byte da ricevere |
-| 0x4C | STATUS | 8bit | R | Stato (bit31 = busy su V2?) |
-| 0x80 | FIFO_BASE | 70B | R/W | FIFO dati (70 byte, 0x80-0xC6) |
+| 0x4C | STATUS | 32bit | R | Stato (bit31 = busy su V2) |
+| 0x6C | SPEED_REG | 32bit | R/W | Speed V2 (spd7 a bit 8-13) |
+| 0x80 | FIFO_BASE | 70B | R/W | FIFO dati (70 byte, 0x80-0xC5) |
 
 ---
 
@@ -97,7 +98,7 @@ Bit 7-0   : OPCODE_V1 — opcode per path V1
 7. Leggi RX dal FIFO
 ```
 
-### V2 Path (Windows amdspi.sys)
+### V2 Path (Linux spi-amd.c)
 ```
 1. Scrivi opcode in OPCODE_REG (0x45)
 2. Scrivi TX_COUNT (0x48)
@@ -106,7 +107,7 @@ Bit 7-0   : OPCODE_V1 — opcode per path V1
 5. Scrivi 0x00 a STROBE 0x49
 6. Scrivi 0x00 a STROBE 0x4A
 7. Trigger: toggle CMD_TRIGGER (0x47) bit7
-8. Busy wait: poll CTRL0 bit31 o STATUS (0x4C)
+8. Busy wait: poll CTRL0 bit31 o STATUS (0x4C) bit31 (ioread32)
 9. Leggi RX dal FIFO (a offset +4)
 ```
 
@@ -116,25 +117,28 @@ Bit 7-0   : OPCODE_V1 — opcode per path V1
 | Opcode register | CTRL0[7:0] | 0x45 |
 | Trigger | CTRL0 bit16 | 0x47 bit7 |
 | Strobe | nessuno | 0x49, 0x4A |
-| Speed config | nessuna | 0x44 (overwrite 0x45!) |
+| Speed config | nessuna | ENA_REG (0x20) ALT_SPD + SPEED_REG (0x6C) spd7 |
 | Secret bits | nessuno | CTRL0 bit 30,29,18 |
 | 0x1D strobe | nessuno | AND 0xFC, OR 0x01 |
 
-### V2 Path — Ordine Esatto Windows (da decomp fcn.0x54d0 / fcn.0x4bac)
+### V2 Path — Ordine Esatto (nostro driver spi-amd.c)
 ```
-1.  read8(0x1D) → AND 0xFC → OR 0x01 → write8(0x1D)     [enable SPI]
-2.  Clear FIFO (CTRL0 bit20 toggle)
-3.  Write opcode to 0x45                                   [prima scrittura]
-4.  Read CTRL0 → set bits 30,29,18 → write CTRL0           [secret bits]
-5.  Speed config: read16(0x44), modifica nibble, write16    [overwrite 0x45!]
+1.  read8(0x1D) → AND 0xFC → OR (cs & 0x03) → write8(0x1D)     [seleziona CS]
+2.  Clear FIFO (CTRL0 bit20 toggle: clear→set)
+3.  Speed config: ENA_REG (0x20) ALT_SPD + SPEED_REG (0x6C) spd7  [amd_set_spi_freq()]
+4.  Write opcode to 0x45                                           [una sola scrittura]
+5.  Secret bits: CTRL0 |= bits 30,29,18 → write CTRL0              [ONCE per messaggio, in amd_spi_setup_v2_regs()]
 6.  write8(TX_COUNT, 0x48)
 7.  Fill FIFO (0x80+)
 8.  write8(RX_COUNT, 0x4B) — 0 per write, rx_len per read
-9.  Write opcode to 0x45 AGAIN                              [dopo speed config]
-10. Trigger: write8(0x80, 0x47)
-11. Wait busy: poll CTRL0 bit31
-12. Restore 0x22 e 0x44 da backup
+9.  Trigger: write8(0x80, 0x47)
+10. Wait busy: poll CTRL0 bit31
+11. Read RX da FIFO a offset +4
 ```
+
+**Nota:** Il driver Linux NON scrive l'opcode due volte e NON salva/ripristina 0x22 e 0x44. Il salvataggio di 0x22
+e la speed config via 0x44 sono comportamenti Windows-only. La double-write dell'opcode (step 9 Windows) è
+necessaria solo perché Windows sovrascrive 0x45 scrivendo 0x44 come 16-bit.
 
 ---
 
@@ -170,7 +174,14 @@ Bit 7-2: Riservati / altri usi
 Operazione Windows (fcn.0x3c20):
   read8(0x1D) → AND 0xFC → OR 0x01 → write8(0x1D)
   Questo preserva bit 7-2, azzera CS (bit 1-0), setta bit 0.
-  Il bit 0 potrebbe essere un "enable" strobe, non CS.
+  Il pattern AND 0xFC/OR 0x01 forza sempre cs=1 indipendentemente
+  dal chip selezionato. Il bit 0 potrebbe essere un "enable" strobe,
+  non un vero CS select.
+
+Nostro driver (select_chip in spi-amd.c):
+  read8(0x1D) → AND 0xFC → OR (cs & 0x03) → write8(0x1D)
+  I bit 1-0 sono trattati come puro CS select con maschera 0x3,
+  supportando cs=0,1,2,3 in base al chip SPI selezionato.
 ```
 
 ---
@@ -193,37 +204,48 @@ Sequenza tipica:
 
 ---
 
-## Speed Config (0x44-0x45)
+## Speed Config (Linux — amd_set_spi_freq())
 
-Il registro a 16 bit (0x44-0x45) controlla la velocità SPI:
-- 0x44 high byte: speed nibble per TX (?)
-- 0x45 low byte: opcode
+Il driver Linux usa due registri separati:
 
-**ATTENZIONE:** Scrivere a 0x44 come 16-bit (writew) **sovrascrive** l'opcode in 0x45!
-Dopo speed config, bisogna **riscrivere** l'opcode a 0x45.
-
-Windows decomp mostra:
+### ENA_REG (0x20) — ALT_SPD field (bit 20-23)
 ```
-readw(0x44) → modifica nibble → writew(0x44)  // overwrite 0x45!
-writeb(opcode, 0x45)                            // re-write opcode
+Velocità effettiva impostata in base a dev->speed_hz.
+Il campo ALT_SPD determina lo speed tier (4 bit).
 ```
 
-Speed nibble mapping (non completamente verificato):
+### SPEED_REG (0x6C) — spd7 field (bit 8-13)
 ```
-0x0 = 100 MHz
-0x1 = 66.66 MHz
-0x2 = 50 MHz
-0x3 = 33.33 MHz
-...
+Regolazione fine della velocità (6 bit).
 ```
+
+### Tabella speed (da spi-amd.c righe 127-137)
+
+| speed_hz (target) | enable_val (ENA_REG ALT_SPD) | spd7_val (SPEED_REG) |
+|-------------------|------------------------------|----------------------|
+| 12.5 MHz          | 0x0                          | 0x04                 |
+| 25.0 MHz          | 0x1                          | 0x04                 |
+| 33.0 MHz          | 0x2                          | 0x04                 |
+| 50.0 MHz          | 0x3                          | 0x04                 |
+| 66.0 MHz          | 0x4                          | 0x04                 |
+| 80.0 MHz          | 0x5                          | 0x04                 |
+| 100.0 MHz         | 0x6                          | 0x04                 |
+| 133.0 MHz         | 0x7                          | 0x04                 |
+
+### Registro 0x44 (Windows-only)
+
+**ATTENZIONE:** Il registro a 16 bit 0x44 è usato **solo** dal driver Windows (amdspi.sys).
+Scrivendolo come 16-bit (writew) sovrascrive anche l'opcode in 0x45, per questo Windows
+deve riscrivere l'opcode dopo la speed config. Il driver Linux **NON** usa 0x44.
 
 ---
 
 ## Status e Busy Polling
 
 ```
+BUSY POLL: ioread32(STATUS) o ioread32(CTRL0), controlla bit31
 V1: poll CTRL0 bit31 (AMD_SPI_BUSY)
-V2: poll CTRL0 bit31 (STATUS 0x4C è inaffidabile)
+V2: poll CTRL0 bit31 o STATUS (0x4C) bit31 (entrambi leggibili come ioread32)
     Timeout: 2 secondi (2000000 µs), poll ogni 20 µs
     Dopo trigger: udelay(20) prima del primo poll
 ```
