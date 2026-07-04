@@ -1,0 +1,19 @@
+# Build artifacts
+module/*.o
+module/*.ko
+module/*.mod
+module/*.mod.c
+module/*.mod.o
+module/*.cmd
+module/.module*
+module/.spi*
+module/.trace*
+module/Module.symvers
+module/modules.order
+module/*.tmp
+module/*.bak
+
+# Large trace files
+*.csv
+*.etl
+*.bin
