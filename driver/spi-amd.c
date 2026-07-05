@@ -255,14 +255,14 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (DBG_VERBOSE || opcode != 0x0B)
 		pr_err("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
 
-	/* V2: set secret bits (30+29+18) before each segment, like Windows fcn.0x2be4 */
-	if (amd_spi->version == AMD_SPI_V2)
-		amd_spi_setup_v2_regs(amd_spi);
+	/* Clear FIFO — single set (not toggle), matching Windows decomp */
+	if (amd_spi->version == AMD_SPI_V2) {
+		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
+		ctrl0 |= AMD_SPI_FIFO_CLEAR;
+		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
+	}
 
-	/* Clear FIFO */
-	amd_spi_clear_fifo_ptr(amd_spi);
-
-	/* V2: write opcode to 0x45 */
+	/* V2: write opcode to 0x45 FIRST (before secret bits, as Windows does) */
 	if (amd_spi->version == AMD_SPI_V2)
 		amd_spi_set_opcode(amd_spi, opcode);
 	else {
@@ -271,7 +271,12 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
 
-	if (amd_spi->version == AMD_SPI_V2) {
+	/* V2: set secret bits (30+29+18) AFTER opcode, as Windows fcn.0x2be4 */
+	if (amd_spi->version == AMD_SPI_V2)
+		amd_spi_setup_v2_regs(amd_spi);
+
+	/* V2: 0x44 dance — only for writes (opcode 0x02), as Windows does */
+	if (amd_spi->version == AMD_SPI_V2 && opcode == 0x02) {
 		u16 w = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 speed_nibble = amd_spi_readreg8(amd_spi, AMD_SPI_ENA_REG) & 0xF;
 		w = (w & 0x00FF) | ((u16)speed_nibble << 8) | ((u16)speed_nibble << 12);

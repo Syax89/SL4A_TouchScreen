@@ -1143,12 +1143,10 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 { return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len); }
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len)
 { dev_err(&shid->spi->dev,"SEQ: write op=0x%02x len=%d raw=[%*ph]\n",buf[0],len,min(len,16),buf);
-  { struct spi_transfer xf[2]; struct spi_message msg;
-  u8 dummy_rx[32];
-  memset(xf,0,sizeof(xf));
-  xf[0].tx_buf=(void*)buf; xf[0].len=len;
-  xf[1].rx_buf=dummy_rx; xf[1].len=len; /* match TX len like Windows */
-  spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
+  { struct spi_transfer xf; struct spi_message msg;
+  memset(&xf,0,sizeof(xf));
+  xf.tx_buf=(void*)buf; xf.len=len;
+  spi_message_init(&msg); spi_message_add_tail(&xf,&msg);
   return spi_sync(shid->spi,&msg); } }
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
@@ -1226,16 +1224,13 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 				0x02, 0x00, 0x00, 0x01, 0x42,
 				0x00, 0x00, 0x03, 0x00, 0x00
 			};
-			struct spi_transfer xf[2];
+			struct spi_transfer xf;
 			struct spi_message msg;
-			u8 dummy_rx[10];
 
-			memset(xf, 0, sizeof(xf));
-			xf[0].tx_buf = (void *)descreq; xf[0].len = sizeof(descreq);
-			xf[1].rx_buf = dummy_rx; xf[1].len = sizeof(dummy_rx);
+			memset(&xf, 0, sizeof(xf));
+			xf.tx_buf = (void *)descreq; xf.len = sizeof(descreq);
 			spi_message_init(&msg);
-			spi_message_add_tail(&xf[0], &msg);
-			spi_message_add_tail(&xf[1], &msg);
+			spi_message_add_tail(&xf, &msg);
 			dev_info(dev, "SEQ: RESET_RSP seen, sending DESCREQ directly (no body drain)\n");
 			spi_sync(shid->spi, &msg);
 			dev_info(dev, "SEQ: DESCREQ sent\n");
@@ -1296,11 +1291,16 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 			if (rblen)
 				spi_hid_seq_read(shid, body, rblen);
-			dev_info(dev, "SEQ: RESET_RSP in state 1, doing ACPI _RST then DESCREQ via workqueue\n");
-			if (!dev->of_node)
-				acpi_evaluate_object(ACPI_HANDLE(dev), "_RST", NULL, NULL);
+			dev_info(dev, "SEQ: RESET_RSP in state 1, sending DESCREQ directly (no _RST, no workqueue)\n");
+			{
+				static const u8 dr[] = {
+					0x02, 0x00, 0x00, 0x01, 0x42,
+					0x00, 0x00, 0x03, 0x00, 0x00
+				};
+				spi_hid_seq_write(shid, dr, sizeof(dr));
+			}
+			dev_info(dev, "SEQ: DESCREQ sent synchronously, waiting for next IRQ\n");
 			shid->seq_state = 1;
-			schedule_work(&shid->descreq_work);
 		}
 		break;
 
@@ -1322,11 +1322,15 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 			if (rblen)
 				spi_hid_seq_read(shid, body, rblen);
-			dev_info(dev, "SEQ: RESET_RSP in state 2, doing ACPI _RST then DESCREQ via workqueue\n");
-			if (!dev->of_node)
-				acpi_evaluate_object(ACPI_HANDLE(dev), "_RST", NULL, NULL);
+			dev_info(dev, "SEQ: RESET_RSP in state 2, sending DESCREQ directly\n");
+			{
+				static const u8 dr[] = {
+					0x02, 0x00, 0x00, 0x01, 0x42,
+					0x00, 0x00, 0x03, 0x00, 0x00
+				};
+				spi_hid_seq_write(shid, dr, sizeof(dr));
+			}
 			shid->seq_state = 1;
-			schedule_work(&shid->descreq_work);
 		}
 		break;
 
@@ -1964,16 +1968,38 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->ready = false;
 	shid->keep_powered = true;
 
-	/* Call ACPI _INI then _RST to fully initialize device */
+	/* Try various _RST locations */
 	if (!dev->of_node) {
-		acpi_handle handle = ACPI_HANDLE(dev);
+		acpi_handle h;
 		acpi_status st;
+		acpi_handle my_handle = ACPI_HANDLE(dev);
+		acpi_handle ctrl_handle = ACPI_HANDLE(&shid->spi->controller->dev);
 
-		st = acpi_evaluate_object(handle, "_INI", NULL, NULL);
-		dev_info(dev, "SEQ: ACPI _INI returned %d\n", st);
+		/* Try 1: HSPI device itself */
+		st = acpi_evaluate_object(my_handle, "_RST", NULL, NULL);
+		dev_info(dev, "SEQ: _RST on HSPI = %d\n", st);
 
-		st = acpi_evaluate_object(handle, "_RST", NULL, NULL);
-		dev_info(dev, "SEQ: ACPI _RST returned %d\n", st);
+		/* Try 2: controller */
+		if (ctrl_handle) {
+			st = acpi_evaluate_object(ctrl_handle, "_RST", NULL, NULL);
+			dev_info(dev, "SEQ: _RST on controller = %d\n", st);
+		}
+
+		/* Try 3: full path \\_SB.SPI1._RST */
+		if (ACPI_SUCCESS(acpi_get_handle(NULL, "\\_SB.SPI1._RST", &h))) {
+			st = acpi_evaluate_object(h, NULL, NULL, NULL);
+			dev_info(dev, "SEQ: _RST on \\\\_SB.SPI1._RST = %d\n", st);
+		} else {
+			dev_info(dev, "SEQ: \\\\_SB.SPI1._RST not found\n");
+		}
+
+		/* Try 4: full path \\_SB.SPI1.HSPI._RST */
+		if (ACPI_SUCCESS(acpi_get_handle(NULL, "\\_SB.SPI1.HSPI._RST", &h))) {
+			st = acpi_evaluate_object(h, NULL, NULL, NULL);
+			dev_info(dev, "SEQ: _RST on \\\\_SB.SPI1.HSPI._RST = %d\n", st);
+		} else {
+			dev_info(dev, "SEQ: \\\\_SB.SPI1.HSPI._RST not found\n");
+		}
 	}
 
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
