@@ -1224,10 +1224,16 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		dev_info(dev, "SEQ: after drain type=%d\n", type);
 		/* Send DESCREQ only if type==0 (ACK) or type==3 (RESET_RSP) */
 		if (type == 0 || type == 3) {
-		/* Always send DESCREQ as TX-only */
+		/* DESCREQ TX+RX (CSV TXN#3): 10 bytes TX, 10 bytes RX inline ACK */
 		{ static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
-		  spi_hid_seq_write(shid, dr, 10);
-		  dev_info(dev,"SEQ: DESCREQ sent TX-only\n"); }
+		  u8 dr_ack[10];
+		  struct spi_transfer xf_dr[2]; struct spi_message msg_dr;
+		  memset(dr_ack,0,10); memset(xf_dr,0,sizeof(xf_dr));
+		  xf_dr[0].tx_buf=(void*)dr; xf_dr[0].len=10;
+		  xf_dr[1].rx_buf=dr_ack; xf_dr[1].len=10;
+		  spi_message_init(&msg_dr); spi_message_add_tail(&xf_dr[0],&msg_dr); spi_message_add_tail(&xf_dr[1],&msg_dr);
+		  spi_sync(shid->spi, &msg_dr);
+		  dev_info(dev,"SEQ: DESCREQ TX+RX ack=[%10ph]\n", dr_ack); }
 		}
 		msleep(5);
 		shid->seq_state = 1;
@@ -1247,14 +1253,20 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 					 shid->desc.output_register,
 					 shid->desc.report_descriptor_length);
 			}
-			/* DESCREQ2 */
+			/* DESCREQ2 TX+RX (CSV TXN#6) */
 			{
 				static const u8 dr2[] = {
 					0x02, 0x00, 0x00, 0x02, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
-				spi_hid_seq_write(shid, dr2, 10);
-				dev_info(dev, "SEQ: DESCREQ2 sent TX-only\n");
+				u8 dr2_ack[10];
+				struct spi_transfer xf_dr2[2]; struct spi_message msg_dr2;
+				memset(dr2_ack,0,10); memset(xf_dr2,0,sizeof(xf_dr2));
+				xf_dr2[0].tx_buf=(void*)dr2; xf_dr2[0].len=10;
+				xf_dr2[1].rx_buf=dr2_ack; xf_dr2[1].len=10;
+				spi_message_init(&msg_dr2); spi_message_add_tail(&xf_dr2[0],&msg_dr2); spi_message_add_tail(&xf_dr2[1],&msg_dr2);
+				spi_sync(shid->spi, &msg_dr2);
+				dev_info(dev, "SEQ: DESCREQ2 TX+RX ack=[%10ph]\n", dr2_ack);
 			}
 			msleep(5);
 			shid->seq_state = 2;

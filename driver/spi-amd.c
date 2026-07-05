@@ -68,6 +68,7 @@ struct amd_spi_freq {
 /* Undocumented registers from amdspi.sys decomp */
 #define AMD_SPI_SECRET_BITS	0x60040000 /* bits 30+29+18 */
 #define AMD_SPI_TXMODE_BIT	0x00800000 /* bit 23: force TX, prevent RX switch */
+#define AMD_SPI_SPEED_CONFIG_REG 0x44	/* write16 clobbers 0x45 (opcode), re-write needed */
 
 static inline u8 amd_spi_readreg8(struct amd_spi *amd_spi, int idx)
 {
@@ -77,6 +78,16 @@ static inline u8 amd_spi_readreg8(struct amd_spi *amd_spi, int idx)
 static inline void amd_spi_writereg8(struct amd_spi *amd_spi, int idx, u8 val)
 {
 	writeb(val, ((u8 __iomem *)amd_spi->io_remap_addr + idx));
+}
+
+static inline u16 amd_spi_readreg16(struct amd_spi *amd_spi, int idx)
+{
+	return readw((u8 __iomem *)amd_spi->io_remap_addr + idx);
+}
+
+static inline void amd_spi_writereg16(struct amd_spi *amd_spi, int idx, u16 val)
+{
+	writew(val, ((u8 __iomem *)amd_spi->io_remap_addr + idx));
 }
 
 static inline u32 amd_spi_readreg32(struct amd_spi *amd_spi, int idx)
@@ -260,6 +271,14 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
 
+	if (amd_spi->version == AMD_SPI_V2) {
+		u16 w = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
+		u8 speed_nibble = amd_spi_readreg8(amd_spi, AMD_SPI_ENA_REG) & 0xF;
+		w = (w & 0x00FF) | ((u16)speed_nibble << 8) | ((u16)speed_nibble << 12);
+		amd_spi_writereg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG, w);
+		amd_spi_set_opcode(amd_spi, opcode);
+	}
+
 	if (tx_len > AMD_SPI_FIFO_SIZE) {
 		pr_err("spi-amd: tx_len %u exceeds FIFO size %u\n", tx_len, AMD_SPI_FIFO_SIZE);
 		return -EINVAL;
@@ -419,44 +438,42 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 {
 	struct amd_spi *amd_spi = spi_controller_get_devdata(host);
 	struct spi_device *spi = msg->spi;
-	struct spi_transfer *xfer;
+	struct spi_transfer *xfer, *next;
 
 	amd_spi_select_chip(amd_spi, spi_get_chipselect(spi, 0));
 
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		u32 remaining, sent;
+		int ret;
 
 		if (xfer->tx_buf && xfer->len > 0) {
 			u8 *tx_buf = (u8 *)xfer->tx_buf;
 			u32 tx_len = xfer->len;
 			u8 opcode = tx_buf[0];
+
 			tx_buf++;
 			tx_len--;
 
-			sent = 0;
-			remaining = tx_len;
-
-			/* Combined TX+RX: if next transfer is RX-only, merge into one segment */
-			if (remaining <= AMD_SPI_FIFO_SIZE &&
-			    !list_is_last(&xfer->transfer_list, &msg->transfers)) {
-				struct spi_transfer *next = list_next_entry(xfer, transfer_list);
-				if ((!next->tx_buf || next->len == 0) &&
-				    next->rx_buf && next->len > 0 &&
-				    next->len <= AMD_SPI_FIFO_SIZE) {
-					u32 rx_chunk = next->len;
-					int ret = amd_spi_exec_segment(amd_spi, opcode,
-						tx_buf, remaining,
-						(u8 *)next->rx_buf, rx_chunk);
+			/* Windows pattern: TX+RX combined in single opcode transaction
+			 * Check if next transfer is an RX-only of matching size */
+			if (!list_is_last(&xfer->transfer_list, &msg->transfers)) {
+				next = list_next_entry(xfer, transfer_list);
+				if (next->rx_buf && next->len > 0 && !next->tx_buf) {
+					ret = amd_spi_exec_segment(amd_spi, opcode,
+						tx_buf, tx_len,
+						(u8 *)next->rx_buf, next->len);
 					if (ret < 0) { msg->status = ret; goto out; }
 					xfer = next;
 					continue;
 				}
 			}
 
+			sent = 0;
+			remaining = tx_len;
 			while (remaining > 0) {
 				u32 chunk = remaining > AMD_SPI_FIFO_SIZE ?
 					    AMD_SPI_FIFO_SIZE : remaining;
-				int ret = amd_spi_exec_segment(amd_spi, opcode,
+				ret = amd_spi_exec_segment(amd_spi, opcode,
 					tx_buf + sent, chunk, NULL, 0);
 				if (ret < 0) { msg->status = ret; goto out; }
 				sent += chunk;
@@ -467,7 +484,7 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 			for (remaining = xfer->len; remaining > 0; ) {
 				u32 chunk = remaining > AMD_SPI_FIFO_SIZE ?
 					    AMD_SPI_FIFO_SIZE : remaining;
-				int ret = amd_spi_exec_segment(amd_spi, 0x0B,
+				ret = amd_spi_exec_segment(amd_spi, 0x0B,
 					NULL, 0, rx_ptr, chunk);
 				if (ret < 0) { msg->status = ret; goto out; }
 				rx_ptr += chunk;
