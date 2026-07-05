@@ -301,7 +301,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (rx_len) {
 		u32 read_off = fifo_pos + tx_len;
 		for (i = 0; i < rx_len && i < AMD_SPI_FIFO_SIZE; i++)
-			rx_data[i] = readw(base + read_off + i) & 0xFF;
+			rx_data[i] = readb(base + read_off + i);
 		pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
 			(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), rx_data);
 	}
@@ -453,6 +453,10 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 
 			tx_buf++;
 			tx_len--;
+
+			/* Strip trailing 0xFF for reads — first RX clock, not TX */
+			if (opcode == 0x0B && tx_len > 0 && tx_buf[tx_len - 1] == 0xFF)
+				tx_len--;
 
 			/* Windows pattern: TX+RX combined in single opcode transaction
 			 * Check if next transfer is an RX-only of matching size */

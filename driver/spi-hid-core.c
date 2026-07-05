@@ -1125,52 +1125,52 @@ static int spi_hid_set_request(struct spi_hid *shid,
 			shid->desc.output_register, &report);
 }
 
-static u8 spi_hid_approval_byte7(struct spi_hid *shid)
-{ return (shid->seq_state == 0) ? 0x00 : ((shid->seq_state >= 4) ? 0x0A : 0x03); }
-static u8 spi_hid_approval_byte8(struct spi_hid *shid)
-{ return 0x00; }
-
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {
-	u8 tx[9]; struct spi_transfer xf[2]; struct spi_message msg;
+	u8 tx[5]; struct spi_transfer xf[2]; struct spi_message msg;
+	int ret;
 	tx[0]=0x0B; tx[1]=(reg>>16)&0xff; tx[2]=(reg>>8)&0xff; tx[3]=reg&0xff;
-	tx[4]=0xFF; tx[5]=0; tx[6]=0;
-	tx[7]=spi_hid_approval_byte7(shid); tx[8]=spi_hid_approval_byte8(shid);
+	tx[4]=0xFF;
 	memset(rx,0,rx_len); memset(xf,0,sizeof(xf));
-	xf[0].tx_buf=tx; xf[0].len=9; xf[1].rx_buf=rx; xf[1].len=rx_len;
+	xf[0].tx_buf=tx; xf[0].len=5; xf[1].rx_buf=rx; xf[1].len=rx_len;
 	spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
-	return spi_sync(shid->spi, &msg);
+	ret = spi_sync(shid->spi, &msg);
+	dev_info(&shid->spi->dev, "SEQ: read reg=0x%06x len=%d ret=%d raw=[%*ph]\n",
+		 reg, rx_len, ret, min(rx_len, 16), rx);
+	return ret;
 }
 static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
-{ dev_err(&shid->spi->dev,"SEQ: read reg=0x%04X len=%d\n",shid->desc.input_register,rx_len);
-  return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len); }
+{ return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len); }
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len)
-{ dev_err(&shid->spi->dev,"SEQ: write op=0x%02x len=%d\n",buf[0],len);
-  { struct spi_transfer xf; struct spi_message msg;
-  memset(&xf,0,sizeof(xf)); xf.tx_buf=(void*)buf; xf.len=len;
-  spi_message_init_with_transfers(&msg,&xf,1); return spi_sync(shid->spi,&msg); } }
-static int spi_hid_seq_write_then_read(struct spi_hid *shid,
-	const u8 *tx, int tx_len, u8 *rx, int rx_len)
-{ struct spi_transfer xf[2]; struct spi_message msg;
-  memset(xf,0,sizeof(xf)); xf[0].tx_buf=(void*)tx; xf[0].len=tx_len;
-  xf[1].rx_buf=rx; xf[1].len=rx_len;
+{ dev_err(&shid->spi->dev,"SEQ: write op=0x%02x len=%d raw=[%*ph]\n",buf[0],len,min(len,16),buf);
+  { struct spi_transfer xf[2]; struct spi_message msg;
+  u8 dummy_rx[32];
+  memset(xf,0,sizeof(xf));
+  xf[0].tx_buf=(void*)buf; xf[0].len=len;
+  xf[1].rx_buf=dummy_rx; xf[1].len=len; /* match TX len like Windows */
   spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
-  return spi_sync(shid->spi,&msg); }
+  return spi_sync(shid->spi,&msg); } }
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
-	int i;
-	for (i = 0; i + 3 < len; i++) {
-		if (rx[i + 3] == 0x5A && (rx[i] & 0x0F) == 2) {
-			if (hdr_off) *hdr_off = i;
-			return (rx[i] >> 4) & 0xF;
-		}
-		if (rx[i] == 0x03 && rx[i + 1] == 0x00 &&
-		    rx[i + 2] == 0x00 && rx[i + 3] == 0x00) {
-			if (hdr_off) *hdr_off = i;
-			return 0;
-		}
-	}
+	if (len < 4)
+		return -1;
+	if (rx[3] == 0x5A && (rx[0] & 0x0F) == 2 && (rx[1] & 0xF) == 0)
+		return (rx[0] >> 4) & 0xF;
 	return -1;
+}
+
+static void spi_hid_seq_descreq_work(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work);
+	struct device *dev = &shid->spi->dev;
+	static const u8 dr[] = {
+		0x02, 0x00, 0x00, 0x01, 0x42,
+		0x00, 0x00, 0x03, 0x00, 0x00
+	};
+
+	dev_info(dev, "SEQ: DESCREQ work — sending DESCREQ@0x000001...\n");
+	spi_hid_seq_write(shid, dr, sizeof(dr));
+	dev_info(dev, "SEQ: DESCREQ work — sent, waiting for IRQ\n");
 }
 
 
@@ -1178,141 +1178,180 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[64]; int type, off = 0; u16 blen = 0;
+	u8 hdr[10]; int type; u16 blen = 0;
 
 	if (!shid->seq_enabled) return IRQ_HANDLED;
 
+	/* Windows reads response header first: 5 sync bytes + 4-byte header = 9 bytes.
+	 * AMD controller with TX_COUNT=3 sees 6 sync bytes; try 10 to capture full header. */
 	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
-		dev_err(dev, "SEQ: hdr fail\n");
+		dev_err(dev, "SEQ: header read fail\n");
 		return IRQ_HANDLED;
 	}
-	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &off);
-	dev_info(dev, "SEQ[state=%d] off=%d type=%d raw=[%*ph]\n",
-		 shid->seq_state, off, type, 16, hdr);
+	type = spi_hid_seq_hdr_type(&hdr[6], sizeof(hdr) - 6, NULL);
+	dev_info(dev, "SEQ[state=%d] type=%d hdr=[%*ph]\n",
+		 shid->seq_state, type, 4, &hdr[6]);
 	if (type < 0) {
 		dev_info(dev, "SEQ: no header found\n");
+		/* In state 0, drain any body data and send DESCREQ anyway */
+		if (shid->seq_state == 0) {
+			u8 body_drain[64];
+			spi_hid_seq_read(shid, body_drain, sizeof(body_drain));
+			dev_info(dev, "SEQ: body drain done, forcing DESCREQ@0x000001...\n");
+			{
+				static const u8 dr[] = {
+					0x02, 0x00, 0x00, 0x01, 0x42,
+					0x00, 0x00, 0x03, 0x00, 0x00
+				};
+				spi_hid_seq_write(shid, dr, sizeof(dr));
+			}
+			shid->seq_state = 1;
+		} else {
+			return IRQ_HANDLED;
+		}
 		return IRQ_HANDLED;
 	}
-	{
-		u8 *hp = &hdr[off];
-		if (type == 0) {
-			blen = 4; /* ACK has no report length, drain 4 bytes */
-		} else {
-			blen = (((hp[1] >> 4) & 0xF) << 0) | (hp[2] << 4);
-			blen *= 4;
-		}
-		if (blen > sizeof(shid->input.content))
-			blen = sizeof(shid->input.content);
-	}
+
+	blen = (((hdr[7] >> 4) & 0xF) << 0) | (hdr[8] << 4);
+	blen *= 4;
+	if (blen > sizeof(shid->input.content))
+		blen = sizeof(shid->input.content);
 
 	switch (shid->seq_state) {
 
-	case 0: /* WAIT_RESET — drain RESET_RSP, send DESCREQ, wait for IRQ */
+	case 0: /* WAIT_RESET — skip body, send DESCREQ directly */
 		if (type == 3) {
-			u8 dr_buf[64];
-			dev_info(dev, "SEQ: RESET_RSP drain body blen=%u\n", blen);
-			if (blen && blen <= sizeof(dr_buf))
-				spi_hid_seq_read(shid, dr_buf, blen);
+			/* Skip body read — just send DESCREQ write directly */
+			static const u8 descreq[] = {
+				0x02, 0x00, 0x00, 0x01, 0x42,
+				0x00, 0x00, 0x03, 0x00, 0x00
+			};
+			struct spi_transfer xf[2];
+			struct spi_message msg;
+			u8 dummy_rx[10];
+
+			memset(xf, 0, sizeof(xf));
+			xf[0].tx_buf = (void *)descreq; xf[0].len = sizeof(descreq);
+			xf[1].rx_buf = dummy_rx; xf[1].len = sizeof(dummy_rx);
+			spi_message_init(&msg);
+			spi_message_add_tail(&xf[0], &msg);
+			spi_message_add_tail(&xf[1], &msg);
+			dev_info(dev, "SEQ: RESET_RSP seen, sending DESCREQ directly (no body drain)\n");
+			spi_sync(shid->spi, &msg);
+			dev_info(dev, "SEQ: DESCREQ sent\n");
+
+			/* Speculative read — device may not assert IRQ immediately */
+			msleep(10);
+			{
+				u8 hdr2[10];
+				int t2;
+				spi_hid_seq_read(shid, hdr2, sizeof(hdr2));
+				t2 = spi_hid_seq_hdr_type(&hdr2[6], sizeof(hdr2) - 6, NULL);
+				dev_info(dev, "SEQ: speculative read type=%d raw=[%*ph]\n",
+					 t2, 10, hdr2);
+			}
+
+			shid->seq_state = 1;
 		}
-		/* Always send DESCREQ, then let NEXT IRQ drive state=1 */
-		{ static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
-		  u8 dr_ack[24];
-		  struct spi_transfer xf_dr[2]; struct spi_message msg_dr;
-		  memset(dr_ack,0,24); memset(xf_dr,0,sizeof(xf_dr));
-		  xf_dr[0].tx_buf=(void*)dr; xf_dr[0].len=10;
-		  xf_dr[1].rx_buf=dr_ack; xf_dr[1].len=24;
-		  spi_message_init(&msg_dr); spi_message_add_tail(&xf_dr[0],&msg_dr); spi_message_add_tail(&xf_dr[1],&msg_dr);
-		  spi_sync(shid->spi, &msg_dr);
-		  dev_info(dev,"SEQ: DESCREQ TX+RX ack=[%*ph]\n", 24, dr_ack); }
-		shid->seq_state = 1;
 		break;
 
-	case 1: /* WAIT_DESC → type=7 (DEVICE_DESC) */
+	case 1: /* WAIT_DESC → read DEVICE_DESC body, parse, send DESCREQ2 */
 		if (type == 7) {
-			dev_info(dev, "SEQ: DEVICE_DESC! Parsing descriptor...\n");
+			u8 body[64];
+			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+			dev_info(dev, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
+			spi_hid_seq_read(shid, body, rblen);
 			{
 				struct spi_hid_device_desc_raw raw;
-				memcpy(&raw, hdr + off + 4, blen < sizeof(raw) ? blen : sizeof(raw));
+				u32 off = 4 + ((blen >= 31) ? 3 : 0);
+				dev_info(dev, "SEQ: parsing at rx+%u\n", off);
+				memcpy(&raw, body + off,
+				       min_t(u32, sizeof(raw), rblen > off ? rblen - off : 0));
 				spi_hid_parse_dev_desc(&raw, &shid->desc);
-				dev_info(dev, "SEQ: desc vid=0x%04X pid=0x%04X ver=0x%04X inp_reg=0x%04X out_reg=0x%04X rpt_len=%u\n",
-					 shid->desc.vendor_id, shid->desc.product_id,
-					 shid->desc.version_id, shid->desc.input_register,
-					 shid->desc.output_register,
-					 shid->desc.report_descriptor_length);
+				dev_info(dev, "SEQ: vid=0x%04X pid=0x%04X ver=0x%04X inp=0x%04X out=0x%04X cmd=0x%04X rpt_len=%u max_in=%u max_out=%u\n",
+					shid->desc.vendor_id, shid->desc.product_id,
+					shid->desc.version_id, shid->desc.input_register,
+					shid->desc.output_register,
+					shid->desc.command_register,
+					shid->desc.report_descriptor_length,
+					shid->desc.max_input_length,
+					shid->desc.max_output_length);
 			}
-			/* DESCREQ2 TX+RX (CSV TXN#6) */
+			dev_info(dev, "SEQ: sending DESCREQ2 to reg=0x%04X...\n",
+				 shid->desc.report_descriptor_register);
 			{
-				static const u8 dr2[] = {
+				u8 dr2[10] = {
 					0x02, 0x00, 0x00, 0x02, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
-				u8 dr2_ack[10];
-				struct spi_transfer xf_dr2[2]; struct spi_message msg_dr2;
-				memset(dr2_ack,0,10); memset(xf_dr2,0,sizeof(xf_dr2));
-				xf_dr2[0].tx_buf=(void*)dr2; xf_dr2[0].len=10;
-				xf_dr2[1].rx_buf=dr2_ack; xf_dr2[1].len=10;
-				spi_message_init(&msg_dr2); spi_message_add_tail(&xf_dr2[0],&msg_dr2); spi_message_add_tail(&xf_dr2[1],&msg_dr2);
-				spi_sync(shid->spi, &msg_dr2);
-				dev_info(dev, "SEQ: DESCREQ2 TX+RX ack=[%10ph]\n", dr2_ack);
+				dr2[1] = (shid->desc.report_descriptor_register >> 16) & 0xFF;
+				dr2[2] = (shid->desc.report_descriptor_register >> 8) & 0xFF;
+				dr2[3] = shid->desc.report_descriptor_register & 0xFF;
+				spi_hid_seq_write(shid, dr2, sizeof(dr2));
 			}
 			shid->seq_state = 2;
 		} else if (type == 3) {
-			dev_info(dev, "SEQ: still RESET_RSP in state 1\n");
-		} else if (type == 0) {
-			dev_info(dev, "SEQ: ACK in state 1 (DESCREQ sent?)\n");
-		} else {
-			dev_info(dev, "SEQ: state 1 unexpected type=%d\n", type);
+			u8 body[16];
+			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+
+			if (rblen)
+				spi_hid_seq_read(shid, body, rblen);
+			dev_info(dev, "SEQ: RESET_RSP in state 1, doing ACPI _RST then DESCREQ via workqueue\n");
+			if (!dev->of_node)
+				acpi_evaluate_object(ACPI_HANDLE(dev), "_RST", NULL, NULL);
+			shid->seq_state = 1;
+			schedule_work(&shid->descreq_work);
 		}
 		break;
 
-	case 2: /* WAIT_RPT → type=8 (RPT_DESC), then VENDOR_INIT */
+	case 2: /* WAIT_RPT → read RPT_DESC body, go to DONE */
 		if (type == 8) {
-			dev_info(dev, "SEQ: RPT_DESC! → VENDOR_INIT\n");
-			spi_hid_seq_read(shid, shid->input.content, blen);
-			goto vendor_init;
-		} else if (type == 7) {
-			dev_info(dev, "SEQ: still DEVICE_DESC in state 2\n");
+			u8 body[1024];
+			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+			dev_info(dev, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
+			spi_hid_seq_read(shid, body, rblen);
+			dev_info(dev, "SEQ: report descriptor received, creating HID device\n");
+			shid->seq_state = 4;
+			shid->ready = true;
+			shid->keep_powered = true;
+			if (!shid->hid)
+				schedule_work(&shid->create_device_work);
 		} else if (type == 3) {
-			dev_info(dev, "SEQ: still RESET_RSP in state 2\n");
+			u8 body[16];
+			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+
+			if (rblen)
+				spi_hid_seq_read(shid, body, rblen);
+			dev_info(dev, "SEQ: RESET_RSP in state 2, doing ACPI _RST then DESCREQ via workqueue\n");
+			if (!dev->of_node)
+				acpi_evaluate_object(ACPI_HANDLE(dev), "_RST", NULL, NULL);
+			shid->seq_state = 1;
+			schedule_work(&shid->descreq_work);
 		}
 		break;
 
-	case 3: /* VENDOR_INIT — activation commands */
-vendor_init:
-		{
-			u8 rx[64], ack[64];
-			dev_info(dev, "SEQ: VENDOR_INIT starting activation sequence\n");
-			/* cmd1: opcode 0x00, 5 bytes */
-			{ static const u8 c1[] = {0x00, 0x0E, 0x00, 0x00, 0x00};
-			  spi_hid_seq_write(shid, c1, 5); }
-			dev_info(dev, "SEQ: cmd1 sent (opcode 0x00)\n"); msleep(5);
-			/* cmd2: opcode 0x00, 1 byte */
-			{ u8 c = 0; spi_hid_seq_write(shid, &c, 1); }
-			dev_info(dev, "SEQ: cmd2 sent (opcode 0x00)\n"); msleep(5);
-			/* Read ACK via 0x0B */
-			spi_hid_seq_read(shid, ack, 16);
-			dev_info(dev, "SEQ: ACK[16]=[%*ph]\n", 16, ack);
-			msleep(30);
-			/* cmd3: opcode 0x70, TX=1 RX=14 */
-			{ u8 c = 0x70;
-			  spi_hid_seq_write_then_read(shid, &c, 1, rx, 14); }
-			dev_info(dev, "SEQ: cmd3 rx=[%*ph]\n", 14, rx);
-			msleep(5);
-			dev_info(dev, "SEQ: VENDOR_INIT done, scheduling fw_work+create_device\n");
-			shid->seq_state = 4; shid->ready = true; shid->keep_powered = true;
-			schedule_work(&shid->fw_work);
-			if (!shid->hid) schedule_work(&shid->create_device_work);
-		}
+	case 3: /* VENDOR_INIT — removed, not needed for this device */
+		dev_info(dev, "SEQ: skipping VENDOR_INIT (not for this device)\n");
+		shid->seq_state = 4;
+		shid->ready = true;
+		shid->keep_powered = true;
+		if (!shid->hid)
+			schedule_work(&shid->create_device_work);
 		break;
 
-	case 4: /* DONE — forward touch reports */
-		if (type == 7 && shid->hid) {
-			u16 rl = hdr[off] | (hdr[off + 1] << 8);
-			dev_info(dev, "SEQ: DONE type=7 report len=%u blen=%u\n",
-				 rl, blen);
-			if (rl > 2 && rl <= blen)
+	case 4: /* DONE — forward input reports (type==1 DATA) */
+		if (type == 1 && shid->hid) {
+			u8 body[512];
+			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+			u16 rl;
+
+			if (spi_hid_seq_read(shid, body, rblen))
+				break;
+			rl = body[6] | (body[7] << 8);
+			dev_info(dev, "SEQ: DATA report type=1 len=%u\n", rl);
+			if (rl > 0 && rl <= blen)
 				hid_input_report(shid->hid, HID_INPUT_REPORT,
-						 hdr + off + 4, rl - 2, 1);
+						 &body[8], rl, 1);
 		}
 		break;
 	}
@@ -1779,6 +1818,8 @@ static int spi_hid_probe(struct spi_device *spi)
 	unsigned long irqflags;
 	int ret;
 
+	dev_err(dev, "PROBE: ENTER\n");
+
 	if (dev->of_node && spi->irq <= 0) {
 		dev_err(dev, "Missing IRQ\n");
 		ret = spi->irq ?: -EINVAL;
@@ -1791,7 +1832,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err0;
 	}
 
-	shid->spi = spi;
+	dev_err(dev, "PROBE: after kzalloc\n");	shid->spi = spi;
 	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
 	spi_set_drvdata(spi, shid);
 
@@ -1807,6 +1848,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		ret = -ENODEV;
 		goto err1;
 	}
+	dev_info(dev, "HID desc reg = 0x%08x\n", shid->device_descriptor_register);
 
 	/*
 	* input_register is used for read approval. Set to default value here.
@@ -1877,25 +1919,63 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_WORK(&shid->refresh_device_work, spi_hid_refresh_device_work);
 	INIT_WORK(&shid->error_work, spi_hid_error_work);
 	INIT_WORK(&shid->fw_work, spi_hid_fw_work);
+	INIT_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
 
+	dev_err(dev, "PROBE: before GPIO\n");
 	if (dev->of_node) {
 		shid->irq = spi->irq;
 	} else {
-		gpiod = gpiod_get_index(&spi->dev, NULL, 0, GPIOD_ASIS);
-		if (IS_ERR(gpiod)) {
-			ret = PTR_ERR(gpiod);
+		/* Use SPI core's IRQ directly — skip gpiod_get to avoid EBUSY */
+		shid->irq = spi->irq;
+		if (shid->irq <= 0) {
+			dev_err(dev, "No IRQ from SPI core\n");
+			ret = -ENODEV;
 			goto err1;
 		}
-
-		shid->irq = gpiod_to_irq(gpiod);
-		gpiod_put(gpiod);
+		dev_info(dev, "GPIO: using irq=%d from SPI core\n", shid->irq);
 	}
 
 	irqflags = irq_get_trigger_type(shid->irq) | IRQF_ONESHOT;
+
+	/* Windows-style GPIO dance BEFORE arming IRQ:
+	 * ClearActiveInterrupts → ReconfigureInterrupt → UnmaskInterrupt
+	 */
+	if (!dev->of_node) {
+		int irq = shid->irq;
+		struct irq_data *id = irq_get_irq_data(irq);
+
+		dev_info(dev, "GPIO dance: irq=%d\n", irq);
+
+		/* Mask IRQ */
+		irq_set_irqchip_state(irq, IRQCHIP_STATE_MASKED, 1);
+
+		/* Reconfigure trigger type */
+		irq_set_irq_type(irq, irqflags & IRQF_TRIGGER_MASK);
+
+		/* Clear pending interrupt */
+		if (id && id->chip && id->chip->irq_ack)
+			id->chip->irq_ack(id);
+		irq_set_irqchip_state(irq, IRQCHIP_STATE_PENDING, 0);
+
+		dev_info(dev, "GPIO dance: mask→reconf→clear done\n");
+	}
 	shid->seq_enabled = true;
 	shid->seq_state = 0;
 	shid->ready = false;
 	shid->keep_powered = true;
+
+	/* Call ACPI _INI then _RST to fully initialize device */
+	if (!dev->of_node) {
+		acpi_handle handle = ACPI_HANDLE(dev);
+		acpi_status st;
+
+		st = acpi_evaluate_object(handle, "_INI", NULL, NULL);
+		dev_info(dev, "SEQ: ACPI _INI returned %d\n", st);
+
+		st = acpi_evaluate_object(handle, "_RST", NULL, NULL);
+		dev_info(dev, "SEQ: ACPI _RST returned %d\n", st);
+	}
+
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
 				   irqflags, dev_name(&spi->dev), shid);
 	if (ret)
@@ -1918,10 +1998,12 @@ static void spi_hid_remove(struct spi_device *spi)
 	struct spi_hid *shid = spi_get_drvdata(spi);
 	struct device *dev = &spi->dev;
 
-	dev_info(dev, "%s\n", __func__);
+	dev_info(dev, "%s: REMOVING\n", __func__);
 
 	spi_hid_power_down(shid);
 	free_irq(shid->irq, shid);
+	if (shid->gpiod)
+		gpiod_put(shid->gpiod);
 	shid->irq_enabled = false;
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 	spi_hid_stop_hid(shid);
