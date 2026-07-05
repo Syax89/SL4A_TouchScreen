@@ -249,10 +249,14 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 {
 	void __iomem *base = amd_spi->io_remap_addr;
 	u32 fifo_pos = AMD_SPI_FIFO_BASE;
+	u16 saved_0x22;
 	int i, ret;
 
 	if (DBG_VERBOSE || opcode != 0x0B)
 		pr_err("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
+
+	/* Windows fcn.0x6fc0: save register 0x22 before transfer */
+	saved_0x22 = readw(base + 0x22);
 
 	/* Clear FIFO — single set (not toggle), matching Windows decomp */
 	if (amd_spi->version == AMD_SPI_V2) {
@@ -307,10 +311,10 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	}
 
 	ret = amd_spi_execute_opcode(amd_spi);
-	if (ret) { pr_err("spi-amd: execute_opcode failed %d\n", ret); return ret; }
+	if (ret) { pr_err("spi-amd: execute_opcode failed %d\n", ret); writew(saved_0x22, base + 0x22); return ret; }
 
 	ret = amd_spi_busy_wait(amd_spi);
-	if (ret) { pr_err("spi-amd: busy_wait timeout %d\n", ret); return ret; }
+	if (ret) { pr_err("spi-amd: busy_wait timeout %d\n", ret); writew(saved_0x22, base + 0x22); return ret; }
 
 	{
 		u32 st = readl(base + AMD_SPI_STATUS_REG);
@@ -327,6 +331,8 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	}
 
 	if (DBG_VERBOSE) pr_err("spi-amd: done\n");
+	/* Windows fcn.0x6f84: restore register 0x22 after transfer */
+	writew(saved_0x22, base + 0x22);
 	return rx_len;
 }
 

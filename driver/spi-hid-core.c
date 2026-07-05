@@ -1968,42 +1968,20 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->ready = false;
 	shid->keep_powered = true;
 
-	/* Force 800 KHz for testing */
-	spi->max_speed_hz = 800000;
-	dev_info(dev, "SEQ: forced speed to %u Hz\n", spi->max_speed_hz);
-
-	/* Try various _RST locations */
+	/* ACPI power cycle: _PS3 → _PS0 → _RST to ensure device is fully powered
+	 * GPIO 0x5B (power enable, set by _PS0) may be required for writes */
 	if (!dev->of_node) {
-		acpi_handle h;
-		acpi_status st;
 		acpi_handle my_handle = ACPI_HANDLE(dev);
-		acpi_handle ctrl_handle = ACPI_HANDLE(&shid->spi->controller->dev);
+		acpi_status st;
 
-		/* Try 1: HSPI device itself */
+		st = acpi_evaluate_object(my_handle, "_PS3", NULL, NULL);
+		dev_info(dev, "SEQ: _PS3 = %d\n", st);
+
+		st = acpi_evaluate_object(my_handle, "_PS0", NULL, NULL);
+		dev_info(dev, "SEQ: _PS0 = %d\n", st);
+
 		st = acpi_evaluate_object(my_handle, "_RST", NULL, NULL);
-		dev_info(dev, "SEQ: _RST on HSPI = %d\n", st);
-
-		/* Try 2: controller */
-		if (ctrl_handle) {
-			st = acpi_evaluate_object(ctrl_handle, "_RST", NULL, NULL);
-			dev_info(dev, "SEQ: _RST on controller = %d\n", st);
-		}
-
-		/* Try 3: full path \\_SB.SPI1._RST */
-		if (ACPI_SUCCESS(acpi_get_handle(NULL, "\\_SB.SPI1._RST", &h))) {
-			st = acpi_evaluate_object(h, NULL, NULL, NULL);
-			dev_info(dev, "SEQ: _RST on \\\\_SB.SPI1._RST = %d\n", st);
-		} else {
-			dev_info(dev, "SEQ: \\\\_SB.SPI1._RST not found\n");
-		}
-
-		/* Try 4: full path \\_SB.SPI1.HSPI._RST */
-		if (ACPI_SUCCESS(acpi_get_handle(NULL, "\\_SB.SPI1.HSPI._RST", &h))) {
-			st = acpi_evaluate_object(h, NULL, NULL, NULL);
-			dev_info(dev, "SEQ: _RST on \\\\_SB.SPI1.HSPI._RST = %d\n", st);
-		} else {
-			dev_info(dev, "SEQ: \\\\_SB.SPI1.HSPI._RST not found\n");
-		}
+		dev_info(dev, "SEQ: _RST = %d\n", st);
 	}
 
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
