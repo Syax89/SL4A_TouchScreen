@@ -117,7 +117,9 @@ static void amd_spi_setclear_reg32(struct amd_spi *amd_spi, int idx, u32 set, u3
 static void amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs)
 {
 	u8 tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
-	tmp = (tmp & 0xFC) | 0x01;
+	tmp &= ~AMD_SPI_ALT_CS_MASK;
+	/* Windows decomp always uses CS1 (0x01) — hardcode it */
+	tmp |= 0x01;
 	amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, tmp);
 }
 
@@ -220,13 +222,10 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 	if (ret)
 		return ret;
 
-	if (amd_spi->version == AMD_SPI_V2) {
-		u8 trig = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
-		trig &= ~AMD_SPI_TRIGGER_CMD;
-		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, trig);
-		trig |= AMD_SPI_TRIGGER_CMD;
-		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, trig);
-	} else {
+	/* V2: single write 0x80 to trigger, as Windows decomp shows */
+	if (amd_spi->version == AMD_SPI_V2)
+		writeb(AMD_SPI_TRIGGER_CMD, amd_spi->io_remap_addr + AMD_SPI_CMD_TRIGGER_REG);
+	else {
 		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
 		ctrl0 &= ~AMD_SPI_EXEC_CMD;
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
@@ -297,11 +296,27 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 
 	wmb();
 
+	if (opcode == 0x02) {
+		u32 c0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
+		u32 st = readl(base + AMD_SPI_STATUS_REG);
+		u8 al = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
+		u16 sp = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
+		u8 op = amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG);
+		pr_err("spi-amd: WRITE PRE-TRIG ctrl0=0x%08x st=0x%08x alt=0x%02x spd=0x%04x op45=0x%02x\n",
+			c0, st, al, sp, op);
+	}
+
 	ret = amd_spi_execute_opcode(amd_spi);
 	if (ret) { pr_err("spi-amd: execute_opcode failed %d\n", ret); return ret; }
 
 	ret = amd_spi_busy_wait(amd_spi);
 	if (ret) { pr_err("spi-amd: busy_wait timeout %d\n", ret); return ret; }
+
+	{
+		u32 st = readl(base + AMD_SPI_STATUS_REG);
+		if (opcode == 0x02)
+			pr_err("spi-amd: WRITE DONE status=0x%08x\n", st);
+	}
 
 	if (rx_len) {
 		u32 read_off = fifo_pos + tx_len;

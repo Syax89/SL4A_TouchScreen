@@ -1968,6 +1968,10 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->ready = false;
 	shid->keep_powered = true;
 
+	/* Force 800 KHz for testing */
+	spi->max_speed_hz = 800000;
+	dev_info(dev, "SEQ: forced speed to %u Hz\n", spi->max_speed_hz);
+
 	/* Try various _RST locations */
 	if (!dev->of_node) {
 		acpi_handle h;
