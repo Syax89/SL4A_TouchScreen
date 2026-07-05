@@ -1207,37 +1207,24 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	switch (shid->seq_state) {
 
-	case 0: /* WAIT_RESET → drain if type==3, wait for ACK, then DESCREQ */
+	case 0: /* WAIT_RESET — drain RESET_RSP, send DESCREQ, wait for IRQ */
 		if (type == 3) {
 			u8 dr_buf[64];
-			dev_info(dev, "SEQ: drain #1 (%u bytes)\n", blen);
-			spi_hid_seq_read(shid, dr_buf, blen > sizeof(dr_buf) ? sizeof(dr_buf) : blen);
-			msleep(5);
-			dev_info(dev, "SEQ: drain #2\n");
-			spi_hid_seq_read(shid, dr_buf, sizeof(dr_buf));
-			dev_info(dev, "SEQ: drain #2 rx=[%*ph]\n", 8, dr_buf);
-			msleep(5);
+			dev_info(dev, "SEQ: RESET_RSP drain body blen=%u\n", blen);
+			if (blen && blen <= sizeof(dr_buf))
+				spi_hid_seq_read(shid, dr_buf, blen);
 		}
-		/* Wait for ACK before sending DESCREQ (like CSV TXN #2) */
-		spi_hid_seq_read(shid, hdr, sizeof(hdr));
-		type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &off);
-		dev_info(dev, "SEQ: after drain type=%d\n", type);
-		/* Send DESCREQ only if type==0 (ACK) or type==3 (RESET_RSP) */
-		if (type == 0 || type == 3) {
-		/* DESCREQ TX+RX (CSV TXN#3): 10 bytes TX, 10 bytes RX inline ACK */
+		/* Always send DESCREQ, then let NEXT IRQ drive state=1 */
 		{ static const u8 dr[]={0x02,0x00,0x00,0x01,0x42,0x00,0x00,0x03,0x00,0x00};
-		  u8 dr_ack[10];
+		  u8 dr_ack[24];
 		  struct spi_transfer xf_dr[2]; struct spi_message msg_dr;
-		  memset(dr_ack,0,10); memset(xf_dr,0,sizeof(xf_dr));
+		  memset(dr_ack,0,24); memset(xf_dr,0,sizeof(xf_dr));
 		  xf_dr[0].tx_buf=(void*)dr; xf_dr[0].len=10;
-		  xf_dr[1].rx_buf=dr_ack; xf_dr[1].len=10;
+		  xf_dr[1].rx_buf=dr_ack; xf_dr[1].len=24;
 		  spi_message_init(&msg_dr); spi_message_add_tail(&xf_dr[0],&msg_dr); spi_message_add_tail(&xf_dr[1],&msg_dr);
 		  spi_sync(shid->spi, &msg_dr);
-		  dev_info(dev,"SEQ: DESCREQ TX+RX ack=[%10ph]\n", dr_ack); }
-		}
-		msleep(5);
+		  dev_info(dev,"SEQ: DESCREQ TX+RX ack=[%*ph]\n", 24, dr_ack); }
 		shid->seq_state = 1;
-		spi_hid_seq_read(shid, shid->input.content, 64);
 		break;
 
 	case 1: /* WAIT_DESC → type=7 (DEVICE_DESC) */
@@ -1268,9 +1255,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 				spi_sync(shid->spi, &msg_dr2);
 				dev_info(dev, "SEQ: DESCREQ2 TX+RX ack=[%10ph]\n", dr2_ack);
 			}
-			msleep(5);
 			shid->seq_state = 2;
-			spi_hid_seq_read(shid, shid->input.content, blen);
 		} else if (type == 3) {
 			dev_info(dev, "SEQ: still RESET_RSP in state 1\n");
 		} else if (type == 0) {
