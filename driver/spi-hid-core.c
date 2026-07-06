@@ -355,7 +355,7 @@ out:
 }
 
 /* Forward declarations */
-static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len);
+static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len);
 
 static void spi_hid_fw_work(struct work_struct *work)
 {
@@ -1141,13 +1141,28 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 }
 static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 { return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len); }
-static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len)
-{ dev_err(&shid->spi->dev,"SEQ: write op=0x%02x len=%d raw=[%*ph]\n",buf[0],len,min(len,16),buf);
-  { struct spi_transfer xf; struct spi_message msg;
-  memset(&xf,0,sizeof(xf));
-  xf.tx_buf=(void*)buf; xf.len=len;
-  spi_message_init(&msg); spi_message_add_tail(&xf,&msg);
-  return spi_sync(shid->spi,&msg); } }
+static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len)
+{
+	struct spi_transfer xf[2];
+	struct spi_message msg;
+
+	dev_err(&shid->spi->dev, "SEQ: write op=0x%02x len=%d rx=%d raw=[%*ph]\n",
+		buf[0], len, rx_len, min(len, 16), buf);
+
+	memset(xf, 0, sizeof(xf));
+	xf[0].tx_buf = (void *)buf;
+	xf[0].len = len;
+	spi_message_init(&msg);
+	spi_message_add_tail(&xf[0], &msg);
+
+	if (rx && rx_len > 0) {
+		xf[1].rx_buf = rx;
+		xf[1].len = rx_len;
+		spi_message_add_tail(&xf[1], &msg);
+	}
+
+	return spi_sync(shid->spi, &msg);
+}
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
 	if (len < 4)
@@ -1165,10 +1180,11 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		0x02, 0x00, 0x00, 0x01, 0x42,
 		0x00, 0x00, 0x03, 0x00, 0x00
 	};
+	u8 dr_rx[10];
 
 	dev_info(dev, "SEQ: DESCREQ work — sending DESCREQ@0x000001...\n");
-	spi_hid_seq_write(shid, dr, sizeof(dr));
-	dev_info(dev, "SEQ: DESCREQ work — sent, waiting for IRQ\n");
+	spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
+	dev_info(dev, "SEQ: DESCREQ work — sent, rx=[%*ph]\n", (int)sizeof(dr_rx), dr_rx);
 }
 
 
@@ -1201,7 +1217,8 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 					0x02, 0x00, 0x00, 0x01, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
-				spi_hid_seq_write(shid, dr, sizeof(dr));
+				u8 dr_rx[10];
+				spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
 			}
 			shid->seq_state = 1;
 		} else {
@@ -1224,16 +1241,11 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 				0x02, 0x00, 0x00, 0x01, 0x42,
 				0x00, 0x00, 0x03, 0x00, 0x00
 			};
-			struct spi_transfer xf;
-			struct spi_message msg;
+			u8 descreq_rx[10];
 
-			memset(&xf, 0, sizeof(xf));
-			xf.tx_buf = (void *)descreq; xf.len = sizeof(descreq);
-			spi_message_init(&msg);
-			spi_message_add_tail(&xf, &msg);
-			dev_info(dev, "SEQ: RESET_RSP seen, sending DESCREQ directly (no body drain)\n");
-			spi_sync(shid->spi, &msg);
-			dev_info(dev, "SEQ: DESCREQ sent\n");
+			dev_info(dev, "SEQ: RESET_RSP seen, sending DESCREQ (full-duplex)\n");
+			spi_hid_seq_write(shid, descreq, sizeof(descreq), descreq_rx, sizeof(descreq_rx));
+			dev_info(dev, "SEQ: DESCREQ sent, rx=[%*ph]\n", (int)sizeof(descreq_rx), descreq_rx);
 
 			/* Speculative read — device may not assert IRQ immediately */
 			msleep(10);
@@ -1279,10 +1291,11 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 					0x02, 0x00, 0x00, 0x02, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
+				u8 dr2_rx[10];
 				dr2[1] = (shid->desc.report_descriptor_register >> 16) & 0xFF;
 				dr2[2] = (shid->desc.report_descriptor_register >> 8) & 0xFF;
 				dr2[3] = shid->desc.report_descriptor_register & 0xFF;
-				spi_hid_seq_write(shid, dr2, sizeof(dr2));
+				spi_hid_seq_write(shid, dr2, sizeof(dr2), dr2_rx, sizeof(dr2_rx));
 			}
 			shid->seq_state = 2;
 		} else if (type == 3) {
@@ -1297,7 +1310,8 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 					0x02, 0x00, 0x00, 0x01, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
-				spi_hid_seq_write(shid, dr, sizeof(dr));
+				u8 dr_rx[10];
+				spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
 			}
 			dev_info(dev, "SEQ: DESCREQ sent synchronously, waiting for next IRQ\n");
 			shid->seq_state = 1;
@@ -1328,7 +1342,8 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 					0x02, 0x00, 0x00, 0x01, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
-				spi_hid_seq_write(shid, dr, sizeof(dr));
+				u8 dr_rx[10];
+				spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
 			}
 			shid->seq_state = 1;
 		}
