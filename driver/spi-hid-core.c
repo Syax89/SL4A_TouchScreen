@@ -1968,37 +1968,16 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->ready = false;
 	shid->keep_powered = true;
 
-	/* FULL COLD-BOOT SEQUENCE (matching surface_init.csv):
-	 * 1. _PS3 → _PS0 → _RST power cycle
-	 * 2. Vendor init @0x04
-	 * 3. Use register 0x04 as input (device sends data there after vendor init) */
+	/* TEST: _RST + long delay (5s) before IRQ arm */
 	if (!dev->of_node) {
 		acpi_handle my_handle = ACPI_HANDLE(dev);
 		acpi_status st;
-
-		st = acpi_evaluate_object(my_handle, "_PS3", NULL, NULL);
-		dev_info(dev, "SEQ: _PS3 = %d\n", st);
-
-		st = acpi_evaluate_object(my_handle, "_PS0", NULL, NULL);
-		dev_info(dev, "SEQ: _PS0 = %d\n", st);
-
 		st = acpi_evaluate_object(my_handle, "_RST", NULL, NULL);
-		dev_info(dev, "SEQ: _RST = %d\n", st);
-
-		/* Vendor init command from Windows surface_init.csv */
-		static const u8 ven[] = {
-			0x02, 0x00, 0x00, 0x04, 0x82,
-			0x00, 0x00, 0x04, 0x00, 0x01,
-			0x01, 0x0C, 0xEE, 0x5B
-		};
-		dev_info(dev, "SEQ: sending vendor init @0x04...\n");
-		spi_hid_seq_write(shid, ven, sizeof(ven));
-		dev_info(dev, "SEQ: vendor init sent\n");
-
-		/* After vendor init, device sends DATA on register 0x04 */
-		shid->desc.input_register = 0x000004;
-		dev_info(dev, "SEQ: input_register set to 0x04 for vendor DATA mode\n");
+		dev_info(dev, "SEQ: _RST = %d, sleeping 5s...\n", st);
+		msleep(5000);
 	}
+	shid->desc.input_register = 0x000000;
+	dev_info(dev, "SEQ: _RST + 5s delay, arming IRQ\n");
 
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
 				   irqflags, dev_name(&spi->dev), shid);
