@@ -14,7 +14,7 @@
 ## Key Transfer Functions
 | Address | Size | Name | Description |
 |---------|------|------|-------------|
-| 0x140003c20 | 2659B | transfer_execute | MAIN transfer function. TX_COUNT=3, opcode=0x0B, secret bits, FIFO data. Reads RX at 0x83. |
+| 0x140003c20 | 2659B | transfer_execute | MAIN transfer function. TX_COUNT=3, opcode=0x0B, FAST_READ mode, FIFO data. Reads RX at 0x83. |
 | 0x140003528 | 1130B | sub_transfer | Sub-transfer setup, DMA descriptors ('AeiC'/'ALDT'). NO MMIO access. |
 | 0x1400054d0 | 1996B | submit_handler | WRITE handler (opcode 0x02). RX_COUNT=0 — TX-only. |
 | 0x140004bac | 2337B | read_with_speed | READ handler with speed config. 0x44 dance. RX_COUNT=rx_len+1. Reads at 0x84. |

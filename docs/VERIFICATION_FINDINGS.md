@@ -12,7 +12,7 @@ Below are the **8 critical bugs** to fix BEFORE any other change.
 | # | Component | Bug | File:Line | Impact |
 |---|-----------|-----|-----------|---------|
 | C1 | **SPI** | `amd_spi_select_chip()`: uses `cs & 0x03`, Windows forces `OR 0x01` | spi-amd.c:106-108 | CRITICAL — transfers with CS=0 fail |
-| C2 | **SPI** | `amd_spi_setup_v2_regs()` called from `host_transfer`, NOT from `exec_segment` | spi-amd.c:426-427 | HIGH — secret bits not applied per segment |
+| C2 | **SPI** | `amd_spi_setup_v2_regs()` called from `host_transfer`, NOT from `exec_segment` | spi-amd.c:426-427 | HIGH — READ_MODE not applied per segment |
 | C3 | **SPI** | Strobe 0x49/0x4A absent in Windows, potentially harmful | spi-amd.c:269-270 | MEDIUM |
 | C4 | **HID** | `memcpy(&raw, hdr+off, s)` instead of `hdr+off+4` — corrupted descriptor | spi-hid-core.c:1237 | **CRITICAL** — all descriptor fields shifted by 4 bytes |
 | C5 | **HID** | `input_register = 0x1000` for pre-descriptor reads — should be `0x0000` | spi-hid-core.h:76, spi-hid-core.c:1814 | **CRITICAL** — full state machine desync |
@@ -56,7 +56,7 @@ static void amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs) {
 // NEVER from amd_spi_exec_segment (lines 234-292)
 
 // Fix: call amd_spi_setup_v2_regs at the start of amd_spi_exec_segment
-// Windows sets the secret bits INSIDE fcn.0x2be4 (transfer_data) for every segment
+// Windows sets READ_MODE (FAST_READ) INSIDE fcn.0x2be4 (transfer_data) for every segment
 ```
 
 ### C4 — memcpy Offset (HID)
@@ -125,7 +125,7 @@ should be **reverted**. The correct behavior is to always send 0x00 in these dum
 | ACPI match table (AMDI0060 → V2) | Correct |
 | MMIO base 0xFEC10000 | Correct |
 | SPI speed 33.33 MHz | Correct |
-| reg_prefix (ioread16 from 0x22) | Correct |
+| SPI100_SPEED_CONFIG (ioread16 from 0x22) | Correct |
 | GPIO IRQ thread registration | Correct |
 | DSDT _DSM UUID match | Correct |
 
@@ -140,7 +140,7 @@ should be **reverted**. The correct behavior is to always send 0x00 in these dum
 | C6 | approval7 runtime | **REVERTED** (false bug — approval bytes are buffer artifacts) | spi-hid-core.c:1129 |
 | C7 | approval8 runtime | **REVERTED** (false bug — same as C6) | spi-hid-core.c:1131 |
 | C1 | ALT_CS encoding | **FIXED** | spi-amd.c:106-108 |
-| C2 | secret bits in exec_segment | **FIXED** | spi-amd.c:250-251, removed from host_transfer |
+| C2 | READ_MODE in exec_segment | **FIXED** | spi-amd.c:250-251, removed from host_transfer |
 | C3 | Strobe 0x49/0x4A | **REMOVED** (not used by Windows) | spi-amd.c:272-273 |
 | C4-C7,C1-C3 | Build | **COMPILES** | Both modules |
 | DESCREQ | Write path | **EXHAUSTED** — software fix insufficient. Logic analyzer needed. | — |

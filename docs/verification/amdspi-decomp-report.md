@@ -65,7 +65,7 @@ Prologue: `ctx = get_context(); var_48=ctx`. `num_chunks = ceil(tx_len/70)` (`0x
   ; (saves current bit30/29/18 into var_7c — never reused)
   c |= 0x60000000                    ; bit30+29                                     @0x5771
   c |= (1<<18)                       ; bts 18                                        @0x577e
-  write32(BASE+0x00, c)              ; "secret bits" = 0x60040000, ONCE per chunk   @0x5792
+  write32(BASE+0x00, c)              ; READ_MODE FAST_READ (0x60040000), ONCE per chunk   @0x5792
   w = read16(BASE+0x44)              ; speed/opcode word                            @0x57a6
   n = read8(BASE+0x20) & 0x0F        ; ENA nibble                                    @0x57b5
   w = (w & 0xF0FF) | (n<<8)
@@ -194,7 +194,7 @@ The `| 0x01` appears **only on entry**; on exit bits 1-0 are zeroed (`& 0xFC`) w
 path all go to `BASE+0x80` (FIFO), not to 0x49/0x4A. The register offsets actually used are
 only: 0x1D, 0x20, 0x22, 0x44, 0x45, 0x47, 0x48, 0x4B, 0x4C, 0x80+.
 
-**7. CTRL0 "secret bits" (0x60040000 = bit30+29+18): where and how many times? bit 21?**
+**7. CTRL0 READ_MODE (0x60040000 = SPI_READ_MODE bits 30+29+18): where and how many times? bit 21?**
 Applied **only once per segment/chunk**: `or 0x60000000` + `bts 18` followed by a single
 `write32(CTRL0)` (write: **0x140005771/577e/5792**; read 3c20: **0x140004209/421a/4232**;
 4bac: **0x140004fa0/4fb1/4fc9**). **There is no** second application ("secret again"). The code
@@ -206,7 +206,7 @@ saves the pre-existing bits 30/29/18 into a variable (`var_7c`, e.g. 0x140005755
 **8. Register 0x44: written in the write path? value? order vs 0x45?**
 - Write `0x54d0`: **YES**. `read16(0x44)` (0x57a6) → RMW → `write16(0x44, w)` (0x581c). Formula:
   `w = (w & 0xF0FF)|((ENA&0xF)<<8)` then `w = (w & 0x0FFF)|((ENA&0xF)<<12)` (ENA = read8(BASE+0x20)&0xF).
-  Order: **AFTER** the first `write8(0x45,0x02)` (0x573b) and after the secret bits.
+  Order: **AFTER** the first `write8(0x45,0x02)` (0x573b) and after the READ_MODE.
 - **Second opcode 0x45 write after 0x44: YES.** `write8(0x45, 0x02)` again at **0x140005959**
   (because the write16 to 0x44 also overwrites byte 0x45). Same for read: 2nd write at 0x42ab (3c20)
   / 0x511d (4bac).
@@ -227,7 +227,7 @@ transaction. A DESCREQ (write command + read response) is **two separate SPI tra
 1.  read8(0x1D); &=0xFC; |=0x01; write8(0x1D)        ; select CS
 2.  ctrl0=read32(0x00); ctrl0|=BIT(20); write32(0x00) ; FIFO clear — a SINGLE set (no toggle)
 3.  write8(0x45, 0x0B)                                ; opcode
-4.  ctrl0=read32(0x00); ctrl0|=0x60040000; write32(0x00) ; secret bits (once)
+4.  ctrl0=read32(0x00); ctrl0|=0x60040000; write32(0x00) ; READ_MODE FAST_READ (once)
 5.  (optional, like 0x4bac) read16(0x44); RMW ENA nibble; write16(0x44); then RE-write8(0x45,0x0B)
 6.  write8(0x48, TX_COUNT)                            ; = 3 (dummy command/address bytes)
 7.  FIFO[0..TX_COUNT-1] = TX bytes (Windows writes 0x00)
@@ -272,14 +272,14 @@ the right thing polling `CTRL0(0x00) bit31` (the real busy). Keep that + a post-
    is the full WRITE handler, not a simple wrapper that "calls 0x6f84".
 2. **`0x4bac` sequence, step 4 (FIFO clear "clear→set / rising edge"): FALSE.** The code does a
    single `read32; bts 20; write32` (0x4f37/…). No preventive clear write.
-3. **Step 12 "Secret bits AGAIN": FALSE.** The secret bits are applied **only once** per
+3. **Step 12 "Secret bits AGAIN": FALSE.** The READ_MODE is applied **only once** per
    segment. There is no second write.
 4. **Step 14 "while (read32(CTRL0) & BIT(31))": doubly wrong.** The poll reads **0x4C** (not
    CTRL0) with **read8** (not read32); testing bit31 of a byte makes the loop a **no-op**. The real busy
    bit is CTRL0(0x00) bit31, but the Windows driver **never polls it**.
 5. Summary "TX+RX with the same opcode in a single operation (0x02 TX + 0x02 RX)": **FALSE.** With
    opcode 0x02 RX_COUNT is always 0. The TX+RX combination in one trigger exists **only** with opcode 0x0B.
-6. Correct instead: restore of 0x22 (not 0x44), 0x1D strobe, secret bits (30/29/18), no TXMODE,
+6. Correct instead: restore of 0x22 (not 0x44), 0x1D strobe, READ_MODE (30/29/18), no TXMODE,
    speed on 0x44 with opcode re-write.
 
 ### `SPI_REGISTERS.md`
@@ -297,5 +297,5 @@ the right thing polling `CTRL0(0x00) bit31` (the real busy). Keep that + a post-
    correct offset is `0x80 + TX_COUNT (+skip)`, not a fixed +4 constant.
 5. **CTRL0 bit20 "requires a 0→1 transition / clear→set": not what Windows does** (a single set). If
    this is a requirement, it's a Linux-side discovery.
-6. Correct: opcode at 0x45, trigger 0x47 bit7, secret bits 30/29/18, 0x44 as speed+opcode 16-bit with the
+6. Correct: opcode at 0x45, trigger 0x47 bit7, READ_MODE FAST_READ (30/29/18), 0x44 as speed+opcode 16-bit with the
    need to re-write the opcode, FIFO base map at 0x80.

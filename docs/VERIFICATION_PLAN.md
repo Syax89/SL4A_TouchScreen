@@ -35,7 +35,7 @@
 | CTRL0 | 0x00 | AMD_SPI_CTRL0_REG | read32/write32 | [ ] |
 | ALT_CS | 0x1D | AMD_SPI_ALT_CS_REG | read8/write8 | [ ] |
 | ENA_REG | 0x20 | AMD_SPI_ENA_REG | present | [ ] |
-| REG_PREFIX | 0x22 | read16 in probe | fcn.0x6fc0 (16-bit!) | [ ] |
+| SPI100_SPEED | 0x22 | SPI100_SPEED_CONFIG (4 speed tiers) | Windows saves/restores | [ ] |
 | SPEED_OPCODE | 0x44 | **NOT USED** | USED (16-bit write) | [ ] |
 | OPCODE_REG | 0x45 | AMD_SPI_OPCODE_REG | single/double write8 | [ ] |
 | CMD_TRIGGER | 0x47 | AMD_SPI_CMD_TRIGGER_REG | toggle bit7 | [ ] |
@@ -51,12 +51,12 @@
 | Bit | Linux Name | Value | Windows Decomp | Correct? |
 |-----|-----------|--------|----------------|-----------|
 | 31 | BUSY | poll to wait | BIT(31) wait | [ ] |
-| 30 | SECRET_30 | 0x40000000 | part of SECRET_BITS | [ ] |
-| 29 | SECRET_29 | 0x20000000 | part of SECRET_BITS | [ ] |
+| 30 | READ_MODE[2] | 0x40000000 | MSB of SPI_READ_MODE (FAST_READ=7) | [ ] |
+| 29 | READ_MODE[1] | 0x20000000 | Middle bit of SPI_READ_MODE | [ ] |
 | 23 | TXMODE | 0x00800000 | Windows does **NOT** set it | [ ] |
 | 21 | PRESERVED | 0x00200000 | Windows preserves it | [ ] |
 | 20 | FIFO_CLEAR | clear→set toggle | fcn.0x4bac: clear→set | [ ] |
-| 18 | SECRET_18 | 0x00040000 | part of SECRET_BITS | [ ] |
+| 18 | READ_MODE[0] | 0x00040000 | LSB of SPI_READ_MODE | [ ] |
 | 16 | EXEC_CMD | clear→set toggle | V1 path only | [ ] |
 
 ### 1.3 Segment Execution Sequence (fcn.0x4bac decomp)
@@ -106,7 +106,7 @@ Windows decomp (fcn.0x4bac):          vs    Linux (amd_spi_exec_segment):
 ```c
 static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi) {
     amd_spi_setclear_reg32(amd_spi, AMD_SPI_CTRL0_REG,
-                           AMD_SPI_SECRET_BITS, 0);
+                           AMD_SPI_READ_MODE_FAST, 0);
 }
 ```
 
@@ -262,7 +262,7 @@ These are NOT "approval bytes" and do NOT need to be set by the driver.
 
 - Opcode 0xB0 requires TXMODE=1 because the controller doesn't recognize 0xB0 as a write
 - Windows doesn't use TXMODE — how does it manage?
-- Possibly the V2 path with secret bits handles direction automatically
+- Possibly the V2 path with FAST_READ mode handles direction automatically
 
 ---
 
