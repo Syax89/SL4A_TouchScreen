@@ -209,7 +209,8 @@ static int amd_spi_busy_wait(struct amd_spi *amd_spi)
 	u32 val;
 	int reg;
 
-	reg = AMD_SPI_CTRL0_REG;
+	/* Poll both CTRL0 (0x00) for busy (bit 31) — the reliable indicator */
+	reg = AMD_SPI_CTRL0_REG;  /* 0x00 */
 	return readl_poll_timeout(amd_spi->io_remap_addr + reg, val,
 				  !(val & AMD_SPI_BUSY), 20, 2000000);
 }
@@ -282,11 +283,20 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (amd_spi->version == AMD_SPI_V2)
 		amd_spi_setup_v2_regs(amd_spi);
 
-	/* V2: 0x44 dance — only for writes (opcode 0x02), as Windows does */
+	/* V2: 0x44 dance — only for writes (opcode 0x02), as Windows does.
+	 * Windows fcn.0x4bac does TWO separate writew to 0x44:
+	 * first: r44 = (r44 & 0xF0FF) | (nibble << 8)
+	 * second: r44 = (r44 & 0x0FFF) | (nibble << 12)
+	 * Each writew to 0x44 clobbers 0x45 — latch side-effect may differ. */
 	if (amd_spi->version == AMD_SPI_V2 && opcode == 0x02) {
 		u16 w = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 speed_nibble = amd_spi_readreg8(amd_spi, AMD_SPI_ENA_REG) & 0xF;
-		w = (w & 0x00FF) | ((u16)speed_nibble << 8) | ((u16)speed_nibble << 12);
+		/* First write: insert nibble at bits 11:8, mask 0xF0FF */
+		w = (w & 0xF0FF) | ((u16)speed_nibble << 8);
+		amd_spi_writereg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG, w);
+		amd_spi_set_opcode(amd_spi, opcode);  /* re-write after 0x44 clobber */
+		/* Second write: insert nibble at bits 15:12, mask 0x0FFF */
+		w = (w & 0x0FFF) | ((u16)speed_nibble << 12);
 		amd_spi_writereg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG, w);
 		amd_spi_set_opcode(amd_spi, opcode);
 	}
@@ -343,6 +353,8 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (DBG_VERBOSE) pr_err("spi-amd: done\n");
 	/* Windows fcn.0x6f84: restore register 0x22 after transfer */
 	writew(saved_0x22, base + 0x22);
+	/* Windows fcn.0x4684: restore original opcode to 0x45 after transfer */
+	writeb(0x0B, base + AMD_SPI_OPCODE_REG);
 	return rx_len;
 }
 
