@@ -306,72 +306,187 @@ byte[3] = 0x5A (V2 sync)
 - **0x0103**: RESET line (asserted LOW, released HIGH)
 - **0x5B**: POWER ENABLE (HIGH = on, LOW = off)
 
-### ACPI Enumeration Flow (before driver loads)
+## 10. ACPI Device Tree — Complete Enumeration Flow
 
-The ACPI subsystem enumerates `\_SB.SPI1.HSPI` during boot. The `_INI` method is
-called **once, automatically**, before any driver probes the device.
+All ACPI methods that affect the touchscreen (extracted from DSDT + SSDT4/SSDT5,
+verified bit-identical between Windows and Linux via md5sum).
+
+---
+
+### 10.1 Device Tree
+
+```
+\_SB.PCI0.LPC0          (1022:790e) — FCH LPC bridge, dependency _DEP[2]
+\_SB.GPIO               AMD GPIO controller, dependency _DEP[1]
+\_SB.SPI1               AMD SPI controller (AMDI0060), dependency _DEP[0]
+  └── HSPI              Touchscreen device (MSHW0231 / PNP0C51)
+```
+
+### 10.2 SPI Controller (AMDI0060)
 
 ```asl
-Device (HSPI) {
-    Name (_HID, ...)                    // MSHW0231 or PNP0C51
-    Name (_CID, "PNP0C51")
-    Name (_DEP, Package() { SPI1, GPIO, PCI0.LPC0 })
-    Method (_STA) { Return (0x0F) }     // present + enabled
-
-    // SPI resources: 33MHz, MODE0, CS0 + GPIO IRQ pin 0x55
-    Name (RBUF, ResourceTemplate() {
-        SpiSerialBusV2(..., 0x01FC9350, ClockPolarityLow, ClockPhaseFirst, ...)
-        GpioInt(Edge, ActiveLow, ..., 0x0055)
+Device (_SB.SPI1) {
+    Name (_HID, "AMDI0060")
+    Name (_CRS, ResourceTemplate() {
+        Memory32Fixed(ReadWrite, 0xFEC10000, 0x00000100)
     })
+    Method (_STA) { Return (0x0F) }     // always present
 }
+```
 
+The SPI controller has **no _INI, no _PSx, no power management methods**. It is a
+pure resource provider. The MMIO region `0xFEC10000-0xFEC100FF` is the only resource.
+
+### 10.3 Touchscreen Device (HSPI)
+
+```asl
+Device (_SB.SPI1.HSPI) {
+    // _HID: dynamic — reads SHSD field from OperationRegion
+    // On Surface Laptop 4 AMD: SHSD = "MSHW0231"
+    Method (_HID) { Return (ToString(ToBuffer(SHSD), 0x09)) }
+
+    Name (_CID, "PNP0C51")              // compatible: generic HID-over-SPI
+    Name (_S0W, 0x02)                   // wake from S0, necessary for GPIO IRQ
+
+    Method (_STA) { Return (0x0F) }     // present + enabled + functional
+
+    // Resources: SPI bus 33.33MHz MODE0 CS0 + GPIO IRQ pin 0x55 Edge/ActiveLow
+    Name (RBUF, ResourceTemplate() {
+        SpiSerialBusV2(0x0000, PolarityLow, FourWireMode, 8,
+            ControllerInitiated, 0x01FC9350,
+            ClockPolarityLow, ClockPhaseFirst,
+            "\\_SB.SPI1", 0x00, ResourceConsumer, , Exclusive)
+        GpioInt(Edge, ActiveLow, ExclusiveAndWake, PullNone, 0x0000,
+            "\\_SB.GPIO", 0x00, ResourceConsumer, , ) { 0x0055 }
+    })
+    Method (_CRS) { Return (RBUF) }
+
+    // _DSM: HID descriptor query (UUID 6e2ac436-...)
+    // Function 0 returns 0x03 (3 functions supported)
+    // Function 1 returns 1 (HID descriptor address = device descriptor register)
+    Method (_DSM, 4) {
+        If (Arg0 == UUID("6e2ac436-...")) {
+            If (Arg1 == 1) {
+                If (Arg2 == 0) { Return (Buffer() { 0x03 }) }
+                If (Arg2 == 1) { Return (One) }
+            }
+        }
+        Return (Buffer() { 0x00 })
+    }
+}
+```
+
+### 10.4 Power Management Methods
+
+```asl
 Scope (\_SB.SPI1.HSPI) {
+    Name (_UID, 0x0A)
+    Name (_DEP, Package() { SPI1, GPIO, ^^PCI0.LPC0 })
+
+    Name (FLAG, Zero)                   // power state tracking:
+                                        //   0 = D0 (powered on)
+                                        //   3 = D3 (powered off)
+
+    // _INI: called ONCE by ACPI during enumeration.
+    // Only powers on the device if BIOS left it OFF.
     Method (_INI) {
-        // Only if device was OFF at boot:
-        Local0 = M009(0x5B)             // read POWER gpio
-        If (Local0 == Zero) {           // if POWER is OFF
+        Local0 = M009(0x5B)             // read POWER GPIO
+        If (Local0 == Zero) {           // device was OFF
             M010(0x0103, Zero)          //   assert RESET
             M010(0x5B, One)             //   turn POWER on
             Sleep(0x012C)               //   wait 300ms
         }
-        Local0 = M009(0x0103)           // read RESET gpio
-        If (Local0 == Zero) {           // if RESET still asserted
-            M010(0x0103, One)           //   de-assert RESET
+        Local0 = M009(0x0103)           // read RESET GPIO
+        If (Local0 == Zero) {           // RESET still asserted?
+            M010(0x0103, One)           //   de-assert
         }
+        FLAG = Zero                     // mark as D0
     }
 
-    Method (_RST)   { M010(0x0103,0); Sleep(300ms); M010(0x0103,1); }
-    Method (_PS0)   { if(FLAG) { M010(0x5B,1); Sleep(300ms); M010(0x0103,1); } }
-    Method (_PS3)   { if(!FLAG) { M010(0x0103,0); M010(0x5B,0); } }
+    // _RST: reset pulse (300ms LOW on RESET pin)
+    Method (_RST) {
+        M010(0x0103, Zero)              // assert RESET
+        Sleep(0x012C)                   // 300ms
+        M010(0x0103, One)               // de-assert
+    }
+
+    // _PS0: transition from D3cold to D0
+    Method (_PS0) {
+        If (FLAG != Zero) {             // was in D3?
+            M010(0x5B, One)             //   power on
+            Sleep(0x012C)               //   300ms
+            M010(0x0103, One)           //   de-assert reset
+        }
+        FLAG = Zero
+    }
+
+    // _PS2: empty (NOP)
+    Method (_PS2) { }
+
+    // _PS3: transition from D0 to D3cold
+    Method (_PS3) {
+        If (FLAG != 3) {                // not already D3?
+            M010(0x0103, Zero)          //   assert RESET
+            Sleep(1)                    //   1ms
+            M010(0x5B, Zero)            //   power OFF
+        }
+        FLAG = 3
+    }
 }
 ```
 
-**What _INI does**: GPIO power sequencing ONLY. No SPI register writes, no MMIO,
-no firmware init. If the device was already powered by BIOS, `_INI` is a NOP.
+### 10.5 FLAG State Machine
 
-**What happens before our driver loads**:
-1. BIOS powers on the touchscreen during POST
-2. ACPI enumerates `\_SB.SPI1.HSPI` → `_STA` → `_CRS` → `_DSM` → `_INI`
-3. `_INI`: device already on → NOP (skips M010 calls)
-4. ACPI creates the SPI device and GPIO IRQ resources
-5. Linux SPI subsystem registers `spi-MSHW0231:00`
-6. Our `spi-hid.ko` driver probes and starts reading
+```
+FLAG = 0   → Device is in D0 (powered on, reset de-asserted)
+FLAG = 3   → Device is in D3 (powered off, reset asserted)
 
-**Implications for driver probe**:
-- The device is **already powered and initialized** by the time probe() runs
-- `_INI` has already executed — do NOT call M009/M010/M010 again
-- Calling `M010(0x5B,0)` kills the device until reboot (destructive power-off)
-- The only thing probe() needs to do: drain RESET_RSP and send DESCREQ
+Transitions:
+  Boot → _INI           → FLAG = 0        (powers on if needed)
+  D3  → _PS0            → FLAG = 0        (powers on, de-asserts reset)
+  D0  → _PS3            → FLAG = 3        (asserts reset, powers off)
+  Any → _RST            → (pulse, no FLAG change)
+  Any → _PS2            → (NOP)
+```
 
-### GPIO details
+### 10.6 What Windows Does vs What We Did
+
+| Event | Windows | Our driver (before fix) |
+|-------|---------|------------------------|
+| Boot | ACPI calls _INI (NOP if already on) | probe() called M009/M010 — **DESTRUCTIVE** |
+| Driver load | hidspi.sys probe: no GPIO calls | Called M010 to power-cycle |
+| Runtime | Never calls _RST, _PS0, _PS3 | — |
+| Sleep/wake | ACPI handles _PS3/_PS0, not the driver | — |
+
+**Windows driver NEVER calls M009/M010 directly.** The decomp (hidspi.sys symbols,
+function list) contains zero references to ACPI evaluate, GPIO methods, or _PSx/_RST.
+All power management is handled by the ACPI subsystem transparently.
+
+### 10.7 Correct Driver Behavior
+
+1. **probe()**: device is already powered and initialized by ACPI _INI. Do NOT call
+   M009/M010. Just drain RESET_RSP and send DESCREQ.
+2. **remove()**: nothing. The ACPI subsystem handles power.
+3. **suspend/resume**: the ACPI subsystem calls _PS3/_PS0 automatically via the
+   kernel PM framework. The driver just pauses/resumes the SPI message queue.
+
+### GPIO Details
 
 - **M084** (GPIO base) = pointer in the CPNV OperationRegion @0x7C7A3018+8
-- **M009(0x0103)**: Bank 1, Pin 3, reads `M084 + 0x1202 + pin*4`
-- **M010(0x0103, v)**: Bank 1, Pin 3, writes a 2-bit field at offset 6 with `(2|v)`
-- **M009(0x5B)**: Bank 0, Pin 91, reads `M084 + 0x1502 + pin*4`
-- **M010(0x5B, v)**: Bank 0, Pin 91, writes the output value
-- **0x0103**: RESET line (asserted LOW, released HIGH)
+- **M009(addr)**: GPIO read. Bank = addr[10:8], Pin = addr[7:0]
+  - M009(0x5B): Bank 0, Pin 91, reads `M084 + 0x1502 + pin*4`
+  - M009(0x0103): Bank 1, Pin 3, reads `M084 + 0x1202 + pin*4`
+- **M010(addr, value)**: GPIO write. Bank 0 writes output value; Bank 1 writes
+  `(2|value)` to a 2-bit field at offset 6.
 - **0x5B**: POWER ENABLE (HIGH = on, LOW = off)
+- **0x0103**: RESET line (asserted LOW, released HIGH)
+
+### M010 Power Cycle Destroys the Device (2026-07-07)
+
+Calling `M010(0x5B,0)` (power off) or any M010 sequence **permanently breaks
+the touchscreen until a full system reboot**. After M010, the device stops
+sending RESET_RSP and MISO returns only `00 03 00 00 00...`. Verified across
+8 different power-cycle sequences. The driver must NEVER call M009/M010.
 
 ---
 
