@@ -1,0 +1,52 @@
+┌ 180: pdb.public:_static_unsigned_short_int___cdecl_HidSpiDeviceV0StateMachine_class_HidSpiDeviceV0_::EntryFuncs::ResettingSyncEntry_void____ptr64_ (int64_t arg1);
+│ `- args(rcx) vars(5:sp[0x38..0x60])
+│           0x140008080      4053           push rbx
+│           0x140008082      4883ec50       sub rsp, 0x50
+│           0x140008086      488bd9         mov rbx, rcx               ; arg1
+│           0x140008089      90             nop
+│           0x14000808a      f0ff818400..   lock inc dword [rcx + 0x84] ; arg1
+│           0x140008091      90             nop
+│           0x140008092      488b4970       mov rcx, qword [rcx + 0x70] ; arg1
+│           0x140008096      e859d5ffff     call pdb.public:_long_int___cdecl_Fdo::ResetDevice_void____ptr64
+│           0x14000809b      448bc8         mov r9d, eax
+│           0x14000809e      85c0           test eax, eax
+│       ┌─< 0x1400080a0      7815           js 0x1400080b7
+│       │   0x1400080a2      488d4b28       lea rcx, [rbx + 0x28]
+│       │   0x1400080a6      bad0070000     mov edx, 0x7d0             ; 2000
+│       │   0x1400080ab      e8c8960000     call pdb.public:_void___cdecl_Timer::Start_unsigned_long_int____ptr64
+│       │   0x1400080b0      b807000000     mov eax, 7
+│      ┌──< 0x1400080b5      eb77           jmp 0x14000812e
+│      │└─> 0x1400080b7      488b0dea1f..   mov rcx, qword [pdb.WPP_GLOBAL_Control] ; [0x14001a0a8:8]=0x14001a0a8 pdb.WPP_GLOBAL_Control
+│      │    0x1400080be      488d05e31f..   lea rax, pdb.WPP_GLOBAL_Control ; 0x14001a0a8
+│      │    0x1400080c5      483bc8         cmp rcx, rax
+│      │┌─< 0x1400080c8      740f           je 0x1400080d9
+│      ││   0x1400080ca      8b412c         mov eax, dword [rcx + 0x2c]
+│      ││   0x1400080cd      b201           mov dl, 1
+│      ││   0x1400080cf      84c2           test dl, al
+│     ┌───< 0x1400080d1      7406           je 0x1400080d9
+│     │││   0x1400080d3      80792902       cmp byte [rcx + 0x29], 2
+│    ┌────< 0x1400080d7      7302           jae 0x1400080db
+│    │└─└─> 0x1400080d9      32d2           xor dl, dl
+│    └────> 0x1400080db      488d05be1f..   lea rax, pdb.WPP_RECORDER_INITIALIZED ; 0x14001a0a0
+│      │    0x1400080e2      483905b71f..   cmp qword [pdb.WPP_RECORDER_INITIALIZED], rax ; [0x14001a0a0:8]=0x14001a0a0 pdb.WPP_RECORDER_INITIALIZED
+│      │    0x1400080e9      410f95c0       setne r8b
+│      │    0x1400080ed      84d2           test dl, dl
+│      │┌─< 0x1400080ef      7505           jne 0x1400080f6
+│      ││   0x1400080f1      4584c0         test r8b, r8b
+│     ┌───< 0x1400080f4      7433           je 0x140008129
+│     ││└─> 0x1400080f6      488b4370       mov rax, qword [rbx + 0x70]
+│     ││    0x1400080fa      44894c2448     mov dword [var_48h], r9d
+│     ││    0x1400080ff      4c8b4940       mov r9, qword [rcx + 0x40]
+│     ││    0x140008103      488b4918       mov rcx, qword [rcx + 0x18]
+│     ││    0x140008107      4889442440     mov qword [var_40h], rax
+│     ││    0x14000810c      488d05e501..   lea rax, pdb.WPP_2e3dc772ca153ea287995547200e8a15_Traceguids ; 0x1400182f8 ; "r\xc7=.\x15\u02a2>\x87\x99UG \x0e\x8a\x15\x02"
+│     ││    0x140008113      4889442438     mov qword [var_38h], rax
+│     ││    0x140008118      66c7442430..   mov word [var_30h], 0x38   ; '8'
+│     ││                                                               ; [0x38:2]=0xffff ; 56
+│     ││    0x14000811f      c644242002     mov byte [var_20h], 2
+│     ││    0x140008124      e80f92ffff     call pdb.WPP_RECORDER_AND_TRACE_SF_qd
+│     └───> 0x140008129      b806000000     mov eax, 6
+│      │    ; CODE XREF from pdb.public:_static_unsigned_short_int___cdecl_HidSpiDeviceV0StateMachine_class_HidSpiDeviceV0_::EntryFuncs::ResettingSyncEntry_void____ptr64_ @ 0x1400080b5(x)
+│      └──> 0x14000812e      4883c450       add rsp, 0x50
+│           0x140008132      5b             pop rbx
+└           0x140008133      c3             ret

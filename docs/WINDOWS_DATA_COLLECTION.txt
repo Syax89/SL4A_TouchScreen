@@ -1,0 +1,131 @@
+================================================================================
+  WINDOWS DATA COLLECTION FOR MSHW0231 TOUCHSCREEN DRIVER DEBUGGING
+================================================================================
+
+GOAL: Capture the EXACT MMIO register values of the AMD SPI controller
+      (AMDI0060) during a WRITE operation on Windows.
+      We'll compare these values against Linux to understand
+      why writes work on Windows but not on Linux.
+
+================================================================================
+  METHOD 1: RWEverything (the simplest)
+================================================================================
+
+1. Boot into Windows
+
+2. Download RWEverything from: http://rweverything.com/
+   (if the link doesn't work, search "RWEverything download" on Google)
+
+3. Run Rw.exe AS ADMINISTRATOR
+
+4. PCI WINDOW: find the SPI controller
+   - Menu: Access -> PCI Devices (or press F4)
+   - Look for the device with Vendor ID = 0x1022 (AMD)
+   - You should see something like "AMD FCH SPI Controller" or similar
+   - Take a screenshot (or File -> Save)
+
+5. MMIO WINDOW: read the SPI registers at 0xFEC10000
+   - Menu: Access -> MMIO (or press Ctrl+M)
+   - Enter physical address: 0xFEC10000
+   - Size: 256 bytes
+   - Click OK
+
+   IMPORTANT NOTE: the registers change during SPI operations.
+   To capture the values DURING A WRITE, you need to:
+
+   a) Open the MMIO window at 0xFEC10000
+   b) Keep the window open and visible
+   c) TOUCH THE SCREEN (this triggers SPI transfers)
+   d) Right after touching, press F5 (refresh) in the MMIO window
+   e) Repeat several times to capture different moments
+
+   SAVE THE DATA (File -> Save as...) with names like:
+   - mmio_idle.txt    (without touching the screen)
+   - mmio_touch1.txt  (right after a touch)
+   - mmio_touch2.txt
+   - mmio_touch3.txt
+
+6. REGISTERS TO CAPTURE (the most important ones):
+
+   Offset  Register   Linux (WRITE)    Windows (TO CAPTURE)
+   ------  --------   -------------    ----------------------
+   0x00    CTRL0      0x6F8CA902       ???  <-- THE MOST IMPORTANT ONE
+   0x0C    CTRL1      0x02000000       ???
+   0x1D    ALT_CS     0xB1             ???
+   0x20    ENA        0x11110713       ???
+   0x22    REG_22     0x1111           ???
+   0x44    SPEED_CFG  0x0200 (idle)    ???
+   0x45    OPCODE     0x02 (write)     ???
+   0x47    TRIGGER    0x00 (idle)      ???
+   0x48    TX_COUNT   9                ???
+   0x4B    RX_COUNT   0                ???
+   0x4C    STATUS     0x00010809       ???
+   0x6C    SPD7       ?                ???
+
+   CTRL0 is the MOST CRITICAL register. Every bit counts!
+   Compare it bit-by-bit against 0x6F8CA902.
+
+7. PCI CONFIG SPACE WINDOW
+   - Menu: Access -> PCI Config Space
+   - Enter the Bus/Dev/Fun of the SPI controller (obtained from the PCI window)
+   - Save the first 64 bytes
+
+8. SAVE EVERYTHING in the folder C:\Users\simone\Desktop\spi_dump\
+   Create the folder and copy all the saved .txt files there.
+
+================================================================================
+  METHOD 2 (ALTERNATIVE): WinDbg Kernel Debugging
+================================================================================
+
+If you have WinDbg installed (from the Windows SDK/WDK):
+
+1. Open WinDbg as administrator
+2. Menu: File -> Kernel Debug -> Local
+3. Commands to run:
+
+   .sympath+ C:\Windows\System32\drivers
+   .reload /f hidspi.sys
+   .reload /f amdspi.sys
+
+   # Read MMIO while idle:
+   !dd 0xFEC10000 L20
+
+   # Read after a touch (do a quick refresh):
+   !dd 0xFEC10000 L20
+
+   # If you can load them as a module:
+   lm m hidspi*
+   lm m amdspi*
+
+================================================================================
+  METHOD 3 (ADVANCED): ETW/WPP Trace
+================================================================================
+
+From an administrator terminal:
+
+   # Start WPP tracing for the SPI/HID drivers:
+   logman create trace spi_trace -o C:\spi_trace.etl -p "{...}" -ets
+
+   # Touch the screen for 30 seconds
+   # Stop the trace:
+   logman stop spi_trace -ets
+
+   # Open the .etl file with Windows Performance Analyzer (WPA)
+   # Look for events containing MMIO register values
+
+================================================================================
+  FINAL NOTES
+================================================================================
+
+The MOST IMPORTANT piece of data is the value of CTRL0 (offset 0x00) during a
+SPI WRITE operation. On Linux we have:
+
+   CTRL0 = 0x6F8CA902
+
+If Windows shows a DIFFERENT value, we've found the problem.
+If it's the SAME, the problem is at a lower level (timing, voltages, PCI config).
+
+After collecting the data on Windows, reboot into Linux.
+The files will be accessible from the Windows partition mounted on Linux.
+
+Good luck!

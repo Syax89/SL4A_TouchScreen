@@ -1,0 +1,287 @@
+            ; CALL XREF from fcn.14000a664 @ +0x300(x)
+┌ 650: fcn.14000a664 (int64_t arg1);
+│ `- args(rcx) vars(7:sp[0x40..0x70])
+│           0x14000a664      488bc4         mov rax, rsp
+│           0x14000a667      48895808       mov qword [rax + 8], rbx
+│           0x14000a66b      48896810       mov qword [rax + 0x10], rbp
+│           0x14000a66f      48897018       mov qword [rax + 0x18], rsi
+│           0x14000a673      48897820       mov qword [rax + 0x20], rdi
+│           0x14000a677      4154           push r12
+│           0x14000a679      4156           push r14
+│           0x14000a67b      4157           push r15
+│           0x14000a67d      4883ec60       sub rsp, 0x60
+│           0x14000a681      488ba9b000..   mov rbp, qword [rcx + 0xb0] ; arg1
+│           0x14000a688      488bf9         mov rdi, rcx               ; arg1
+│           0x14000a68b      4885ed         test rbp, rbp
+│       ┌─< 0x14000a68e      750a           jne 0x14000a69a
+│       │   ; CODE XREF from fcn.14000a664 @ 0x14000a81b(x)
+│      ┌──> 0x14000a690      b807000000     mov eax, 7
+│     ┌───< 0x14000a695      e935020000     jmp 0x14000a8cf
+│     │╎│   ; CODE XREF from fcn.14000a664 @ 0x14000a68e(x)
+│     │╎└─> 0x14000a69a      8b5d48         mov ebx, dword [rbp + 0x48]
+│     │╎    0x14000a69d      8bcb           mov ecx, ebx
+│     │╎    0x14000a69f      408a754c       mov sil, byte [rbp + 0x4c]
+│     │╎    0x14000a6a3      83e901         sub ecx, 1
+│     │╎┌─< 0x14000a6a6      0f84ff010000   je 0x14000a8ab
+│     │╎│   0x14000a6ac      83e901         sub ecx, 1
+│    ┌────< 0x14000a6af      0f84ba010000   je 0x14000a86f
+│    ││╎│   0x14000a6b5      83e901         sub ecx, 1
+│   ┌─────< 0x14000a6b8      0f84ae000000   je 0x14000a76c
+│   │││╎│   0x14000a6be      83e901         sub ecx, 1
+│  ┌──────< 0x14000a6c1      0f84a5000000   je 0x14000a76c
+│  ││││╎│   0x14000a6c7      83f901         cmp ecx, 1                 ; 1
+│ ┌───────< 0x14000a6ca      0f849f010000   je 0x14000a86f
+│ │││││╎│   0x14000a6d0      488b0d49da..   mov rcx, qword [0x140018120] ; [0x140018120:8]=0x140018120
+│ │││││╎│   0x14000a6d7      488d0542da..   lea rax, [0x140018120]
+│ │││││╎│   0x14000a6de      483bc8         cmp rcx, rax
+│ ────────< 0x14000a6e1      7411           je 0x14000a6f4
+│ │││││╎│   0x14000a6e3      8b412c         mov eax, dword [rcx + 0x2c]
+│ │││││╎│   0x14000a6e6      40b601         mov sil, 1
+│ │││││╎│   0x14000a6e9      4084c6         test sil, al
+│ ────────< 0x14000a6ec      7406           je 0x14000a6f4
+│ │││││╎│   0x14000a6ee      80792902       cmp byte [rcx + 0x29], 2
+│ ────────< 0x14000a6f2      7303           jae 0x14000a6f7
+│ │││││╎│   ; CODE XREFS from fcn.14000a664 @ 0x14000a6e1(x), 0x14000a6ec(x)
+│ ────────> 0x14000a6f4      4032f6         xor sil, sil
+│ │││││╎│   ; CODE XREF from fcn.14000a664 @ 0x14000a6f2(x)
+│ ────────> 0x14000a6f7      488d051ada..   lea rax, [0x140018118]
+│ │││││╎│   0x14000a6fe      41bf0d0000c0   mov r15d, 0xc000000d       ; '\r'
+│ │││││╎│   0x14000a704      4839050dda..   cmp qword [0x140018118], rax ; [0x140018118:8]=0x140018118
+│ │││││╎│   0x14000a70b      410f95c6       setne r14b
+│ │││││╎│   0x14000a70f      4084f6         test sil, sil
+│ ────────< 0x14000a712      7505           jne 0x14000a719
+│ │││││╎│   0x14000a714      4584f6         test r14b, r14b
+│ ────────< 0x14000a717      744b           je 0x14000a764
+│ │││││╎│   ; CODE XREF from fcn.14000a664 @ 0x14000a712(x)
+│ ────────> 0x14000a719      488b5f68       mov rbx, qword [rdi + 0x68]
+│ │││││╎│   0x14000a71d      48ff1514f9..   call qword [sym.imp.WppRecorder.sys_imp_WppRecorderLogGetDefault] ; [0x14001a038:8]=0x1a810 reloc.WppRecorder.sys_imp_WppRecorderLogGetDefault
+│ │││││╎│   0x14000a724      0f1f440000     nop dword [rax + rax]
+│ │││││╎│   0x14000a729      44897c2450     mov dword [var_50h], r15d
+│ │││││╎│   0x14000a72e      488d0d3bba..   lea rcx, [0x140016170]
+│ │││││╎│   0x14000a735      48896c2448     mov qword [var_48h], rbp
+│ │││││╎│   0x14000a73a      4c8bc8         mov r9, rax
+│ │││││╎│   0x14000a73d      48895c2440     mov qword [var_40h], rbx
+│ │││││╎│   0x14000a742      458ac6         mov r8b, r14b
+│ │││││╎│   0x14000a745      48894c2438     mov qword [var_38h], rcx
+│ │││││╎│   0x14000a74a      408ad6         mov dl, sil
+│ │││││╎│   0x14000a74d      488b0dccd9..   mov rcx, qword [0x140018120] ; [0x140018120:8]=0x140018120
+│ │││││╎│   0x14000a754      66c7442430..   mov word [var_30h], 0x24   ; '$'
+│ │││││╎│                                                              ; [0x24:2]=0xffff ; 36
+│ │││││╎│   0x14000a75b      488b4918       mov rcx, qword [rcx + 0x18]
+│ │││││╎│   0x14000a75f      e85cb1ffff     call fcn.1400058c0
+│ │││││╎│   ; CODE XREF from fcn.14000a664 @ 0x14000a717(x)
+│ ────────> 0x14000a764      418bd7         mov edx, r15d
+│ ────────< 0x14000a767      e99b000000     jmp 0x14000a807
+│ │││││╎│   ; CODE XREFS from fcn.14000a664 @ 0x14000a6b8(x), 0x14000a6c1(x)
+│ │└└─────> 0x14000a76c      4c8b7d30       mov r15, qword [rbp + 0x30]
+│ │  ││╎│   0x14000a770      440fb76750     movzx r12d, word [rdi + 0x50]
+│ │  ││╎│   0x14000a775      4c8b7528       mov r14, qword [rbp + 0x28]
+│ │  ││╎│   0x14000a779      4d3bfc         cmp r15, r12
+│ │ ┌─────< 0x14000a77c      0f869e000000   jbe 0x14000a820
+│ │ │││╎│   0x14000a782      488b0d97d9..   mov rcx, qword [0x140018120] ; [0x140018120:8]=0x140018120
+│ │ │││╎│   0x14000a789      488d0590d9..   lea rax, [0x140018120]
+│ │ │││╎│   0x14000a790      483bc8         cmp rcx, rax
+│ │┌──────< 0x14000a793      7411           je 0x14000a7a6
+│ │││││╎│   0x14000a795      8b412c         mov eax, dword [rcx + 0x2c]
+│ │││││╎│   0x14000a798      40b601         mov sil, 1
+│ │││││╎│   0x14000a79b      4084c6         test sil, al
+│ ────────< 0x14000a79e      7406           je 0x14000a7a6
+│ │││││╎│   0x14000a7a0      80792902       cmp byte [rcx + 0x29], 2
+│ ────────< 0x14000a7a4      7303           jae 0x14000a7a9
+│ │││││╎│   ; CODE XREFS from fcn.14000a664 @ 0x14000a793(x), 0x14000a79e(x)
+│ ─└──────> 0x14000a7a6      4032f6         xor sil, sil
+│ │ │││╎│   ; CODE XREF from fcn.14000a664 @ 0x14000a7a4(x)
+│ ────────> 0x14000a7a9      488d0568d9..   lea rax, [0x140018118]
+│ │ │││╎│   0x14000a7b0      48390561d9..   cmp qword [0x140018118], rax ; [0x140018118:8]=0x140018118
+│ │ │││╎│   0x14000a7b7      410f95c6       setne r14b
+│ │ │││╎│   0x14000a7bb      4084f6         test sil, sil
+│ │┌──────< 0x14000a7be      7505           jne 0x14000a7c5
+│ │││││╎│   0x14000a7c0      4584f6         test r14b, r14b
+│ ────────< 0x14000a7c3      743d           je 0x14000a802
+│ │││││╎│   ; CODE XREF from fcn.14000a664 @ 0x14000a7be(x)
+│ │└──────> 0x14000a7c5      488b5f68       mov rbx, qword [rdi + 0x68]
+│ │ │││╎│   0x14000a7c9      48ff1568f8..   call qword [sym.imp.WppRecorder.sys_imp_WppRecorderLogGetDefault] ; [0x14001a038:8]=0x1a810 reloc.WppRecorder.sys_imp_WppRecorderLogGetDefault
+│ │ │││╎│   0x14000a7d0      0f1f440000     nop dword [rax + rax]
+│ │ │││╎│   0x14000a7d5      488b0d44d9..   mov rcx, qword [0x140018120] ; [0x140018120:8]=0x140018120
+│ │ │││╎│   0x14000a7dc      458ac6         mov r8b, r14b
+│ │ │││╎│   0x14000a7df      4489642458     mov dword [var_58h], r12d
+│ │ │││╎│   0x14000a7e4      4c8bc8         mov r9, rax
+│ │ │││╎│   0x14000a7e7      4c897c2450     mov qword [var_50h], r15
+│ │ │││╎│   0x14000a7ec      408ad6         mov dl, sil
+│ │ │││╎│   0x14000a7ef      48896c2448     mov qword [var_48h], rbp
+│ │ │││╎│   0x14000a7f4      488b4918       mov rcx, qword [rcx + 0x18]
+│ │ │││╎│   0x14000a7f8      48895c2440     mov qword [var_40h], rbx
+│ │ │││╎│   0x14000a7fd      e8b6450000     call fcn.14000edb8
+│ │ │││╎│   ; CODE XREF from fcn.14000a664 @ 0x14000a7c3(x)
+│ ────────> 0x14000a802      ba230000c0     mov edx, 0xc0000023        ; '#'
+│ │ │││╎│   ; CODE XREF from fcn.14000a664 @ 0x14000a767(x)
+│ ────────> 0x14000a807      488b8fb000..   mov rcx, qword [rdi + 0xb0]
+│ │ │││╎│   0x14000a80e      e8b9460000     call fcn.14000eecc
+│ │ │││╎│   0x14000a813      4883a7b000..   and qword [rdi + 0xb0], 0
+│ │ │││└──< 0x14000a81b      e970feffff     jmp 0x14000a690
+│ │ │││ │   ; CODE XREF from fcn.14000a664 @ 0x14000a77c(x)
+│ │ └─────> 0x14000a820      4c8b87d000..   mov r8, qword [rdi + 0xd0]
+│ │  ││ │   0x14000a827      33d2           xor edx, edx
+│ │  ││ │   0x14000a829      488b8fc800..   mov rcx, qword [rdi + 0xc8]
+│ │  ││ │   0x14000a830      e88b830000     call fcn.140012bc0
+│ │  ││ │   0x14000a835      488b8fc800..   mov rcx, qword [rdi + 0xc8]
+│ │  ││ │   0x14000a83c      4d8bc7         mov r8, r15
+│ │  ││ │   0x14000a83f      4883c104       add rcx, 4
+│ │  ││ │   0x14000a843      498bd6         mov rdx, r14
+│ │  ││ │   0x14000a846      e875800000     call fcn.1400128c0
+│ │  ││ │   0x14000a84b      b903000000     mov ecx, 3
+│ │  ││ │   0x14000a850      3bd9           cmp ebx, ecx
+│ │  ││ │   0x14000a852      8d4102         lea eax, [rcx + 2]
+│ │  ││ │   0x14000a855      0f45c8         cmovne ecx, eax
+│ │  ││ │   0x14000a858      488b87c800..   mov rax, qword [rdi + 0xc8]
+│ │  ││ │   0x14000a85f      8808           mov byte [rax], cl
+│ │  ││ │   0x14000a861      488b87c800..   mov rax, qword [rdi + 0xc8]
+│ │  ││ │   0x14000a868      6644897801     mov word [rax + 1], r15w
+│ │  ││┌──< 0x14000a86d      eb2f           jmp 0x14000a89e
+│ │  ││││   ; CODE XREFS from fcn.14000a664 @ 0x14000a6af(x), 0x14000a6ca(x)
+│ └──└────> 0x14000a86f      4c8b87d000..   mov r8, qword [rdi + 0xd0]
+│     │││   0x14000a876      33d2           xor edx, edx
+│     │││   0x14000a878      488b8fc800..   mov rcx, qword [rdi + 0xc8]
+│     │││   0x14000a87f      e83c830000     call fcn.140012bc0
+│     │││   0x14000a884      b806000000     mov eax, 6
+│     │││   0x14000a889      83fb02         cmp ebx, 2                 ; 2
+│     │││   0x14000a88c      448d40fe       lea r8d, [rax - 2]
+│     │││   0x14000a890      440f45c0       cmovne r8d, eax
+│     │││   0x14000a894      488b87c800..   mov rax, qword [rdi + 0xc8]
+│     │││   0x14000a89b      448800         mov byte [rax], r8b
+│     │││   ; CODE XREF from fcn.14000a664 @ 0x14000a86d(x)
+│     │└──> 0x14000a89e      488b87c800..   mov rax, qword [rdi + 0xc8]
+│     │ │   0x14000a8a5      40887003       mov byte [rax + 3], sil
+│     │┌──< 0x14000a8a9      eb1f           jmp 0x14000a8ca
+│     │││   ; CODE XREF from fcn.14000a664 @ 0x14000a6a6(x)
+│     ││└─> 0x14000a8ab      4c8b87d000..   mov r8, qword [rdi + 0xd0]
+│     ││    0x14000a8b2      33d2           xor edx, edx
+│     ││    0x14000a8b4      488b8fc800..   mov rcx, qword [rdi + 0xc8]
+│     ││    0x14000a8bb      e800830000     call fcn.140012bc0
+│     ││    0x14000a8c0      488b87c800..   mov rax, qword [rdi + 0xc8]
+│     ││    0x14000a8c7      c60002         mov byte [rax], 2
+│     ││    ; CODE XREF from fcn.14000a664 @ 0x14000a8a9(x)
+│     │└──> 0x14000a8ca      b808000000     mov eax, 8
+│     │     ; CODE XREF from fcn.14000a664 @ 0x14000a695(x)
+│     └───> 0x14000a8cf      4c8d5c2460     lea r11, [var_60h]
+│           0x14000a8d4      498b5b20       mov rbx, qword [r11 + 0x20]
+│           0x14000a8d8      498b6b28       mov rbp, qword [r11 + 0x28]
+│           0x14000a8dc      498b7330       mov rsi, qword [r11 + 0x30]
+│           0x14000a8e0      498b7b38       mov rdi, qword [r11 + 0x38]
+│           0x14000a8e4      498be3         mov rsp, r11
+│           0x14000a8e7      415f           pop r15
+│           0x14000a8e9      415e           pop r14
+│           0x14000a8eb      415c           pop r12
+└           0x14000a8ed      c3             ret
+
+================================================================================
+DETAILED ANALYSIS: ConfigureTransfer (HidSpiCx.sys @ 0x14000a664)
+================================================================================
+
+1. FUNCTION ARGUMENT STRUCTURE
+--------------------------------------------------------------------------------
+Signature: NTSTATUS ConfigureTransfer(PDEVICE_CONTEXT DeviceContext)
+
+arg1 = rcx = rdi = PDEVICE_CONTEXT (pointer to device context):
+
+  DeviceContext structure offsets:
+    +0x50: MaxTransferLength (WORD)  - max bytes allowed per transfer
+    +0x68: LogBuffer (QWORD)         - WPP logging buffer
+    +0xb0: TransferDesc (QWORD)      - pointer to transfer descriptor (input)
+    +0xc8: OutputBuffer (QWORD)      - pointer to SPI command buffer (output)
+    +0xd0: SecondaryBuffer (QWORD)   - buffer passed to setup/prep function
+
+2. TRANSFER DESCRIPTOR STRUCTURE (pointed to by DeviceContext+0xb0)
+--------------------------------------------------------------------------------
+    +0x28: addr (QWORD)  - data address / buffer pointer
+    +0x30: len  (QWORD)  - transfer length
+    +0x48: type (DWORD)  - transfer type (switch value 1-6)
+    +0x4c: flags (BYTE)  - additional flags
+
+3. SWITCH/CASE MAPPING (Type -> Opcode)
+--------------------------------------------------------------------------------
+
+  The switch uses a subtract-each-1 ladder:
+
+    ecx = type - 1  =>  je @0x14000a8ab  (type == 1)
+                          je @0x14000a86f  (type == 2, after sub #2)
+                          je @0x14000a76c  (type == 3, after sub #3)
+                          je @0x14000a76c  (type == 4, after sub #4)
+                  cmp ecx,1 => je @0x14000a86f  (type == 5, residual == 1)
+                  type 6 => default/error path (returns status 7)
+
+  Case-by-case breakdown:
+
+  ┌──────┬────────┬──────────────────────────────────────────────────────────┐
+  │ Type │ Opcode │ Fields Written to OutputBuffer                           │
+  ├──────┼────────┼──────────────────────────────────────────────────────────┤
+  │  1   │  0x02  │ [buf+0] = 0x02 (opcode only)                            │
+  │      │        │ Calls fcn.140012bc0 to prep buffer                       │
+  │      │        │ Returns STATUS_SUCCESS (0)                               │
+  ├──────┼────────┼──────────────────────────────────────────────────────────┤
+  │  2   │  0x04  │ [buf+0] = 0x04 (opcode)                                 │
+  │      │        │ [buf+3] = sil (flags byte from TransferDesc+0x4c)       │
+  │      │        │ Calls fcn.140012bc0 to prep buffer                       │
+  │      │        │ Returns STATUS_SUCCESS (0)                               │
+  ├──────┼────────┼──────────────────────────────────────────────────────────┤
+  │  3   │  0x03  │ [buf+0] = 0x03 (opcode)                                 │
+  │      │        │ [buf+1] = len (WORD, transfer length from +0x30)        │
+  │      │        │ [buf+3] = flags (BYTE from +0x4c)                        │
+  │      │        │ Validates len <= MaxTransferLength (context+0x50)        │
+  │      │        │ If too large: returns STATUS_BUFFER_TOO_SMALL (0xC0000023)│
+  │      │        │ Calls fcn.140012bc0 + fcn.1400128c0(addr, len, &buf[4]) │
+  │      │        │ Returns STATUS_SUCCESS (0)                               │
+  ├──────┼────────┼──────────────────────────────────────────────────────────┤
+  │  4   │  0x05  │ [buf+0] = 0x05 (opcode)                                 │
+  │      │        │ [buf+1] = len (WORD, transfer length from +0x30)        │
+  │      │        │ [buf+3] = flags (BYTE from +0x4c)                        │
+  │      │        │ SAME handler as type 3; opcode differentiates output vs  │
+  │      │        │ input: type 3 = InputReport  (opcode 0x03)               │
+  │      │        │        type 4 = OutputReport (opcode 0x05)               │
+  ├──────┼────────┼──────────────────────────────────────────────────────────┤
+  │  5   │  0x06  │ [buf+0] = 0x06 (opcode)                                 │
+  │      │        │ [buf+3] = flags (BYTE from +0x4c)                        │
+  │      │        │ SAME handler as type 2 (no length/address)              │
+  │      │        │ Returns STATUS_SUCCESS (0)                               │
+  ├──────┼────────┼──────────────────────────────────────────────────────────┤
+  │  6   │  N/A   │ Default/error: falls through to WPP error logging        │
+  │      │        │ Returns status 7 (NTSTATUS 0x7 = STATUS_INVALID_PARAM?)  │
+  │      │        │ Also calls fcn.14000eecc for cleanup, zeros desc pointer │
+  └──────┴────────┴──────────────────────────────────────────────────────────┘
+
+4. KEY OBSERVATIONS
+--------------------------------------------------------------------------------
+
+  a) Output buffer layout (CommandBuffer at DeviceContext+0xc8):
+     Offset 0:  Opcode byte (0x02-0x06)
+     Offset 1:  Length word (only for types 3 and 4: read/write transfers)
+     Offset 3:  Flags byte (for types 2,3,4,5)
+     Offset 4+: Data payload area (for read/write, addr/length used)
+
+  b) The type 3 and type 4 cases share the handler at 0x14000a76c.
+     They differ only in the opcode byte written:
+       - type 3 (InputReport)  -> opcode 0x03, ecx=3
+       - type 4 (OutputReport) -> opcode 0x05, ecx=5, derived as ecx+2
+     Both write the transfer length as a WORD at [buf+1].
+
+  c) The type 2 and type 5 cases share the handler at 0x14000a86f.
+     They differ only in the opcode byte written:
+       - type 2 -> opcode 0x04 (eax-2 = 4, where eax=6)
+       - type 5 -> opcode 0x06 (eax=6, cmovne not taken since ebx!=2)
+     Neither writes length/address; only opcode + flags at [buf+3].
+
+  d) Type 1 is the simplest: just opcode 0x02, no additional fields.
+
+  e) Error paths:
+     - type 6 (and >6): returns status 7
+     - NULL TransferDesc: returns status 7
+     - type 3/4 with len > MaxTransferLength: STATUS_BUFFER_TOO_SMALL
+
+5. LIKELY HID SPI TRANSFER TYPE MAPPING
+--------------------------------------------------------------------------------
+  Type 1 -> HID SPI Opcode 0x02 (Descriptor read / no data phase)
+  Type 2 -> HID SPI Opcode 0x04 (Command/Control with flags)
+  Type 3 -> HID SPI Opcode 0x03 (Input Report read - with length/address)
+  Type 4 -> HID SPI Opcode 0x05 (Output Report write - with length/address)
+  Type 5 -> HID SPI Opcode 0x06 (Command/Control with flags, variant)
+  Type 6 -> Invalid/unsupported

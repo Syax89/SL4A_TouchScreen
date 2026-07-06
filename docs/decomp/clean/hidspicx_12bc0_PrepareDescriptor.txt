@@ -1,0 +1,237 @@
+            0x140012bc0      488bc1         mov rax, rcx
+            0x140012bc3      0fb6d2         movzx edx, dl
+            0x140012bc6      49b9010101..   movabs r9, 0x101010101010101
+            0x140012bd0      490fafd1       imul rdx, r9
+            0x140012bd4      66480f6ec2     movq xmm0, rdx
+            0x140012bd9      0f16c0         movlhps xmm0, xmm0
+            0x140012bdc      4983f840       cmp r8, 0x40               ; '@' ; 64
+        ┌─< 0x140012be0      726e           jb 0x140012c50
+        │   0x140012be2      f605175600..   test byte [0x140018200], 2 ; [0x140018200:1]=2
+       ┌──< 0x140012be9      740d           je 0x140012bf8
+       ││   0x140012beb      4981f82003..   cmp r8, 0x320              ; 800
+      ┌───< 0x140012bf2      0f8308010000   jae 0x140012d00
+      │└──> 0x140012bf8      0f1101         movups xmmword [rcx], xmm0
+      │ │   0x140012bfb      4c03c1         add r8, rcx
+      │ │   0x140012bfe      4883c110       add rcx, 0x10              ; 16
+      │ │   0x140012c02      4883e1f0       and rcx, 0xfffffffffffffff0
+      │ │   0x140012c06      4c2bc1         sub r8, rcx
+      │ │   0x140012c09      4983f840       cmp r8, 0x40               ; '@' ; 64
+      │┌──< 0x140012c0d      7247           jb 0x140012c56
+      │││   0x140012c0f      4a8d5401f0     lea rdx, [rcx + r8 - 0x10]
+      │││   0x140012c14      4e8d4c01d0     lea r9, [rcx + r8 - 0x30]
+      │││   0x140012c19      4983e1f0       and r9, 0xfffffffffffffff0
+      │││   0x140012c1d      49c1e806       shr r8, 6
+     ┌────> 0x140012c21      0f2901         movaps xmmword [rcx], xmm0
+     ╎│││   0x140012c24      0f294110       movaps xmmword [rcx + 0x10], xmm0
+     ╎│││   0x140012c28      4883c140       add rcx, 0x40              ; 64
+     ╎│││   0x140012c2c      49ffc8         dec r8
+     ╎│││   0x140012c2f      0f2941e0       movaps xmmword [rcx - 0x20], xmm0
+     ╎│││   0x140012c33      0f2941f0       movaps xmmword [rcx - 0x10], xmm0
+     └────< 0x140012c37      75e8           jne 0x140012c21
+      │││   0x140012c39      410f2901       movaps xmmword [r9], xmm0
+      │││   0x140012c3d      410f294110     movaps xmmword [r9 + 0x10], xmm0
+      │││   0x140012c42      410f294120     movaps xmmword [r9 + 0x20], xmm0
+      │││   0x140012c47      0f1102         movups xmmword [rdx], xmm0
+      │││   0x140012c4a      c3             ret
+      │││   0x140012c4b      0f1f440000     nop dword [rax + rax]
+      ││└─> 0x140012c50      4983f810       cmp r8, 0x10               ; 16
+      ││┌─< 0x140012c54      722a           jb 0x140012c80
+      │└──> 0x140012c56      4d8d4c08f0     lea r9, [r8 + rcx - 0x10]
+      │ │   0x140012c5b      4983e020       and r8, 0x20               ; 32
+      │ │   0x140012c5f      0f1101         movups xmmword [rcx], xmm0
+      │ │   0x140012c62      49d1e8         shr r8, 1
+      │ │   0x140012c65      410f1101       movups xmmword [r9], xmm0
+      │ │   0x140012c69      420f110401     movups xmmword [rcx + r8], xmm0
+      │ │   0x140012c6e      49f7d8         neg r8
+      │ │   0x140012c71      430f110401     movups xmmword [r9 + r8], xmm0
+      │ │   0x140012c76      c3             ret
+      │ │   0x140012c77      660f1f8400..   nop word [rax + rax]
+      │ └─> 0x140012c80      4983f804       cmp r8, 4                  ; 4
+      │ ┌─< 0x140012c84      722a           jb 0x140012cb0
+      │ │   0x140012c86      4d8d4c08fc     lea r9, [r8 + rcx - 4]
+      │ │   0x140012c8b      4983e008       and r8, 8
+      │ │   0x140012c8f      8911           mov dword [rcx], edx
+      │ │   0x140012c91      49d1e8         shr r8, 1
+      │ │   0x140012c94      418911         mov dword [r9], edx
+      │ │   0x140012c97      42891401       mov dword [rcx + r8], edx
+      │ │   0x140012c9b      49f7d8         neg r8
+      │ │   0x140012c9e      43891401       mov dword [r9 + r8], edx
+      │ │   0x140012ca2      c3             ret
+      │ │   0x140012ca3      6666666666..   nop word [rax + rax]
+      │ └─> 0x140012cb0      4d85c0         test r8, r8
+      │ ┌─< 0x140012cb3      7411           je 0x140012cc6
+      │ │   0x140012cb5      8811           mov byte [rcx], dl
+      │ │   0x140012cb7      4e8d4c01fe     lea r9, [rcx + r8 - 2]
+      │ │   0x140012cbc      4983f801       cmp r8, 1                  ; 1
+      │┌──< 0x140012cc0      7404           je 0x140012cc6
+      │││   0x140012cc2      66418911       mov word [r9], dx
+      │└└─> 0x140012cc6      c3             ret
+      │     0x140012cc7      cc             int3
+      │     0x140012cc8      cc             int3
+      │     0x140012cc9      cc             int3
+      │     0x140012cca      cc             int3
+      │     0x140012ccb      cc             int3
+      │     0x140012ccc      cc             int3
+      │     0x140012ccd      cc             int3
+      │     0x140012cce      cc             int3
+      │     0x140012ccf      cc             int3
+      │     0x140012cd0      cc             int3
+      │     0x140012cd1      cc             int3
+      │     0x140012cd2      cc             int3
+      │     0x140012cd3      cc             int3
+      │     0x140012cd4      cc             int3
+      │     0x140012cd5      cc             int3
+      │     0x140012cd6      cc             int3
+      │     0x140012cd7      cc             int3
+      │     0x140012cd8      cc             int3
+      │     0x140012cd9      cc             int3
+      │     0x140012cda      cc             int3
+      │     0x140012cdb      cc             int3
+      │     0x140012cdc      cc             int3
+      │     0x140012cdd      cc             int3
+      │     0x140012cde      cc             int3
+      │     0x140012cdf      cc             int3
+      │     0x140012ce0      cc             int3
+      │     0x140012ce1      cc             int3
+      │     0x140012ce2      cc             int3
+      │     0x140012ce3      cc             int3
+      │     0x140012ce4      cc             int3
+      │     0x140012ce5      cc             int3
+      │     0x140012ce6      cc             int3
+      │     0x140012ce7      cc             int3
+      │     0x140012ce8      cc             int3
+      │     0x140012ce9      cc             int3
+      │     0x140012cea      cc             int3
+      │     0x140012ceb      cc             int3
+      │     0x140012cec      cc             int3
+      │     0x140012ced      cc             int3
+      │     0x140012cee      cc             int3
+      │     0x140012cef      cc             int3
+      │     0x140012cf0      cc             int3
+      │     0x140012cf1      cc             int3
+      │     0x140012cf2      cc             int3
+      │     0x140012cf3      cc             int3
+      │     0x140012cf4      cc             int3
+      │     0x140012cf5      cc             int3
+      │     0x140012cf6      cc             int3
+      │     0x140012cf7      cc             int3
+      │     0x140012cf8      cc             int3
+      │     0x140012cf9      cc             int3
+      │     0x140012cfa      cc             int3
+      │     0x140012cfb      cc             int3
+      │     0x140012cfc      cc             int3
+      │     0x140012cfd      cc             int3
+      │     0x140012cfe      cc             int3
+      │     0x140012cff      cc             int3
+      └───> 0x140012d00      57             push rdi
+            0x140012d01      f605f85400..   test byte [0x140018200], 1 ; [0x140018200:1]=2
+        ┌─< 0x140012d08      7432           je 0x140012d3c
+       ┌──> 0x140012d0a      488bf9         mov rdi, rcx
+       ╎│   0x140012d0d      4c03c1         add r8, rcx
+       ╎│   0x140012d10      0f1101         movups xmmword [rcx], xmm0
+       ╎│   0x140012d13      4883c740       add rdi, 0x40              ; 64
+       ╎│   0x140012d17      0f114110       movups xmmword [rcx + 0x10], xmm0
+       ╎│   0x140012d1b      4883e7c0       and rdi, 0xffffffffffffffc0
+       ╎│   0x140012d1f      0f114120       movups xmmword [rcx + 0x20], xmm0
+       ╎│   0x140012d23      4c2bc7         sub r8, rdi
+       ╎│   0x140012d26      0f114130       movups xmmword [rcx + 0x30], xmm0
+       ╎│   0x140012d2a      498bc8         mov rcx, r8
+       ╎│   0x140012d2d      4c8bc8         mov r9, rax
+       ╎│   0x140012d30      66480f7ec0     movq rax, xmm0
+       ╎│   0x140012d35      f3aa           rep stosb byte [rdi], al
+       ╎│   0x140012d37      498bc1         mov rax, r9
+       ╎│   0x140012d3a      5f             pop rdi
+       ╎│   0x140012d3b      c3             ret
+       ╎└─> 0x140012d3c      e83f000000     call 0x140012d80
+       └──< 0x140012d41      ebc7           jmp 0x140012d0a
+            0x140012d43      cc             int3
+            0x140012d44      cc             int3
+            0x140012d45      cc             int3
+            0x140012d46      cc             int3
+            0x140012d47      cc             int3
+            0x140012d48      cc             int3
+            0x140012d49      cc             int3
+            0x140012d4a      cc             int3
+            0x140012d4b      cc             int3
+            0x140012d4c      cc             int3
+            0x140012d4d      cc             int3
+            0x140012d4e      cc             int3
+            0x140012d4f      cc             int3
+            0x140012d50      cc             int3
+            0x140012d51      cc             int3
+            0x140012d52      cc             int3
+            0x140012d53      cc             int3
+            0x140012d54      cc             int3
+            0x140012d55      cc             int3
+            0x140012d56      cc             int3
+            0x140012d57      cc             int3
+            0x140012d58      cc             int3
+            0x140012d59      cc             int3
+            0x140012d5a      cc             int3
+            0x140012d5b      cc             int3
+            0x140012d5c      cc             int3
+            0x140012d5d      cc             int3
+            0x140012d5e      cc             int3
+            0x140012d5f      cc             int3
+            0x140012d60      cc             int3
+            0x140012d61      cc             int3
+            0x140012d62      cc             int3
+            0x140012d63      cc             int3
+            0x140012d64      cc             int3
+            0x140012d65      cc             int3
+            0x140012d66      cc             int3
+            0x140012d67      cc             int3
+            0x140012d68      cc             int3
+            0x140012d69      cc             int3
+            0x140012d6a      cc             int3
+            0x140012d6b      cc             int3
+            0x140012d6c      cc             int3
+            0x140012d6d      cc             int3
+            0x140012d6e      cc             int3
+            0x140012d6f      cc             int3
+            0x140012d70      cc             int3
+            0x140012d71      cc             int3
+            0x140012d72      cc             int3
+            0x140012d73      cc             int3
+            0x140012d74      cc             int3
+            0x140012d75      cc             int3
+            0x140012d76      cc             int3
+            0x140012d77      cc             int3
+            0x140012d78      cc             int3
+            0x140012d79      cc             int3
+            0x140012d7a      cc             int3
+            0x140012d7b      cc             int3
+            0x140012d7c      cc             int3
+            0x140012d7d      cc             int3
+            0x140012d7e      cc             int3
+            0x140012d7f      cc             int3
+            0x140012d80      4151           push r9
+            0x140012d82      4150           push r8
+            0x140012d84      52             push rdx
+            0x140012d85      51             push rcx
+            0x140012d86      50             push rax
+            0x140012d87      4883ec30       sub rsp, 0x30
+            0x140012d8b      0f29442420     movaps xmmword [rsp + 0x20], xmm0
+            0x140012d90      e83bf9ffff     call 0x1400126d0
+            0x140012d95      0f28442420     movaps xmm0, xmmword [rsp + 0x20]
+            0x140012d9a      4883c430       add rsp, 0x30
+            0x140012d9e      58             pop rax
+            0x140012d9f      59             pop rcx
+            0x140012da0      5a             pop rdx
+            0x140012da1      4158           pop r8
+            0x140012da3      4159           pop r9
+            0x140012da5      c3             ret
+            0x140012da6      cc             int3
+            0x140012da7      cc             int3
+            0x140012da8      cc             int3
+            0x140012da9      cc             int3
+            0x140012daa      cc             int3
+            0x140012dab      cc             int3
+            0x140012dac      cc             int3
+            0x140012dad      cc             int3
+            0x140012dae      cc             int3
+            0x140012daf      cc             int3
+            0x140012db0      cc             int3
+            0x140012db1      cc             int3
+            0x140012db2      cc             int3
+            0x140012db3      cc             int3

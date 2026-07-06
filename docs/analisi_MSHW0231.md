@@ -1,20 +1,20 @@
-# Analisi HID-over-SPI — Surface touchscreen (ACPI\MSHW0231)
+# HID-over-SPI Analysis — Surface touchscreen (ACPI\MSHW0231)
 
-## Identificazione hardware
-- Bus: HID-over-SPI (non I2C, non USB classico)
-- ACPI HID: `MSHW0231`, driver Windows: `hidspi.sys` ("SPI HID Device")
+## Hardware Identification
+- Bus: HID-over-SPI (not I2C, not classic USB)
+- ACPI HID: `MSHW0231`, Windows driver: `hidspi.sys` ("SPI HID Device")
 - Vendor/Product/Version ID: 0x045E / 0xC19 / 0x4
-- Protocollo pubblico: "HID Over SPI Protocol Specification v1.0" (Microsoft, Community Promise) — allegato `HidSpiProtocolSpec.pdf`
+- Public protocol: "HID Over SPI Protocol Specification v1.0" (Microsoft, Community Promise) — attachment `HidSpiProtocolSpec.pdf`
 
-## Driver Linux esistente
-`linux-surface/spi-hid` (adattato dai sorgenti Android del Surface Duo 2).
-Match ACPI attuale: `MSHW0134`, `MSHW0162`, `MSHW0235`, `PNP0C51` (generico).
-`MSHW0231` non è elencato esplicitamente ma può agganciarsi tramite il `_CID` generico `PNP0C51` se il DSDT lo espone.
+## Existing Linux Driver
+`linux-surface/spi-hid` (adapted from the Surface Duo 2 Android sources).
+Current ACPI match: `MSHW0134`, `MSHW0162`, `MSHW0235`, `PNP0C51` (generic).
+`MSHW0231` isn't explicitly listed but can attach via the generic `_CID` `PNP0C51` if the DSDT exposes it.
 
-## Verifica protocollo via cattura ETW (SPB-ClassExtension + GPIO-ClassExtension)
-Byte osservati sul bus SPI, confrontati con le costanti in `spi-hid-core.h`:
+## Protocol Verification via ETW Capture (SPB-ClassExtension + GPIO-ClassExtension)
+Bytes observed on the SPI bus, compared against the constants in `spi-hid-core.h`:
 
-| Campo | Valore osservato | Costante driver Linux | Match |
+| Field | Observed Value | Linux Driver Constant | Match |
 |---|---|---|---|
 | Read approval opcode | 0x0B | `SPI_HID_READ_APPROVAL_OPCODE_READ` | OK |
 | Read approval constant | 0xFF | `SPI_HID_READ_APPROVAL_CONSTANT` | OK |
@@ -22,38 +22,38 @@ Byte osservati sul bus SPI, confrontati con le costanti in `spi-hid-core.h`:
 | Input header sync byte | 0x5A | `SPI_HID_INPUT_HEADER_SYNC_BYTE` | OK |
 | Input header version | 0x02 | `SPI_HID_INPUT_HEADER_VERSION` | OK |
 
-**Il protocollo software è quindi confermato conforme alla spec pubblica.**
+**The software protocol is therefore confirmed to conform to the public spec.**
 
-## Report Descriptor completo (estratto da evento ETW HIDCLASS, non serve WinDbg)
-Lunghezza: 936 byte. File allegati: `mshw0231_report_descriptor.bin`, `mshw0231_report_descriptor.txt` (decodificato con `hiddump.py`).
+## Full Report Descriptor (extracted from an ETW HIDCLASS event, no WinDbg needed)
+Length: 936 bytes. Attached files: `mshw0231_report_descriptor.bin`, `mshw0231_report_descriptor.txt` (decoded with `hiddump.py`).
 
-Contenuto rilevante:
-- **Collection Pen standard** (Report ID 1): InRange/TipSwitch/BarrelSwitch/Invert/Eraser + X/Y + TipPressure — Digitizer HID puro.
-- **Collection TouchScreen standard** (Report ID 0x40 / 64): TipSwitch + X/Y — HID puro, ma **mai osservato sul bus** in nessuna delle catture.
-- **~10 Report ID "grezzi"** sotto Digitizer/vendor page (6, 7, 8, 10, 11, 12, 13, 26, 28...): campo 16 bit + blocco enorme marcato "costante" (da 11 a 7485 byte). Report ID 6 è un **Feature "DeviceMode"** (119 byte).
+Relevant content:
+- **Standard Pen Collection** (Report ID 1): InRange/TipSwitch/BarrelSwitch/Invert/Eraser + X/Y + TipPressure — pure Digitizer HID.
+- **Standard TouchScreen Collection** (Report ID 0x40 / 64): TipSwitch + X/Y — pure HID, but **never observed on the bus** in any of the captures.
+- **~10 "raw" Report IDs** under the Digitizer/vendor page (6, 7, 8, 10, 11, 12, 13, 26, 28...): a 16-bit field + a huge block marked "constant" (from 11 to 7485 bytes). Report ID 6 is a **"DeviceMode" Feature** (119 bytes).
 
-## Cosa manda davvero il dispositivo (confermato su 3 catture: touch a caldo, disable/enable, boot a freddo)
-- **~90% dei report DATA → Report ID 12**, blob grezzo da **4299 byte** (2 byte "SurfaceSwitch" + 4297 byte marcati costanti)
-- Una minoranza → Report ID 8, blob grezzo da 211 byte
-- **0% → Report ID 0x40** (il report TouchScreen standard con X/Y non viene mai inviato)
+## What the Device Actually Sends (confirmed across 3 captures: warm touch, disable/enable, cold boot)
+- **~90% of DATA reports → Report ID 12**, a raw blob of **4299 bytes** (2-byte "SurfaceSwitch" + 4297 bytes marked constant)
+- A minority → Report ID 8, a raw blob of 211 bytes
+- **0% → Report ID 0x40** (the standard TouchScreen report with X/Y is never sent)
 
-**Conclusione**: il digitizer trasmette **frame grezzi stile Intel IPTS**, non coordinate elaborate. Serve un demone userspace (tipo `iptsd`) oltre al driver di trasporto.
+**Conclusion**: the digitizer transmits **raw Intel-IPTS-style frames**, not processed coordinates. A userspace daemon (like `iptsd`) is needed in addition to the transport driver.
 
-## Mappa registri SPI (osservata su 3 catture indipendenti)
+## SPI Register Map (observed across 3 independent captures)
 
-| Registro | Uso osservato |
+| Register | Observed Use |
 |---|---|
-| `0x0` | **Solo read-approval** (opcode `0x0B`). Mai una write. Indirizzo di input dedicato — questo è il "ctrl0". |
-| `0x1` | Write COMMAND, content_id=0 — parte dell'handshake subito dopo il reset |
-| `0x2` | Write COMMAND, content_id=0 — idem |
-| `0x3` | Canale Feature: `GET_FEATURE` su Report ID 6 (DeviceMode), `SET_FEATURE` su Report ID 5 e Report ID 86 (0x56) |
-| `0x4` | Richiesta Device Descriptor |
+| `0x0` | **Read-approval only** (opcode `0x0B`). Never a write. Dedicated input address — this is the "ctrl0". |
+| `0x1` | Write COMMAND, content_id=0 — part of the handshake right after reset |
+| `0x2` | Write COMMAND, content_id=0 — same |
+| `0x3` | Feature channel: `GET_FEATURE` on Report ID 6 (DeviceMode), `SET_FEATURE` on Report ID 5 and Report ID 86 (0x56) |
+| `0x4` | Device Descriptor request |
 
-Il driver Linux usa come default hardcoded `SPI_HID_DEFAULT_INPUT_REGISTER = 0x1000` prima di leggere il descrittore — con questo hardware il registro reale è `0x0`, quindi se `spi_hid_probe()` non legge l'indirizzo vero da ACPI `_DSM` *prima* della primissima read-approval, la sincronizzazione iniziale fallisce.
+The Linux driver uses the hardcoded default `SPI_HID_DEFAULT_INPUT_REGISTER = 0x1000` before reading the descriptor — on this hardware the real register is `0x0`, so if `spi_hid_probe()` doesn't read the real address from ACPI `_DSM` *before* the very first read-approval, the initial synchronization fails.
 
-## Nessun comando di cambio modalità
-In tutta la sequenza di boot, Windows esegue **solo un `GET_FEATURE` sul Report ID 6 (DeviceMode)**, mai un `SET_FEATURE` per modificarlo. Non esiste quindi un comando host-side che forza la modalità "contatti elaborati": il dispositivo parte già configurato (verosimilmente da firmware) per streammare frame grezzi.
+## No Mode-Change Command
+Throughout the entire boot sequence, Windows only ever issues a **`GET_FEATURE` on Report ID 6 (DeviceMode)**, never a `SET_FEATURE` to change it. So there is no host-side command that forces "processed contacts" mode: the device starts up already configured (presumably by firmware) to stream raw frames.
 
-## Prossimo passo
-1. Verifica diretta di `_DSM` per MSHW0231 via WinDbg (`!amli de \_SB.<path>.MSHW0231._DSM` con debug kernel locale attivo) per confermare *perché* la mappa registri è questa (le funzioni 1/2/3 del `_DSM` dovrebbero restituire questi stessi indirizzi).
-2. Decodifica completa del payload del Report ID 12 per capire il formato del frame grezzo (dimensioni griglia, bit per cella, eventuale header di calibrazione) — necessaria per scrivere l'equivalente di `iptsd` per questo hardware.
+## Next Step
+1. Direct verification of `_DSM` for MSHW0231 via WinDbg (`!amli de \_SB.<path>.MSHW0231._DSM` with a local kernel debug session active) to confirm *why* the register map is this way (the `_DSM` functions 1/2/3 should return these same addresses).
+2. Full decoding of the Report ID 12 payload to understand the raw frame format (grid dimensions, bits per cell, any calibration header) — needed to write the equivalent of `iptsd` for this hardware.

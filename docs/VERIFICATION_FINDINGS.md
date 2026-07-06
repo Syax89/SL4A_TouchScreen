@@ -1,76 +1,76 @@
-# Risultati Verifica Completa — 2026-07-04
+# Full Verification Results — 2026-07-04
 
 ## Executive Summary
 
-Tre sub-agenti hanno verificato in modo indipendente SPI controller, HID state machine e ACPI/init flow.
-Di seguito i **8 bug critici** da fixare PRIMA di ogni altra modifica.
+Three sub-agents independently verified the SPI controller, HID state machine, and ACPI/init flow.
+Below are the **8 critical bugs** to fix BEFORE any other change.
 
 ---
 
-## Riepilogo Bug Critici
+## Critical Bug Summary
 
-| # | Componente | Bug | File:Line | Impatto |
+| # | Component | Bug | File:Line | Impact |
 |---|-----------|-----|-----------|---------|
-| C1 | **SPI** | `amd_spi_select_chip()`: usa `cs & 0x03`, Windows forza `OR 0x01` | spi-amd.c:106-108 | CRITICAL — trasferimenti con CS=0 falliscono |
-| C2 | **SPI** | `amd_spi_setup_v2_regs()` chiamata in `host_transfer`, NON in `exec_segment` | spi-amd.c:426-427 | HIGH — secret bits non applicati per ogni segmento |
-| C3 | **SPI** | Strobe 0x49/0x4A non presenti in Windows, potenzialmente dannosi | spi-amd.c:269-270 | MEDIUM |
-| C4 | **HID** | `memcpy(&raw, hdr+off, s)` anziché `hdr+off+4` — descrittore corrotto | spi-hid-core.c:1237 | **CRITICAL** — tutti i campi descrittore shiftati di 4 byte |
-| C5 | **HID** | `input_register = 0x1000` per letture pre-descriptor — dovrebbe essere `0x0000` | spi-hid-core.h:76, spi-hid-core.c:1814 | **CRITICAL** — desync completo state machine |
-| C6 | **HID** | `approval7 = 0x03` a runtime — dovrebbe essere `0x0A` | spi-hid-core.c:1129 | **CRITICAL** — device rifiuta report |
-| C7 | **HID** | `approval8 = 0x0A` a runtime — dovrebbe essere `0x00` | spi-hid-core.c:1131 | **CRITICAL** — device rifiuta report |
-| C8 | **ACPI** | GPIO pin documentato `0x15` ma DSDT dice `0x55` (85 dec, trigger Edge/ActiveLow) | DSDT / DRIVER_STATE.md | MEDIUM — driver legge da ACPI a runtime, ma documentazione errata |
+| C1 | **SPI** | `amd_spi_select_chip()`: uses `cs & 0x03`, Windows forces `OR 0x01` | spi-amd.c:106-108 | CRITICAL — transfers with CS=0 fail |
+| C2 | **SPI** | `amd_spi_setup_v2_regs()` called from `host_transfer`, NOT from `exec_segment` | spi-amd.c:426-427 | HIGH — secret bits not applied per segment |
+| C3 | **SPI** | Strobe 0x49/0x4A absent in Windows, potentially harmful | spi-amd.c:269-270 | MEDIUM |
+| C4 | **HID** | `memcpy(&raw, hdr+off, s)` instead of `hdr+off+4` — corrupted descriptor | spi-hid-core.c:1237 | **CRITICAL** — all descriptor fields shifted by 4 bytes |
+| C5 | **HID** | `input_register = 0x1000` for pre-descriptor reads — should be `0x0000` | spi-hid-core.h:76, spi-hid-core.c:1814 | **CRITICAL** — full state machine desync |
+| C6 | **HID** | `approval7 = 0x03` at runtime — should be `0x0A` | spi-hid-core.c:1129 | **CRITICAL** — device rejects reports |
+| C7 | **HID** | `approval8 = 0x0A` at runtime — should be `0x00` | spi-hid-core.c:1131 | **CRITICAL** — device rejects reports |
+| C8 | **ACPI** | GPIO pin documented as `0x15` but the DSDT says `0x55` (85 dec, Edge/ActiveLow trigger) | DSDT / DRIVER_STATE.md | MEDIUM — the driver reads it from ACPI at runtime, but the documentation was wrong |
 
 ---
 
-## Dettaglio Bug Critici
+## Critical Bug Detail
 
 ### C1 — ALT_CS Encoding (SPI)
 
 ```c
-// Codice attuale (spi-amd.c:106-108)
+// Current code (spi-amd.c:106-108)
 static void amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs) {
     amd_spi_setclear_reg8(amd_spi, AMD_SPI_ALT_CS_REG,
                           cs, AMD_SPI_ALT_CS_MASK);
 }
 
-// Comportamento Windows (da fcn.0x4bac decomp)
+// Windows behavior (from fcn.0x4bac decomp)
 // read8(0x1D) → AND 0xFC → OR 0x01 → write8(0x1D)
 ```
 
-**Problema**: Il bit 0 di 0x1D potrebbe essere un "strobe enable" necessario, non un vero CS select.
-Windows forza sempre `0x01`. Il nostro driver con cs=0 produce `0x00` (strobe disabilitato).
+**Problem**: bit 0 of 0x1D might be a required "strobe enable", not a real CS select.
+Windows always forces `0x01`. Our driver with cs=0 produces `0x00` (strobe disabled).
 
 **Fix**:
 ```c
 static void amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs) {
     u8 tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
-    tmp = (tmp & 0xFC) | 0x01;  // pattern Windows
+    tmp = (tmp & 0xFC) | 0x01;  // Windows pattern
     amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, tmp);
 }
 ```
 
-### C2 — Secret Bits non in exec_segment (SPI)
+### C2 — Secret Bits Not in exec_segment (SPI)
 
 ```c
-// Codice attuale: setup_v2_regs chiamata solo in host_transfer (linea 427)
-// MAI in amd_spi_exec_segment (linea 234-292)
+// Current code: setup_v2_regs is only called from host_transfer (line 427)
+// NEVER from amd_spi_exec_segment (lines 234-292)
 
-// Fix: chiamare amd_spi_setup_v2_regs all'inizio di amd_spi_exec_segment
-// Windows setta i secret bits DENTRO fcn.0x2be4 (transfer_data) per ogni segmento
+// Fix: call amd_spi_setup_v2_regs at the start of amd_spi_exec_segment
+// Windows sets the secret bits INSIDE fcn.0x2be4 (transfer_data) for every segment
 ```
 
-### C4 — memcpy offset (HID)
+### C4 — memcpy Offset (HID)
 
 ```c
-// Codice attuale (spi-hid-core.c:1237):
-memcpy(&raw, hdr + off, s);  // copia dall'header HID!
+// Current code (spi-hid-core.c:1237):
+memcpy(&raw, hdr + off, s);  // copies from the HID header!
 
 // Fix:
 memcpy(&raw, hdr + off + 4, min(s - 4, sizeof(raw)));
-// +4 salta l'header [type][len_low][len_high][0x5A]
+// +4 skips the header [type][len_low][len_high][0x5A]
 ```
 
-### C5 — input_register iniziale (HID)
+### C5 — Initial input_register (HID)
 
 ```c
 // spi-hid-core.h:76:
@@ -79,20 +79,20 @@ memcpy(&raw, hdr + off + 4, min(s - 4, sizeof(raw)));
 // spi-hid-core.c:1814:
 shid->desc.input_register = SPI_HID_DEFAULT_INPUT_REGISTER;
 
-// Fix: usare 0x0000 in state 0 (pre-descriptor)
-// Dopo il parse del descriptor, l'input_register vero viene dal dispositivo
+// Fix: use 0x0000 in state 0 (pre-descriptor)
+// After the descriptor parse, the real input_register comes from the device
 ```
 
-### C6/C7 — Approval Bytes Errati (HID)
+### C6/C7 — Wrong Approval Bytes (HID)
 
 ```c
-// Codice attuale (spi-hid-core.c:1129-1131):
+// Current code (spi-hid-core.c:1129-1131):
 static u8 spi_hid_approval_byte7(struct spi_hid *shid)
 { return (shid->seq_state == 0) ? 0x00 : 0x03; }
 static u8 spi_hid_approval_byte8(struct spi_hid *shid)
 { return (shid->seq_state == 4) ? 0x0A : 0x00; }
 
-// CSV Windows a runtime: approval7=0x0A, approval8=0x00
+// Windows CSV at runtime: approval7=0x0A, approval8=0x00
 // Fix:
 static u8 spi_hid_approval_byte7(struct spi_hid *shid)
 { return (shid->seq_state == 0) ? 0x00 : ((shid->seq_state >= 4) ? 0x0A : 0x03); }
@@ -102,66 +102,66 @@ static u8 spi_hid_approval_byte8(struct spi_hid *shid)
 
 ---
 
-## Cosa È STATO CONFERMATO OK
+## What Was CONFIRMED OK
 
-| Area | Conferma |
+| Area | Confirmation |
 |------|---------|
-| Offset registri SPI (tutti) | Corretti |
-| Dimensioni accesso MMIO (8/16/32 bit) | Corrette |
-| Toggle FIFO_CLEAR (bit20 clear→set) | Corretto |
-| Toggle CMD_TRIGGER (0x47 bit7 clear→set) | Corretto, più robusto di Windows |
-| RX FIFO offset +4 | Corretto |
-| Busy wait (CTRL0 bit31, timeout 2s) | Corretto |
-| Secret bits (30+29+18 = 0x60040000) | Identici a Windows |
-| Bit 21 preservato (read-modify-write) | OK (clear mask = 0 in setclear) |
-| DESCREQ payload format (10 byte) | Esatto |
-| DESCREQ2 payload format | Esatto |
-| cmd1/cmd2/cmd3 payload | Esatti |
-| Double drain (2x 0x0B read) prima DESCREQ | Corretto |
-| State machine transition logic | Corretta |
-| Report descriptor buffer size (8K) | Sufficiente (936 byte) |
-| ACPI match table (AMDI0060 → V2) | Corretto |
-| MMIO base 0xFEC10000 | Corretto |
-| SPI speed 33.33 MHz | Corretto |
-| reg_prefix (ioread16 da 0x22) | Corretto |
-| GPIO IRQ thread registration | Corretto |
-| DSDT _DSM UUID match | Corretto |
+| SPI register offsets (all) | Correct |
+| MMIO access widths (8/16/32 bit) | Correct |
+| FIFO_CLEAR toggle (bit20 clear→set) | Correct |
+| CMD_TRIGGER toggle (0x47 bit7 clear→set) | Correct, more robust than Windows |
+| RX FIFO offset +4 | Correct |
+| Busy wait (CTRL0 bit31, 2s timeout) | Correct |
+| Secret bits (30+29+18 = 0x60040000) | Identical to Windows |
+| Bit 21 preserved (read-modify-write) | OK (clear mask = 0 in setclear) |
+| DESCREQ payload format (10 bytes) | Exact |
+| DESCREQ2 payload format | Exact |
+| cmd1/cmd2/cmd3 payload | Exact |
+| Double drain (2x 0x0B read) before DESCREQ | Correct |
+| State machine transition logic | Correct |
+| Report descriptor buffer size (8K) | Sufficient (936 bytes) |
+| ACPI match table (AMDI0060 → V2) | Correct |
+| MMIO base 0xFEC10000 | Correct |
+| SPI speed 33.33 MHz | Correct |
+| reg_prefix (ioread16 from 0x22) | Correct |
+| GPIO IRQ thread registration | Correct |
+| DSDT _DSM UUID match | Correct |
 
 ---
 
-## Stato Fix (2026-07-06 — FINALE)
+## Fix Status (2026-07-06 — FINAL)
 
-| # | Bug | Stato | File |
+| # | Bug | Status | File |
 |---|-----|--------|------|
 | C4 | memcpy offset +4 | **FIXED** | spi-hid-core.c:1237 |
 | C5 | input_register=0x1000 | **FIXED** | spi-hid-core.h:76 |
 | C6 | approval7 runtime | **FIXED** | spi-hid-core.c:1129 |
 | C7 | approval8 runtime | **FIXED** | spi-hid-core.c:1131 |
 | C1 | ALT_CS encoding | **FIXED** | spi-amd.c:106-108 |
-| C2 | secret bits in exec_segment | **FIXED** | spi-amd.c:250-251, rimosso da host_transfer |
-| C3 | Strobe 0x49/0x4A | **RIMOSSI** (non usati da Windows) | spi-amd.c:272-273 |
-| C4-C7,C1-C3 | Build | **COMPILA** | Entrambi i moduli |
-| DESCREQ | Write path | **ESAURITO** — software fix insufficiente. Serve logic analyzer. | — |
+| C2 | secret bits in exec_segment | **FIXED** | spi-amd.c:250-251, removed from host_transfer |
+| C3 | Strobe 0x49/0x4A | **REMOVED** (not used by Windows) | spi-amd.c:272-273 |
+| C4-C7,C1-C3 | Build | **COMPILES** | Both modules |
+| DESCREQ | Write path | **EXHAUSTED** — software fix insufficient. Logic analyzer needed. | — |
 
 ---
 
-## Esito Finale Test (2026-07-06)
+## Final Test Outcome (2026-07-06)
 
-Tutti i fix software sono stati applicati. Tuttavia, **il device ignora qualsiasi write (opcode 0x02)**.
-Il blocco e' a livello fisico (CTRL0 bits[15:8] hardwired a 0xA9 vs 0x0E Windows).
+All software fixes have been applied. However, **the device ignores every write (opcode 0x02)**.
+The block is at the physical level (CTRL0 bits[15:8] hardwired to 0xA9 vs 0x0E on Windows).
 
-**Next step**: logic analyzer su SCK/MOSI/MISO/CS tra Windows e Linux.
+**Next step**: logic analyzer on SCK/MOSI/MISO/CS between Windows and Linux.
 
 ---
 
-## Principio Operativo
+## Operating Principle
 
 ```
-MISURA MILLE VOLTE, MODIFICA UNA.
+MEASURE A THOUSAND TIMES, CUT ONCE.
 ```
 
-Ogni modifica al codice deve:
-1. Essere confrontata con la decomp Windows corrispondente
-2. Essere verificata da un sub-agente indipendente
-3. Essere documentata in questo file e in DRIVER_STATE.md
-4. Essere testata con `make && insmod` PRIMA di procedere al fix successivo
+Every code change must:
+1. Be compared against the corresponding Windows decomp
+2. Be verified by an independent sub-agent
+3. Be documented in this file and in DRIVER_STATE.md
+4. Be tested with `make && insmod` BEFORE moving on to the next fix

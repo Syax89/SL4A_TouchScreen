@@ -1,0 +1,242 @@
+            ; CALL XREF from fcn.140003c20 @ 0x140003fd9(x)
+┌ 1130: fcn.140003528 (int64_t arg1, uint32_t arg2, uint32_t arg3, int64_t arg_140h);
+│ `- args(rcx, r8, r9) vars(24:sp[0x8..0x120])
+│           0x140003528      44894c2420     mov dword [var_20h], r9d   ; arg4
+│           0x14000352d      4c89442418     mov qword [var_18h], r8    ; arg3
+│           0x140003532      88542410       mov byte [var_10h], dl
+│           0x140003536      48894c2408     mov qword [var_8h], rcx    ; arg1
+│           0x14000353b      4881ec1801..   sub rsp, 0x118
+│           0x140003542      488b0567ab..   mov rax, qword [0x14001e0b0] ; [0x14001e0b0:8]=0x2b992ddfa232
+│           0x140003549      4833c4         xor rax, rsp
+│           0x14000354c      4889842408..   mov qword [var_108h], rax
+│           0x140003554      488b8c2420..   mov rcx, qword [var_8h]
+│           0x14000355c      e89fdaffff     call fcn.140001000
+│           0x140003561      4889842488..   mov qword [var_88h], rax
+│           0x140003569      48c7442458..   mov qword [var_58h], 0
+│           0x140003572      48c7442468..   mov qword [var_68h], 0x28  ; '('
+│                                                                      ; [0x28:8]=-1 ; 40
+│           0x14000357b      488b442468     mov rax, qword [var_68h]
+│           0x140003580      4883c010       add rax, 0x10              ; 16
+│           0x140003584      4889442460     mov qword [var_60h], rax
+│           0x140003589      488d8c24c0..   lea rcx, [var_c0h]
+│           0x140003591      e802e7ffff     call fcn.140001c98
+│           0x140003596      488b842420..   mov rax, qword [var_8h]
+│           0x14000359e      48898424e0..   mov qword [var_e0h], rax
+│           0x1400035a6      488d442450     lea rax, [var_50h]
+│           0x1400035ab      4889442428     mov qword [var_28h], rax
+│           0x1400035b0      488d442458     lea rax, [var_58h]
+│           0x1400035b5      4889442420     mov qword [var_20h_2], rax
+│           0x1400035ba      4c8b4c2460     mov r9, qword [var_60h]
+│           0x1400035bf      4533c0         xor r8d, r8d
+│           0x1400035c2      ba00020000     mov edx, 0x200             ; 512
+│           0x1400035c7      488d8c24c0..   lea rcx, [var_c0h]
+│           0x1400035cf      e808470000     call fcn.140007cdc
+│           0x1400035d4      89442448       mov dword [var_48h], eax
+│           0x1400035d8      837c244800     cmp dword [var_48h], 0
+│       ┌─< 0x1400035dd      7d57           jge 0x140003636
+│       │   0x1400035df      b850000000     mov eax, 0x50              ; 'P' ; 80
+│       │   0x1400035e4      486bc000       imul rax, rax, 0
+│       │   0x1400035e8      8b4c2448       mov ecx, dword [var_48h]
+│       │   0x1400035ec      894c2438       mov dword [var_38h], ecx
+│       │   0x1400035f0      488b4c2460     mov rcx, qword [var_60h]
+│       │   0x1400035f5      48894c2430     mov qword [var_30h], rcx
+│       │   0x1400035fa      488b8c2420..   mov rcx, qword [var_8h]
+│       │   0x140003602      48894c2428     mov qword [var_28h], rcx
+│       │   0x140003607      488d0dca81..   lea rcx, [0x14001b7d8]
+│       │   0x14000360e      48894c2420     mov qword [var_20h_2], rcx
+│       │   0x140003613      6641b91200     mov r9w, 0x12              ; 18
+│       │   0x140003618      41b806000000   mov r8d, 6
+│       │   0x14000361e      b204           mov dl, 4
+│       │   0x140003620      488b0d79aa..   mov rcx, qword [0x14001e0a0] ; [0x14001e0a0:8]=0x14001e0a0
+│       │   0x140003627      488b4c0140     mov rcx, qword [rcx + rax + 0x40]
+│       │   0x14000362c      e8af430000     call fcn.1400079e0
+│      ┌──< 0x140003631      e9ff020000     jmp 0x140003935
+│      ││   ; CODE XREF from fcn.140003528 @ 0x1400035dd(x)
+│      │└─> 0x140003636      4c8b442460     mov r8, qword [var_60h]
+│      │    0x14000363b      33d2           xor edx, edx
+│      │    0x14000363d      488b4c2450     mov rcx, qword [var_50h]
+│      │    0x140003642      e8f9670100     call fcn.140019e40
+│      │    0x140003647      488b442450     mov rax, qword [var_50h]
+│      │    0x14000364c      c70041656943   mov dword [rax], 0x43696541 ; 'AeiC'
+│      │                                                               ; [0x43696541:4]=-1
+│      │    0x140003652      488b442450     mov rax, qword [var_50h]
+│      │    0x140003657      8b4c2468       mov ecx, dword [var_68h]
+│      │    0x14000365b      894808         mov dword [rax + 8], ecx
+│      │    0x14000365e      488b442450     mov rax, qword [var_50h]
+│      │    0x140003663      c7400c0400..   mov dword [rax + 0xc], 4
+│      │    0x14000366a      488b442450     mov rax, qword [var_50h]
+│      │    0x14000366f      c74004414c..   mov dword [rax + 4], 0x54444c41 ; 'ALDT'
+│      │                                                               ; [0x54444c41:4]=-1
+│      │    0x140003676      b808000000     mov eax, 8
+│      │    0x14000367b      486bc000       imul rax, rax, 0
+│      │    0x14000367f      488b4c2450     mov rcx, qword [var_50h]
+│      │    0x140003684      488d440110     lea rax, [rcx + rax + 0x10]
+│      │    0x140003689      4889442440     mov qword [var_40h], rax
+│      │    0x14000368e      33c0           xor eax, eax
+│      │    0x140003690      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x140003695      668901         mov word [rcx], ax
+│      │    0x140003698      b804000000     mov eax, 4
+│      │    0x14000369d      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x1400036a2      66894102       mov word [rcx + 2], ax
+│      │    0x1400036a6      0fb6842428..   movzx eax, byte [var_10h]
+│      │    0x1400036ae      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x1400036b3      894104         mov dword [rcx + 4], eax
+│      │    0x1400036b6      488b442440     mov rax, qword [var_40h]
+│      │    0x1400036bb      0fb74002       movzx eax, word [rax + 2]
+│      │    0x1400036bf      4883f804       cmp rax, 4                 ; 4
+│      │┌─< 0x1400036c3      730b           jae 0x1400036d0
+│      ││   0x1400036c5      48c7442470..   mov qword [var_70h], 4
+│     ┌───< 0x1400036ce      eb0e           jmp 0x1400036de
+│     │││   ; CODE XREF from fcn.140003528 @ 0x1400036c3(x)
+│     ││└─> 0x1400036d0      488b442440     mov rax, qword [var_40h]
+│     ││    0x1400036d5      0fb74002       movzx eax, word [rax + 2]
+│     ││    0x1400036d9      4889442470     mov qword [var_70h], rax
+│     ││    ; CODE XREF from fcn.140003528 @ 0x1400036ce(x)
+│     └───> 0x1400036de      488b442440     mov rax, qword [var_40h]
+│      │    0x1400036e3      488b4c2470     mov rcx, qword [var_70h]
+│      │    0x1400036e8      488d440804     lea rax, [rax + rcx + 4]
+│      │    0x1400036ed      4889442440     mov qword [var_40h], rax
+│      │    0x1400036f2      33c0           xor eax, eax
+│      │    0x1400036f4      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x1400036f9      668901         mov word [rcx], ax
+│      │    0x1400036fc      b804000000     mov eax, 4
+│      │    0x140003701      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x140003706      66894102       mov word [rcx + 2], ax
+│      │    0x14000370a      488b442440     mov rax, qword [var_40h]
+│      │    0x14000370f      8b8c243801..   mov ecx, dword [var_20h]
+│      │    0x140003716      894804         mov dword [rax + 4], ecx
+│      │    0x140003719      488b442440     mov rax, qword [var_40h]
+│      │    0x14000371e      0fb74002       movzx eax, word [rax + 2]
+│      │    0x140003722      4883f804       cmp rax, 4                 ; 4
+│      │┌─< 0x140003726      730b           jae 0x140003733
+│      ││   0x140003728      48c7442478..   mov qword [var_78h], 4
+│     ┌───< 0x140003731      eb0e           jmp 0x140003741
+│     │││   ; CODE XREF from fcn.140003528 @ 0x140003726(x)
+│     ││└─> 0x140003733      488b442440     mov rax, qword [var_40h]
+│     ││    0x140003738      0fb74002       movzx eax, word [rax + 2]
+│     ││    0x14000373c      4889442478     mov qword [var_78h], rax
+│     ││    ; CODE XREF from fcn.140003528 @ 0x140003731(x)
+│     └───> 0x140003741      488b442440     mov rax, qword [var_40h]
+│      │    0x140003746      488b4c2478     mov rcx, qword [var_78h]
+│      │    0x14000374b      488d440804     lea rax, [rax + rcx + 4]
+│      │    0x140003750      4889442440     mov qword [var_40h], rax
+│      │    0x140003755      33c0           xor eax, eax
+│      │    0x140003757      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x14000375c      668901         mov word [rcx], ax
+│      │    0x14000375f      b804000000     mov eax, 4
+│      │    0x140003764      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x140003769      66894102       mov word [rcx + 2], ax
+│      │    0x14000376d      488b442440     mov rax, qword [var_40h]
+│      │    0x140003772      c740040000..   mov dword [rax + 4], 0
+│      │    0x140003779      488b442440     mov rax, qword [var_40h]
+│      │    0x14000377e      0fb74002       movzx eax, word [rax + 2]
+│      │    0x140003782      4883f804       cmp rax, 4                 ; 4
+│      │┌─< 0x140003786      730e           jae 0x140003796
+│      ││   0x140003788      48c7842480..   mov qword [var_80h], 4
+│     ┌───< 0x140003794      eb11           jmp 0x1400037a7
+│     │││   ; CODE XREF from fcn.140003528 @ 0x140003786(x)
+│     ││└─> 0x140003796      488b442440     mov rax, qword [var_40h]
+│     ││    0x14000379b      0fb74002       movzx eax, word [rax + 2]
+│     ││    0x14000379f      4889842480..   mov qword [var_80h], rax
+│     ││    ; CODE XREF from fcn.140003528 @ 0x140003794(x)
+│     └───> 0x1400037a7      488b442440     mov rax, qword [var_40h]
+│      │    0x1400037ac      488b8c2480..   mov rcx, qword [var_80h]
+│      │    0x1400037b4      488d440804     lea rax, [rax + rcx + 4]
+│      │    0x1400037b9      4889442440     mov qword [var_40h], rax
+│      │    0x1400037be      33c0           xor eax, eax
+│      │    0x1400037c0      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x1400037c5      668901         mov word [rcx], ax
+│      │    0x1400037c8      b804000000     mov eax, 4
+│      │    0x1400037cd      488b4c2440     mov rcx, qword [var_40h]
+│      │    0x1400037d2      66894102       mov word [rcx + 2], ax
+│      │    0x1400037d6      488b442440     mov rax, qword [var_40h]
+│      │    0x1400037db      c740040200..   mov dword [rax + 4], 2
+│      │    0x1400037e2      4533c0         xor r8d, r8d
+│      │    0x1400037e5      488b542458     mov rdx, qword [var_58h]
+│      │    0x1400037ea      488d8c24a8..   lea rcx, [var_a8h]
+│      │    0x1400037f2      e8853c0000     call fcn.14000747c
+│      │    0x1400037f7      448b842440..   mov r8d, dword [arg_140h]
+│      │    0x1400037ff      488b942430..   mov rdx, qword [var_18h]
+│      │    0x140003807      488d8c2490..   lea rcx, [var_90h]
+│      │    0x14000380f      e8183c0000     call fcn.14000742c
+│      │    0x140003814      ba02000000     mov edx, 2
+│      │    0x140003819      488d8c24f8..   lea rcx, [var_f8h]
+│      │    0x140003821      e8fe3c0000     call fcn.140007524
+│      │    0x140003826      b9f4010000     mov ecx, 0x1f4             ; 500
+│      │    0x14000382b      e8a03c0000     call fcn.1400074d0
+│      │    0x140003830      488bd0         mov rdx, rax
+│      │    0x140003833      488d8c24f8..   lea rcx, [var_f8h]
+│      │    0x14000383b      e8203d0000     call fcn.140007560
+│      │    0x140003840      488b8c2420..   mov rcx, qword [var_8h]
+│      │    0x140003848      e8bb430000     call fcn.140007c08
+│      │    0x14000384d      48c7442430..   mov qword [var_30h], 0
+│      │    0x140003856      488d8c24f8..   lea rcx, [var_f8h]
+│      │    0x14000385e      48894c2428     mov qword [var_28h], rcx
+│      │    0x140003863      488d8c2490..   lea rcx, [var_90h]
+│      │    0x14000386b      48894c2420     mov qword [var_20h_2], rcx
+│      │    0x140003870      4c8d8c24a8..   lea r9, [var_a8h]
+│      │    0x140003878      41b804c03200   mov r8d, 0x32c004
+│      │    0x14000387e      33d2           xor edx, edx
+│      │    0x140003880      488bc8         mov rcx, rax
+│      │    0x140003883      e8c0430000     call fcn.140007c48
+│      │    0x140003888      89442448       mov dword [var_48h], eax
+│      │    0x14000388c      837c244800     cmp dword [var_48h], 0
+│      │┌─< 0x140003891      7d4a           jge 0x1400038dd
+│      ││   0x140003893      b850000000     mov eax, 0x50              ; 'P' ; 80
+│      ││   0x140003898      486bc000       imul rax, rax, 0
+│      ││   0x14000389c      8b4c2448       mov ecx, dword [var_48h]
+│      ││   0x1400038a0      894c2430       mov dword [var_30h], ecx
+│      ││   0x1400038a4      488b8c2420..   mov rcx, qword [var_8h]
+│      ││   0x1400038ac      48894c2428     mov qword [var_28h], rcx
+│      ││   0x1400038b1      488d0d207f..   lea rcx, [0x14001b7d8]
+│      ││   0x1400038b8      48894c2420     mov qword [var_20h_2], rcx
+│      ││   0x1400038bd      6641b91300     mov r9w, 0x13              ; 19
+│      ││   0x1400038c2      41b806000000   mov r8d, 6
+│      ││   0x1400038c8      b204           mov dl, 4
+│      ││   0x1400038ca      488b0dcfa7..   mov rcx, qword [0x14001e0a0] ; [0x14001e0a0:8]=0x14001e0a0
+│      ││   0x1400038d1      488b4c0140     mov rcx, qword [rcx + rax + 0x40]
+│      ││   0x1400038d6      e859e5ffff     call fcn.140001e34
+│     ┌───< 0x1400038db      eb58           jmp 0x140003935
+│     │││   ; CODE XREF from fcn.140003528 @ 0x140003891(x)
+│     ││└─> 0x1400038dd      488b842430..   mov rax, qword [var_18h]
+│     ││    0x1400038e5      813841656f42   cmp dword [rax], 0x426f6541 ; 'AeoB'
+│     ││┌─< 0x1400038eb      7448           je 0x140003935
+│     │││   0x1400038ed      b850000000     mov eax, 0x50              ; 'P' ; 80
+│     │││   0x1400038f2      486bc000       imul rax, rax, 0
+│     │││   0x1400038f6      488b8c2420..   mov rcx, qword [var_8h]
+│     │││   0x1400038fe      48894c2428     mov qword [var_28h], rcx
+│     │││   0x140003903      488d0dce7e..   lea rcx, [0x14001b7d8]
+│     │││   0x14000390a      48894c2420     mov qword [var_20h_2], rcx
+│     │││   0x14000390f      6641b91400     mov r9w, 0x14              ; 20
+│     │││   0x140003914      41b806000000   mov r8d, 6
+│     │││   0x14000391a      b204           mov dl, 4
+│     │││   0x14000391c      488b0d7da7..   mov rcx, qword [0x14001e0a0] ; [0x14001e0a0:8]=0x14001e0a0
+│     │││   0x140003923      488b4c0140     mov rcx, qword [rcx + rax + 0x40]
+│     │││   0x140003928      e8e73d0000     call fcn.140007714
+│     │││   0x14000392d      c74424480f..   mov dword [var_48h], 0xc014000f ; '\x0f'
+│     │││                                                              ; [0xc014000f:4]=-1
+│     │││   ; CODE XREFS from fcn.140003528 @ 0x140003631(x), 0x1400038db(x), 0x1400038eb(x)
+│     └└└─> 0x140003935      48837c245800   cmp qword [var_58h], 0
+│       ┌─< 0x14000393b      740a           je 0x140003947
+│       │   0x14000393d      488b4c2458     mov rcx, qword [var_58h]
+│       │   0x140003942      e815440000     call fcn.140007d5c
+│       │   ; CODE XREF from fcn.140003528 @ 0x14000393b(x)
+│       └─> 0x140003947      b808000000     mov eax, 8
+│           0x14000394c      486bc000       imul rax, rax, 0
+│           0x140003950      488b8c2430..   mov rcx, qword [var_18h]
+│           0x140003958      488d44010c     lea rax, [rcx + rax + 0xc]
+│           0x14000395d      b901000000     mov ecx, 1
+│           0x140003962      486bc900       imul rcx, rcx, 0
+│           0x140003966      0fb6440804     movzx eax, byte [rax + rcx + 4]
+│           0x14000396b      85c0           test eax, eax
+│       ┌─< 0x14000396d      7507           jne 0x140003976
+│       │   0x14000396f      b8010000c0     mov eax, 0xc0000001
+│      ┌──< 0x140003974      eb04           jmp 0x14000397a
+│      ││   ; CODE XREF from fcn.140003528 @ 0x14000396d(x)
+│      │└─> 0x140003976      8b442448       mov eax, dword [var_48h]
+│      │    ; CODE XREF from fcn.140003528 @ 0x140003974(x)
+│      └──> 0x14000397a      488b8c2408..   mov rcx, qword [var_108h]
+│           0x140003982      4833cc         xor rcx, rsp
+│           0x140003985      e896450000     call fcn.140007f20
+│           0x14000398a      4881c41801..   add rsp, 0x118
+└           0x140003991      c3             ret

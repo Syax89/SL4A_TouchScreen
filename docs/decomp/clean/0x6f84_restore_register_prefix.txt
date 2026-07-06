@@ -1,0 +1,19 @@
+            ; XREFS: CALL 0x140004144  CALL 0x1400045ff  CALL 0x140004b2d  
+            ; XREFS: CALL 0x140005427  CALL 0x140005b75  CALL 0x140005f8d  
+            ; XREFS: CALL 0x140007369  
+┌ 58: fcn.140006f84 (int64_t arg1);
+│ `- args(rcx) vars(2:sp[0x20..0x40])
+│           0x140006f84      48894c2408     mov qword [var_8h], rcx    ; arg1
+│           0x140006f89      4883ec38       sub rsp, 0x38
+│           0x140006f8d      488b4c2440     mov rcx, qword [var_8h]
+│           0x140006f92      e869a0ffff     call fcn.140001000
+│           0x140006f97      4889442420     mov qword [var_20h], rax
+│           0x140006f9c      488b442420     mov rax, qword [var_20h]
+│           0x140006fa1      488b00         mov rax, qword [rax]
+│           0x140006fa4      4883c022       add rax, 0x22              ; 34
+│           0x140006fa8      488b4c2420     mov rcx, qword [var_20h]
+│           0x140006fad      0fb75158       movzx edx, word [rcx + 0x58]
+│           0x140006fb1      488bc8         mov rcx, rax               ; int64_t arg1
+│           0x140006fb4      e8e70b0000     call fcn.140007ba0
+│           0x140006fb9      4883c438       add rsp, 0x38
+└           0x140006fbd      c3             ret

@@ -1,0 +1,13 @@
+            ; XREFS: CALL 0x140001695  CALL 0x1400041b8  CALL 0x140004232  
+            ; XREFS: CALL 0x140004851  CALL 0x1400048a8  CALL 0x140004f4f  
+            ; XREFS: CALL 0x140004fc9  CALL 0x140005725  CALL 0x140005792  
+            ; XREFS: CALL 0x140005ef7  
+┌ 26: fcn.140001fd8 (int64_t arg1, int64_t arg2);
+│ `- args(rcx, rdx) vars(2:sp[0x18..0x20])
+│           0x140001fd8      89542410       mov dword [var_10h], edx   ; arg2
+│           0x140001fdc      48894c2408     mov qword [var_8h], rcx    ; arg1
+│           0x140001fe1      488b442408     mov rax, qword [var_8h]
+│           0x140001fe6      8b4c2410       mov ecx, dword [var_10h]
+│           0x140001fea      8908           mov dword [rax], ecx
+│           0x140001fec      f0830c2400     lock or dword [rsp], 0
+└           0x140001ff1      c3             ret

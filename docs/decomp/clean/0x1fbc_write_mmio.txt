@@ -1,0 +1,10 @@
+            ; XREFS(36)
+┌ 26: fcn.140001fbc (uint32_t arg1);
+│ `- args(rcx) vars(2:sp[0x18..0x20])
+│           0x140001fbc      88542410       mov byte [var_10h], dl
+│           0x140001fc0      48894c2408     mov qword [var_8h], rcx    ; arg1
+│           0x140001fc5      488b442408     mov rax, qword [var_8h]
+│           0x140001fca      8a4c2410       mov cl, byte [var_10h]
+│           0x140001fce      8808           mov byte [rax], cl
+│           0x140001fd0      f0830c2400     lock or dword [rsp], 0
+└           0x140001fd5      c3             ret

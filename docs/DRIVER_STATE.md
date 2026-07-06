@@ -1,82 +1,82 @@
-# DRIVER STATE — 2026-07-06 (FINALE + chiusura piste software)
+# DRIVER STATE — 2026-07-06 (FINAL + software avenues closed out)
 
 > **Repository**: https://github.com/Syax89/SL4A_TouchScreen
-> **Fonte di verita'**: [GROUND_TRUTH.md](GROUND_TRUTH.md)
+> **Source of truth**: [GROUND_TRUTH.md](GROUND_TRUTH.md)
 
 ---
 
-## Stato complessivo: SOFTWARE ESAURITO
+## Overall status: SOFTWARE EXHAUSTED
 
-Dopo analisi esaustiva di **ogni** componente software (decompilazione driver Windows,
-tracce CSV ETW, dump MMIO e PCI, test GPIO/ACPI, comparazione registro-per-registro),
-**tutte le opzioni software sono state esaurite**.
+After exhaustive analysis of **every** software component (Windows driver decompilation,
+ETW CSV traces, MMIO and PCI dumps, GPIO/ACPI tests, register-by-register comparison),
+**every software option has been exhausted**.
 
 ---
 
 ## Read path
 
-**FUNZIONANTE** — RESET_RSP identico a Windows (`32 10 00 5A` + `03 00 00 00`), bit-identical.
-Tutte le read (opcode 0x0B) funzionano correttamente. Il device risponde con dati HID validi.
+**WORKING** — RESET_RSP identical to Windows (`32 10 00 5A` + `03 00 00 00`), bit-identical.
+Every read (opcode 0x0B) works correctly. The device responds with valid HID data.
 
 ---
 
 ## Write path
 
-**ESAURITO** — Il device ignora **qualsiasi write** (opcode 0x02) su qualsiasi registro.
-Il controller AMD FCH Cezanne sotto Linux non produce un segnale write che il touchscreen
-MSHW0231 riconosce.
+**EXHAUSTED** — the device ignores **every write** (opcode 0x02) to every register.
+The AMD FCH Cezanne controller under Linux does not produce a write signal that the
+MSHW0231 touchscreen recognizes.
 
-### Test falliti (matrice completa)
+### Failed tests (complete matrix)
 - SPI modes 0, 1, 2, 3
-- Velocita' 800 KHz - 33 MHz
+- Speeds 800 KHz - 33 MHz
 - Trigger V1 (CTRL0 bit16)
 - Trigger V2 (0x47 bit7)
-- Trigger V2 hardcoded 0x80
-- CTRL1 write Windows value 0x020006B5 (read-only register, ignorato)
-- 0x44 dance con mask 0xF0FF, 0x0FFF
+- Hardcoded trigger V2 0x80
+- CTRL1 write, Windows value 0x020006B5 (read-only register, ignored)
+- 0x44 dance with masks 0xF0FF, 0x0FFF
 - TXMODE CTRL0 bit23
-- CS1 hardcoded
-- Opcode prepended al FIFO
+- Hardcoded CS1
+- Opcode prepended to the FIFO
 - Full power cycle: _PS3→_PS0→_RST via ACPI
 - GPIO power cycle via M010
-- Vendor init @0x04 (14 byte cold boot)
-- DESCREQ sincrono IRQ e workqueue
-- PCI 0xB8 bit7 (16-bit FIFO mode — fixa layout dati read, NON write)
-- **Tutte le combinazioni delle categorie sopra**
+- Vendor init @0x04 (14-byte cold boot)
+- Synchronous DESCREQ, IRQ, and workqueue
+- PCI 0xB8 bit7 (16-bit FIFO mode — fixes the read data layout, NOT the write)
+- **Every combination of the categories above**
 
 ---
 
 ## PCI Configuration Discovery (CRITICAL)
 
-Dump del bridge FCH LPC (1022:790e, device 00:14.3) da Windows:
+Dump of the FCH LPC bridge (1022:790e, device 00:14.3) from Windows:
 
 ### PCI 0xB4 — FIFO Data Layout
-| | Value | Descrizione |
+| | Value | Description |
 |--|-------|-------------|
-| Windows | 0x7DFFE000 | FIFO data layout / sync byte count (**corretto 06/07 sera**, era trascritto male come 0x007DFFE0) |
-| Linux | 0x00000000 | Default BIOS |
-| Scrivibile | SI | Via setpci — retestato col valore corretto: nessun effetto sulle write |
+| Windows | 0x7DFFE000 | FIFO data layout / sync byte count (**corrected on the night of 2026-07-06**, was previously mis-transcribed as 0x007DFFE0) |
+| Linux | 0x00000000 | BIOS default |
+| Writable | YES | Via setpci — retested with the correct value: no effect on writes |
 
 ### PCI 0xB8 — 16-bit FIFO Access Mode
-| | Value | Descrizione |
+| | Value | Description |
 |--|-------|-------------|
 | Windows | 0x33ED0084 | bit7=1: 16-bit FIFO access |
 | Linux | 0x33ED0004 | bit7=0: 8-bit FIFO access (default) |
-| Scrivibile | SI | Via `setpci -s 00:14.3 B8.L=0x0084` |
+| Writable | YES | Via `setpci -s 00:14.3 B8.L=0x33ED0084` (full value — a partial write like `B8.L=0x0084` clobbers the whole dword instead of only setting bit7) |
 
-Impostando 0xB8 al valore Windows si abilita il 16-bit FIFO mode. I dati letti
-sono corretti con la formula word extraction (readw + estrazione byte pari/dispari).
-**Tuttavia, le write (opcode 0x02) continuano a fallire.**
+Setting 0xB8 to the Windows value enables 16-bit FIFO mode. The data read out
+is then correct using the word-extraction formula (readw + odd/even byte extraction).
+**However, writes (opcode 0x02) still fail.**
 
 ---
 
-## CTRL0 bits[15:8] — Sospetto principale
+## CTRL0 bits[15:8] — Prime Suspect
 
 - **Windows** = 0x0E
-- **Linux** = 0xA9 (hardwired, **immutabile da software** — ogni writel ignorato dal controller)
+- **Linux** = 0xA9 (hardwired, **immutable from software** — every writel is ignored by the controller)
 
-Questi bit controllano parametri di chip select timing. Un valore errato potrebbe
-invalidare il framing delle write a livello di segnale elettrico.
+These bits control chip-select timing parameters. A wrong value could
+invalidate the electrical-level framing of writes.
 
 ---
 
@@ -84,86 +84,86 @@ invalidare il framing delle write a livello di segnale elettrico.
 
 - **Windows** = 0x020006B5
 - **Linux** = 0x02000000
-- La differenza nei bit bassi (0x06B5 vs 0x0000) non e' riproducibile: CTRL1 e' read-only.
+- The difference in the low bits (0x06B5 vs 0x0000) can't be reproduced: CTRL1 is read-only.
 
 ---
 
 ## FIFO diagnostics
 
-Il modulo `mmio_write.c` conferma:
-- Write: i dati TX sono corretti nel FIFO, ma MISO resta **tutti zeri** (device non pilota la linea)
-- Read: MISO contiene dati HID validi (sync bytes + header + body) — con PCI 0xB8 bit7=1, il layout e' corretto
-- Il device **ignora selettivamente** le write, non le read
+The `mmio_write.c` module confirms:
+- Write: the TX data is correct in the FIFO, but MISO stays **all zeros** (the device doesn't drive the line)
+- Read: MISO contains valid HID data (sync bytes + header + body) — with PCI 0xB8 bit7=1, the layout is correct
+- The device **selectively ignores** writes, not reads
 
 ---
 
 ## ACPI verification
 
-- DSDT md5sum identico Windows/Linux: `78046fa74c0282ee59db8b04a5204d88`
-- Le tabelle ACPI sono **bit-identiche** — nessuna differenza di configurazione hardware
-- SPI mode: MODE 0 (ClockPolarityLow, ClockPhaseFirst) a 33.33 MHz
+- DSDT md5sum identical between Windows/Linux: `78046fa74c0282ee59db8b04a5204d88`
+- The ACPI tables are **bit-identical** — no hardware configuration difference
+- SPI mode: MODE 0 (ClockPolarityLow, ClockPhaseFirst) at 33.33 MHz
 
 ---
 
-## Sessione 06/07 sera/notte — chiusura piste software rimanenti
+## Session 2026-07-06 evening/night — closing out the remaining software avenues
 
-Senza logic analyzer ne' secondo PC (niente WinDbg a breakpoint), testate e chiuse
-tutte le idee software plausibili rimaste:
+Without a logic analyzer or a second PC (no breakpoint-based WinDbg), every remaining
+plausible software idea was tested and closed out:
 
-- **WPP tracing di hidspi.sys** (tracepdb+traceview+tracefmt): catturata una write
-  reale (`HidSetFeature`, 14B) che completa con STATUS_SUCCESS, confermata
-  dall'interno del driver — conferma indipendente che opcode 0x02 funziona su
-  Windows. Incrociato con "Vendor init @0x04" (gia' nella matrice test FALLITI su
-  Linux, stesso registro): il blocco resta uniforme Windows-vs-Linux, non
-  specifico a un registro.
-- **PCI config space esteso**: confrontati Root Complex, IOMMU, SMBus, tutte le 8
-  funzioni Data Fabric oltre al bridge LPC. Solo Data Fabric Fn4 (00:18.4) mostrava
-  differenze reali (0x5C, 0x98, 0x9C) — testate su HW: 0x98/0x9C read-only, 0x5C
-  scrivibile ma **nessun effetto** sul write path una volta applicato.
-- **PCI 0xB4**: corretto un bug di trascrizione (valore vero 0x7DFFE000, non
-  0x007DFFE0) e retestato — nessun effetto, pista chiusa per davvero stavolta.
-- Gia' escluse in precedenza: SMN/PCI-config nel driver Windows (decomp), _OSI
-  ACPI gating, WREN/SPI-NOR heritage, kernel lockdown, SME, IOMMU (probabile
-  irrilevanza).
+- **WPP tracing of hidspi.sys** (tracepdb+traceview+tracefmt): captured a real write
+  (`HidSetFeature`, 14B) completing with STATUS_SUCCESS, confirmed from inside the
+  driver itself — independent confirmation that opcode 0x02 works on
+  Windows. Cross-checked against "Vendor init @0x04" (already in the FAILED test
+  matrix on Linux, same register): the block remains uniform Windows-vs-Linux, not
+  specific to a single register.
+- **Extended PCI config space**: compared the Root Complex, IOMMU, SMBus, and all 8
+  Data Fabric functions in addition to the LPC bridge. Only Data Fabric Fn4 (00:18.4)
+  showed real differences (0x5C, 0x98, 0x9C) — tested on real hardware: 0x98/0x9C are
+  read-only, 0x5C is writable but has **no effect** on the write path once applied.
+- **PCI 0xB4**: fixed a transcription bug (real value 0x7DFFE000, not
+  0x007DFFE0) and retested — no effect, this avenue is genuinely closed this time.
+- Already ruled out earlier: SMN/PCI-config access inside the Windows driver (decomp), _OSI
+  ACPI gating, WREN/SPI-NOR heritage, kernel lockdown, SME, IOMMU (likely
+  irrelevant).
 
-**Nessuna pista software plausibile rimane da testare.**
-
----
-
-## Next step OBBLIGATORIO
-
-**Logic analyzer** su bus SPI — confronto segnali SCK/MOSI/MISO/CS tra Windows e Linux.
-Senza questa misurazione fisica, **nessun fix software e' possibile**.
+**No plausible software avenue remains to be tested.**
 
 ---
 
-## Strumenti diagnostici
+## MANDATORY next step
 
-| Tool | Path | Descrizione |
+**Logic analyzer** on the SPI bus — compare SCK/MOSI/MISO/CS signals between Windows and Linux.
+Without this physical measurement, **no software fix is possible**.
+
+---
+
+## Diagnostic Tools
+
+| Tool | Path | Description |
 |------|------|-------------|
-| `parse_spi.py` | `~/Scrivania/tools/parse_spi.py` | Parser completo CSV ETW (transazioni, timing, IRQ, init) |
-| `mmio_write.c` | `~/spi-amd-v2-multi/mmio_write.c` | Raw MMIO test: write Windows-exact + FIFO dump |
-| `gpio_test.ko` | modulo kernel | Test GPIO M009/M010 via ACPI evaluate |
-| PCI dump | `/mnt/win/Users/simon/Desktop/spi_dump/LPC_00_14_3.BIN` | PCI config space (bridge 1022:790e) |
+| `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, IRQ, init) |
+| `mmio_write.c` | `tools/diagnostics/mmio_write.c` | Raw MMIO test: Windows-exact write + FIFO dump |
+| `gpio_test.c` | `tools/gpio_test.c` | GPIO M009/M010 test via ACPI evaluate |
+| PCI dump | Windows-side, `Desktop\windrivers\` | PCI config space (bridge 1022:790e) and 11-device comparison |
 
 ---
 
-## Moduli
+## Modules
 
-Compilati in `~/spi-hid/driver/` e `~/spi-amd-v2-multi/`
+Built from `driver/` (single source of truth — `spi-amd.c` and `spi-hid-core.c` live and
+build together from this one directory; there is no longer a separate working copy).
 
 ---
 
-## File chiave
+## Key Files
 
-| File | Contenuto |
+| File | Contents |
 |------|-----------|
-| `~/spi-hid/driver/spi-hid-core.c` | WINSEQ + GPIO in probe |
-| `~/spi-amd-v2-multi/spi-amd.c` | CTRL0 fix pre-trigger |
-| `~/spi-amd-v2-multi/mmio_write.c` | Raw MMIO test module |
-| `~/Scrivania/tools/parse_spi.py` | CSV ETW parser |
-| `~/Scrivania/traces/surface_*.csv` | Windows ETW traces |
-| `~/Scrivania/decomp/` | Decomp driver Windows |
-| `/mnt/win/Users/simon/Desktop/spi_dump/` | MMIO dump Windows (RWEverything) |
-| `/mnt/win/Users/simon/Desktop/spi_dump/LPC_00_14_3.BIN` | PCI config space dump (bridge LPC) |
-| `/mnt/win/Users/simon/Desktop/windrivers/` | hidspi.pdb/.sys, TMF WPP, log decodificati, dump PCI 11 device |
+| `driver/spi-hid-core.c` | WINSEQ + GPIO in probe |
+| `driver/spi-amd.c` | Pre-trigger CTRL0 fix |
+| `tools/diagnostics/mmio_write.c` | Raw MMIO test module |
+| `tools/parse_spi.py` | ETW CSV parser |
+| `traces/surface_*.csv` | Windows ETW traces |
+| `docs/decomp/` | Windows driver decompilation |
+| `docs/windows_mmio_dumps/` | Windows MMIO dump (RWEverything) |
+| Windows-side, `Desktop\windrivers\` | PCI config space dump (LPC bridge + 11-device comparison), hidspi.pdb/.sys, WPP TMF files, decoded logs |

@@ -1,0 +1,13 @@
+            ; CALL XREF from fcn.140004bac @ 0x140005053(x)
+            ; CALL XREF from fcn.1400054d0 @ 0x14000581c(x)
+            ; CALL XREF from fcn.140005c9c @ +0x152(x)
+            ; CALL XREF from fcn.140006f84 @ 0x140006fb4(x)
+┌ 29: fcn.140007ba0 (int64_t arg1);
+│ `- args(rcx) vars(2:sp[0x18..0x20])
+│           0x140007ba0      6689542410     mov word [var_10h], dx
+│           0x140007ba5      48894c2408     mov qword [var_8h], rcx    ; arg1
+│           0x140007baa      488b442408     mov rax, qword [var_8h]
+│           0x140007baf      0fb74c2410     movzx ecx, word [var_10h]
+│           0x140007bb4      668908         mov word [rax], cx
+│           0x140007bb7      f0830c2400     lock or dword [rsp], 0
+└           0x140007bbc      c3             ret

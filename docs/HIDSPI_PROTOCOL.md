@@ -1,29 +1,29 @@
 # HID-over-SPI Protocol — MSHW0231 Touchscreen
 
-## Panoramica
+## Overview
 
-Il touchscreen Surface Laptop 4 AMD usa il protocollo HID-over-SPI (sezione 7.2.5.7 specifica HID SPI).
-Il dispositivo è un controller touchscreen che richiede:
-1. Sequenza di discovery (reset → descrittori → report descriptor)
-2. Attivazione vendor-specific (cmd1/cmd2/cmd3)
-3. Upload firmware B0 (120 blocchi da 241 byte)
-4. Inizializzazione (~41 secondi)
-5. Funzionamento normale (report HID)
+The Surface Laptop 4 AMD touchscreen uses the HID-over-SPI protocol (section 7.2.5.7 specifies HID SPI).
+The device is a touchscreen controller that requires:
+1. A discovery sequence (reset → descriptors → report descriptor)
+2. Vendor-specific activation (cmd1/cmd2/cmd3)
+3. B0 firmware upload (120 blocks of 241 bytes)
+4. Initialization (~41 seconds)
+5. Normal operation (HID reports)
 
-## Formato Header HID
+## HID Header Format
 
-Ogni risposta dal dispositivo inizia con sync bytes (0xFF) seguiti dall'header:
+Every response from the device starts with sync bytes (0xFF) followed by the header:
 
 ```
 Byte 0: [TYPE_4bit][VERSION_4bit]
-        versione = 2 (HID-over-SPI)
-         tipo report:
+        version = 2 (HID-over-SPI)
+        report type:
            0 = ACK/Ready
            1 = DATA
            3 = RESET_RSP
            4 = COMMAND_RESP
            5 = GET_FEATURE_RESP
-           7 = DEVICE_DESC  
+           7 = DEVICE_DESC
            8 = RPT_DESC
 
 Byte 1: [LENGTH_LOW_4bit][FRAGMENT_ID_4bit]
@@ -33,19 +33,19 @@ Byte 3: 0x5A (marker)
 Body length = (((Byte1 >> 4) << 0) | (Byte2 << 4)) * 4
 ```
 
-### Esempi
+### Examples
 
 ```
 RESET_RSP:  32 10 00 5A    type=3, body_len = ((0x10>>4) | 0x00<<4)*4 = 4
 DEVICE_DESC: 72 80 00 5A    type=7, body_len = ((0x80>>4) | 0x00<<4)*4 = 32
 RPT_DESC:   82 B0 0E 5A    type=8, body_len = ((0xB0>>4) | 0x0E<<4)*4 = 0xEB*4 = 940
 
-ACK pattern: 03 00 00 00    (non ha 0x5A! Pattern speciale)
+ACK pattern: 03 00 00 00    (no 0x5A! Special pattern)
 ```
 
 ---
 
-## Comandi SPI
+## SPI Commands
 
 ### 0x0B — Read Register (Approval Read)
 
@@ -53,15 +53,16 @@ ACK pattern: 03 00 00 00    (non ha 0x5A! Pattern speciale)
 TX: [0x0B] [ADDR_H] [ADDR_M] [ADDR_L] [0xFF] [0x00] [0x00] [APPR7] [APPR8]
       opcode  └──── register address (24bit) ────┘  └pad─┘ └─ approval ─┘
 
-9 byte totali. Il dispositivo risponde con i dati dal registro specificato.
+9 bytes total. The device responds with the data from the specified register.
 
 Approval bytes:
-  APPR7: 0x00 per state==0, 0x03 per state!=0 (spi_hid_approval_byte7: cambia alla transizione 0→1, non dopo descriptor parse)
-  APPR8: 0x00 default
+  APPR7: 0x00 for state==0, 0x03 for state!=0 (spi_hid_approval_byte7: changes on the 0→1
+         transition, not after the descriptor parse)
+  APPR8: 0x00 by default
 
-Indirizzi registro:
-  0x000000: registro di input (pre-definito)
-  0x001000: input_register (dopo device descriptor parse)
+Register addresses:
+  0x000000: input register (default)
+  0x001000: input_register (after device descriptor parse)
 ```
 
 ### 0x02 — DESCREQ (Device Descriptor Request)
@@ -70,109 +71,109 @@ Indirizzi registro:
 TX: [0x02] [0x00] [0x00] [0x01] [0x42] [0x00] [0x00] [0x03] [0x00] [0x00]
       opcode  └───???────┘ └─??─┘ └─???──────────────┘ └─??─┘
 
-10 byte totali.
+10 bytes total.
 
-DESCREQ2 (per report descriptor):
+DESCREQ2 (for the report descriptor):
 TX: [0x02] [0x00] [0x00] [0x02] [0x42] [0x00] [0x00] [0x03] [0x00] [0x00]
-                      ↑ registro 0x02 invece di 0x01
+                      ↑ register 0x02 instead of 0x01
 
-Il dispositivo risponde con ACK (03 00 00 00), poi invia IRQ.
-Dopo IRQ, il successivo 0x0B read restituisce il descrittore.
+The device responds with ACK (03 00 00 00), then raises an IRQ.
+After the IRQ, the next 0x0B read returns the descriptor.
 ```
 
-### 0x00 — Attivazione (cmd1, cmd2)
+### 0x00 — Activation (cmd1, cmd2)
 
 ```
-cmd1: [0x00] [0x0E] [0x00] [0x00] [0x00]    5 byte
+cmd1: [0x00] [0x0E] [0x00] [0x00] [0x00]    5 bytes
 cmd2: [0x00]                                   1 byte (NOP/padding)
 
-TX only, nessuna risposta inline.
+TX only, no inline response.
 ```
 
 ### 0x70 — Read Status (cmd3)
 
 ```
 TX: [0x70]                                     1 byte
-RX: 14 byte di stato firmware
+RX: 14 bytes of firmware status
 
-TX+RX nella stessa transazione.
+TX+RX in the same transaction.
 ```
 
 ### 0xB0 — Firmware Block Write
 
 ```
-TX: [0xB0] [240 byte di dati firmware]         241 byte totali
+TX: [0xB0] [240 bytes of firmware data]         241 bytes total
 
-TX only, nessuna risposta inline.
-120 blocchi + 125 byte di coda = 29.045 byte totali.
+TX only, no inline response.
+120 blocks + 125-byte tail = 29,045 bytes total.
 ```
 
 ---
 
-## Sequenza di Boot Completa
+## Complete Boot Sequence
 
-### Fase 1: Reset (0-200 µs)
+### Phase 1: Reset (0-200 µs)
 ```
 ┌─ 0x0B read → RESET_RSP (32 10 00 5A)
-│  Il dispositivo è in reset, invia il report di reset.
-├─ 0x0B read → ACK (03 00 00 00)  
-│  Dopo ~168 µs, il dispositivo è pronto.
-│  NESSUN comando inviato tra le due letture!
-└─ Il dispositivo cambia stato da solo (timeout interno)
+│  The device is in reset, it sends the reset report.
+├─ 0x0B read → ACK (03 00 00 00)
+│  After ~168 µs, the device is ready.
+│  NO command sent between the two reads!
+└─ The device changes state on its own (internal timeout)
 ```
 
-### Fase 2: Device Discovery (~200-2000 µs)
+### Phase 2: Device Discovery (~200-2000 µs)
 ```
 ┌─ DESCREQ (0x02) → ACK (03 00 00 00 00)
-├─ GPIO IRQ (~58 µs dopo)
+├─ GPIO IRQ (~58 µs later)
 ├─ 0x0B read → DEVICE_DESC type=7 (72 80 00 5A)
-│  approval byte7 cambia a 0x03
+│  approval byte7 changes to 0x03
 ├─ 0x0B read 37B → device descriptor data
 │  vendor=0x03A8, product=0x0002, ver=0x0320
 ├─ DESCREQ2 (0x02) → all zeros (device busy)
-├─ GPIO IRQ (~727 µs dopo)
+├─ GPIO IRQ (~727 µs later)
 ├─ 0x0B read → RPT_DESC type=8 (82 B0 0E 5A)
 ├─ 0x0B read 945B → full HID report descriptor
-└─ ~962ms gap (driver processing interno)
+└─ ~962ms gap (internal driver processing)
 ```
 
-### Fase 3: Attivazione (~962ms)
+### Phase 3: Activation (~962ms)
 ```
-┌─ cmd1 (0x00, 5 byte)
-├─ cmd2 (0x00, 1 byte)  
+┌─ cmd1 (0x00, 5 bytes)
+├─ cmd2 (0x00, 1 byte)
 ├─ 0x0B read → checksum response
 ├─ cmd3 (0x70, TX+RX 14B) → FW status
-└─ (possibili altri comandi vendor: 0x28, 0x24, 0x29, 0x22, 0x25, 0x26)
+└─ (possible other vendor commands: 0x28, 0x24, 0x29, 0x22, 0x25, 0x26)
 ```
 
-### Fase 4: Firmware Upload (~410ms)
+### Phase 4: Firmware Upload (~410ms)
 ```
-┌─ B0 block #1 (241 byte)
+┌─ B0 block #1 (241 bytes)
 ├─ B0 block #2
-├─ ... (120 blocchi totali)
-├─ B0 tail (125 byte)
-└─ Attesa 41 secondi per inizializzazione dispositivo
+├─ ... (120 blocks total)
+├─ B0 tail (125 bytes)
+└─ 41-second wait for device initialization
 ```
 
-### Fase 5: Funzionamento (~41s dopo FW)
+### Phase 5: Operation (~41s after FW)
 ```
-┌─ GPIO IRQ periodici (~ogni 110ms)
-├─ 0x0B read → report HID type=7
-├─ hid_input_report() → eventi touch
-└─ Loop continuo
+┌─ Periodic GPIO IRQ (~every 110ms)
+├─ 0x0B read → HID report type=7
+├─ hid_input_report() → touch events
+└─ Continuous loop
 ```
 
 ---
 
-## State Machine del Nostro Driver
+## Our Driver's State Machine
 
-### Stato Attuale (v5)
+### Current State (v5)
 
 ```
 State 0 (WAIT_RESET):
-  ├── type==3: drain #1 (blen byte) + drain #2 (64 byte)
-  ├── Sempre: DESCREQ (0x02 TX+RX 10B) → state=1
-  └── Dopo state=1: extra spi_hid_seq_read(shid, shid->input.content, 64) per svuotare il buffer
+  ├── type==3: drain #1 (blen bytes) + drain #2 (64 bytes)
+  ├── Always: DESCREQ (0x02 TX+RX 10B) → state=1
+  └── After state=1: extra spi_hid_seq_read(shid, shid->input.content, 64) to flush the buffer
 
 State 1 (WAIT_DESC):
   ├── type==7: parse device descriptor → DESCREQ2 → state=2 + drain
@@ -181,7 +182,8 @@ State 1 (WAIT_DESC):
 
 State 2 (WAIT_RPT):
   ├── type==8: drain → goto VENDOR_INIT
-  ├── NOTA: Il decomp di State2 (fcn.0xda9c) confronta con type==4 (COMMAND_RESP), non type==8. Il nostro codice confronta type==8. Discrepanza da verificare.
+  ├── NOTE: State2's decomp (fcn.0xda9c) compares against type==4 (COMMAND_RESP), not type==8.
+  │   Our code compares against type==8. Discrepancy to be verified.
   └── type==3/7: log and retry
 
 State 3 (VENDOR_INIT):
@@ -192,100 +194,100 @@ State 4 (DONE):
   └── type==7: forward to hid_input_report()
 ```
 
-### Problemi Noti
+### Known Issues
 
-1. **DESCREQ non produce type=7**: TX usa opcode 0x02, RX separata usa 0x0B
-   - In Windows: TX+RX usano LO STESSO opcode 0x02 nella stessa operazione
-   - Da CSV: DESCREQ TX+RX inline restituisce ACK, poi IRQ, poi type=7
+1. **DESCREQ doesn't produce type=7**: TX uses opcode 0x02, the separate RX uses 0x0B
+   - On Windows: TX+RX use the SAME opcode 0x02 in the same operation
+   - From the CSV: inline DESCREQ TX+RX returns ACK, then IRQ, then type=7
 
-2. **Nessun DESCREQ2**: Manca il secondo DESCREQ per il report descriptor
-   - Il codice in state 1 HA DESCREQ2 ma non viene mai eseguito (state 1 non vede type=7)
+2. **No DESCREQ2**: the second DESCREQ for the report descriptor is missing
+   - The code in state 1 DOES have DESCREQ2 but it's never executed (state 1 never sees type=7)
 
-3. **Drain multiplo assente**: Windows fa 2 letture 0x0B prima di DESCREQ
-   - Le due letture drenano RESET_RSP e poi ricevono ACK
+3. **Missing multi-drain**: Windows performs 2 0x0B reads before DESCREQ
+   - The two reads drain RESET_RSP and then receive ACK
 
-4. **TX+RX opcode mismatch**: La write 0x02 e la read 0x0B sono operazioni separate
-   - Il device interpreta 0x0B come nuovo comando, non come completion di 0x02
+4. **TX+RX opcode mismatch**: the 0x02 write and the 0x0B read are separate operations
+   - The device interprets 0x0B as a new command, not as the completion of 0x02
 
-### Fix Proposti
+### Proposed Fixes
 
-**Opzione A**: Usare `exec_segment(opcode=0x02, tx=9, rx=10)` combinato
-  - Stesso opcode per TX e RX in una singola operazione
-  - Richiede capire il layout FIFO per RX quando TX>0
-  
-**Opzione B**: TX 0x02 write-only, attendere GPIO IRQ, poi 0x0B read
-  - Il device processa DESCREQ e invia IRQ quando pronto
-  - La 0x0B read successiva prende la risposta
+**Option A**: Use a combined `exec_segment(opcode=0x02, tx=9, rx=10)`
+  - Same opcode for TX and RX in a single operation
+  - Requires understanding the FIFO layout for RX when TX>0
 
-**Opzione C**: Usare path V1 (CTRL0) per DESCREQ con TX+RX combinato
-  - Il path V1 potrebbe gestire RX per qualsiasi opcode
-  - Meno restrizioni del path V2 con TXMODE
+**Option B**: TX-only 0x02 write, wait for the GPIO IRQ, then 0x0B read
+  - The device processes the DESCREQ and raises the IRQ when ready
+  - The following 0x0B read picks up the response
+
+**Option C**: Use the V1 path (CTRL0) for DESCREQ with combined TX+RX
+  - The V1 path might handle RX for any opcode
+  - Fewer restrictions than the V2 path with TXMODE
 
 ---
 
-## Driver Windows — hidspicx.sys
+## Windows Driver — hidspicx.sys
 
-Da decompilazione, il driver HID-over-SPI di Windows implementa:
+From decompilation, the Windows HID-over-SPI driver implements:
 
-### Funzioni Principali
+### Main Functions
 
 1. **VerifyResetResponse** (fcn.0xdd64):
-   - Legge header RESET_RSP (type=3)
-   - Verifica che il body contenga i dati corretti
-   - Se valido, avanza lo stato
+   - Reads the RESET_RSP header (type=3)
+   - Verifies the body contains the correct data
+   - If valid, advances the state
 
 2. **HidGetDeviceDescriptor** (fcn.0xf458):
-   - Invia DESCREQ (opcode 0x02, register 0x01)
-   - Aspetta GPIO IRQ
-   - Legge device descriptor via 0x0B
+   - Sends DESCREQ (opcode 0x02, register 0x01)
+   - Waits for the GPIO IRQ
+   - Reads the device descriptor via 0x0B
 
 3. **VerifyDescriptorCompletion** (fcn.0xd2f8):
-   - Verifica che il descrittore sia completo
-   - Invia DESCREQ2 (opcode 0x02, register 0x02)
-   - Aspetta GPIO IRQ
-   - Legge report descriptor
+   - Verifies the descriptor is complete
+   - Sends DESCREQ2 (opcode 0x02, register 0x02)
+   - Waits for the GPIO IRQ
+   - Reads the report descriptor
 
 4. **ConfigureTransfer** (fcn.0xa664):
-   - Configura i buffer di trasferimento
-   - Setta approval bytes (0x00 → 0x03)
+   - Configures the transfer buffers
+   - Sets the approval bytes (0x00 → 0x03)
 
 5. **PrepareDescriptor** (fcn.0x12bc0):
-   - Alloca buffer per descrittore
-   - Prepara la struttura SPI_HID_DEVICE_DESC
+   - Allocates the descriptor buffer
+   - Prepares the SPI_HID_DEVICE_DESC structure
 
-### Orchestrator (fcn.0xc8d8) — Loop Principale
-
-```
-1. Legge il tipo di report dal buffer
-2. Switch sul tipo:
-   - type==3 (RESET_RSP): avanza stato e invia DESCREQ
-   - type==7 (DEVICE_DESC): riceve descrittore, invia DESCREQ2
-   - type==8 (RPT_DESC): riceve report descriptor
-   - type==0 (ACK) con body_len>0: verifica completamento
-3. Se il descrittore è completo, avvia attivazione
-4. Loop su IRQ successive
-```
-
-### Chiavi di Lettura Decomp
+### Orchestrator (fcn.0xc8d8) — Main Loop
 
 ```
-r13d = 3       → costante per confronto type==3
-r14d = stato flag (0/1)
-rdi = type byte dal buffer
-cmp dil, r13b  → confronta type con 3
-je 0x...       → se type==3, salta al handler RESET_RSP
+1. Reads the report type from the buffer
+2. Switches on the type:
+   - type==3 (RESET_RSP): advances state and sends DESCREQ
+   - type==7 (DEVICE_DESC): receives descriptor, sends DESCREQ2
+   - type==8 (RPT_DESC): receives report descriptor
+   - type==0 (ACK) with body_len>0: verifies completion
+3. If the descriptor is complete, starts activation
+4. Loops on subsequent IRQs
+```
+
+### Decomp Reading Key
+
+```
+r13d = 3       → constant used to compare against type==3
+r14d = state flag (0/1)
+rdi = type byte from the buffer
+cmp dil, r13b  → compares type against 3
+je 0x...       → if type==3, jump to the RESET_RSP handler
 ```
 
 ---
 
-## Riepilogo Fix Necessari
+## Summary of Required Fixes
 
-| Priorità | Problema | File | Fix |
+| Priority | Issue | File | Fix |
 |----------|---------|------|-----|
-| CRITICAL | DESCREQ non produce type=7 | spi-hid-core.c | TX+RX stesso opcode o attendere IRQ |
-| CRITICAL | Device non riceve DESCREQ | spi-amd.c | Verificare TXMODE per 0x02 |
-| HIGH | Manca drain multiplo | spi-hid-core.c | Due 0x0B read prima di DESCREQ |
-| HIGH | State 1 non vede type=7 | spi-hid-core.c | Aggiungere logica per type=7 |
-| MEDIUM | Manca DESCREQ2 | spi-hid-core.c | Già presente ma non raggiunto |
-| MEDIUM | Manca VENDOR_INIT completo | spi-hid-core.c | Aggiungere comandi vendor |
-| LOW | Firmware non testato | spi-hid-core.c | Riattivare fw_work dopo fix |
+| CRITICAL | DESCREQ doesn't produce type=7 | spi-hid-core.c | TX+RX same opcode, or wait for IRQ |
+| CRITICAL | Device doesn't receive DESCREQ | spi-amd.c | Verify TXMODE for 0x02 |
+| HIGH | Missing multi-drain | spi-hid-core.c | Two 0x0B reads before DESCREQ |
+| HIGH | State 1 never sees type=7 | spi-hid-core.c | Add logic for type=7 |
+| MEDIUM | Missing DESCREQ2 | spi-hid-core.c | Already present but unreachable |
+| MEDIUM | Full VENDOR_INIT missing | spi-hid-core.c | Add vendor commands |
+| LOW | Firmware untested | spi-hid-core.c | Re-enable fw_work after fixes |
