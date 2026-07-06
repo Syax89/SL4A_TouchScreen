@@ -1,25 +1,24 @@
 MMIO register comparison, SPI controller (0xFEC10000) - Windows vs Linux
 Generated from a one-shot dump via RWEverything (DMEM command), 2026-07-06
+UPDATED 2026-07-07: CTRL0 bits[15:8] theory INVALIDATED (proven = TX_COUNT/RX_COUNT auto-set)
 
 REG        OFF    LINUX(WRITE)   WIN_IDLE    WIN_TOUCH1  WIN_TOUCH2  WIN_TOUCH3   NOTE
-CTRL0      0x00   0x6F8CA902     0x60040E02  0x6F8C0E02  0x6F8C0E02  0x6F8C0E02   High byte (0x6F) and low byte (0x02) match during touch; byte 0x0E vs 0xA9 (bits 8-15) is DIFFERENT
-CTRL1      0x0C   0x02000000     0x020006B5  0x020006B5  0x020006B5  0x020006B5   Low bits 0x06B5 present on Windows, absent on Linux (0x0000)
+CTRL0      0x00   0x6F8CA902     0x60040E02  0x6F8C0E02  0x6F8C0E02  0x6F8C0E02   bits[15:8]=TX/RX_COUNT auto-set by hw (not config)
+CTRL1      0x0C   0x02000000     0x020006B5  0x020006B5  0x020006B5  0x020006B5   Low bits 0x06B5 Win-only, read-only from MMIO
 ALT_CS     0x1D   0xB1           0xB1        0xB1        0xB1        0xB1         Identical
 ENA        0x20   0x11110713     0x11110713  0x11110713  0x11110713  0x11110713   Identical
-REG_22     0x22   0x1111         0x1111      0x1111      0x1111      0x1111       Identical
+SPI100_SPD 0x22   0x1111         0x1111      0x1111      0x1111      0x1111       SPI100_SPEED_CONFIG (4 tiers), identical
+HOST_PREF  0x2C   —              0x8000D4C0  0x8000D4C0  0x8000D4C0  0x8000D4C0   SPI100_HOST_PREF_CONFIG (RD4DW=0)
 SPEED_CFG  0x44   0x0200         0x0200      0x0200      0x0200      0x0200       Identical
 OPCODE     0x45   0x02           0x02        0x02        0x02        0x02         Identical
-TRIGGER    0x47   0x00           0x00        0x00        0x00        0x00         Identical (idle/settled, not captured "during" the trigger)
-TX_COUNT   0x48   0x09           0x0E        0x0E        0x0E        0x0E         Different: 0x48 is probably not exactly TX_COUNT on this revision, or a different accumulated value
+TRIGGER    0x47   0x00           0x00        0x00        0x00        0x00         Identical (idle)
+TX_COUNT   0x48   0x09           0x0E        0x0E        0x0E        0x0E         TX=9(Linux, DESCREQ) vs TX=14(Win, vendor init)
 RX_COUNT   0x4B   0x00           0x00        0x00        0x00        0x00         Identical
-STATUS     0x4C   0x00010809     0x000F0E0D  0x000F0E0D  0x00100E0D  0x00110E0D   Very different from Linux; the high byte increments on every touch (0F,10,11) - looks like a counter, not a status bitmask
-SPD7       0x6C   ?              0x00000000  0x00000000  0x00000000  0x00000000   N/A
+STATUS     0x4C   0x00010809     0x000F0E0D  0x000F0E0D  0x00100E0D  0x00110E0D   High byte = counter on Win (0F,10,11)
+SPD7       0x6C   0x00000000     0x00000000  0x00000000  0x00000000  0x00000000   Identical
+MISC_CNTRL 0xFC   —              0x0000      0x0000      0x0000      0x0000       SPI_MISC_CNTRL semaphore (no lock held)
 
-Key observation: CTRL0 differs ONLY in the byte at bits 8-15 (Windows=0x0E, Linux=0xA9).
-All other CTRL0 bytes match exactly during touch. This byte is the most likely
-starting point for understanding why the write works on Windows and not on Linux.
-
-Methodological note: the touch1/2/3 dumps are identical to each other (except for a counter
-in STATUS offset 0x4E), so they probably capture the "settled" post-transfer state rather than
-the exact transient during the write. Capturing the real transient would require a hardware
-breakpoint in the kernel debugger (requires a second machine) or a much higher-frequency dump.
+2026-07-07 UPDATE: CTRL0 bits[15:8] = 0x0E vs 0xA9 was the #1 suspect. Now proven FALSE:
+bits[11:8] = TX_COUNT (verified 1-15), bits[15:12] = RX_COUNT. These are auto-set
+by hardware, not configuration. Setting TX_COUNT=14 reproduces 0x0E identically to
+Windows, but writes still fail. The root cause lies elsewhere.

@@ -103,7 +103,7 @@ or similar in the INIT/PAGE sections.
 2.  ALT_CS:          read8(0x1D) → &0xFC → |0x01 → write8(0x1D)
 3.  FIFO clear:      read32(CTRL0) → |= BIT20 → write32(CTRL0)   [single-set, no toggle]
 4.  opcode #1:       write8(0x45, opcode)
-5.  secret bits:     read32(CTRL0) → |= 0x60040000 → write32     [bit23 NEVER touched]
+5.  READ_MODE:        read32(CTRL0) → |= 0x60040000 → write32     [FAST_READ, bit23 NEVER touched]
 6.  0x44 dance:      read16(0x44); n = read8(0x20) & 0xF;
                     w = (w & 0x00FF) | (n<<8) | (n<<12);
                     write16(0x44, w)                              [clobbers 0x45!]
@@ -206,13 +206,21 @@ and with the diagnostic module on Linux.
 | 0x22 | 0x22 | 0x1111 | save/restore | ✅ | Identical |
 | Speed | — | 33.33 MHz | from ACPI _CRS | ✅ | Identical |
 
-### CTRL0 bits[15:8] — The Prime Suspect
+### CTRL0 bits[15:8] — Auto-set by Hardware (NOT "immutable")
 
-- **Windows**: 0x0E
-- **Linux**: 0xA9
-- **Behavior**: every writel to CTRL0 that modifies bits[15:8] is **ignored** by the hardware controller. An immediate read after the write always shows 0xA9.
-- **Impact**: these bits control chip-select timing parameters. A wrong value could invalidate the electrical-level framing of writes.
-- **Cause**: the value is set by the BIOS at boot and the Cezanne FCH controller doesn't allow it to be modified via MMIO. It's unclear how Windows obtains 0x0E — the Windows driver might reconfigure the controller through a non-MMIO mechanism (PCI config space, SMBus, or something else).
+**2026-07-07 discovery**: bits[11:8] = TX_COUNT, bits[15:12] = RX_COUNT. These are NOT
+chip-select timing parameters — they are **transient hardware state** that reflects the
+last transfer's byte counts. Verified by testing TX_COUNT values 1-15 and observing
+bits[11:8] track exactly.
+
+- **Windows shows 0x0E** because the last transfer had TX_COUNT=14 (the 14-byte
+  vendor init command `02 00 00 04 82 00 00 04 00 01 02 0C EE 5B`)
+- **Linux shows 0xA9** because the last transfer had different TX/RX counts
+
+Direct writel to these bits IS ignored (they're read-only/hardware-managed),
+but the previous theory that they were "hardwired chip-select timing causing
+write failure" is **FALSE**. Setting TX_COUNT=14 reproduces 0x0E identically
+to Windows, and writes still fail. These bits are not the root cause.
 
 ### CTRL1 — Read-only
 

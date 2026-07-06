@@ -65,8 +65,8 @@ struct amd_spi_freq {
 	u8 spd7_val;
 };
 
-/* Undocumented registers from amdspi.sys decomp */
-#define AMD_SPI_SECRET_BITS	0x60040000 /* bits 30+29+18 */
+/* SPI controller configuration bits (from coreboot amdblocks/spi.h) */
+#define AMD_SPI_READ_MODE_FAST	0x60040000 /* bits 30+29+18 = 0b111 = FAST_READ (value 7) */
 #define AMD_SPI_TXMODE_BIT	0x00800000 /* bit 23: force TX, prevent RX switch */
 #define AMD_SPI_SPEED_CONFIG_REG 0x44	/* write16 clobbers 0x45 (opcode), re-write needed */
 
@@ -187,7 +187,7 @@ static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi)
 	/* Bits 30,29,18. Windows never sets bit23 (TXMODE).
 	 * TXMODE is only set for opcode 0xB0 firmware writes. */
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_CTRL0_REG,
-			       AMD_SPI_SECRET_BITS, 0);
+			       AMD_SPI_READ_MODE_FAST, 0);
 }
 
 static int amd_spi_set_opcode(struct amd_spi *amd_spi, u8 cmd_opcode)
@@ -256,7 +256,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (DBG_VERBOSE || opcode != 0x0B)
 		pr_err("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
 
-	/* Windows fcn.0x6fc0: save register 0x22 before transfer */
+	/* Windows fcn.0x6fc0: save SPI100_SPEED_CONFIG (0x22) before transfer */
 	saved_0x22 = readw(base + 0x22);
 
 	/* Clear FIFO — single set (not toggle), matching Windows decomp */
@@ -266,7 +266,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
 
-	/* V2: write opcode to 0x45 FIRST (before secret bits, as Windows does) */
+	/* V2: write opcode to 0x45 FIRST (before READ_MODE, as Windows does) */
 	if (amd_spi->version == AMD_SPI_V2)
 		amd_spi_set_opcode(amd_spi, opcode);
 	else {
@@ -275,7 +275,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
 
-	/* V2: set secret bits (30+29+18) AFTER opcode, as Windows fcn.0x2be4 */
+	/* V2: set SPI_READ_MODE=FAST_READ (bits 30+29+18=0b111) AFTER opcode */
 	if (amd_spi->version == AMD_SPI_V2)
 		amd_spi_setup_v2_regs(amd_spi);
 
@@ -363,7 +363,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	}
 
 	if (DBG_VERBOSE) pr_err("spi-amd: done\n");
-	/* Windows fcn.0x6f84: restore register 0x22 after transfer */
+	/* Windows fcn.0x6f84: restore SPI100_SPEED_CONFIG (0x22) after transfer */
 	writew(saved_0x22, base + 0x22);
 	/* Windows fcn.0x4684: restore original opcode to 0x45 after transfer */
 	writeb(0x0B, base + AMD_SPI_OPCODE_REG);
@@ -623,11 +623,11 @@ static int amd_spi_probe(struct platform_device *pdev)
 	amd_spi->version = (uintptr_t)device_get_match_data(dev);
 	host->bus_num = 0;
 
-	/* Read register prefix from MMIO+0x22 (amdspi.sys decomp: fcn.0x6fc0)
+	/* Read SPI100_SPEED_CONFIG from MMIO+0x22 (amdspi.sys decomp: fcn.0x6fc0)
 	 * Windows reads 16-bit via fcn.0x1400019e0 (read16), not 8-bit.
 	 */
-	amd_spi->reg_prefix = ioread16(amd_spi->io_remap_addr + 0x22);
-	dev_info(dev, "reg_prefix at MMIO+0x22 = 0x%04X\n", amd_spi->reg_prefix);
+	amd_spi->speed_cfg = ioread16(amd_spi->io_remap_addr + 0x22);
+	dev_info(dev, "SPI100_SPEED_CONFIG at MMIO+0x22 = 0x%04X\n", amd_spi->speed_cfg);
 
 	return amd_spi_probe_common(dev, host);
 }

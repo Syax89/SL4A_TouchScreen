@@ -7,39 +7,45 @@
 | 0x00 | CTRL0 | 32bit | R/W | Main control |
 | 0x1D | ALT_CS | 8bit | R/W | Alternate chip select |
 | 0x20 | ENA_REG | 32bit | R/W | Enable (SPI100, ALT_SPD at bits 20-23) |
-| 0x22 | REG_PREFIX | 16bit | R/W | Prefix register (saved/restored) |
+| 0x22 | SPI100_SPEED_CONFIG | 16bit | R/W | Speed tiers: NORM(bits 2-0), FAST(5-3), ALT(8-6), TPM(11-9). Windows saves/restores. |
+| 0x2C | SPI100_HOST_PREF | 32bit | R/W | Host prefetch config (bit15 = SPI_RD4DW_EN_HOST) |
 | 0x44 | SPEED_OPCODE | 16bit | R/W | Windows-only speed config (high byte speed + low byte opcode) |
 | 0x45 | OPCODE_REG | 8bit | R/W | Opcode for the V2 path |
 | 0x47 | CMD_TRIGGER | 8bit | R/W | V2 trigger (bit7 = start) |
-| 0x48 | TX_COUNT | 8bit | R/W | Bytes to transmit |
-| 0x49 | — | 8bit | W | NOT used by Windows (zero occurrences in amdspi.sys). REMOVED from Linux driver. |
-| 0x4A | — | 8bit | W | NOT used by Windows (zero occurrences in amdspi.sys). REMOVED from Linux driver. |
-| 0x4B | RX_COUNT | 8bit | R/W | Bytes to receive |
-| 0x4C | STATUS | 8bit (Windows reads as byte) | R | Status. Windows reads it as a **byte** and the bit31 poll is a no-op. The reliable busy flag is CTRL0 bit31. |
+| 0x48 | TX_COUNT | 8bit | R/W | Bytes to transmit. After transfer, bits[11:8] of CTRL0 reflect this value. |
+| 0x49 | — | 8bit | — | NOT used by Windows (zero occurrences in amdspi.sys). REMOVED from Linux driver. |
+| 0x4A | — | 8bit | — | NOT used by Windows (zero occurrences in amdspi.sys). REMOVED from Linux driver. |
+| 0x4B | RX_COUNT | 8bit | R/W | Bytes to receive. After transfer, bits[15:12] of CTRL0 reflect this value. |
+| 0x4C | STATUS | 8bit | R | FIFO pointers (RD_PTR bits 23-16, WR_PTR bits 15-8, DONE_BYTE_COUNT bits 7-0) |
 | 0x6C | SPEED_REG | 32bit | R/W | V2 speed (spd7 at bits 8-13) |
-| 0x80 | FIFO_BASE | 70B | R/W | Data FIFO (70 bytes, 0x80-0xC5) |
+| 0x80 | FIFO_BASE | 71B | R/W | Data FIFO (71 bytes, 0x80-0xC6 for Cezanne) |
+| 0xFC | SPI_MISC_CNTRL | 16bit | R/W | Semaphore: PSP_OWNS(bit10), HFP_OWNS(bit9), HBIOS_OWNS(bit5) |
 
 ---
 
 ## CTRL0 (0x00) — Full Bit Map
 
 ```
-Bit 31    : BUSY (read-only) — 1 = transfer in progress
-Bit 30    : SECRET_30 (0x40000000) — always set by Windows
-Bit 29    : SECRET_29 (0x20000000) — always set by Windows
+Bit 31    : BUSY (read-only)
+Bit 30    : SPI_READ_MODE[2] — MSB of 3-bit READ_MODE
+Bit 29    : SPI_READ_MODE[1] — middle bit
 Bit 28-24 : Reserved / undocumented
-Bit 23    : TXMODE (0x00800000) — forces the controller into TX mode
-Bit 22    : Reserved
-Bit 21    : PRESERVED (0x00200000) — Windows preserves it (doesn't modify it)
-Bit 20    : FIFO_CLEAR (0x00100000) — pulse to reset the FIFO pointer
-Bit 19    : Reserved
-Bit 18    : SECRET_18 (0x00040000) — always set by Windows
+Bit 23    : TXMODE — undocumented, not in coreboot headers
+Bit 22    : SPI_ACCESS_MAC_ROM_EN
+Bit 21    : Function unknown. Survives |= 0x60040000 by omission.
+Bit 20    : FIFO_CLEAR — single set in Windows, toggle in Linux driver
+Bit 19    : Reserved / auto-set by hardware during transfers
+Bit 18    : SPI_READ_MODE[0] — LSB of 3-bit READ_MODE
 Bit 17    : Reserved
-Bit 16    : EXEC_CMD (0x00010000) — V1 trigger (starts the transfer)
-Bit 15-12 : RX_COUNT_AUTO — auto-set by hardware based on RX_COUNT
-Bit 11-8  : Reserved
+Bit 16    : EXEC_CMD — V1 trigger
+Bit 15-12 : Auto-set by hardware (reflects last RX_COUNT)
+Bit 11-8  : Auto-set by hardware (reflects last TX_COUNT)
 Bit 7-0   : OPCODE_V1 — opcode for the V1 path
 ```
+
+SPI_READ_MODE = {bit30, bit29, bit18} → 3-bit value:
+- 0 = Normal33M, 2 = Dual112, 3 = Quad114, 4 = Dual122, 5 = Quad144, 6 = Normal66M, 7 = FAST_READ
+Windows always uses value 7 (FAST_READ) = 0x60040000.
 
 ### Observed CTRL0 Values
 
@@ -51,9 +57,9 @@ Bit 7-0   : OPCODE_V1 — opcode for the V1 path
 
 ### Bit Detail
 
-**Bit 30 (0x40000000):** Secret bit from the Windows decomp. Function unknown but always present.
-
-**Bit 29 (0x20000000):** Secret bit from the Windows decomp. Function unknown but always present.
+**SPI_READ_MODE (bits 30+29+18):** Documented in coreboot `amdblocks/spi.h`.
+3-bit field selecting the SPI read mode. Windows always sets value 7 (FAST_READ = 0x60040000).
+Not "secret" — standard AMD FCH SPI controller feature.
 
 **Bit 23 (TXMODE, 0x00800000):**
 - When SET: the controller forces the MOSI line active for ALL opcodes
@@ -79,7 +85,7 @@ purely by omission (is never cleared or set explicitly). It is not deliberately 
   ctrl0 |= BIT(20); write32(CTRL0, ctrl0);  // set (rising edge)
   ```
 
-**Bit 18 (0x00040000):** Third secret bit. Function unknown.
+**Bit 18 (0x00040000):** LSB of SPI_READ_MODE. Part of the 3-bit read mode selector. Always set by Windows (FAST_READ).
 
 **Bit 16 (EXEC_CMD, 0x00010000):**
 - Trigger for the V1 path

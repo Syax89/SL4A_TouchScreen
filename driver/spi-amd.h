@@ -32,7 +32,7 @@ struct amd_spi {
 	void *dma_virt_addr;
 	enum amd_spi_versions version;
 	u32 speed_hz;
-	u16 reg_prefix;		/* value at MMIO+0x22 (from amdspi.sys decomp, 16-bit read) */
+	u16 speed_cfg;		/* SPI100_SPEED_CONFIG at MMIO+0x22 (4 speed tiers) */
 	u32 txmode_saved_ctrl0;	/* CTRL0 before TXMODE set, restored after segment */
 	u8 speed_hz_index;	/* 0=F_66_66MHz, 1=F_33_33MHz, etc. */
 };

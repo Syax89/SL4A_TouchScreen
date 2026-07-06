@@ -20,8 +20,8 @@
 | 0x140004bac | 2337B | read_with_speed | READ handler with speed config. 0x44 dance. RX_COUNT=rx_len+1. Reads at 0x84. |
 | 0x140004684 | 1319B | write_sequence | WRITE handler inside SPB sequence. RX_COUNT=0. |
 | 0x140002be4 | 323B | transfer_data | Data copy/setup for transfer |
-| 0x140006fc0 | 58B | read_register_prefix | Reads 0x22, stores word at extension+0x58 |
-| 0x140006f84 | 58B | restore_register_prefix | Restores 0x22 from extension+0x58 |
+| 0x140006fc0 | 58B | save_speed_config | Saves SPI100_SPEED_CONFIG (0x22), stores at extension+0x58 |
+| 0x140006f84 | 58B | restore_speed_config | Restores SPI100_SPEED_CONFIG (0x22) from extension+0x58 |
 
 ## Register Values — authoritative
 
@@ -30,7 +30,7 @@ Verified values (correcting previous wrong conclusions):
 - **0x48** = TX byte count (read: 3 · write: tx_len)
 - **0x4B** = RX byte count (read: rx_len · write: 0)
 - **0x47** = trigger V2 (bit 7 = 0x80)
-- **CTRL0 secret bits** = 0x60040000 (bit 30+29+18)
+- **CTRL0 SPI_READ_MODE** = 0x60040000 (bits 30+29+18 = 0b111 = FAST_READ, value 7)
 - **CTRL0 bit 23 (0x00800000)**: NOT written by amdspi.sys. The string `0x800000` doesn't appear in ANY function.
 - **FIFO base = 0x80**, FIFO size = 70 (0x46), chunk 64
 - **0x1D** = ALT_CS, **0x49/0x4A** = NOT USED in amdspi.sys (zero occurrences in the binary)
