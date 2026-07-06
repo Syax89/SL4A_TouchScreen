@@ -222,10 +222,14 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 	if (ret)
 		return ret;
 
-	/* V2: single write 0x80 to trigger, as Windows decomp shows */
-	if (amd_spi->version == AMD_SPI_V2)
-		writeb(AMD_SPI_TRIGGER_CMD, amd_spi->io_remap_addr + AMD_SPI_CMD_TRIGGER_REG);
-	else {
+	/* V2: toggle trigger to preserve other bits in 0x47 */
+	if (amd_spi->version == AMD_SPI_V2) {
+		u8 trig = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
+		trig &= ~AMD_SPI_TRIGGER_CMD;
+		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, trig);
+		trig |= AMD_SPI_TRIGGER_CMD;
+		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, trig);
+	} else {
 		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
 		ctrl0 &= ~AMD_SPI_EXEC_CMD;
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
@@ -298,6 +302,11 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 
 	writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
 
+	/* Re-apply secret bits after FIFO fill (v2-multi approach).
+	 * The 0x44 dance or FIFO operations may have cleared them. */
+	if (amd_spi->version == AMD_SPI_V2)
+		amd_spi_setup_v2_regs(amd_spi);
+
 	wmb();
 
 	if (opcode == 0x02) {
@@ -306,8 +315,9 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		u8 al = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
 		u16 sp = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 op = amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG);
-		pr_err("spi-amd: WRITE PRE-TRIG ctrl0=0x%08x st=0x%08x alt=0x%02x spd=0x%04x op45=0x%02x\n",
-			c0, st, al, sp, op);
+		u8 tr = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
+		pr_err("spi-amd: WRITE PRE-TRIG c0=0x%08x st=0x%08x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x\n",
+			c0, st, al, sp, op, tr);
 	}
 
 	ret = amd_spi_execute_opcode(amd_spi);
@@ -572,6 +582,17 @@ static int amd_spi_probe(struct platform_device *pdev)
 				     "ioremap of SPI registers failed\n");
 
 	dev_info(dev, "spi-amd-v2-multi: io_remap=%p\n", amd_spi->io_remap_addr);
+
+	/* Dump initial CTRL0 value (BIOS/UEFI preset) */
+	{
+		u32 c0 = readl(amd_spi->io_remap_addr + 0x00);
+		u32 st = readl(amd_spi->io_remap_addr + 0x4C);
+		u16 r44 = readw(amd_spi->io_remap_addr + 0x44);
+		u8 r45 = readb(amd_spi->io_remap_addr + 0x45);
+		u8 r1d = readb(amd_spi->io_remap_addr + 0x1D);
+		dev_info(dev, "BIOS regs: CTRL0=0x%08x STATUS=0x%08x 0x44=0x%04x 0x45=0x%02x 0x1D=0x%02x\n",
+			 c0, st, r44, r45, r1d);
+	}
 
 	amd_spi->version = (uintptr_t)device_get_match_data(dev);
 	host->bus_num = 0;
