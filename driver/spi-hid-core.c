@@ -1968,6 +1968,34 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->ready = false;
 	shid->keep_powered = true;
 
+	/* TEST: NO _RST — let device stay in whatever state BIOS/Windows left it */
+#if 1
+	/* Send vendor init command BEFORE waiting for IRQ.
+	 * From Windows surface_init.csv: first SPI tx is write to addr 0x04
+	 * 02 00 00 04 82 00 00 04 00 01 01 0C EE 5B */
+	if (!dev->of_node) {
+		static const u8 ven[] = {
+			0x02, 0x00, 0x00, 0x04, 0x82,
+			0x00, 0x00, 0x04, 0x00, 0x01,
+			0x01, 0x0C, 0xEE, 0x5B
+		};
+		dev_info(dev, "SEQ: sending vendor init @0x04...\n");
+		spi_hid_seq_write(shid, ven, sizeof(ven));
+		dev_info(dev, "SEQ: vendor init sent\n");
+
+		/* Now try reading from 0x04 — the vendor data register */
+		{
+			u8 rx[16];
+			int ret = spi_hid_seq_read_reg(shid, 0x000004, rx, 16);
+			dev_info(dev, "SEQ: read reg=0x04 ret=%d raw=[%*ph]\n",
+				 ret, 16, rx);
+			spi_hid_seq_hdr_type(&rx[6], 10, NULL);
+			dev_info(dev, "SEQ: post-vendor init hdr from 0x04: first 10 bytes\n");
+		}
+	}
+#endif
+
+#if 0
 	/* ACPI power cycle: _PS3 → _PS0 → _RST to ensure device is fully powered
 	 * GPIO 0x5B (power enable, set by _PS0) may be required for writes */
 	if (!dev->of_node) {
@@ -1983,6 +2011,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		st = acpi_evaluate_object(my_handle, "_RST", NULL, NULL);
 		dev_info(dev, "SEQ: _RST = %d\n", st);
 	}
+#endif
 
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
 				   irqflags, dev_name(&spi->dev), shid);
