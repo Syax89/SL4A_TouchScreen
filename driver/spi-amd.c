@@ -291,12 +291,8 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (amd_spi->version == AMD_SPI_V2 && opcode == 0x02) {
 		u16 w = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 speed_nibble = amd_spi_readreg8(amd_spi, AMD_SPI_ENA_REG) & 0xF;
-		/* First write: insert nibble at bits 11:8, mask 0xF0FF */
-		w = (w & 0xF0FF) | ((u16)speed_nibble << 8);
-		amd_spi_writereg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG, w);
-		amd_spi_set_opcode(amd_spi, opcode);  /* re-write after 0x44 clobber */
-		/* Second write: insert nibble at bits 15:12, mask 0x0FFF */
-		w = (w & 0x0FFF) | ((u16)speed_nibble << 12);
+		/* Windows mask is 0x00FF (clears ALL of bits [15:8]), not 0xF0FF */
+		w = (w & 0x00FF) | ((u16)speed_nibble << 8) | ((u16)speed_nibble << 12);
 		amd_spi_writereg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG, w);
 		amd_spi_set_opcode(amd_spi, opcode);
 	}
@@ -316,11 +312,6 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		rx_len = tx_len + 1;  /* +1 for opcode byte on wire */
 
 	writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
-
-	/* Re-apply secret bits after FIFO fill (v2-multi approach).
-	 * The 0x44 dance or FIFO operations may have cleared them. */
-	if (amd_spi->version == AMD_SPI_V2)
-		amd_spi_setup_v2_regs(amd_spi);
 
 	wmb();
 
