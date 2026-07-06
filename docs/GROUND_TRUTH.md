@@ -1,135 +1,204 @@
 # GROUND TRUTH — Modello verificato incrociando CSV ETW × decomp amdspi × decomp hidspi V0 × spec PDF
 
-> **Data verifica: 2026-07-05.** Tre verificatori indipendenti; report completi in
-> [verification/](verification/). Questo documento SOSTITUISCE le affermazioni in
-> conflitto in HIDSPI_PROTOCOL.md / CSV_SEQUENCE.md / VERIFICATION_PLAN.md §2.5-2.6 /
-> DRIVER_STATE.md §6-7. Ogni claim qui sotto è confermato da ≥2 fonti indipendenti.
+> **Data ultima verifica: 2026-07-06.** 
+> Fonti: decomp hidspi.sys (PDB), amdspi.sys (no PDB, objdump), CSV ETW,
+> DSDT/SSDT ACPI, test su Linux con Surface Laptop 4 AMD (Cezanne), kernel 7.1.2-3-cachyos.
 
-## 1. Modello di transazione (il punto che sblocca tutto)
+---
 
-**Write = TX-only. Risposta = read separata, gated su interrupt GPIO. SEMPRE.**
-
-- Spec §7.2.3 + §6.2.2: output report → device consuma → interrupt entro 1 s → host
-  legge header con read approval → legge body. Tre transazioni SPI distinte.
-- hidspi V0 `SendingWriteToBusEntry` @0x140008180: singolo transfer da 10 byte,
-  poi `Timer::Start(2000ms)` e attesa evento interrupt, poi `ReadingResponseHeaderEntry`.
-- amdspi write path 0x54d0: `write8(0x4B, 0)` esplicito (RX_COUNT=0), **mai** letture
-  dalla FIFO dopo il trigger.
-
-**Il "MISO inline" delle write nel CSV ETW è un artefatto**: hidspi riusa i buffer tra
-transazioni; il MISO loggato per la DESCREQ (`FF×5 03 00 00 00 00`) è il contenuto della
-transazione *precedente* (body della reset response). Stesso artefatto per gli "approval
-bytes" (v. §3).
-
-## 2. Sequenza di boot corretta (CSV, canale HID = handle 0x7F74AA5D37F8)
+## 1. Architettura driver Windows
 
 ```
-IRQ ─46µs→ TXN0  read hdr  9B  → 32 10 00 5A            (RESET_RESP header, type=3)
-           TXN1  read body 9B  → 03 00 00 00            (RESET_RESP body: len16=3, ContentID 0)
-           TXN2  WRITE 10B     02 00 00 01 42 00 00 03 00 00   (DESCREQ, TX-only)
-IRQ +58µs→ TXN3  read hdr  9B  → 72 80 00 5A            (DEVICE_DESC header, type=7, body=32B)
-           TXN4  read body 37B → 3 byte prefisso + 28B descriptor + 1 pad
-           TXN5  WRITE 10B     02 00 00 02 42 00 00 03 00 00   (DESCREQ2 → wReportDescRegister)
-IRQ+727µs→ TXN6  read hdr  9B  → 82 B0 0E 5A            (RPT_DESC header, type=8, body=940B)
-           TXN7  read body 945B→ 3 byte prefisso + 936B report descriptor + pad
-→ runtime: per OGNI input report: IRQ → read hdr 9B (type=1 DATA) → read body (5+blen)
-  cadenza mediana runtime ~10 ms; 676 IRQ ↔ 677 header read nel boot trace
+┌─────────────────────────────────────────┐
+│ hidspi.sys (143KB) — HID protocol layer │
+│ Contiene TUTTO il codice MMIO per V0    │
+│ ✅ DECOMPILATO (con PDB)                │
+│ Funzioni: 0x3c20 (transfer), 0x4bac,    │
+│ 0x54d0 (submit_handler), 0x3528 (sub)   │
+│ Percorso V0: MMIO DIRETTO, no SpbCx     │
+└────────────┬────────────────────────────┘
+             │ (V0 path: direct MMIO)
+             ▼
+┌─────────────────────────────────────────┐
+│ amdspi.sys (232KB) — AMD FCH SPI driver │
+│ Contiene stesso codice MMIO + init WDF  │
+│ ❌ MAI DECOMPILATO (no PDB)             │
+│ MA: init = solo boilerplate WDF         │
+│ NESSUN registro SPI toccato nell'init   │
+│ Usato solo per path V1/SpbCx            │
+└────────────┬────────────────────────────┘
+             ▼
+    AMD FCH SPI Controller HW
+         (MMIO 0xFEC10000)
 ```
 
-- **Non esiste un report "ACK type 0"**: `03 00 00 00` è il body della reset response
-  (hidspi `ValidateResponse` ammette solo type {1,3,4,5,7,8}).
-- **Un interrupt per ogni input report** (spec §7.1.6); le body read NON hanno un secondo
-  IRQ: header+body si leggono nello stesso servizio dell'interrupt.
-- **RESET_RESP non sollecitata ripetuta** (il nostro caso, ~109 ms — periodo firmware,
-  non in spec) = il device segnala errore → per spec §6.1.3 l'host RIPARTE DALLA
-  DESCRIPTOR REQUEST (non dal reset).
+Il device **MSHW0231** usa il path **HidSpiDeviceV0** (pre-release).
+Il decomp che abbiamo è dal driver giusto. amdspi.sys ha codice init WDF 
+che non tocca registri SPI — verificato via objdump: nessun `add rax, 0x1D` 
+o simile nelle sezioni INIT/PAGE.
 
-## 3. Read approval: 5 byte, niente "approval bytes"
+---
 
-- Formato (spec §7.1.2 + `ReadingResponseHeaderEntry` @0x7da0):
-  `[0x0B][addr24 BE][0xFF]` = 5 byte trasmessi; i successivi byte della transazione
-  sono fase RX (header a partire dal 6° byte).
-- Header read = transazione da 9 byte (5 TX + 4 RX header).
-  Body read = 5 + blen, con `blen = (u16(hdr[1..2]) >> 4) * 4`
-  (identica a `(hdr[1]>>4 | hdr[2]<<4)*4`). Validare: `hdr[3]==0x5A`, `(hdr[1]&0xF)==0`.
-- **I "byte 7/8 di approval" (0x00/0x03/0x0A/0x04 nel CSV) sono spazzatura del buffer TX
-  riusato di hidspi** — il device non campiona MOSI dopo il 5° byte. Qualsiasi logica
-  `approval_byte7/8` nel driver va rimossa.
-- Indirizzo di read: 0x000000 fino al parse del device descriptor, poi wInputRegister
-  dal descriptor (sul nostro device resta 0x0000).
+## 2. Sequenza esatta Windows write path (0x54d0/0x4bac) — MMIO trace
 
-## 4. Come amdspi programma il controller (decomp, per exec_segment)
-
-**Write path 0x54d0 (opcode 0x02), sequenza MMIO:**
 ```
-1. ALT_CS 0x1D: read8 → &0xFC → |0x01 → write8
-2. FIFO clear: CTRL0 bit20 — UN SOLO SET (read-modify-write), non toggle
-3. write8(0x45, opcode)                      ← prima scrittura opcode
-4. CTRL0 |= 0x60040000 (secret bits, RMW; bit21/23 mai toccati) — una volta per segmento
-5. w = read16(0x44); n = read8(0x20) & 0xF;
-   w = (w & 0x00FF) | (n<<8) | (n<<12); write16(0x44, w)   ← clobbera 0x45!
-6. write8(0x45, opcode)                      ← SECONDA scrittura opcode
-7. write8(0x48, tx_len); fill FIFO da 0x80
-8. write8(0x4B, 0)                           ← RX_COUNT sempre 0 nelle write
-9. write8(0x47, 0x80) trigger
-10. poll 0x4C (NB: il poll Windows è buggato/no-op — non aspetta davvero;
-    il nostro poll su CTRL0 bit31 è più corretto e va tenuto)
-11. uscita: ALT_CS &0xFC (senza OR 1)
+1.  save 0x22:       readw(base+0x22), store context
+2.  ALT_CS:          read8(0x1D) → &0xFC → |0x01 → write8(0x1D)
+3.  FIFO clear:      read32(CTRL0) → |= BIT20 → write32(CTRL0)   [single-set, no toggle]
+4.  opcode #1:       write8(0x45, opcode)
+5.  secret bits:     read32(CTRL0) → |= 0x60040000 → write32     [bit23 MAI toccato]
+6.  0x44 dance:      read16(0x44); n = read8(0x20) & 0xF;
+                     w = (w & 0x00FF) | (n<<8) | (n<<12);
+                     write16(0x44, w)                              [clobbers 0x45!]
+7.  opcode #2:       write8(0x45, opcode)                          [re-write after 0x44]
+8.  TX_COUNT:        write8(0x48, tx_len)
+9.  FIFO fill:       write8(0x80+i, data[i]) for i in 0..tx_len-1
+10. RX_COUNT:        write8(0x4B, 0)                               [TX-only per write]
+11. trigger:         write8(0x47, 0x80)
+12. poll:            read8(0x4C), check bit31 busy [Windows: buggato/no-op]
+13. restore 0x22:    writew(base+0x22, saved)
+14. restore opcode:  write8(0x45, original_opcode)                 [0x4684 teardown]
+15. ALT_CS exit:     read8(0x1D) → &0xFC → write8                  [deselect CS]
 ```
-**Read path 0x3c20 (opcode 0x0B), ramo PIO:** identico tranne: TX_COUNT=3 (i 3 byte
-d'indirizzo in FIFO; l'opcode esce da 0x45; il byte 0xFF NON è trasmesso — è il primo
-clock RX), NIENTE dance 0x44, RX_COUNT=rx_len, risposta letta a **FIFO + TX_COUNT**
-(0x83). La variante 0x4bac usa RX_COUNT=rx_len+1 e legge a 0x84 (regola: offset
-risposta = 0x80 + TX_COUNT, skip = RX_COUNT − rx_len).
 
-- **Strobe 0x49/0x4A: NON ESISTONO in amdspi** (ricerca esaustiva nel binario). Solo-Linux.
-- L'unica differenza write-vs-read: la **dance del registro 0x44** (passi 5-6).
-  Effetto netto sui registri = nullo (0x45 riscritto) → probabile side-effect di latch
-  della write16 a 0x44. È il candidato n.1 per il blocco write.
-  NB il test precedente (H10) scriveva 0x44 PRIMA dell'opcode → no-op garantito; l'ordine
-  Windows (opcode → word 0x44 → opcode) NON è mai stato provato.
+**Read path (0x3c20):** identico tranne:
+- TX_COUNT=3 (3 byte indirizzo), NIENTE 0x44 dance
+- RX_COUNT=rx_len, risposta a FIFO+TX_COUNT (0x83)
 
-## 5. Device descriptor V0 (28 byte, layout tipo HID-over-I2C)
+---
 
-Body della risposta type=7: `[len16 LE = 31][ContentID]` (3 byte) + 28 byte contenuto + pad.
-Il contenuto inizia quindi a **body+3** (= header+4+3):
+## 3. Stato driver Linux — 2026-07-06
 
-| off | campo | note |
-|-----|-------|------|
-| 0 | wDeviceDescLength = 0x001C | validare ==28 |
-| 2 | bcdVersion | |
-| 4 | wReportDescLength | 936 sul nostro device |
-| 6 | **wReportDescRegister** | destinazione DESCREQ2 (=0x0002 qui) |
-| 8 | **wInputRegister** | nuovo indirizzo read post-parse (=0x0000 qui) |
-| 10 | wMaxInputLength | dimensiona le body read |
-| 12 | **wOutputRegister** | output/set-get-feature |
-| 14 | wMaxOutputLength | |
-| 16 | **wCommandRegister** | indirizzo SET_POWER (solo se flags lo dicono) |
-| 18/20/22 | VID / PID / bcdVersion | 0x045E / 0x0C19 |
-| 24 | dword flags | bit6/bit7 = supporto power command |
+### Read path — FUNZIONANTE ✓
+- `readb` (non `readw & 0xFF`), TX_COUNT=3, offset 0x83
+- 6 sync byte (non 5), header read 10B, parser a `&hdr[6]`
+- Body read: `blen + 6` byte, validazione header `0x5A`
+- CTRL0 = 0x60040000, no TXMODE bit23, ALT_CS CS1 (0x01)
 
-- Windows **non manda SET_POWER al boot** (i flag del descriptor decidono; e comunque
-  andrebbe a wCommandRegister, che prima del parse vale 0 → i test pre-enumerazione a
-  0x000001 non replicavano Windows).
-- Input report runtime: **type=1 (DATA)**, non type=7.
+### Write path — BLOCCATO ✗
+TUTTE le differenze con Windows sono state corrette — i registri sono bit-identici:
+- 0x44 dance con mask `0x00FF` (match Windows), opcode re-write dopo 0x44
+- FIFO clear single-set, trigger write8(0x47, 0x80)
+- 0x22 save/restore, opcode restore 0x0B post-transfer
+- RX_COUNT=0 write, full-duplex test, retry loop 0x80→0x4B+0x02→0x45
+- Busy poll su CTRL0 (più affidabile di Windows che non aspetta davvero)
+- **Il device ignora OGNI write (opcode 0x02) — solo read (0x0B) funzionano**
 
-## 6. I due device SPB (scoperta CSV)
+### Tentativi falliti
+- _RST, _PS3→_PS0→_RST, zero-touch BIOS state, delay 5s
+- Vendor init @0x04, read 0x04, input register 0x04
+- DESCREQ sincrono IRQ (~70µs), workqueue, 800KHz, 33MHz, CS0/CS1
 
-Il boot trace contiene DUE target SPB: il touchscreen HID (connection 0x0b, solo
-opcode 0x0B/0x02) e un **secondo device** (connection 0x18/0x19/0x1a) su cui avvengono
-TUTTI gli opcode 0x00/0x70/0xB0/0xB1/0x22/0x24-0x29: vendor init, upload firmware
-(121 blocchi 0xB0 = 28.924 B), secondo binario 0x22, cicli 0x24-0x29.
-**Lo stato VENDOR_INIT e fw_work del driver Linux mirano al device sbagliato e vanno
-rimossi dal path HID.** (Da capire in futuro se/quale nodo ACPI sia il secondo device
-e se il touch funzioni senza quell'upload dopo cold boot.)
+### Valori registri confermati (BIOS → Linux → Windows)
+| Registro | BIOS/Linux | Windows | Note |
+|----------|-----------|---------|------|
+| CTRL0 (0x00) | 0x6f8ca90b | +=0x60040000 | Identico |
+| CTRL1 (0x0C) | 0x02000000 | MAI toccato | BIOS-only |
+| ALT_CS (0x1D) | 0xB1 | (r&0xFC)\|0x01=0xB1 | Identico |
+| ENA (0x20) | 0x11110713 | low nibble=3 | Identico |
+| 0x44 | 0x0200 | →0x3300 dance | Identico |
+| 0x45 | 0x0B/0x02 | opcode ×2 | Identico |
+| 0x22 | 0x1111 | save/restore | Identico |
+| Speed | 33.33 MHz | da ACPI _CRS | Identico |
 
-## 7. Piano fix conseguente (una modifica → un test)
+---
 
-| # | Fix | Fonte |
-|---|-----|-------|
-| G0 | Baseline: build repo attuale + reload + dmesg | — |
-| G1 | Read Windows-shape: approval 5B (0B+addr24BE+FF via TX_COUNT=3+RX include FF), header read 9B, body read 5+blen, validazioni 0x5A/nibble; rimuovere approval_byte7/8 | §3, §4 |
-| G2 | Write path exec_segment: dance 0x44 (opcode→word 0x44→opcode), FIFO clear single-set | §4 |
-| G3 | Sequencer: header+body per IRQ; DESCREQ dopo body reset; NIENTE read post-write (aspettare IRQ, timeout 2 s); su RESET_RESP ripetuta ri-DESCREQ | §1, §2 |
-| G4 | Parse descriptor a body+3 (28B, validare 0x001C); DESCREQ2 a wReportDescRegister; input register/max length dal descriptor | §5 |
-| G5 | Rimuovere VENDOR_INIT/fw_work dal path HID; runtime su type=1 | §6, §5 |
+## 4. State machine V0 (62 stati)
+
+Flusso enumerazione standard:
+```
+resettingSync → _RST (GPIO reset 300ms)
+  → readResetResponse → header+body RESET_RSP (type=3)
+  → writeDescriptorRequest → DESCREQ @0x01 (10 byte, opcode 0x02)
+  → readDescriptorResponse → DEVICE_DESC (type=7)
+  → verifyDescriptor → DESCREQ2 @0x02
+  → readDescriptorResponse → RPT_DESC (type=8)
+  → ready → DATA (type=1)
+```
+
+Su RESET_RSP ripetuta: il device segnala errore → host RIPARTE DAL DESCREQ.
+
+---
+
+## 5. Surface_init.csv (cold boot) vs surface_boot_auto.csv (warm boot)
+
+### Cold boot (init trace, 513 transazioni):
+1. Vendor init WRITE @0x04: `02 00 00 04 82 00 00 04 00 01 01 0C EE 5B`
+2. IRQ 73µs dopo → READ 0x04 → header `12 60 03 5A` (type=1 DATA!)
+3. Dopo 2 cicli: header → `12 40 43 5A`, body 4281B (touch frame)
+4. **NON c'è DESCREQ!** Il device va direttamente in modalità DATA
+5. Più tardi: re-enumeration con comandi vendor (0xC2, 0x42, 0x82)
+6. Poi DESCREQ @0x01 → DEVICE_DESC → funziona
+
+### Warm boot (boot_auto trace):
+1. RESET_RSP @0x00 → DESCREQ @0x01 → DEVICE_DESC → funziona
+2. Il device è già stato inizializzato dal cold boot precedente
+
+### Companion device (conn 0x18/0x19/0x1a):
+- Inizializzato DOPO il touchscreen (gap ~962ms)
+- Riceve 121 firmware block (opcode 0xB0) — NON il touchscreen
+- Il touchscreen NON riceve firmware upload
+
+---
+
+## 6. Codifica header V0 (4 byte)
+
+```
+byte[0] = (type << 4) | 2      type: 1=DATA, 3=RESET_RSP, 7=DEVICE_DESC, 8=RPT_DESC
+byte[1-2] = body_len * 4 (LE)  es: 0x0010/4=4 (RESET_RSP), 0x0EB0/4=940 (RPT_DESC)
+byte[3] = 0x5A (V2 sync)
+```
+
+### Header osservati:
+| Header | Type | Body len | Contesto |
+|--------|------|----------|----------|
+| `12 60 03 5A` | 1 (DATA) | 216 | Cold boot iniziale |
+| `12 40 43 5A` | 1 (DATA) | 4304 | Touch frame pieno |
+| `32 10 00 5A` | 3 (RESET_RSP) | 4 | Reset response |
+| `72 80 00 5A` | 7 (DEVICE_DESC) | 32 | Device descriptor |
+| `82 B0 0E 5A` | 8 (RPT_DESC) | 940 | Report descriptor |
+
+---
+
+## 7. GPIO (da SSDT5 M009/M010)
+
+- **M084** (GPIO base) = puntatore in CPNV OperationRegion @0x7C7A3018+8
+- **M009(0x0103)**: Bank 1, Pin 3, legge `M084 + 0x1202 + pin*4`
+- **M010(0x0103, v)**: Bank 1, Pin 3, scrive 2-bit field a offset 6 con `(2|v)`
+- **M009(0x5B)**: Bank 0, Pin 91, legge `M084 + 0x1502 + pin*4`
+- **M010(0x5B, v)**: Bank 0, Pin 91, scrive output value
+- **0x0103**: RESET line (assetito LOW, rilasciato HIGH)
+- **0x5B**: POWER ENABLE (HIGH = acceso, LOW = spento)
+
+### Sequenze ACPI:
+- `_INI`: se spento → accende power (0x5B=1), sleep 300ms, rilascia reset (0x0103=1)
+- `_RST`: reset pulse (0x0103=0, sleep 300ms, 0x0103=1)
+- `_PS0`: se era D3 → accende power, rilascia reset
+- `_PS3`: se non D3 → assert reset, spegne power
+- WRST/NRST: stub vuoti (NOP)
+
+---
+
+## 8. Verifica assenza interferenze Linux
+
+- **Nessun driver Linux interferisce** (no upstream spi-amd, no pinctrl, no IRQ conflict)
+- **Nessuna init pre-driver Windows** (SpbCx non tocca registri, _INI solo GPIO)
+- **Nessun firmware upload** al touchscreen (solo companion)
+- **DKMS pulito** (moduli freschi, no conflitti)
+
+---
+
+## 9. Conclusione
+
+Il device **ignora qualsiasi write (opcode 0x02) su qualsiasi registro**,
+mentre tutte le read (opcode 0x0B) funzionano. I registri SPI sono
+bit-identici tra Windows e Linux. La sequenza MMIO è identica.
+
+**Causa più probabile**: differenza a livello fisico/elettrico —
+l'opcode 0x02 non viene riconosciuto dal device quando inviato dal
+controller AMD SPI sotto Linux. Possibili cause:
+1. Differenza di timing CS/clock tra Windows e Linux
+2. Controller errata su questa generazione FCH (Cezanne)
+3. Signal integrity a 33 MHz
+
+**Next step**: logic analyzer per confrontare i segnali SPI tra Windows e Linux.
