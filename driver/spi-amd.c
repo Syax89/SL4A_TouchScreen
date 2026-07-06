@@ -326,8 +326,10 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		u16 sp = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 op = amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG);
 		u8 tr = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
-		pr_err("spi-amd: WRITE PRE-TRIG c0=0x%08x st=0x%08x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x\n",
-			c0, st, al, sp, op, tr);
+		u32 ena = amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG);
+		u8 nib = (u8)(ena & 0xF);
+		pr_err("spi-amd: WRITE PRE-TRIG c0=0x%08x st=0x%08x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x ena20=0x%08x nib=%u\n",
+			c0, st, al, sp, op, tr, ena, nib);
 	}
 
 	ret = amd_spi_execute_opcode(amd_spi);
