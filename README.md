@@ -1,111 +1,33 @@
-# SL4A_TouchScreen — Linux Driver for Surface Laptop 4 AMD Touchscreen
+# SL4A_TouchScreen
 
-Linux HID-over-SPI driver for the Microsoft Surface Laptop 4 (AMD) touchscreen
-(ACPI HID `MSHW0231`, SPI controller `AMDI0060`).
+> Linux HID-over-SPI driver for the Microsoft Surface Laptop 4 (AMD) touchscreen
 
-Windows supports this hardware via `amdspi.sys` + `hidspicx.sys` (drivers downloaded
-through Windows Update, not included in the base OS image).
-This project reverse-engineers the Windows driver protocol to implement a native
-Linux kernel driver.
+[![Status](https://img.shields.io/badge/status-software%20exhausted-red)](https://github.com/Syax89/SL4A_TouchScreen)
+[![Hardware](https://img.shields.io/badge/next%20step-logic%20analyzer-blue)](#next-step)
+[![License](https://img.shields.io/badge/license-GPL--2.0%20%7C%20BSD--3-orange)](LICENSE)
+
+---
+
+## What is this?
+
+A **reverse-engineered Linux kernel driver** for the `MSHW0231` touchscreen controller used in the Surface Laptop 4 (AMD). Windows ships with proprietary drivers (`amdspi.sys` + `hidspi.sys`) downloaded via Windows Update. This project reverse-engineers their behavior to produce a native Linux driver.
+
+---
 
 ## Status
 
-**Software exhausted — logic analyzer (or a live JTAG/WinDbg kernel debug rig on a
-second machine) is required to go further.**
+**Reads work.** Writes don't. Every software avenue has been exhausted.
 
-The SPI bus communication works: reads (opcode 0x0B) produce correct HID data
-(verified bit-identical to Windows traces). The device ignores all write operations
-(opcode 0x02) — DESCREQ, vendor init, all write transactions fail regardless of
-SPI mode, speed, trigger method, or register configuration. This has been verified
-on a genuinely pristine boot (no prior driver ever touched the device this boot —
-see [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §15.9), ruling out any
-possibility of leftover/corrupted controller state from an earlier probe.
+| Path | Status |
+|------|--------|
+| Reads (opcode `0x0B`) | Working — bit-identical to Windows traces |
+| Writes (opcode `0x02`) | **Blocked** — device ignores all writes regardless of config |
 
-### PCI 0xB8 bit7 (16-bit FIFO mode) — fixes read layout, not the write block
+The prime suspect is **CTRL0 bits [15:8]**: Windows = `0x0E`, Linux = `0xA9` (immutable from software). These bits control chip-select timing — a wrong value could invalidate the electrical framing of writes. A **logic analyzer** on SCK/MOSI/MISO/CS is the only remaining path forward.
 
-The FCH LPC bridge (1022:790e, device 00:14.3) has a PCI config register at
-offset 0xB8 that controls FIFO access mode:
+Full details: [`docs/DRIVER_STATE.md`](docs/DRIVER_STATE.md) and [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §15.
 
-```
-# Linux default (8-bit FIFO — byte-interleaved reads)
-setpci -s 00:14.3 B8.L
-# → 0x33ED0004
-
-# Windows value (16-bit FIFO — correct byte ordering)
-setpci -s 00:14.3 B8.L=0x33ED0084
-```
-
-With bit7=1, the FIFO returns 16-bit words. The correct byte extraction formula:
-```c
-for (i = 0; i < rx_len; i++) {
-    u16 w = readw(base + read_off + (i/2)*2);
-    dst[i] = (i & 1) ? (u8)(w >> 8) : (u8)(w & 0xFF);
-}
-```
-
-This produces the expected HID response: `FF FF FF FF FF FF 32 10 00 5A`.
-
-PCI offset 0xB4 (Windows: `0x7DFFE000`, Linux: `0x00000000`) controls FIFO data
-layout and sync byte count. Both 0xB4 and 0xB8 are writable via setpci and were
-retested with the correct full 32-bit values — no effect on the write path.
-
-**Write operations (opcode 0x02) still fail** even with 16-bit FIFO mode, correct
-PCI 0xB4/0xB8 values, and every other software knob tried (see the exhaustive test
-matrix in `docs/GROUND_TRUTH.md` §3 and §15). The AMD FCH Cezanne SPI controller
-under Linux cannot produce a valid write signal that the MSHW0231 touchscreen
-recognizes. A logic analyzer on SCK/MOSI/MISO/CS is the only remaining path.
-
-### Everything else ruled out (2026-07-06/07 session)
-
-Beyond the original register/protocol test matrix, the following were investigated
-and empirically excluded as the cause (all with real hardware tests, not just
-theory — details in `docs/GROUND_TRUTH.md` §15):
-
-- **AMD "SPI Lock" mechanism** (`RomProtect`, `SpiProtectEn0/Lock`, `SPIRestrictedCmd`/`2`)
-  — the exact same mechanism `fwupd` uses to detect BIOS flash write-protection.
-  All four registers are byte-identical between Windows and Linux on this machine.
-- **Extended PCI config space** of Root Complex, IOMMU, SMBus, and all 8 Data Fabric
-  functions — only one Data Fabric register differed, tested live, no effect.
-- **`iommu=off`/`amd_iommu=off`** — no effect.
-- **WPP-level driver tracing** of `hidspi.sys` (real Windows internals, not just
-  MMIO snapshots) confirms opcode 0x02 writes genuinely succeed on Windows on this
-  exact hardware — closing any doubt that the "Windows works" assumption itself
-  might be wrong.
-- **Protocol version**: confirmed (independently, by a linux-surface maintainer on
-  the LKML thread proposing upstream `spi-hid`) that this device uses the legacy
-  `SPI_HID_SUPPORTED_VERSION = 0x0100`, not the publicly documented v1.0
-  (`0x0300`) spec — explains why the public Microsoft PDF spec doesn't fully match
-  this device's behavior, but the difference is purely at the protocol/addressing
-  level, not something that explains the write block itself.
-- **A stray unsigned copy of an old build of this very driver baked into the boot
-  initramfs**, auto-loading before any other software could touch the device —
-  found and fixed (see §15.9), then re-tested on a provably virgin boot: same
-  failure. Ruled out.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│ spi-hid.ko (spi-hid-core.c)                 │
-│  - HID-over-SPI protocol state machine      │
-│  - Device discovery (DESCREQ/DESCREQ2)       │
-│  - Firmware upload (B0 blocks)              │
-│  - HID report forwarding                    │
-└───────────────┬─────────────────────────────┘
-                │ Linux SPI framework
-┌───────────────┴─────────────────────────────┐
-│ spi-amd.ko (spi-amd.c)                      │
-│  - AMD FCH SPI controller V2                │
-│  - FIFO management (70-byte FIFO at 0x80)   │
-│  - Combined TX+RX transfers                 │
-└───────────────┬─────────────────────────────┘
-                │ MMIO
-┌───────────────┴─────────────────────────────┐
-│ AMD FCH SPI controller @ 0xFEC10000         │
-│  - V2 path with registers 0x45-0x4B         │
-│  - 16-bit FIFO access                       │
-└─────────────────────────────────────────────┘
-```
+---
 
 ## Hardware
 
@@ -113,110 +35,205 @@ theory — details in `docs/GROUND_TRUTH.md` §15):
 |-----------|--------|
 | Device | Surface Laptop 4 (AMD) |
 | Touchscreen ACPI HID | `MSHW0231` (falls back to `PNP0C51`) |
-| SPI Controller | `AMDI0060` (AMD FCH V2) |
+| SPI Controller | `AMDI0060` (AMD FCH Cezanne) |
 | MMIO Base | `0xFEC10000` |
-| FIFO Size | 70 bytes |
-| GPIO IRQ | Pin `0x55` (da ACPI), Power=`0x5B`, Reset=`0x0103` |
-| SPI Speed | 33.33 MHz, MODE 0 (CPOL=0, CPHA=0) |
-| SPI Mode | MODE 0 (ClockPolarityLow, ClockPhaseFirst) |
+| FIFO | 70 bytes at `0x80` |
+| GPIO IRQ | Pin `0x55` (DSDT), Power=`0x5B`, Reset=`0x0103` |
+| SPI Mode | MODE 0 (CPOL=0, CPHA=0) at 33.33 MHz |
+| Protocol | HID-over-SPI **V0** (pre-release, "version 2" wire format) |
 
-## Key Source Files
+**Key finding**: the system has **two SPB devices**:
 
-| File | Contents |
-|------|----------|
-| `driver/spi-hid-core.c` | HID-over-SPI protocol implementation |
-| `driver/spi-hid-core.h` | Protocol constants and data structures |
-| `driver/spi-amd.c` | AMD SPI controller V2 driver |
-| `driver/spi-amd.h` | SPI controller definitions |
+| Device | Connection | Opcodes | Purpose |
+|--------|-----------|---------|---------|
+| **A** — Touchscreen | `0x0B` | `0x0B`, `0x02` | HID input reports, descriptor discovery |
+| **B** — Companion chip | `0x18`, `0x19`, `0x1A` | `0x00`, `0x70`, `0xB0`, `0xB1`, `0x22`, ... | Activation, firmware upload |
 
-## HID-over-SPI Protocol
+The touchscreen receives **only** reads (`0x0B`) and writes (`0x02`) — no firmware, no vendor activation.
 
-The Microsoft HID-over-SPI protocol is documented in the public specification
-(`docs/HidSpiProtocolSpec.pdf`). Key protocol elements:
+---
 
-- **Read Approval (0x0B)**: Read device data with register addressing
-- **Output Write (0x02)**: Send commands (DESCREQ, DESCREQ2)
-- **Activation (0x00, 0x70)**: Vendor-specific init commands
-- **Firmware Upload (0xB0)**: 120 blocks × 241 bytes
+## Architecture
 
-### Device Initialization Sequence (from Windows CSV traces, 2384 transactions, ~88s total)
+```
+┌──────────────────────────────────────┐
+│  spi-hid.ko (driver/spi-hid-core.c)  │
+│  HID-over-SPI protocol state machine │
+│  · Device discovery (DESCREQ/2)      │
+│  · Reset Response drain              │
+│  · Runtime HID input reports (type 1)│
+└──────────────┬───────────────────────┘
+               │ Linux SPI framework
+┌──────────────┴───────────────────────┐
+│  spi-amd.ko (driver/spi-amd.c)       │
+│  AMD FCH SPI controller driver (V2)  │
+│  · TX-only writes + GPIO-gated reads │
+│  · Secret bits (CTRL0: 30,29,18)     │
+│  · 16-bit FIFO mode (PCI 0xB8 bit7)  │
+└──────────────┬───────────────────────┘
+               │ MMIO
+┌──────────────┴───────────────────────┐
+│  AMD FCH SPI Controller @ 0xFEC10000 │
+└──────────────────────────────────────┘
+```
 
-1. Device resets → sends `RESET_RSP` (type=3) via 0x0B read
-2. After ~168 µs, device auto-advances → sends `ACK` (type=0)
-3. Host sends `DESCREQ` (opcode 0x02) → device acknowledges inline; GPIO IRQ fires ~62µs later
-4. Host does 0x0B read → receives `DEVICE_DESC` (type=7, Vendor=0x045E, Product=0x0C19)
-5. Host parses device descriptor → sends `DESCREQ2` → receives `RPT_DESC` (type=8, 936 bytes)
-6. Activation commands (`cmd1`/`cmd2`/`cmd3`)
-7. Firmware upload (120 B0 blocks, 241 bytes each — for companion device, NOT touchscreen)
-8. Second binary upload (0x22) for companion device
-9. Runtime HID reports: 4304B full frames, 216B heatmap frames, alternating ~10 frames
+---
+
+## Protocol
+
+The device uses the **HidSpiDeviceV0** path (pre-release protocol), not the public v1.0 spec.
+
+### Wire format (V0, "version 2")
+
+```
+Header: [TYPE:4|VERSION:4] [u16 LE] [0x5A]
+        version = 2, low nibble of u16 must be 0
+Body:   [len16 LE = content+3] [ContentID] [content...]
+```
+
+### Report types
+
+| Type | Name | When |
+|------|------|------|
+| `1` | DATA | Runtime input reports |
+| `3` | RESET_RSP | Device reset signal |
+| `7` | DEVICE_DESC | 28-byte device descriptor |
+| `8` | RPT_DESC | 936-byte HID report descriptor |
+
+### Touchscreen init sequence (from Windows ETW traces)
+
+```
+GPIO IRQ → 0x0B read 9B → RESET_RSP header (32 10 00 5A)
+         → 0x0B read 9B → RESET_RSP body   (03 00 00 00)   ← same report, not "ACK"
+         → 0x02 write 10B → DESCREQ (register 0x000001)      ← TX-only
+         → GPIO IRQ (~58 µs)
+         → 0x0B read 9B → DEVICE_DESC header (72 80 00 5A)
+         → 0x0B read 37B → device descriptor body
+            VID=0x045E, PID=0x0C19, Ver=0x0100
+         → 0x02 write 10B → DESCREQ2 (register 0x000002)     ← TX-only
+         → GPIO IRQ (~727 µs)
+         → 0x0B read 9B → RPT_DESC header (82 B0 0E 5A)
+         → 0x0B read 945B → 936-byte HID report descriptor
+         ~ runtime HID input reports (type=1) ~
+```
+
+---
 
 ## Building
 
 ```bash
-# Build SPI controller driver
-make LLVM=1 -C /lib/modules/$(uname -r)/build M=$HOME/spi-amd-v2-multi modules
+# SPI controller driver
+make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
 
-# Build HID driver
-make LLVM=1 -C /lib/modules/$(uname -r)/build M=$HOME/spi-hid/driver modules
+# Or for HID-only:
+make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver -f Makefile.hid modules
 ```
 
-## Loading
+### Load
 
 ```bash
-# Unload old modules
 sudo rmmod spi_hid spi_amd 2>/dev/null
-
-# Load new modules
-sudo insmod ~/spi-amd-v2-multi/spi-amd.ko
-sudo insmod ~/spi-hid/driver/spi-hid.ko
-
-# Or install to DKMS
-sudo cp ~/spi-amd-v2-multi/spi-amd.ko ~/spi-hid/driver/spi-hid.ko \
-        /lib/modules/$(uname -r)/updates/dkms/
-sudo depmod -a
-sudo modprobe spi_hid
+sudo insmod driver/spi-amd.ko
+sudo insmod driver/spi-hid.ko
 ```
 
-## Debugging
+### Debug
 
 ```bash
-# Monitor driver activity
-sudo dmesg -w | grep -E "SEQ|spi-amd"
-
-# Trigger module reload
-sudo rmmod spi_hid; sudo rmmod spi_amd
-sudo insmod ~/spi-amd-v2-multi/spi-amd.ko
-sudo insmod ~/spi-hid/driver/spi-hid.ko
+sudo dmesg -w | grep -E "SEQ|spi-amd|spi-hid"
 ```
 
-## Fixes Applied
+---
 
-Verified against Windows decomp (`amdspi.sys`, `hidspi.sys`) and ETW CSV traces:
+## PCI Configuration
 
-| Fix | Description |
-|-----|-------------|
-| C1 | ALT_CS encoding: use `AND 0xFC, OR 0x01` like Windows |
-| C2 | Secret bits applied per-segment in `exec_segment` |
-| C4 | `memcpy` offset `+4` in descriptor parse |
-| C5 | `input_register` default `0x0000` (was `0x1000`) |
-| C6 | `approval7 = 0x03` post-DESCREQ, `0x0A` at runtime |
-| C7 | `approval8 = 0x00` always |
-| FIFO | PCI 0xB8 bit7 16-bit mode: `readw` with byte extraction |
-| HDR | Dynamic 0x5A search in header parser (3 or 6 sync bytes) |
+The FCH LPC bridge (`1022:790e`, device `00:14.3`) needs two registers set to match Windows:
+
+```bash
+# 16-bit FIFO access mode (fixes byte ordering on reads)
+sudo setpci -s 00:14.3 B8.L=0x33ED0084
+
+# FIFO data layout
+sudo setpci -s 00:14.3 B4.L=0x7DFFE000
+```
+
+With `0xB8` bit7=1, data must be read as 16-bit words:
+```c
+for (i = 0; i < rx_len; i++) {
+    u16 w = readw(base + read_off + (i/2)*2);
+    dst[i] = (i & 1) ? (u8)(w >> 8) : (u8)(w & 0xFF);
+}
+```
+
+---
+
+## What's been ruled out (exhaustive)
+
+| Category | Tests |
+|----------|-------|
+| SPI modes | 0, 1, 2, 3 |
+| Speeds | 800 KHz through 33 MHz |
+| Triggers | V1 (CTRL0 bit16), V2 (0x47 bit7), hardcoded 0x80 |
+| PCI config | 0xB4, 0xB8 (full 32-bit values), extended config space of 11 devices |
+| MMIO | CTRL1, 0x44 dance, TXMODE, CS selection, opcode prepend, FIFO variants |
+| ACPI | Full power cycle (_PS3→_PS0→_RST), GPIO M009/M010 toggle |
+| Protocol | Vendor init @0x04, synchronous/async DESCREQ, IRQ timing |
+| Kernel | `iommu=off`, `amd_iommu=off`, SME, clean boot (no stale module) |
+| PCI lock | RomProtect, SpiProtectEn, SPIRestrictedCmd — identical Windows/Linux |
+| WPP tracing | Confirmed: Windows `hidspi.sys` succeeds with opcode 0x02 on this hardware |
+
+Full test matrix: [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §3 and §15.
+
+---
+
+## Tools
+
+| Tool | Path | Description |
+|------|------|-------------|
+| `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, GPIO) |
+| `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
+| `decode_hidspi.py` | `tools/decode_hidspi.py` | HID-over-SPI protocol decoder |
+| `mmio_write.c` | `tools/diagnostics/mmio_write.c` | Raw MMIO test module |
+| `gpio_test.c` | `tools/gpio_test.c` | GPIO power/reset via ACPI |
+| `test_coldboot.sh` | `tools/test_coldboot.sh` | Virgin-boot test harness |
+
+---
 
 ## Documentation
 
-- `docs/GROUND_TRUTH.md` — Cross-verified ground truth model (CSV × decomp × ACPI × PCI × tests × WPP tracing); the single source of truth, see especially §15 for the final exhaustive close-out
-- `docs/SPI_REGISTERS.md` — AMD FCH SPI + PCI config register map, CTRL0 bits, V1/V2 paths
-- `docs/DRIVER_STATE.md` — Current driver status, test matrix, PCI findings
-- `docs/VERIFICATION_FINDINGS.md` — Independent sub-agent verification of SPI/HID/ACPI code, 8 critical bugs found and fixed
-- `docs/VERIFICATION_PLAN.md` — Phased verification methodology used throughout the project
-- `docs/AMDSPI_DECOMP.md` — `amdspi.sys` decompilation analysis
-- `docs/HIDSPI_PROTOCOL.md` — HID-over-SPI protocol and state machine
-- `docs/CSV_SEQUENCE.md` — Windows boot sequence from ETW traces
-- `docs/SESSION_2026-07-06.md` — Session log of the final exhaustive debugging pass
+| File | Contents |
+|------|----------|
+| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | **Single source of truth** — cross-verified model (CSV × decomp × ACPI × PCI × tests) |
+| [`docs/DRIVER_STATE.md`](docs/DRIVER_STATE.md) | Status, test matrix, PCI findings, next steps |
+| [`docs/SPI_REGISTERS.md`](docs/SPI_REGISTERS.md) | AMD FCH SPI + PCI config register map |
+| [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol and touchscreen behavior |
+| [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md) | Annotated Windows boot SPI trace (2384 transactions) |
+| [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md) | `amdspi.sys` decompilation with function index |
+| [`docs/VERIFICATION_FINDINGS.md`](docs/VERIFICATION_FINDINGS.md) | Independent code audit — 8 bugs found and fixed |
+| [`docs/VERIFICATION_PLAN.md`](docs/VERIFICATION_PLAN.md) | Phased verification methodology |
+| [`docs/SESSION_2026-07-06.md`](docs/SESSION_2026-07-06.md) | Final debugging session log |
+| [`docs/analisi_MSHW0231.md`](docs/analisi_MSHW0231.md) | Touchscreen register/feature analysis |
+| [`docs/decomp/amdspi/DECOMP-INDEX.md`](docs/decomp/amdspi/DECOMP-INDEX.md) | Authoritative function index for amdspi.sys |
+
+### Verification reports
+
+| File | Verdict |
+|------|---------|
+| [`docs/verification/amdspi-decomp-report.md`](docs/verification/amdspi-decomp-report.md) | SPI controller register-level verification |
+| [`docs/verification/protocol-verification-report.md`](docs/verification/protocol-verification-report.md) | HID protocol verification (spec + decomp + CSV) |
+| [`docs/verification/csv-verification-report.md`](docs/verification/csv-verification-report.md) | CSV trace ground-truth verification |
+
+---
+
+## Next step
+
+**Logic analyzer** on SCK/MOSI/MISO/CS between Windows and Linux.
+
+Without a physical measurement of the SPI bus electrical signals, no software fix is possible. The CTRL0[15:8] timing bits are the prime suspect; a logic analyzer will confirm whether the write framing is electrically valid on Linux.
+
+---
 
 ## License
 
-Dual GPL-2.0 / BSD-3-Clause. See source file headers.
+Dual **GPL-2.0** / **BSD-3-Clause**. See source file headers.
+
