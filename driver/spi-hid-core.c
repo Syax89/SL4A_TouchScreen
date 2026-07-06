@@ -1165,10 +1165,13 @@ static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *r
 }
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
-	if (len < 4)
-		return -1;
-	if (rx[3] == 0x5A && (rx[0] & 0x0F) == 2 && (rx[1] & 0xF) == 0)
-		return (rx[0] >> 4) & 0xF;
+	int i;
+	for (i = 3; i < len; i++) {
+		if (rx[i] == 0x5A && (rx[i-3] & 0x0F) == 2) {
+			if (hdr_off) *hdr_off = i - 3;
+			return (rx[i-3] >> 4) & 0xF;
+		}
+	}
 	return -1;
 }
 
