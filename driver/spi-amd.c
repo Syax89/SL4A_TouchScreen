@@ -326,6 +326,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 
 	if (opcode == 0x02) {
 		u32 c0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
+		u32 c1 = readl(base + 0x0C);
 		u32 st = readl(base + AMD_SPI_STATUS_REG);
 		u8 al = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
 		u16 sp = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
@@ -333,8 +334,8 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		u8 tr = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
 		u32 ena = amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG);
 		u8 nib = (u8)(ena & 0xF);
-		pr_err("spi-amd: WRITE PRE-TRIG c0=0x%08x st=0x%08x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x ena20=0x%08x nib=%u\n",
-			c0, st, al, sp, op, tr, ena, nib);
+		pr_err("spi-amd: WRITE PRE-TRIG c0=0x%08x c1=0x%08x st=0x%08x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x ena=0x%08x nib=%u\n",
+			c0, c1, st, al, sp, op, tr, ena, nib);
 	}
 
 	ret = amd_spi_execute_opcode(amd_spi);
@@ -628,12 +629,14 @@ static int amd_spi_probe(struct platform_device *pdev)
 	/* Dump initial CTRL0 value (BIOS/UEFI preset) */
 	{
 		u32 c0 = readl(amd_spi->io_remap_addr + 0x00);
+		u32 c1 = readl(amd_spi->io_remap_addr + 0x0C);
 		u32 st = readl(amd_spi->io_remap_addr + 0x4C);
 		u16 r44 = readw(amd_spi->io_remap_addr + 0x44);
 		u8 r45 = readb(amd_spi->io_remap_addr + 0x45);
 		u8 r1d = readb(amd_spi->io_remap_addr + 0x1D);
-		dev_info(dev, "BIOS regs: CTRL0=0x%08x STATUS=0x%08x 0x44=0x%04x 0x45=0x%02x 0x1D=0x%02x\n",
-			 c0, st, r44, r45, r1d);
+		u32 ena = readl(amd_spi->io_remap_addr + 0x20);
+		dev_info(dev, "BIOS regs: CTRL0=0x%08x CTRL1=0x%08x ENA=0x%08x STATUS=0x%08x 0x44=0x%04x 0x45=0x%02x 0x1D=0x%02x\n",
+			 c0, c1, ena, st, r44, r45, r1d);
 	}
 
 	amd_spi->version = (uintptr_t)device_get_match_data(dev);
