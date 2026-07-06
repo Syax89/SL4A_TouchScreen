@@ -2,6 +2,10 @@
 
 Extracted from `surface_boot_auto.csv` — ETW trace of a Windows boot on the Surface Laptop 4 AMD.
 
+> **UPDATE 2026-07-06**: Corretto sulla base di `verification/csv-verification-report.md`.
+> Il concetto di "ACK", l'auto-cambiamento di stato del device, gli "approval bytes"
+> come campi di protocollo e il vendor ID sbagliato sono stati fixati.
+
 ## Summary Statistics
 
 | Metric | Value |
@@ -13,20 +17,24 @@ Extracted from `surface_boot_auto.csv` — ETW trace of a Windows boot on the Su
 | Source file | `surface_boot_auto.csv` |
 | Timestamp | 100ns units (ETW Clock-Time) |
 
-### Protocol status byte (approval byte a8)
-| Value | Phase |
-|--------|------|
-| 0x00 | Init / pre-DESCREQ |
-| 0x03 | Post-DESCREQ (descriptors received) |
-| 0x04 | Runtime (post init) |
+### Two SPB devices exist in the trace
+
+| | Handle | Connection | Opcodes | Transactions |
+|---|---|---|---|---|
+| **Device A** — touchscreen | `0x7F74AA5D37F8` | 0x0B | 0x0B, 0x02 | 1,357 |
+| **Device B** — companion | `0x7F74AA5D7B88` | 0x18, 0x19, 0x1A | 0x00, 0x70, 0xB0, 0xB1, 0x28, 0x22... | 1,027 |
+
+The activation commands (0x00/0x70) and firmware uploads (0xB0) belong to **Device B**, NOT the touchscreen.
 
 ### Firmware operation detail
-- **120 FW blocks (0xB0)** for the companion device, NOT for the touchscreen
+- **120 FW blocks (0xB0)** for the companion device (Device B), NOT for the touchscreen
 - **Second binary upload (0x22)** for the companion device
 - The touchscreen does NOT receive a firmware upload
+- The touchscreen does NOT receive activation commands (0x00/0x70)
 
-### Device descriptor
+### Device descriptor (Device A — touchscreen)
 - Vendor=0x045E (Microsoft), Product=0x0C19, Version=0x0100
+- wInputRegister=0x0000, wOutputRegister=0x0003, wReportDescRegister=0x0002
 
 ---
 
@@ -43,155 +51,181 @@ Each row contains comma-separated fields. Relevant fields:
 ## Conventions
 
 - **Opcode**: the first byte of the TX payload is the SPI opcode
-- **Sync bytes**: 5 bytes of `0xFF` before the HID header
-- **HID header** (RESET_RSP/DEVICE_DESC/RPT_DESC): 4 bytes `[TYPE][LEN_LOW][LEN_HIGH][0x5A]`
-- **Descriptor data header** (TXN#8): 3 bytes `[TYPE][LEN_LOW][LEN_HIGH]` — 0x75 is the first data byte, NOT 0x5A
+- **0xFF in MISO**: the host transmits 0xFF as placeholder during the read approval (MOSI byte 5). These are NOT "sync bytes from the device" — they are transmitted by the HOST.
+- **HID header** (V0 format): 4 bytes `[TYPE:4|VERSION:4][LEN_HIGH][LEN_LOW][0x5A]`
+- **Descriptor data prefix** (body): 3 bytes `[len16 LE = content+3][ContentID]` before actual content
 - **Report type**: `(TYPE >> 4) & 0xF`, version: `TYPE & 0x0F` == 2
-- **Approval bytes**: bytes 7 and 8 of the 0x0B TX payload
+- **"Approval bytes" in TX**: bytes 6-8 of the 9-byte 0x0B read approval are **residual buffer data** from a previous write, not intentional protocol fields. The device does not sample MOSI after byte 4 of the read approval.
 
 ---
 
-## PHASE 1: Reset and Discovery (~0-2000 µs, 8 transactions)
+## PHASE 1: Reset Response (Device A — touchscreen)
 
-### TXN #1 — First 0x0B Read (lines 63-73)
+### TXN #0 — First 0x0B Read (Reset Response Header)
 ```
 PayloadStart: total=18 bytes, transfers=2
 ┌─ TX ToDevice:  9 bytes ─────────────────────────────┐
 │ 0B 00 00 00 FF 00 00 00 00                         │
-│ │  └──────────────┘ └┘ └─┘ └─┘                    │
-│ opcode  addr=0x0000  FF pad  approval7=0x00        │
-│           (register 0)          approval8=0x00      │
+│ │  └──────────────┘ └┘ └──── dummy ────┘           │
+│ opcode  addr=0x0000  FF pad (placeholder for device) │
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 9 bytes ────────────────────────────┐
 │ FF FF FF FF FF 32 10 00 5A                          │
-│ └─sync (5)──┘ └─header──┘                          │
+│ └─host TX──┘ └─header──┘                          │
 │ TYPE=0x32 → (3<<4)|2 = RESET_RSP type=3            │
-│ body_length = (0x10>>4)|(0x00<<4) = 1 → *4 = 4      │
+│ body_length = 0x1000>>4 = 0x100 → *4 = 4 bytes      │
 └─────────────────────────────────────────────────────┘
-⏱ Total duration: ~6.3 µs (63 ticks of 100ns)
+⏱ Total duration: ~6.3 µs (ETW event span, not bus time)
 ```
 
-### TXN #2 — Second 0x0B Read (lines 80-90)
+### TXN #1 — Second 0x0B Read (Reset Response Body)
 ```
 PayloadStart: total=18, transfers=2
 ┌─ TX ToDevice:  9 bytes ─────────────────────────────┐
-│ 0B 00 00 00 FF 00 00 00 00   (IDENTICAL to the first)│
+│ 0B 00 00 00 FF 00 00 00 00   (same read approval)   │
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 9 bytes ────────────────────────────┐
 │ FF FF FF FF FF 03 00 00 00                          │
-│ └─sync──┘ └─ACK──┘                                 │
-│ ACK pattern: 03 00 00 00 (device READY!)           │
+│ └─host TX──┘ └─reset response body──┘             │
+│ Body: 03 00 00 00 = len16=3 (content_len 0 + 3)     │
+│       ContentID=0, 1 pad byte                       │
+│ This is the BODY of the RESET_RSP, NOT a separate    │
+│ "ACK" report. The two reads are header+body of the   │
+│ SAME Reset Response input report.                    │
 └─────────────────────────────────────────────────────┘
-⏱ Gap from TXN #1: ~168 µs
+⏱ Gap from TXN #0: ~168 µs (body read follows header)
 ⏱ Duration: ~5.5 µs
 
-🔑 KEY INSIGHT: the device changes state between TXN #1 and TXN #2
-   with no command at all! Elapsed time alone (~168 µs)
-   makes the device go from RESET_RSP to ACK.
+KEY CORRECTION: The device does NOT "change state on its own."
+TXN #0 reads the header (type=3, len=4), TXN #1 reads the body.
+No command was sent because none is needed — both reads belong
+to the same Reset Response input report per the HID-over-SPI protocol.
 ```
 
-### TXN #3 — DESCREQ (lines 97-108)
+---
+
+## PHASE 2: Device Discovery (Device A — touchscreen)
+
+### TXN #2 — DESCREQ (Write)
 ```
-PayloadStart: total=20, transfers=2
+PayloadStart: total=20, transfers=2 (full-duplex)
 ┌─ TX ToDevice: 10 bytes ─────────────────────────────┐
 │ 02 00 00 01 42 00 00 03 00 00                       │
-│ │  └──???──┘ └??┘ └??┘ └??┘ └??┘                   │
-│ opcode 0x02 = DESCREQ                               │
+│ │  └──addr──┘ └─len?──┘ └pad?┘                     │
+│ opcode 0x02 = output report write                    │
+│ register address 0x000001 (descriptor request)       │
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 10 bytes ───────────────────────────┐
 │ FF FF FF FF FF 03 00 00 00 00                       │
-│ └─sync──┘ └───ACK────┘                             │
-│ DESCREQ acknowledged!                                │
+│ └─host TX──┘ └──MISO during write──┘               │
+│ MISO shows residual data — the driver does NOT read  │
+│ the FIFO after a write (RX_COUNT=0).                 │
 └─────────────────────────────────────────────────────┘
-⏱ Gap from TXN #2: ~147 µs
-⏱ Duration: ~5.6 µs
+⏱ Gap from TXN #1: ~147 µs
+⏱ Duration: ~5.6 µs (ETW span)
 ```
 
-### 🔴 GPIO IRQ (lines 120-121) — After DESCREQ
+### GPIO IRQ — After DESCREQ
 ```
 GPIO-ClassExtension: InterruptInvokeDeviceIsrStart
 GPIO-ClassExtension: InterruptInvokeDeviceIsrComplete
-⏱ After DESCREQ: ~58 µs
+⏱ After DESCREQ IoComplete: ~58 µs
 ⏱ ISR duration: ~1 µs
-Pin: 0x15, Flags: 0x409 (level-triggered active-high)
+Pin: 0x15 (ETW), 0x55 in DSDT
 ```
 
-### TXN #4 — 0x0B Read (post-DESCREQ, lines 128-139)
+### TXN #3 — 0x0B Read (Device Descriptor Header)
 ```
 PayloadStart: total=18, transfers=2
 ┌─ TX ToDevice: 9 bytes ──────────────────────────────┐
 │ 0B 00 00 00 FF 00 00 03 00                          │
 │                         └─┘                          │
-│              approval7=0x03 (CHANGED from 0x00!)    │
+│              byte7=0x03 (buffer residual, NOT a      │
+│              protocol field — see note above)        │
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 9 bytes ────────────────────────────┐
 │ FF FF FF FF FF 72 80 00 5A                          │
-│ └─sync──┘ └─header──┘                              │
-│ TYPE=0x72 → (7<<4)|2 = DEVICE_DESC type=7 !!!      │
-│ body_length = (0x80>>4)|(0x00<<4) = 8 → *4 = 32     │
+│ └─host TX──┘ └─header──┘                           │
+│ TYPE=0x72 → (7<<4)|2 = DEVICE_DESC type=7           │
+│ body_length = 0x8000>>4 = 0x800 → *4 = 32 bytes     │
 └─────────────────────────────────────────────────────┘
-⏱ Gap from GPIO IRQ: ~112 µs
+⏱ Gap from GPIO IRQ: ~112 µs (actually ~10 µs — see csv-verification-report)
 ⏱ Duration: ~5.4 µs
 ```
 
-### TXN #5 — 0x0B Read, 37 bytes (lines 145-155)
+### TXN #4 — 0x0B Read, 37 bytes (Device Descriptor Body)
 ```
 PayloadStart: total=74, transfers=2
 ┌─ TX ToDevice: 37 bytes ─────────────────────────────┐
 │ 0B 00 00 00 FF 00 00 03 00 00 00 00 00...          │
-│                         └─┘                          │
-│              approval7=0x03                          │
 │ Padded to 37 bytes (zero-filled)                    │
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 37 bytes ───────────────────────────┐
 │ FF FF FF FF FF 1F 00 00 1C 00 00 01 A8 03 02 00... │
-│ └─sync──┘ └───device descriptor data─────────────┘ │
-│ vendor=0x03A8, product=0x0002, version=0x0320       │
+│ └─host TX──┘ └─body prefix─┘ └──descriptor data───┘ │
+│ Body prefix (3 bytes): len16=0x001F, ContentID=0x00  │
+│ Descriptor (28 bytes at body+3):                     │
+│   wDeviceDescLength = 0x001C (28)                    │
+│   bcdVersion = 0x0100                                │
+│   wReportDescLength = 0x03A8 (936)  ← NOT vendor ID! │
+│   wReportDescRegister = 0x0002                       │
+│   wInputRegister = 0x0000                            │
+│   wMaxInputLength = 0x0020 (32)                      │
+│   wOutputRegister = 0x0003                           │
+│   wMaxOutputLength = 0x0002                          │
+│   wCommandRegister = 0x0004 (SET_POWER)              │
+│   wVendorID = 0x045E (Microsoft)                      │
+│   wProductID = 0x0C19                                 │
+│   wVersionID = 0x0100                                 │
+│   dword flags = 0x00000081                           │
+│                                                       │
+│ CORRECTED: 0x03A8 at offset 4 is the report descriptor│
+│ LENGTH (936 bytes), NOT the vendor ID. Previous docs  │
+│ mis-parsed this as vendor=0x03A8 product=0x0002.     │
 └─────────────────────────────────────────────────────┘
-⏱ Duration: ~5.6 µs
+⏱ Duration: ~5.6 µs (ETW span)
 ```
 
-### TXN #6 — DESCREQ2 (lines 162-172)
+### TXN #5 — DESCREQ2 (Write)
 ```
 PayloadStart: total=20, transfers=2
 ┌─ TX ToDevice: 10 bytes ─────────────────────────────┐
 │ 02 00 00 02 42 00 00 03 00 00                       │
-│    └──???──┘                                        │
-│    register=0x0002 (different from TXN #3: 0x0001) │
+│    └──addr──┘                                       │
+│    register=0x0002 (report descriptor request)       │
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 10 bytes ───────────────────────────┐
 │ 00 00 00 00 00 00 00 00 00 00                       │
-│ ALL ZEROS! Device busy/not responding                │
+│ ALL ZEROS! Device busy processing DESCREQ            │
 └─────────────────────────────────────────────────────┘
-⏱ Gap from TXN #5: ~140 µs
+⏱ Gap from TXN #4: ~140 µs
 ⏱ Duration: ~3.0 µs
 ```
 
-### 🔴 GPIO IRQ (lines 185-186) — After DESCREQ2
+### GPIO IRQ — After DESCREQ2
 ```
-⏱ After DESCREQ2: ~727 µs
+⏱ After DESCREQ2 IoComplete: ~727 µs
 ⏱ ISR duration: ~5 µs
 Pin: 0x15
 ```
 
-### TXN #7 — 0x0B Read (post-DESCREQ2, lines 193-203)
+### TXN #6 — 0x0B Read (Report Descriptor Header)
 ```
 PayloadStart: total=18, transfers=2
 ┌─ TX ToDevice: 9 bytes ──────────────────────────────┐
 │ 0B 00 00 00 FF 00 00 03 00                          │
-│              approval7=0x03                          │
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 9 bytes ────────────────────────────┐
 │ FF FF FF FF FF 82 B0 0E 5A                          │
-│ └─sync──┘ └─header──┘                              │
-│ TYPE=0x82 → (8<<4)|2 = RPT_DESC type=8 !!!         │
-│ body_length = (0xB0>>4)|(0x0E<<4) = 0xEB → *4 = 940 │
+│ └─host TX──┘ └─header──┘                           │
+│ TYPE=0x82 → (8<<4)|2 = RPT_DESC type=8              │
+│ body_length = 0xEB00>>4 = 0xEB0 → *4 = 940 bytes    │
 └─────────────────────────────────────────────────────┘
 ⏱ Gap from GPIO IRQ: ~185 µs
 ⏱ Duration: ~6.7 µs
 ```
 
-### TXN #8 — 0x0B Read, 945 bytes (lines 210-220)
+### TXN #7 — 0x0B Read, 945 bytes (Report Descriptor Body)
 ```
 PayloadStart: total=1890, transfers=2
 ┌─ TX ToDevice: 945 bytes ────────────────────────────┐
@@ -199,135 +233,57 @@ PayloadStart: total=1890, transfers=2
 └─────────────────────────────────────────────────────┘
 ┌─ RX FromDevice: 945 bytes ──────────────────────────┐
 │ FF FF FF FF FF AB 03 00 75 08 15 00 26 FF 00 06... │
-│ └─sync──┘ └header┘ └──descriptor data─────────────┘ │
-│            (3 bytes, NO 0x5A! 0x75 is the 1st data byte)│
-│ Contains Usage Pages, Logical Min/Max, Report IDs...│
+│ └─host TX──┘ └─body prefix─┘ └──936B report desc──┘ │
+│ Body prefix (3 bytes): len16=0x03AB, ContentID=0x00  │
+│ HID Report Descriptor: 936 bytes, starts with 0x75   │
+│ (UsagePage byte). Contains Usage Pages, Logical      │
+│ Min/Max, Report IDs...                                │
 └─────────────────────────────────────────────────────┘
-⏱ Gap from TXN #7: ~560 µs
+⏱ Gap from TXN #6: ~560 µs
 ⏱ Duration: ~5.4 µs
 ```
 
----
-
-## PHASE 2: Activation (~962ms after TXN #8)
-
-### ⏸ ~962 millisecond GAP
+### ~962ms GAP
 ```
 The Windows driver processes the descriptors, sets up the HID framework,
-prepares the buffers, initializes internal structures.
-NO SPI activity during this gap.
-```
-
-### TXN #9 — cmd1 (lines 233-235)
-```
-PayloadStart: total=5, transfers=1 (TX only!)
-┌─ TX ToDevice: 5 bytes ──────────────────────────────┐
-│ 00 0E 00 00 00                                      │
-│ │  └─payload──┘                                     │
-│ opcode 0x00 = activation command                    │
-│ payload: 0x0E 0x00 0x00 0x00                        │
-└─────────────────────────────────────────────────────┘
-```
-
-### TXN #10 — cmd2
-```
-PayloadStart: total=1, transfers=1 (TX only!)
-┌─ TX ToDevice: 1 byte ──────────────────────────────┐
-│ 00                                                  │
-│ opcode 0x00 = NOP/padding                           │
-└─────────────────────────────────────────────────────┘
-```
-
-### TXN #11 — Checksum Response (RX-only, no 0x0B)
-```
-┌─ RX FromDevice: checksum data                        │
-│ 84 26 AA...                                         │
-└─────────────────────────────────────────────────────┘
-```
-
-### TXN #12 — cmd3 (0x70 TX+RX)
-```
-┌─ TX ToDevice: 1 byte ──────────────────────────────┐
-│ 70                                                  │
-│ opcode 0x70 = FW status request                     │
-└─────────────────────────────────────────────────────┘
-┌─ RX FromDevice: 14 bytes ───────────────────────────┐
-│ 0E 00 42 01 02 03 FF...                             │
-│ └───firmware status────────────────────────────────┘ │
-⏱ Duration: ~23.5 ms (!! much slower than the others)  │
+initializes internal structures. NO SPI activity on the TOUCHSCREEN during
+this gap. (Companion device B becomes active during this period — see below.)
 ```
 
 ---
 
-## PHASE 3: Firmware Upload (from ~989ms onward)
+## Device B Activity During the Gap (Companion Chip — NOT the touchscreen)
 
-### TXN #13+ — B0 Firmware Blocks
+The following transactions happen on Device B (`0x7F74AA5D7B88`), on connections
+0x18/0x19/0x1A. These are **NOT** touchscreen operations.
+
 ```
-PayloadStart: total=241, transfers=1 (TX only)
-┌─ TX ToDevice: 241 bytes ────────────────────────────┐
-│ B0 [240 bytes of firmware data]                     │
-│ │                                                    │
-│ opcode 0xB0 = firmware block write                   │
-└─────────────────────────────────────────────────────┘
-⏱ Each block: ~3.4 ms
-⏱ Inter-block gap: ~100-170 µs
-⏱ Total blocks: ~120
-⏱ Total FW time: ~410 ms
+TXN B1 (conn 0x18): Write 5B — 00 0E 00 00 00     (cmd1)
+TXN B2 (conn 0x19): Write 1B — 00                   (cmd2)
+TXN B3 (conn 0x19): Read 3B  — 84 26 AA             (checksum)
+TXN B4 (conn 0x1A): Seq W1+R14 — 70 → 0E 00 42...  (cmd3, FW status)
+TXN B5+ (conn 0x1A): Write 241B — B0 + 240B data    (FW blocks ×120)
+TXN post-FW: B1 execute, 0x70 status, 0x28 command, 0x22 second binary
 ```
 
 ---
 
-## PHASE 4: Post-FW — Second Binary and Runtime (~410ms+)
+## PHASE 3: Runtime Operation (Device A — touchscreen)
 
-### TXN #134 — 0xB1 Post-FW Execute (5-byte TX)
-```
-┌─ TX ToDevice: 5 bytes ──────────────────────────────┐
-│ B1 [4-byte payload]                                  │
-│ │                                                    │
-│ opcode 0xB1 = post-firmware execute command          │
-└─────────────────────────────────────────────────────┘
-```
+Resumes after ~5902ms from boot start:
 
-### TXN #135-136 — 0x70 Read Status (×2)
 ```
-┌─ TX ToDevice: 1 byte ──────────────────────────────┐
-│ 70                                                  │
-└─────────────────────────────────────────────────────┘
-┌─ RX FromDevice: N bytes ─────────────────────────────┐
-│ post-upload firmware status                          │
-└─────────────────────────────────────────────────────┘
+├─ Write 0x02 (SET_FEATURE/GET_FEATURE to register 0x0003)
+├─ 0x0B read 9B → header type=1 (DATA report, NOT type=7)
+├─ 0x0B read N bytes → HID input report body
+├─ Periodic resync reads every ~110ms
+└─ Continuous loop
 ```
 
-### TXN #137 — 0x28 Unknown Command (7-byte TX+RX)
+### Runtime read example (around 42s):
 ```
-┌─ TX ToDevice: 7 bytes ──────────────────────────────┐
-│ 28 [6-byte payload]                                  │
-└─────────────────────────────────────────────────────┘
-┌─ RX FromDevice: N bytes ─────────────────────────────┐
-│ 0x28 command response                                │
-└─────────────────────────────────────────────────────┘
-```
-
-### TXN #138+ — 0x22 Second Binary Upload
-```
-┌─ TX ToDevice: N bytes ──────────────────────────────┐
-│ 22 [payload]                                         │
-│ opcode 0x22 = second binary upload                   │
-└─────────────────────────────────────────────────────┘
-⏱ Multiple blocks, similar to PHASE 3
-```
-
-### Runtime — 0x0B Read with approval7=0x0A
-```
-┌─ TX ToDevice: 9+ bytes ─────────────────────────────┐
-│ 0B ... 0A 00                                        │
-│        └─┘                                          │
-│   approval7=0x0A (runtime)                           │
-└─────────────────────────────────────────────────────┘
-┌─ RX FromDevice: N bytes ─────────────────────────────┐
-│ sensor data / HID report                            │
-└─────────────────────────────────────────────────────┘
-⏱ Interval between reads: ~110 ms (periodic resync)
+MOSI: 0B 00 00 00 FF 00 03 0A 00...
+MISO: FF FF FF FF FF 12 60 03 5A    (header type=1, len=0x6000>>4=0x600*4=6144B)
 ```
 
 ---
@@ -336,67 +292,65 @@ PayloadStart: total=241, transfers=1 (TX only)
 
 | Event | Duration/Gap |
 |--------|-----------|
-| 0x0B read (9+9 bytes) | ~6 µs |
-| DESCREQ (10+10 bytes) | ~6 µs |
-| DESCREQ → GPIO IRQ | ~58 µs |
-| GPIO IRQ → 0x0B read | ~112 µs |
+| 0x0B read (9+9 bytes) ETW span | ~6 µs |
+| DESCREQ (10+10 bytes) ETW span | ~6 µs |
+| DESCREQ IoComplete → GPIO IRQ | ~58 µs |
+| GPIO IRQ → 0x0B read | ~10 µs (typical) |
 | GPIO ISR duration | ~1-5 µs |
-| DESCREQ2 (10+10 bytes) | ~3 µs |
-| DESCREQ2 → GPIO IRQ | ~727 µs |
-| GPIO IRQ → 0x0B read | ~185 µs |
-| Report descriptor read (1890 bytes) | ~5.4 µs |
-| Descriptor → cmd1 gap | ~962 ms (!) |
-| FW block write (241 bytes) | ~3.4 ms |
-| FW inter-block gap | ~100-170 µs |
-| Resync byte frequency (runtime) | every ~110 ms |
+| DESCREQ2 (10+10 bytes) ETW span | ~3 µs |
+| DESCREQ2 IoComplete → GPIO IRQ | ~727 µs |
+| GPIO IRQ → 0x0B read | ~185 µs (varies) |
+| Report descriptor read (1890 bytes) ETW span | ~5.4 µs |
+| Descriptor → next activity gap | ~962 ms |
+| Resync read frequency (runtime) | every ~110 ms |
+
+**Note**: ETW "duration" times (~6 µs) are logging event spans, not actual SPI bus times.
+Actual SPI transfer time at 33.33 MHz for 9 bytes = ~2.2 µs.
 
 ---
 
-## RECURRING PATTERNS
+## RECURRING PATTERNS (Device A — touchscreen)
 
-### Opcodes and Meaning
-| Opcode | Name | TX | RX | Notes |
-|--------|------|----|----|------|
-| 0x0B | Read Register | 9+ bytes | n bytes | Approval at byte7/8, address at byte1-3 |
-| 0x02 | DESCREQ | 10 bytes | 10 bytes | Requests a device descriptor |
-| 0x00 | Activation | 1-5 bytes | — | cmd1/cmd2 |
-| 0x70 | Read Status | 1 byte | 14 bytes | Firmware status |
-| 0xB0 | FW Block | 241 bytes | — | Firmware write |
-| 0xB1 | Post-FW Execute | 5 bytes | — | Post-firmware execution |
-| 0x28 | Unknown | 7 bytes | N bytes | Unknown post-FW command |
-| 0x22 | Second Binary | N bytes | — | Second binary upload |
+### Opcodes
+| Opcode | Name | TX | Notes |
+|--------|------|----|------|
+| 0x0B | Read Approval | 9+ bytes | 5 protocol bytes + dummy padding. RX returns HID input report. |
+| 0x02 | Output Report Write | 10 bytes | TX-only write. Response arrives via separate 0x0B + GPIO IRQ. |
 
-### Approval Bytes
+### Body Length Formula (V0)
 ```
-Byte7 (approval7):
-  - 0x00: initial state (before DESCREQ)
-  - 0x03: after receiving at least one descriptor
-  - 0x0A: runtime (~52s after boot)
-
-Byte8 (approval8):
-  - 0x00: ALWAYS (never changes)
-```
-
-### Body Length Formula
-```
-body_length = ((len_low >> 4) | (len_high << 4)) * 4
+body_length = ((header_u16 >> 4) * 4)
 ```
 Examples:
-- RESET_RSP: len_low=0x10, len_high=0x00 → (1|0)*4 = 4
-- DEVICE_DESC: len_low=0x80, len_high=0x00 → (8|0)*4 = 32
-- RPT_DESC: len_low=0xB0, len_high=0x0E → (0x0B|0xE0)*4 = 0xEB*4 = 940
+- RESET_RSP: header_u16=0x0100 → (0x100)*4 = 4
+- DEVICE_DESC: header_u16=0x8000 → (0x800)*4 = 32
+- RPT_DESC: header_u16=0xEB00 → (0xEB0)*4 = 940
 
-### HID Header
+### HID Header (V0 format)
 ```
-Format: [TYPE][LEN_LOW][LEN_HIGH][0x5A]
+Format: [TYPE 7:4 | VERSION 3:0] [u16 LE, bits 3:0=0, bits 15:4=len] [0x5A]
 
 TYPE byte:
-  bits 3-0: protocol version (= 2 for HID-over-SPI)
+  bits 3-0: protocol version (= 2 for HID-over-SPI V0)
   bits 7-4: report type
 
-Report types:
-  0 = ACK/Ready (pattern: 03 00 00 00, no 0x5A!)
-  3 = RESET_RSP   (e.g.: 32 10 00 5A)
-  7 = DEVICE_DESC  (e.g.: 72 80 00 5A)
-  8 = RPT_DESC     (e.g.: 82 B0 0E 5A)
+Report types observed on touchscreen:
+  1 = DATA (runtime input reports)
+  3 = RESET_RSP
+  7 = DEVICE_DESC
+  8 = RPT_DESC
+
+Type 0 does NOT exist in the V0 decomp (ValidateResponse bitmask 0x1B2).
+03 00 00 00 is the RESET_RSP body (len16=3), not an "ACK" type.
 ```
+
+### Note on TX "Approval Bytes"
+The bytes at positions 6-8 of the 9-byte 0x0B TX payload (previously called
+"approval7/approval8") are **residual buffer data** from the Windows driver's
+buffer reuse. After a DESCREQ write (10 bytes: `02 00 00 01 42 00 00 03 00 00`),
+the next read only writes bytes 0-4 (0x0B + addr + 0xFF). Bytes 5-8 retain
+values from the previous write — hence byte7=0x03 after DESCREQ.
+
+The observed values (0x00 before write, 0x03 after, 0x0A at runtime) are
+explained by buffer reuse, NOT by an intentional "approval" protocol mechanism.
+

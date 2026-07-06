@@ -15,7 +15,7 @@
 | 0x49 | — | 8bit | W | NOT used by Windows (zero occurrences in amdspi.sys). The Linux driver writes it as a V2 strobe. |
 | 0x4A | — | 8bit | W | NOT used by Windows (zero occurrences in amdspi.sys). The Linux driver writes it as a V2 strobe. |
 | 0x4B | RX_COUNT | 8bit | R/W | Bytes to receive |
-| 0x4C | STATUS | 32bit | R | Status. Windows reads it as a **byte** and the bit31 poll is a no-op. The reliable busy flag is CTRL0 bit31. |
+| 0x4C | STATUS | 8bit (Windows reads as byte) | R | Status. Windows reads it as a **byte** and the bit31 poll is a no-op. The reliable busy flag is CTRL0 bit31. |
 | 0x6C | SPEED_REG | 32bit | R/W | V2 speed (spd7 at bits 8-13) |
 | 0x80 | FIFO_BASE | 70B | R/W | Data FIFO (70 bytes, 0x80-0xC5) |
 
@@ -63,15 +63,20 @@ Bit 7-0   : OPCODE_V1 — opcode for the V1 path
 - Windows **NEVER** sets TXMODE (it uses a different mechanism)
 - Only truly needed for the 0xB0 firmware opcode
 
-**Bit 21 (0x00200000):** Windows preserves it (reads the current value and keeps it). Function unknown.
+**Bit 21 (0x00200000):** Function unknown. Windows does `ctrl0 |= 0x60040000`, so bit21 survives
+purely by omission (is never cleared or set explicitly). It is not deliberately "preserved."
 
 **Bit 20 (FIFO_CLEAR, 0x00100000):**
-- **Requires a 0→1 transition** to reset the FIFO pointer
-- Writing `(val & ~bit) | bit` does NOT guarantee the toggle
-- Correct procedure:
+- Windows driver uses a **single set**: `ctrl0 = read32(CTRL0); ctrl0 |= BIT(20); write32(CTRL0, ctrl0)`
+- The toggle procedure (clear→set) was a Linux-side discovery — if the hardware requires a
+  0→1 transition, both approaches may work depending on whether the bit was already 0.
   ```
-  ctrl0 &= ~BIT(20); write32(CTRL0, ctrl0);  // clear
-  ctrl0 |= BIT(20);  write32(CTRL0, ctrl0);  // set (rising edge)
+  // Windows style (single set only):
+  ctrl0 = read32(CTRL0); ctrl0 |= BIT(20); write32(CTRL0, ctrl0);
+
+  // Linux style (explicit toggle, belt-and-suspenders):
+  ctrl0 = read32(CTRL0); ctrl0 &= ~BIT(20); write32(CTRL0, ctrl0);  // clear
+  ctrl0 |= BIT(20); write32(CTRL0, ctrl0);  // set (rising edge)
   ```
 
 **Bit 18 (0x00040000):** Third secret bit. Function unknown.
@@ -98,42 +103,54 @@ Bit 7-0   : OPCODE_V1 — opcode for the V1 path
 7. Read RX from the FIFO
 ```
 
-### V2 Path (Linux spi-amd.c)
+### V2 Path (Windows — amdspi.sys)
 ```
 1. Write opcode into OPCODE_REG (0x45)
 2. Write TX_COUNT (0x48)
 3. Fill FIFO (0x80+)
 4. Write RX_COUNT (0x4B)
-5. Write 0x00 to STROBE 0x49
-6. Write 0x00 to STROBE 0x4A
-7. Trigger: toggle CMD_TRIGGER (0x47) bit7
-8. Busy wait: poll CTRL0 bit31 or STATUS (0x4C) bit31 (ioread32)
-9. Read RX from the FIFO (at offset +4)
+5. Trigger: CMD_TRIGGER (0x47) bit7
+6. Busy wait: reads STATUS (0x4C) as a byte, tests bit31 (no-op)
+7. Read RX from the FIFO at offset 0x80 + TX_COUNT
+
+NOTE: Windows does NOT write to 0x49/0x4A. Zero occurrences in amdspi.sys.
+```
+
+### V2 Path (Linux — spi-amd.c, our driver)
+```
+1. Write opcode into OPCODE_REG (0x45)
+2. Write TX_COUNT (0x48)
+3. Fill FIFO (0x80+)
+4. Write RX_COUNT (0x4B)
+5. Trigger: toggle CMD_TRIGGER (0x47) bit7
+6. Busy wait: poll CTRL0 bit31 (ioread32)
+7. Read RX from the FIFO (at offset 0x80 + TX_COUNT)
+
+NOTE: The Linux driver no longer writes to 0x49/0x4A (removed — not used by Windows).
 ```
 
 ### Key Differences
-| Aspect | V1 | V2 |
-|---------|----|----|
+| Aspect | V1 | V2 (Windows) |
+|---------|----|--------------|
 | Opcode register | CTRL0[7:0] | 0x45 |
 | Trigger | CTRL0 bit16 | 0x47 bit7 |
-| Strobe | none | 0x49, 0x4A |
 | Speed config | none | ENA_REG (0x20) ALT_SPD + SPEED_REG (0x6C) spd7 |
 | Secret bits | none | CTRL0 bits 30,29,18 |
-| 0x1D strobe | none | AND 0xFC, OR 0x01 |
+| 0x1D strobe | none | AND 0xFC, OR 0x01
 
 ### V2 Path — Exact Order (our spi-amd.c driver)
 ```
 1.  read8(0x1D) → AND 0xFC → OR (cs & 0x03) → write8(0x1D)     [select CS]
-2.  Clear FIFO (CTRL0 bit20 toggle: clear→set)
+2.  Clear FIFO (CTRL0 bit20 toggle: clear→set)                    [Linux uses toggle, Windows uses single set]
 3.  Speed config: ENA_REG (0x20) ALT_SPD + SPEED_REG (0x6C) spd7  [amd_set_spi_freq()]
 4.  Write opcode to 0x45                                           [single write]
-5.  Secret bits: CTRL0 |= bits 30,29,18 → write CTRL0              [ONCE per message, in amd_spi_setup_v2_regs()]
+5.  Secret bits: CTRL0 |= bits 30,29,18 → write CTRL0              [ONCE per segment, in amd_spi_setup_v2_regs()]
 6.  write8(TX_COUNT, 0x48)
 7.  Fill FIFO (0x80+)
 8.  write8(RX_COUNT, 0x4B) — 0 for a write, rx_len for a read
 9.  Trigger: write8(0x80, 0x47)
 10. Wait busy: poll CTRL0 bit31
-11. Read RX from the FIFO at offset +4
+11. Read RX from the FIFO at offset 0x80 + TX_COUNT
 ```
 
 **Note:** the Linux driver does NOT write the opcode twice and does NOT save/restore 0x22 and 0x44. Saving
@@ -151,17 +168,19 @@ Offset 0x80 (FIFO_BASE):
 TX write:
   writeb(data[i], base + 0x80 + i)  for i = 0..tx_len-1
 
-RX read:
-  readb(base + 0x80 + 4 + i)  for i = 0..rx_len-1
-  The +4 offset is constant (verified with the diagnostic module)
-  The controller overwrites the first positions with RX data
+RX read (verified against Windows decomp):
+  The RX data starts at offset 0x80 + TX_COUNT:
+  - For 0x3c20 (TX_COUNT=3):     RX starts at 0x83
+  - For 0x4bac (TX_COUNT=rx_len+1): RX starts at 0x84
+  The offset is NOT a fixed +4 constant — it depends on the variant.
+
+  Windows 0x4bac uses RX_COUNT = rx_len+1 (one extra byte in TX),
+  so the RX reads start at 0x80 + (tx_len that includes the extra byte) = 0x84.
+  Windows 0x3c20 uses exact RX_COUNT, so RX starts at 0x80 + 3 = 0x83.
 
 IMPORTANT: with TX_COUNT > 0, the first TX_COUNT bytes are
-  written into the FIFO. Does RX start at position TX_COUNT, or
-  does it overwrite from position 0 (depends on controller mode)?
-  The diagnostic module always reads from +4 regardless of
-  TX_COUNT, suggesting RX overwrites starting from position 0.
-```
+  written into the FIFO. RX data appears AFTER the TX data in the FIFO
+  (at offset 0x80 + TX_COUNT).
 
 ---
 
@@ -243,11 +262,17 @@ has to re-write the opcode after the speed config. The Linux driver does **NOT**
 ## Status and Busy Polling
 
 ```
-BUSY POLL: ioread32(STATUS) or ioread32(CTRL0), check bit31
-V1: poll CTRL0 bit31 (AMD_SPI_BUSY)
-V2: poll CTRL0 bit31 or STATUS (0x4C) bit31 (both readable via ioread32)
-    Timeout: 2 seconds (2,000,000 µs), polled every 20 µs
-    After the trigger: udelay(20) before the first poll
+Windows (amdspi.sys):
+  BUSY POLL: read8(0x4C) — reads STATUS as a BYTE, tests bit31.
+  Since bit31 of a byte is always 0, this poll is effectively a no-op.
+  The real busy indicator is CTRL0 bit31 (not polled by Windows).
+  A retry counter prevents infinite spin.
+
+Linux (spi-amd.c):
+  BUSY POLL: ioread32(CTRL0), check bit31
+  V2 trigger: write8(0x80, 0x47), then poll CTRL0 bit31
+  Timeout: 2 seconds (2,000,000 µs), polled every 20 µs
+  After the trigger: udelay(20) before the first poll
 ```
 
 ---
@@ -256,12 +281,12 @@ V2: poll CTRL0 bit31 or STATUS (0x4C) bit31 (both readable via ioread32)
 
 | Fix | Register | Before | After |
 |-----|----------|-------|------|
-| FIFO clear | CTRL0 bit20 | `setclear` (single write) | clear→set toggle |
+| FIFO clear | CTRL0 bit20 | `setclear` (single write) | clear→set toggle (Linux-style; Windows uses single set) |
 | V2 trigger | 0x47 bit7 | CTRL0 bit16 | 0x47 bit7 toggle |
 | Busy poll | — | switched by version | unified on CTRL0 bit31 |
-| RX offset | FIFO | `fifo_pos + tx_len` | `fifo_pos + 4` |
+| RX offset | FIFO | `fifo_pos + tx_len` | `0x80 + TX_COUNT` |
 | RX_COUNT | 0x4B | `+1` for 0x0B | exact `rx_len` |
-| Strobe V2 | 0x49, 0x4A | absent | `writeb(0x00)` to both |
+| Strobe V2 | 0x49, 0x4A | `writeb(0x00)` to both | **REMOVED** (zero occurrences in amdspi.sys) |
 | V1 trigger | CTRL0 bit16 | `setclear` | clear→set toggle |
 
 ---

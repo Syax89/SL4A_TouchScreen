@@ -16,8 +16,8 @@ Below are the **8 critical bugs** to fix BEFORE any other change.
 | C3 | **SPI** | Strobe 0x49/0x4A absent in Windows, potentially harmful | spi-amd.c:269-270 | MEDIUM |
 | C4 | **HID** | `memcpy(&raw, hdr+off, s)` instead of `hdr+off+4` — corrupted descriptor | spi-hid-core.c:1237 | **CRITICAL** — all descriptor fields shifted by 4 bytes |
 | C5 | **HID** | `input_register = 0x1000` for pre-descriptor reads — should be `0x0000` | spi-hid-core.h:76, spi-hid-core.c:1814 | **CRITICAL** — full state machine desync |
-| C6 | **HID** | `approval7 = 0x03` at runtime — should be `0x0A` | spi-hid-core.c:1129 | **CRITICAL** — device rejects reports |
-| C7 | **HID** | `approval8 = 0x0A` at runtime — should be `0x00` | spi-hid-core.c:1131 | **CRITICAL** — device rejects reports |
+| C6 | **HID** | ~~approval7 = 0x03 at runtime~~ **SMENTITO**: "approval bytes" are buffer echo artifacts, not protocol fields. The observed 0x0A at runtime is a residual from a previous write's content_len field at byte7, not an intentional value. The fix below should be reverted — approval bytes do NOT need to be set. | spi-hid-core.c:1129 | **FALSE BUG** — revert fix |
+| C7 | **HID** | ~~approval8 = 0x0A at runtime~~ **SMENTITO**: same as C6. Approval8=0x00 always because the residual byte8 is always 0x00 in the 10-byte DESCREQ frame (`02 00 00 01 42 00 00 03 00 00`). | spi-hid-core.c:1131 | **FALSE BUG** — revert fix |
 | C8 | **ACPI** | GPIO pin documented as `0x15` but the DSDT says `0x55` (85 dec, Edge/ActiveLow trigger) | DSDT / DRIVER_STATE.md | MEDIUM — the driver reads it from ACPI at runtime, but the documentation was wrong |
 
 ---
@@ -83,21 +83,23 @@ shid->desc.input_register = SPI_HID_DEFAULT_INPUT_REGISTER;
 // After the descriptor parse, the real input_register comes from the device
 ```
 
-### C6/C7 — Wrong Approval Bytes (HID)
+### C6/C7 — "Approval Bytes" — FALSE BUG (SMENTITO 2026-07-06)
+
+The "approval bytes" (bytes 7-8 of the 9-byte 0x0B read approval) are **NOT protocol fields**.
+They are residual buffer data from the Windows driver's TX buffer reuse (see
+`verification/protocol-verification-report.md` §D1).
+
+After a DESCREQ write (10 bytes: `02 00 00 01 42 00 00 03 00 00`), the next 0x0B read only
+writes bytes 0-4 (0x0B + addr + 0xFF). Bytes 5-8 retain residual values from the write.
+Hence byte7=0x03 after DESCREQ, byte7=0x0A at runtime (residual from a write with content_len=7).
+
+The fix that changes `approval7` from 0x03 to 0x0A at runtime and `approval8` from 0x0A to 0x00
+should be **reverted**. The correct behavior is to always send 0x00 in these dummy TX positions
+(or leave them uninitialized — the device ignores MOSI after byte 4 of the read approval).
 
 ```c
-// Current code (spi-hid-core.c:1129-1131):
-static u8 spi_hid_approval_byte7(struct spi_hid *shid)
-{ return (shid->seq_state == 0) ? 0x00 : 0x03; }
-static u8 spi_hid_approval_byte8(struct spi_hid *shid)
-{ return (shid->seq_state == 4) ? 0x0A : 0x00; }
-
-// Windows CSV at runtime: approval7=0x0A, approval8=0x00
-// Fix:
-static u8 spi_hid_approval_byte7(struct spi_hid *shid)
-{ return (shid->seq_state == 0) ? 0x00 : ((shid->seq_state >= 4) ? 0x0A : 0x03); }
-static u8 spi_hid_approval_byte8(struct spi_hid *shid)
-{ return 0x00; }
+// The "approval byte" logic should be removed entirely.
+// Always send 0x00 in the dummy TX positions after byte 4.
 ```
 
 ---
@@ -135,8 +137,8 @@ static u8 spi_hid_approval_byte8(struct spi_hid *shid)
 |---|-----|--------|------|
 | C4 | memcpy offset +4 | **FIXED** | spi-hid-core.c:1237 |
 | C5 | input_register=0x1000 | **FIXED** | spi-hid-core.h:76 |
-| C6 | approval7 runtime | **FIXED** | spi-hid-core.c:1129 |
-| C7 | approval8 runtime | **FIXED** | spi-hid-core.c:1131 |
+| C6 | approval7 runtime | **REVERTED** (false bug — approval bytes are buffer artifacts) | spi-hid-core.c:1129 |
+| C7 | approval8 runtime | **REVERTED** (false bug — same as C6) | spi-hid-core.c:1131 |
 | C1 | ALT_CS encoding | **FIXED** | spi-amd.c:106-108 |
 | C2 | secret bits in exec_segment | **FIXED** | spi-amd.c:250-251, removed from host_transfer |
 | C3 | Strobe 0x49/0x4A | **REMOVED** (not used by Windows) | spi-amd.c:272-273 |

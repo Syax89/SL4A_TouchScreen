@@ -1,293 +1,187 @@
 # HID-over-SPI Protocol — MSHW0231 Touchscreen
 
+> **ATTENZIONE**: Corretto 2026-07-06 sulla base dei report di verifica indipendenti.
+> Molte affermazioni precedenti (ACK, approval bytes, vendor init per touchscreen, TX+RX combinati)
+> sono state **smentite** dal decomp Windows e dall'analisi ETW. Vedi `docs/verification/`.
+
 ## Overview
 
-The Surface Laptop 4 AMD touchscreen uses the HID-over-SPI protocol (section 7.2.5.7 specifies HID SPI).
-The device is a touchscreen controller that requires:
-1. A discovery sequence (reset → descriptors → report descriptor)
-2. Vendor-specific activation (cmd1/cmd2/cmd3)
-3. B0 firmware upload (120 blocks of 241 bytes)
-4. Initialization (~41 seconds)
-5. Normal operation (HID reports)
+The Surface Laptop 4 AMD touchscreen uses the V0 (pre-release) HID-over-SPI path,
+NOT the spec v1.0 HidSpiCx path. The device is on SPB connection 0x0B, handle `0x7F74AA5D37F8`.
 
-## HID Header Format
+Two SPB devices exist in the system:
+- **Device A** (touchscreen): conn 0x0B, opcodes 0x0B (read) and 0x02 (write) only
+- **Device B** (companion chip): conn 0x18/0x19/0x1A, opcodes 0x00/0x70/0xB0/B1/0x28/0x22/0x24/0x25/0x26
 
-Every response from the device starts with sync bytes (0xFF) followed by the header:
+The touchscreen does NOT receive firmware uploads, activation commands (0x00/0x70),
+or any vendor-specific opcodes beyond 0x0B and 0x02.
+
+## HID Header Format (V0 path, "version 2" wire format)
 
 ```
-Byte 0: [TYPE_4bit][VERSION_4bit]
-        version = 2 (HID-over-SPI)
+Byte 0: [TYPE 7:4 | VERSION 3:0]
+        version = 2 (HID-over-SPI V0)
         report type:
-           0 = ACK/Ready
-           1 = DATA
+           1 = DATA (runtime input reports)
            3 = RESET_RSP
-           4 = COMMAND_RESP
+           4 = COMMAND_RESP (e.g. SET_POWER ON response)
            5 = GET_FEATURE_RESP
            7 = DEVICE_DESC
            8 = RPT_DESC
+        Type 0 does NOT exist (ValidateResponse bitmask 0x1B2 = {1,3,4,5,7,8})
 
-Byte 1: [LENGTH_LOW_4bit][FRAGMENT_ID_4bit]
-Byte 2: [LENGTH_HIGH_8bit]
-Byte 3: 0x5A (marker)
+Byte 1-2: u16 LE, bits 3:0 reserved (must be 0), bits 15:4 = body length in units of 4
+Byte 3: 0x5A (marker, mandatory)
 
-Body length = (((Byte1 >> 4) << 0) | (Byte2 << 4)) * 4
+Body length = ((u16 >> 4) * 4)
+Body starts with 3-byte prefix: [len16 = content+3 LE][ContentID]
 ```
 
 ### Examples
 
 ```
-RESET_RSP:  32 10 00 5A    type=3, body_len = ((0x10>>4) | 0x00<<4)*4 = 4
-DEVICE_DESC: 72 80 00 5A    type=7, body_len = ((0x80>>4) | 0x00<<4)*4 = 32
-RPT_DESC:   82 B0 0E 5A    type=8, body_len = ((0xB0>>4) | 0x0E<<4)*4 = 0xEB*4 = 940
+RESET_RSP:  32 10 00 5A    type=3, body_len = ((0x0100>>4))*4 = 4
+  Body: 03 00 00 00        (len16=3, ContentID=0, 1 pad byte)
 
-ACK pattern: 03 00 00 00    (no 0x5A! Special pattern)
+DEVICE_DESC: 72 80 00 5A    type=7, body_len = ((0x8000>>4))*4 = 32
+RPT_DESC:   82 B0 0E 5A    type=8, body_len = ((0xEB00>>4))*4 = 940
 ```
+
+**IMPORTANT**: `03 00 00 00` is the **body of the Reset Response** (len16=3 = 0 content + 3 overhead),
+NOT a separate "ACK" report type. The two initial 0x0B reads are header+body of a single RESET_RSP
+input report.
 
 ---
 
-## SPI Commands
+## SPI Commands (Device A — touchscreen only)
 
-### 0x0B — Read Register (Approval Read)
-
-```
-TX: [0x0B] [ADDR_H] [ADDR_M] [ADDR_L] [0xFF] [0x00] [0x00] [APPR7] [APPR8]
-      opcode  └──── register address (24bit) ────┘  └pad─┘ └─ approval ─┘
-
-9 bytes total. The device responds with the data from the specified register.
-
-Approval bytes:
-  APPR7: 0x00 for state==0, 0x03 for state!=0 (spi_hid_approval_byte7: changes on the 0→1
-         transition, not after the descriptor parse)
-  APPR8: 0x00 by default
-
-Register addresses:
-  0x000000: input register (default)
-  0x001000: input_register (after device descriptor parse)
-```
-
-### 0x02 — DESCREQ (Device Descriptor Request)
+### 0x0B — Read Approval
 
 ```
-TX: [0x02] [0x00] [0x00] [0x01] [0x42] [0x00] [0x00] [0x03] [0x00] [0x00]
-      opcode  └───???────┘ └─??─┘ └─???──────────────┘ └─??─┘
+TX: [0x0B] [ADDR_H] [ADDR_M] [ADDR_L] [0xFF] [dummy] [dummy] [dummy] [dummy]
+      opcode  └──── register address (24bit big-endian) ──┘
 
-10 bytes total.
-
-DESCREQ2 (for the report descriptor):
-TX: [0x02] [0x00] [0x00] [0x02] [0x42] [0x00] [0x00] [0x03] [0x00] [0x00]
-                      ↑ register 0x02 instead of 0x01
-
-The device responds with ACK (03 00 00 00), then raises an IRQ.
-After the IRQ, the next 0x0B read returns the descriptor.
+9 bytes total. The device responds with the HID input report on MISO.
+Bytes 5-8 of TX are dummy/placeholder — the device does not read them.
+What appears at "byte7" in CSV traces is residual buffer data from a previous write, NOT a protocol field.
 ```
 
-### 0x00 — Activation (cmd1, cmd2)
+Register addresses (for touchscreen):
+  0x000000: input register (used before descriptor parse, and stays 0x000000 on this device)
+  After descriptor parse: `wInputRegister` comes from device descriptor offset 8 (word)
+
+### 0x02 — Output Report Write (DESCREQ, SET_POWER, etc.)
 
 ```
-cmd1: [0x00] [0x0E] [0x00] [0x00] [0x00]    5 bytes
-cmd2: [0x00]                                   1 byte (NOP/padding)
+TX: [0x02] [addr_H] [addr_M] [addr_L] [len16 LE] [ContentID] [pad...]
+      opcode  └── register address (24bit BE) ──┘
 
-TX only, no inline response.
+10 bytes total (for DESCREQ).
+This is a TX-only write — RX_COUNT=0 in the write handler (0x54d0).
+The response arrives via a SEPARATE 0x0B read, triggered by a GPIO interrupt.
 ```
 
-### 0x70 — Read Status (cmd3)
-
-```
-TX: [0x70]                                     1 byte
-RX: 14 bytes of firmware status
-
-TX+RX in the same transaction.
-```
-
-### 0xB0 — Firmware Block Write
-
-```
-TX: [0xB0] [240 bytes of firmware data]         241 bytes total
-
-TX only, no inline response.
-120 blocks + 125-byte tail = 29,045 bytes total.
-```
+DESCREQ (Device Descriptor Request): register 0x000001
+DESCREQ2 (Report Descriptor Request): register 0x000002
 
 ---
 
-## Complete Boot Sequence
+## Complete Touchscreen Boot Sequence
 
-### Phase 1: Reset (0-200 µs)
+### Phase 1: Reset Response (2 reads, ~200 µs)
+
 ```
-┌─ 0x0B read → RESET_RSP (32 10 00 5A)
-│  The device is in reset, it sends the reset report.
-├─ 0x0B read → ACK (03 00 00 00)
-│  After ~168 µs, the device is ready.
-│  NO command sent between the two reads!
-└─ The device changes state on its own (internal timeout)
+GPIO IRQ arrives (pin 0x15 in ETW, 0x55 in DSDT)
+├─ 0x0B read 9B → header: 32 10 00 5A (RESET_RSP type=3, body_len=4)
+├─ 0x0B read 9B → body:  03 00 00 00 (len16=3, ContentID=0)
+│  These are header+body of the SAME input report — NOT "RESET_RSP then ACK."
+│  No command is sent between them; the second read is the body drain.
+└─ The device does NOT change state on its own.
 ```
 
 ### Phase 2: Device Discovery (~200-2000 µs)
+
 ```
-┌─ DESCREQ (0x02) → ACK (03 00 00 00 00)
-├─ GPIO IRQ (~58 µs later)
-├─ 0x0B read → DEVICE_DESC type=7 (72 80 00 5A)
-│  approval byte7 changes to 0x03
-├─ 0x0B read 37B → device descriptor data
-│  vendor=0x03A8, product=0x0002, ver=0x0320
-├─ DESCREQ2 (0x02) → all zeros (device busy)
-├─ GPIO IRQ (~727 µs later)
-├─ 0x0B read → RPT_DESC type=8 (82 B0 0E 5A)
-├─ 0x0B read 945B → full HID report descriptor
-└─ ~962ms gap (internal driver processing)
+├─ DESCREQ 0x02 TX 10B (register 0x000001) → write-only, RX_COUNT=0
+│  MISO during write shows FF×5 + 03 00 00 00 00 (not captured by driver)
+├─ GPIO IRQ (~58 µs after DESCREQ IoComplete)
+├─ 0x0B read 9B → header: 72 80 00 5A (DEVICE_DESC type=7)
+├─ 0x0B read 37B → device descriptor body (28 bytes of descriptor at body+3)
+│  vendor=0x045E (Microsoft), product=0x0C19, version=0x0100
+│  wInputRegister=0x0000, wOutputRegister=0x0003, wReportDescRegister=0x0002
+├─ DESCREQ2 0x02 TX 10B (register 0x000002) → MISO all zeros (device busy)
+├─ GPIO IRQ (~727 µs after DESCREQ2 IoComplete)
+├─ 0x0B read 9B → header: 82 B0 0E 5A (RPT_DESC type=8)
+├─ 0x0B read 945B → 936-byte HID report descriptor (at body+3)
+└─ ~962ms gap (driver internal processing)
 ```
 
-### Phase 3: Activation (~962ms)
-```
-┌─ cmd1 (0x00, 5 bytes)
-├─ cmd2 (0x00, 1 byte)
-├─ 0x0B read → checksum response
-├─ cmd3 (0x70, TX+RX 14B) → FW status
-└─ (possible other vendor commands: 0x28, 0x24, 0x29, 0x22, 0x25, 0x26)
-```
+### Phase 3: Runtime Operation
 
-### Phase 4: Firmware Upload (~410ms)
 ```
-┌─ B0 block #1 (241 bytes)
-├─ B0 block #2
-├─ ... (120 blocks total)
-├─ B0 tail (125 bytes)
-└─ 41-second wait for device initialization
-```
-
-### Phase 5: Operation (~41s after FW)
-```
-┌─ Periodic GPIO IRQ (~every 110ms)
-├─ 0x0B read → HID report type=7
-├─ hid_input_report() → touch events
-└─ Continuous loop
+├─ Periodic GPIO IRQ (every ~110ms for resync)
+├─ 0x0B read 9B → header: type=1 (DATA, not type=7!)
+├─ 0x0B read N bytes → HID input report data
+├─ SET_FEATURE/GET_FEATURE writes (opcode 0x02, register 0x0003)
+└─ Continuous loop with type=1 data reports
 ```
 
 ---
 
-## Our Driver's State Machine
+## Windows Driver Architecture (HidSpiDeviceV0)
 
-### Current State (v5)
+The touchscreen uses the **V0 path** (HidSpiDeviceV0 class), NOT the Cx (HidSpiCx) path.
+Key functions from decomp:
 
-```
-State 0 (WAIT_RESET):
-  ├── type==3: drain #1 (blen bytes) + drain #2 (64 bytes)
-  ├── Always: DESCREQ (0x02 TX+RX 10B) → state=1
-  └── After state=1: extra spi_hid_seq_read(shid, shid->input.content, 64) to flush the buffer
+- `ValidateResponseHeader` @0x140008900: validates header byte3=0x5A, low nibble of u16 must be 0
+- `ValidateResponse` @0x140008454: accepts types {1,3,4,5,7,8} (bitmask 0x1B2)
+- `VerifyAndCompleteTransfer` @0x140008ba8: runtime handler, main case type==1 (data)
+- `SendingWriteToBusEntry` @0x140008180: TX-only write (single transfer, length=10)
+- `ReadingResponseHeaderEntry` @0x140007da0: sends read approval (5 bytes), 9-byte total transaction
 
-State 1 (WAIT_DESC):
-  ├── type==7: parse device descriptor → DESCREQ2 → state=2 + drain
-  ├── type==3: "still RESET_RSP" (log)
-  └── type==0: "ACK in state 1" (log, no action)
+### Key differences from spec v1.0 (HidSpiCx)
 
-State 2 (WAIT_RPT):
-  ├── type==8: drain → goto VENDOR_INIT
-  ├── NOTE: State2's decomp (fcn.0xda9c) compares against type==4 (COMMAND_RESP), not type==8.
-  │   Our code compares against type==8. Discrepancy to be verified.
-  └── type==3/7: log and retry
-
-State 3 (VENDOR_INIT):
-  ├── cmd1 (0x00, 5B) → cmd2 (0x00, 1B) → ACK read → cmd3 (0x70)
-  └── schedule fw_work + create_device_work → state=4
-
-State 4 (DONE):
-  └── type==7: forward to hid_input_report()
-```
-
-### Known Issues
-
-1. **DESCREQ doesn't produce type=7**: TX uses opcode 0x02, the separate RX uses 0x0B
-   - On Windows: TX+RX use the SAME opcode 0x02 in the same operation
-   - From the CSV: inline DESCREQ TX+RX returns ACK, then IRQ, then type=7
-
-2. **No DESCREQ2**: the second DESCREQ for the report descriptor is missing
-   - The code in state 1 DOES have DESCREQ2 but it's never executed (state 1 never sees type=7)
-
-3. **Missing multi-drain**: Windows performs 2 0x0B reads before DESCREQ
-   - The two reads drain RESET_RSP and then receive ACK
-
-4. **TX+RX opcode mismatch**: the 0x02 write and the 0x0B read are separate operations
-   - The device interprets 0x0B as a new command, not as the completion of 0x02
-
-### Proposed Fixes
-
-**Option A**: Use a combined `exec_segment(opcode=0x02, tx=9, rx=10)`
-  - Same opcode for TX and RX in a single operation
-  - Requires understanding the FIFO layout for RX when TX>0
-
-**Option B**: TX-only 0x02 write, wait for the GPIO IRQ, then 0x0B read
-  - The device processes the DESCREQ and raises the IRQ when ready
-  - The following 0x0B read picks up the response
-
-**Option C**: Use the V1 path (CTRL0) for DESCREQ with combined TX+RX
-  - The V1 path might handle RX for any opcode
-  - Fewer restrictions than the V2 path with TXMODE
+| Aspect | V0 (this device) | v1.0 (HidSpiCx) |
+|--------|------------------|------------------|
+| Device descriptor | 28 bytes (I2C-like layout) | 24 bytes |
+| Header byte 0 | type:4|version:4 | type:4|version:4 |
+| Header byte 1-2 | u16 (low nibble must be 0) | u16 bits 13:0 = length, bit14 = LFF |
+| Input register | From descriptor offset 8 | From ACPI _DSM |
+| Output register | From descriptor offset 12 | From ACPI _DSM |
+| Descriptor body prefix | 3 bytes [len16|ContentID] | 2 bytes [len16|ContentID] |
+| Write is | TX-only (RX_COUNT=0) | TX-only |
+| Read-after-write | Separate 0x0B, GPIO-gated | Separate read approval, GPIO-gated |
 
 ---
 
-## Windows Driver — hidspicx.sys
+## What is CONFIRMED CORRECT
 
-From decompilation, the Windows HID-over-SPI driver implements:
-
-### Main Functions
-
-1. **VerifyResetResponse** (fcn.0xdd64):
-   - Reads the RESET_RSP header (type=3)
-   - Verifies the body contains the correct data
-   - If valid, advances the state
-
-2. **HidGetDeviceDescriptor** (fcn.0xf458):
-   - Sends DESCREQ (opcode 0x02, register 0x01)
-   - Waits for the GPIO IRQ
-   - Reads the device descriptor via 0x0B
-
-3. **VerifyDescriptorCompletion** (fcn.0xd2f8):
-   - Verifies the descriptor is complete
-   - Sends DESCREQ2 (opcode 0x02, register 0x02)
-   - Waits for the GPIO IRQ
-   - Reads the report descriptor
-
-4. **ConfigureTransfer** (fcn.0xa664):
-   - Configures the transfer buffers
-   - Sets the approval bytes (0x00 → 0x03)
-
-5. **PrepareDescriptor** (fcn.0x12bc0):
-   - Allocates the descriptor buffer
-   - Prepares the SPI_HID_DEVICE_DESC structure
-
-### Orchestrator (fcn.0xc8d8) — Main Loop
-
-```
-1. Reads the report type from the buffer
-2. Switches on the type:
-   - type==3 (RESET_RSP): advances state and sends DESCREQ
-   - type==7 (DEVICE_DESC): receives descriptor, sends DESCREQ2
-   - type==8 (RPT_DESC): receives report descriptor
-   - type==0 (ACK) with body_len>0: verifies completion
-3. If the descriptor is complete, starts activation
-4. Loops on subsequent IRQs
-```
-
-### Decomp Reading Key
-
-```
-r13d = 3       → constant used to compare against type==3
-r14d = state flag (0/1)
-rdi = type byte from the buffer
-cmp dil, r13b  → compares type against 3
-je 0x...       → if type==3, jump to the RESET_RSP handler
-```
+| Aspect | Status |
+|--------|--------|
+| Header body_len formula: `(u16>>4)*4` | CONFIRMED (decomp validates this) |
+| Header sync byte 0x5A at position 3 | CONFIRMED |
+| Read approval format: 0x0B + 24-bit BE addr + 0xFF | CONFIRMED |
+| DESCREQ 10-byte format: 0x02 + addr + len16 + ContentID + pad | CONFIRMED |
+| DESCREQ register 0x000001, DESCREQ2 register 0x000002 | CONFIRMED |
+| GPIO interrupt before every read | CONFIRMED |
+| GPIO interrupt after write before reading response | CONFIRMED |
+| ~962ms gap between descriptors and next activity | CONFIRMED |
 
 ---
 
-## Summary of Required Fixes
+## What has been SMENTITO (FALSIFIED)
 
-| Priority | Issue | File | Fix |
-|----------|---------|------|-----|
-| CRITICAL | DESCREQ doesn't produce type=7 | spi-hid-core.c | TX+RX same opcode, or wait for IRQ |
-| CRITICAL | Device doesn't receive DESCREQ | spi-amd.c | Verify TXMODE for 0x02 |
-| HIGH | Missing multi-drain | spi-hid-core.c | Two 0x0B reads before DESCREQ |
-| HIGH | State 1 never sees type=7 | spi-hid-core.c | Add logic for type=7 |
-| MEDIUM | Missing DESCREQ2 | spi-hid-core.c | Already present but unreachable |
-| MEDIUM | Full VENDOR_INIT missing | spi-hid-core.c | Add vendor commands |
-| LOW | Firmware untested | spi-hid-core.c | Re-enable fw_work after fixes |
+| Previous Claim | Reality |
+|---------------|---------|
+| "type 0 = ACK/Ready" | Does not exist. 03 00 00 00 = RESET_RSP body |
+| "Device changes state on its own" | Header+body of same report |
+| "Approval bytes (APPR7/APPR8) as protocol fields" | Buffer echo artifact |
+| "input_register = 0x001000 after descriptor" | Stays 0x000000 on this device |
+| "TX+RX same opcode 0x02 combined" | TX-only write + separate 0x0B read |
+| "Runtime data type=7" | type=1 (DATA) |
+| "Vendor=0x03A8, Product=0x0002" | 0x045E, 0x0C19 (0x03A8 = report desc length 936) |
+| "Activation/FW phases for touchscreen" | Belong to companion device B |
+| "Sync bytes (0xFF) from device" | Host TX placeholder on MOSI during read approval |
+| "Byte1 [LEN_LOW][FRAGMENT_ID]" | Low nibble reserved, must be 0 |
+| "Approval bytes set by ConfigureTransfer" | Not protocol; buffer reuse artifact |
+

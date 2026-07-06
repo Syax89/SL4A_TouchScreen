@@ -1,5 +1,8 @@
 # amdspi.sys — Windows AMD SPI Driver (Decompiled)
 
+> **UPDATE 2026-07-06**: Corretto sulla base di `verification/amdspi-decomp-report.md`.
+> Le descrizioni errate delle funzioni e alcuni dettagli della sequenza sono stati fixati.
+
 Windows driver for the AMD FCH SPI controller. Responsible for low-level SPI communication.
 
 ## Source Files
@@ -24,12 +27,12 @@ All files in `docs/decomp/amdspi/` are functions decompiled from `amdspi.sys` (x
 | 0x2be4 | 0x2be4_transfer_data.txt | Fills the FIFO with TX data |
 | 0x2d28 | 0x2d28.txt | (buffer management) |
 | 0x2ff4 | 0x2ff4.txt | (completion handling) |
-| 0x3528 | 0x3528_sub_transfer.txt | Sub-transfer: handles TX+RX under the same CS |
+| 0x3528 | 0x3528_sub_transfer.txt | **DMA descriptor builder** — builds 'AeiC'/'ALDT' DMA descriptors, sends via IOCTL 0x32c004. NO MMIO access. |
 | 0x3994 | 0x3994.txt | (error handling) |
-| **0x3c20** | **0x3c20_transfer.txt** | **Full SPI transfer execution** |
-| 0x4684 | 0x4684.txt | (cleanup) |
-| **0x4bac** | **0x4bac.txt** | **Segment execution (TX+RX)** |
-| **0x54d0** | **0x54d0_submit_handler.txt** | **Entry point: submit I/O request** |
+| **0x3c20** | **0x3c20_transfer.txt** | **Main read transfer** (opcode 0x0B). TX_COUNT=3, reads RX at offset 0x80+TX_COUNT=0x83. |
+| 0x4684 | 0x4684.txt | **Write handler** (opcode 0x02) inside SPB sequence. RX_COUNT=0. |
+| **0x4bac** | **0x4bac.txt** | **Read handler with speed config**. Uses 0x44 dance, RX_COUNT=rx_len+1, reads at offset 0x84. |
+| **0x54d0** | **0x54d0_submit_handler.txt** | **Write handler (full)**: opcode 0x02, RX_COUNT=0, TX-only. Does NOT read the FIFO. |
 | 0x6d50 | 0x6d50.txt | (timer/cleanup) |
 | 0x6f84 | 0x6f84_restore_register_prefix.txt | Restores 0x22 after the transfer |
 | 0x6fc0 | 0x6fc0_read_register_prefix.txt | Reads the register prefix from 0x22 |
@@ -46,8 +49,8 @@ All files in `docs/decomp/amdspi/` are functions decompiled from `amdspi.sys` (x
 
 **Logic** (from the assembly):
 1. Allocates a DMA buffer (512 bytes, tag 'SPI2')
-2. Calls `fcn.0x3528` (sub_transfer) to configure the transfer
-3. If sub_transfer returns 0, error
+2. Calls `fcn.0x3528` (DMA descriptor builder) to configure the transfer
+3. If fcn.0x3528 returns 0, error
 4. Calls `fcn.0x6fc0` — **reads the register prefix from MMIO+0x22** (16-bit)
 5. Calls `fcn.0x19c0` — 8-bit read of the status register at context+0x4C (MMIO+0x4C), saves it to a global variable
 6. Saves the read value in the global variable `[0x14001e814]`
@@ -56,25 +59,25 @@ All files in `docs/decomp/amdspi/` are functions decompiled from `amdspi.sys` (x
 9. If the remainder != 0 → conditional branch
 10. Calls `fcn.0x2be4` — **transfer_data**: fills the FIFO and executes
 
-### fcn.0x4bac — Execute Segment
+### fcn.0x4bac — Execute Segment (Read Handler)
 
-**Operation order** (confirmed against our own code):
+**Operation order** (verified against decomp):
 
 ```
 1. read8(0x1D)                         // read ALT_CS
 2. AND 0xFC, OR 0x01                   // preserve bits 7-2, zero the CS bits, set bit 0
 3. write8(0x1D)                         // write ALT_CS (enable strobe)
 
-4. Clear FIFO:
+4. Clear FIFO (write path ONLY):
    ctrl0 = read32(CTRL0)
-   ctrl0 &= ~BIT(20)                   // clear FIFO_CLEAR
+   ctrl0 |= BIT(20)                    // SINGLE SET — Windows does NOT toggle clear→set
    write32(CTRL0, ctrl0)
-   ctrl0 |= BIT(20)                    // set FIFO_CLEAR (rising edge)
-   write32(CTRL0, ctrl0)
+   // NOTE: Windows uses a single set. If HW requires a clear→set transition,
+   // that is a Linux-side discovery (not what Windows does).
 
 5. write8(opcode, 0x45)                // opcode into OPCODE_REG
 
-6. Secret bits:
+6. Secret bits (applied ONCE per segment):
    ctrl0 = read32(CTRL0)
    ctrl0 |= 0x60040000                 // bits 30, 29, 18
    // Does NOT set bit 23 (TXMODE)!
@@ -94,33 +97,33 @@ All files in `docs/decomp/amdspi/` are functions decompiled from `amdspi.sys` (x
      write8(data[i], 0x80 + i)
 
 10. write8(RX_COUNT, 0x4B)            // bytes to receive
-    // For a write: RX_COUNT = 0
-    // For a read: RX_COUNT = rx_len
+    // For a write (0x54d0): RX_COUNT = 0
+    // For a read (0x4bac): RX_COUNT = rx_len+1 (+1 because TX_COUNT includes extra byte)
 
 11. write8(opcode, 0x45) AGAIN         // re-write after the speed config clobbered it!
 
-12. Secret bits AGAIN:
-    ctrl0 = read32(CTRL0)
-    ctrl0 |= 0x60040000
-    write32(CTRL0, ctrl0)
-
-13. Trigger:
+12. Trigger:
     write8(0x80, 0x47)                // CMD_TRIGGER bit7
 
-14. Wait busy (lfence first):
-    while (read32(CTRL0) & BIT(31))
-      pause/spin
+13. Busy poll:
+    val = read8(0x4C)                  // reads STATUS as a BYTE (not read32!)
+    while (val & BIT(31))              // tests bit31 of a BYTE → effectively a no-op
+    // The actual busy indicator is CTRL0 bit31, but Windows never polls it.
+    // The retry counter prevents an infinite loop.
 
-15. Restore (fcn.0x6f84):
+14. Restore (fcn.0x6f84):
     write16(0x22, saved_prefix)       // restores the register prefix (0x22 ONLY)
 ```
 
-### fcn.0x54d0 — Submit Handler
+### fcn.0x54d0 — Submit Handler (WRITE path)
 
-**Entry point** for every SPI I/O request.
+**Write handler** for opcode 0x02. Sets RX_COUNT=0 and does NOT read the FIFO.
 
-Calls:
-1. `fcn.0x6f84` (restore) — register restore
+TX and RX are handled as **separate WDF requests** with two triggers:
+1. Write: opcode 0x02, TX-only (0x54d0, RX_COUNT=0)
+2. Read: opcode 0x0B, triggered by GPIO interrupt (0x4bac or 0x3c20)
+
+They are NOT combined into a single operation with the same opcode.
 
 ### fcn.0x2be4 — Transfer Data
 
@@ -143,7 +146,9 @@ This ensures the register prefix state stays consistent between transfers. It do
 
 ## hidspicx.sys — HID Protocol Driver
 
-The files in `docs/decomp/hidspicx_*.txt` contain the HID-over-SPI driver:
+The files in `docs/decomp/hidspicx_*.txt` contain the HID-over-SPI driver.
+**Note**: the touchscreen uses the V0 path (HidSpiDeviceV0), not the HidSpiCx path.
+The Cx files document the spec v1.0 behavior which does NOT apply to this device.
 
 | File | Function |
 |------|----------|
@@ -157,58 +162,40 @@ The files in `docs/decomp/hidspicx_*.txt` contain the HID-over-SPI driver:
 | hidspicx_1ef0_InitTransfer | Initializes the transfer |
 | hidspicx_da9c_State2 | State 2 handling |
 
-### Orchestrator (fcn.0xc8d8)
-
-The hidspi driver's main loop. Dispatches based on the report type:
-
-```
-1. Reads the type byte from the received buffer
-2. r13d = 3 (constant for RESET_RSP)
-3. cmp type, 3 → if type==3, RESET_RSP handler
-4. cmp type, 7 → if type==7, DEVICE_DESC handler
-5. cmp type, 8 → if type==8, RPT_DESC handler
-6. For each type, calls the appropriate function
-7. Loops on subsequent IRQs
-```
-
-Assembly details:
-```
-mov r13d, 3           ; constant for type==3
-movzx edi, byte [rcx] ; read the type byte
-cmp dil, r13b          ; type == 3?
-jne not_reset_rsp      ; if not, jump away
-; ... RESET_RSP handler ...
-```
-
-The `r14b` flag tracks whether the descriptor has been received:
-- `r14b = 0` → descriptor not yet received
-- `r14b = 1` → descriptor received
-
-The `dil` flag tracks whether the buffer is valid:
-- `setne dil` after `cmp` — dil=1 if the context pointer is valid
-
 ---
 
 ## Summary
 
-### What Windows does that we don't
+### What Windows does — CONFIRMED from decomp
 
-1. **Two 0x0B reads before DESCREQ** — RESET_RSP drain
-2. **TX+RX with the same opcode** in a single operation (0x02 TX + 0x02 RX)
+1. **Two 0x0B reads before DESCREQ** — RESET_RSP header + body drain (single input report)
+2. **TX and RX are separate WDF requests** — write 0x02 (TX-only) + read 0x0B (GPIO-gated)
 3. **Speed config** at 0x44 which overwrites 0x45, then re-writes the opcode
 4. **Restore of 0x22** after every transfer (NOT 0x44)
 5. **0x1D strobe** (AND 0xFC, OR 0x01) before every transfer
-6. **Secret bits** (30, 29, 18) in CTRL0 — always set
+6. **Secret bits** (30, 29, 18) in CTRL0 — always set, ONCE per segment
 7. **Does NOT set TXMODE** (bit 23) — Windows doesn't need it
 8. **Waits for the GPIO IRQ** before reading DESCREQ responses
 9. **DESCREQ2** to request the report descriptor after the device descriptor
-10. **~962ms gap** between receiving the descriptors and the activation commands
+10. **FIFO clear is a single set** (not a toggle) in the Windows driver
+11. **Busy poll reads 0x4C as a byte** — effectively a no-op (retry counter prevents infinite loop)
+12. **RX offset = 0x80 + TX_COUNT** (0x83 for 0x3c20, 0x84 for 0x4bac), not a fixed +4
 
-### What we do that Windows doesn't
+### What the Linux driver does that Windows doesn't
 
-1. **Separate TX+RX** with different opcodes (0x02 TX, 0x0B RX)
-2. **Single drain read** instead of double
-3. **No speed config** (removed for simplicity)
-4. **No 0x22/0x44 restore** (not needed without the speed config)
-5. **No 0x1D strobe** (removed for debugging)
-6. **Extensive debug logging** on every SPI operation
+1. **Separate TX+RX** with different opcodes (0x02 TX, 0x0B RX) — this IS actually what Windows does too
+2. **FIFO clear toggle** (clear→set) — Windows uses single set
+3. **Strobe 0x49/0x4A** — Windows never writes these registers (zero occurrences in amdspi.sys)
+4. **Extensive debug logging** on every SPI operation
+
+### Previously believed — NOW SMENTITO
+
+| Wrong belief | Reality |
+|-------------|---------|
+| "0x3528 handles TX+RX under the same CS" | DMA descriptor builder, no MMIO |
+| "0x4684 is cleanup" | Write handler (opcode 0x02), RX_COUNT=0 |
+| "Secret bits applied TWICE" | Once per segment |
+| "Busy poll = read32(CTRL0)" | read8(0x4C), effectively no-op |
+| "TX+RX with same opcode in single operation" | Separate WDF requests (write 0x02 + read 0x0B) |
+| "FIFO clear requires toggle" | Windows does single set |
+

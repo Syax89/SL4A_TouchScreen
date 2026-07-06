@@ -15,7 +15,7 @@
 ### 0.1 ACPI DSDT
 - [ ] File: `~/dsdt.dsl` — search for `MSHW0231` to extract:
   - SPI register addresses: `_DSM` functions 1/2/3
-  - GPIO pin and IRQ configuration (pin 0x15, flags 0x409)
+  - GPIO pin and IRQ configuration (pin 0x15 in ETW traces, 0x55=85 in DSDT — discrepancy documented)
   - SPI controller MMIO base: `0xFEC10000`
 - [ ] File: `~/ssdt*.dsl` — search for `AMDI0060` for SPI controller configuration
 
@@ -40,10 +40,9 @@
 | OPCODE_REG | 0x45 | AMD_SPI_OPCODE_REG | single/double write8 | [ ] |
 | CMD_TRIGGER | 0x47 | AMD_SPI_CMD_TRIGGER_REG | toggle bit7 | [ ] |
 | TX_COUNT | 0x48 | AMD_SPI_TX_COUNT_REG | write8 | [ ] |
-| STROBE_V2_A | 0x49 | writeb(0x00) | present in decomp? | [ ] |
-| STROBE_V2_B | 0x4A | writeb(0x00) | present in decomp? | [ ] |
+| — | 0x49/0x4A | **REMOVED** (zero occurrences in amdspi.sys) | NOT present | [ ] |
 | RX_COUNT | 0x4B | AMD_SPI_RX_COUNT_REG | write8 | [ ] |
-| STATUS | 0x4C | AMD_SPI_STATUS_REG | read8 in fcn.0x3c20 | [ ] |
+| STATUS | 0x4C | AMD_SPI_STATUS_REG | read8 in fcn.0x3c20 (byte!) | [ ] |
 | SPEED_REG | 0x6C | AMD_SPI_SPEED_REG | present | [ ] |
 | FIFO_BASE | 0x80 | AMD_SPI_FIFO_BASE | 70 bytes | [ ] |
 
@@ -96,11 +95,9 @@ Windows decomp (fcn.0x4bac):          vs    Linux (amd_spi_exec_segment):
 
 11. write8(0x80, 0x47) Trigger            ✅ toggle via amd_spi_execute_opcode
 
-12. Strobe 0x49, 0x4A                    ✅ writeb(0x00)
+12. Wait busy (CTRL0 bit31)               ✅ amd_spi_busy_wait
 
-13. Wait busy (CTRL0 bit31)               ✅ amd_spi_busy_wait
-
-14. Restore 0x22 (fcn.0x6f84)            ⚠️  read in probe but NEVER restored
+13. Restore 0x22 (fcn.0x6f84)            ⚠️  read in probe but NEVER restored
 ```
 
 ### 1.4 Function `amd_spi_setup_v2_regs()`
@@ -199,39 +196,38 @@ The current function walks every transfer in the list and:
 ### 2.5 Initialization Sequence (from Windows CSV)
 
 ```
-Phase 1 — Reset:
-  TXN#1: 0x0B read 9B → RESET_RSP (32 10 00 5A)
-  TXN#2: 0x0B read 9B → ACK (03 00 00 00)
-  (gap ~168 µs, NO command sent!)
+Phase 1 — Reset (Device A, touchscreen):
+  TXN#0: 0x0B read 9B → RESET_RSP header (32 10 00 5A)
+  TXN#1: 0x0B read 9B → RESET_RSP body (03 00 00 00)
+  These are header+body of the SAME Reset Response input report.
 
-Phase 2 — Discovery:
-  TXN#3: DESCREQ 0x02 TX+RX 10B → ACK (all zeros)
-  GPIO IRQ (58 µs later)
-  TXN#4: 0x0B read 9B → DEVICE_DESC type=7
-  TXN#5: 0x0B read 37B → device descriptor data
-  TXN#6: DESCREQ2 0x02 TX+RX 10B → all zeros (busy)
-  GPIO IRQ (727 µs later)
-  TXN#7: 0x0B read 9B → RPT_DESC type=8
-  TXN#8: 0x0B read 945B → HID report descriptor
+Phase 2 — Discovery (Device A, touchscreen):
+  TXN#2: DESCREQ 0x02 TX 10B (write-only, RX_COUNT=0)
+  GPIO IRQ (58 µs after IoComplete)
+  TXN#3: 0x0B read 9B → DEVICE_DESC header type=7
+  TXN#4: 0x0B read 37B → device descriptor body (28 bytes at body+3)
+  TXN#5: DESCREQ2 0x02 TX 10B (write-only) → MISO all zeros (device busy)
+  GPIO IRQ (727 µs after IoComplete)
+  TXN#6: 0x0B read 9B → RPT_DESC header type=8
+  TXN#7: 0x0B read 945B → HID report descriptor body (936 bytes at body+3)
   (~962ms gap — driver processing)
 
-Phase 3 — Activation:
-  TXN#9:  cmd1 0x00 5B TX
-  TXN#10: cmd2 0x00 1B TX
-  TXN#11: 0x0B read → checksum
-  TXN#12: cmd3 0x70 TX+RX 14B
-
-Phase 4 — FW Upload:
-  120+ blocks of 0xB0, 241B each
+Phase 3 — Device B Activity (companion chip, NOT touchscreen):
+  TXN B1-B3: cmd1 (0x00, 5B), cmd2 (0x00, 1B), checksum read
+  TXN B4: cmd3 (0x70 TX+RX 14B) — FW status on companion device
+  TXN B5+: B0 firmware upload (120 blocks × 241B) on companion device
+  IMPORTANT: This activity is on a DIFFERENT SPB device (handle 0x7F74AA5D7B88,
+  connections 0x18/0x19/0x1A). The touchscreen receives NONE of these commands.
 ```
 
-### 2.6 Approval Bytes
+### 2.6 Previously Called "Approval Bytes" — NOW KNOWN TO BE BUFFER ARTIFACTS
 
-| Phase | approval7 | approval8 | Register |
-|------|-----------|-----------|----------|
-| Before DESCREQ | 0x00 | 0x00 | 0x0000 |
-| After device desc | 0x03 | 0x00 | 0x0000(?) |
-| Runtime | 0x0A | 0x00 | 0x0000 |
+The bytes at positions 6-8 of the 0x0B TX payload are **residual buffer data**
+from the Windows driver's buffer reuse, NOT intentional protocol fields.
+After a 10-byte DESCREQ write (`02 00 00 01 42 00 00 03 00 00`), the next
+read only writes bytes 0-4, leaving bytes 5-8 with residual values.
+Observed values (0x00, 0x03, 0x0A) are explained by this mechanism.
+These are NOT "approval bytes" and do NOT need to be set by the driver.
 
 ### 2.7 GPIO IRQ
 
@@ -306,13 +302,18 @@ Phase 4 — FW Upload:
 4. **Fix ALT_CS**: use the Windows pattern (AND 0xFC, OR 0x01) instead of a pure CS select
 5. **Verify 0x44 speed config**: test whether it's actually necessary
 
-### Phase B: HID Protocol Fixes
+Phase B: HID Protocol Fixes (REVISED 2026-07-06):
 
-1. **Fix memcpy offset** in descriptor parsing (hdr+off → hdr+off+4)
-2. **Fix initial input_register**: use 0x0000 with approval7=0x00 in state 0
-3. **Implement combined TX+RX**: change `spi_hid_seq_write_then_read` to use a single transfer
-4. **Add double drain**: two 0x0B reads before DESCREQ
+1. ~~Fix memcpy offset~~ **DONE** (spi-hid-core.c:1237 → hdr+off+4)
+2. ~~Fix initial input_register~~ **DONE** (use 0x0000)
+3. **Use separate write+read**: TX-only 0x02 write, wait for GPIO IRQ, then 0x0B read.
+   This IS what Windows does — NOT "combined TX+RX same opcode."
+4. **Add double drain**: two 0x0B reads before DESCREQ (header+body of RESET_RSP)
 5. **Wait for GPIO IRQ**: after DESCREQ, wait for the IRQ before reading the response
+
+NOTE: "Approval bytes" (C6/C7) and vendor activation (cmd1/cmd2/cmd3) are
+NOT required — approval bytes are buffer artifacts, and activation commands
+belong to the companion device (Device B), not the touchscreen.
 
 ### Phase C: Firmware and Runtime
 
@@ -324,14 +325,12 @@ Phase 4 — FW Upload:
 
 ## 6. Final Verification Checklist
 
-- [ ] The device responds with RESET_RSP (type=3) on the first 0x0B read
-- [ ] After ~168 µs, the second 0x0B read returns ACK
-- [ ] DESCREQ 0x02 TX+RX produces an inline ACK
+- [ ] The device responds with RESET_RSP header (type=3) on the first 0x0B read
+- [ ] The second 0x0B read returns the RESET_RSP body (03 00 00 00 — NOT an "ACK")
+- [ ] DESCREQ 0x02 TX (write-only) is sent to the device
 - [ ] GPIO IRQ arrives after DESCREQ
-- [ ] The post-IRQ 0x0B read returns DEVICE_DESC type=7
+- [ ] The post-IRQ 0x0B read returns DEVICE_DESC header type=7
 - [ ] The 37B 0x0B read returns the correct descriptor (vendor=0x045E, product=0x0C19)
-- [ ] DESCREQ2 produces RPT_DESC type=8
+- [ ] DESCREQ2 produces RPT_DESC header type=8 after GPIO IRQ
 - [ ] The 936-byte report descriptor is received correctly
-- [ ] Vendor commands (cmd1/cmd2/cmd3) execute
-- [ ] B0 firmware upload completes
-- [ ] Type-7 HID reports are received at runtime
+- [ ] Type-1 (DATA) HID reports are received at runtime
