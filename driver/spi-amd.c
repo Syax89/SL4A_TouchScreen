@@ -310,6 +310,11 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	for (i = 0; i < tx_len; i++)
 		writeb(tx_data[i], base + fifo_pos + i);
 
+	/* Full-duplex for writes: device expects to drive MISO during write handshake.
+	 * Windows CSV shows RX data during writes; RX_COUNT=0 may prevent handshake. */
+	if (opcode == 0x02 && rx_len == 0)
+		rx_len = tx_len + 1;  /* +1 for opcode byte on wire */
+
 	writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
 
 	/* Re-apply secret bits after FIFO fill (v2-multi approach).
@@ -335,21 +340,44 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	ret = amd_spi_execute_opcode(amd_spi);
 	if (ret) { pr_err("spi-amd: execute_opcode failed %d\n", ret); writew(saved_0x22, base + 0x22); return ret; }
 
-	ret = amd_spi_busy_wait(amd_spi);
-	if (ret) { pr_err("spi-amd: busy_wait timeout %d\n", ret); writew(saved_0x22, base + 0x22); return ret; }
-
+	/* Windows busy poll: check STATUS register (0x4C) bit 31 for busy.
+	 * If still busy after first poll, retry with 0x80→0x4B + opcode rewrite. */
 	{
-		u32 st = readl(base + AMD_SPI_STATUS_REG);
+		int retries = 30;
+		u32 st;
+		st = readl(base + AMD_SPI_STATUS_REG);
+		while ((st & AMD_SPI_BUSY) && retries-- > 0) {
+			writeb(0x80, base + AMD_SPI_RX_COUNT_REG);  /* 0x4B */
+			writeb(0x02, base + AMD_SPI_OPCODE_REG);      /* 0x45 */
+			usleep_range(50, 100);
+			st = readl(base + AMD_SPI_STATUS_REG);
+		}
+		if (st & AMD_SPI_BUSY) {
+			pr_err("spi-amd: WRITE busy timeout after retries, status=0x%08x\n", st);
+			writew(saved_0x22, base + 0x22);
+			return -ETIMEDOUT;
+		}
 		if (opcode == 0x02)
-			pr_err("spi-amd: WRITE DONE status=0x%08x\n", st);
+			pr_err("spi-amd: WRITE DONE status=0x%08x retries_left=%d\n", st, retries);
 	}
 
 	if (rx_len) {
 		u32 read_off = fifo_pos + tx_len;
-		for (i = 0; i < rx_len && i < AMD_SPI_FIFO_SIZE; i++)
-			rx_data[i] = readb(base + read_off + i);
-		pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
-			(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), rx_data);
+		u8 scratch[80];
+		u8 *dst = rx_data ? rx_data : scratch;
+		u32 rmax = min_t(u32, rx_len, AMD_SPI_FIFO_SIZE);
+		for (i = 0; i < rmax; i++)
+			dst[i] = readb(base + read_off + i);
+		if (opcode == 0x02)
+			pr_err("spi-amd: WRITE MISO rx_len=%u raw=[%*ph]\n",
+				rx_len, (int)min_t(u32, rx_len, 16), dst);
+		else
+			pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
+				(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), dst);
+		if (!rx_data && dst == scratch) {
+			/* Write with forced RX — discard MISO, restore rx_len */
+			rx_len = 0;
+		}
 	}
 
 	if (DBG_VERBOSE) pr_err("spi-amd: done\n");
