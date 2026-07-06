@@ -2,6 +2,34 @@
 
 Estratto da `surface_boot_auto.csv` — Trace ETW del boot di Windows su Surface Laptop 4 AMD.
 
+## Statistiche Riepilogative
+
+| Metrica | Valore |
+|---------|--------|
+| Transazioni SPI totali | 2384 |
+| Transfer buffer totali | 3779 |
+| GPIO interrupt totali | 676 |
+| Durata totale boot | ~88 secondi |
+| File sorgente | `surface_boot_auto.csv` |
+| Timestamp | 100ns units (ETW Clock-Time) |
+
+### Byte di stato protocollo (approval byte a8)
+| Valore | Fase |
+|--------|------|
+| 0x00 | Init / pre-DESCREQ |
+| 0x03 | Post-DESCREQ (descrittori ricevuti) |
+| 0x04 | Runtime (post init) |
+
+### Dettaglio operazioni firmware
+- **120 blocchi FW (0xB0)** per il dispositivo companion, NON per il touchscreen
+- **Second binary upload (0x22)** per il dispositivo companion
+- Il touchscreen NON riceve firmware upload
+
+### Device descriptor
+- Vendor=0x045E (Microsoft), Product=0x0C19, Version=0x0100
+
+---
+
 ## Formato CSV
 
 Ogni riga contiene campi separati da virgola. Campi rilevanti:

@@ -12,10 +12,10 @@
 | 0x45 | OPCODE_REG | 8bit | R/W | Opcode per path V2 |
 | 0x47 | CMD_TRIGGER | 8bit | R/W | Trigger V2 (bit7 = start) |
 | 0x48 | TX_COUNT | 8bit | R/W | Byte da trasmettere |
-| 0x49 | STROBE_V2_A | 8bit | W | Strobe V2 (scrivi 0x00) |
-| 0x4A | STROBE_V2_B | 8bit | W | Strobe V2 (scrivi 0x00) |
+| 0x49 | — | 8bit | W | NON USATO da Windows (zero occorrenze in amdspi.sys). Il driver Linux lo scrive come strobe V2. |
+| 0x4A | — | 8bit | W | NON USATO da Windows (zero occorrenze in amdspi.sys). Il driver Linux lo scrive come strobe V2. |
 | 0x4B | RX_COUNT | 8bit | R/W | Byte da ricevere |
-| 0x4C | STATUS | 32bit | R | Stato (bit31 = busy su V2) |
+| 0x4C | STATUS | 32bit | R | Stato. Windows lo legge come **byte** e il poll bit31 e' no-op. Il busy affidabile e' CTRL0 bit31. |
 | 0x6C | SPEED_REG | 32bit | R/W | Speed V2 (spd7 a bit 8-13) |
 | 0x80 | FIFO_BASE | 70B | R/W | FIFO dati (70 byte, 0x80-0xC5) |
 
@@ -263,3 +263,58 @@ V2: poll CTRL0 bit31 o STATUS (0x4C) bit31 (entrambi leggibili come ioread32)
 | RX_COUNT | 0x4B | `+1` per 0x0B | esatto `rx_len` |
 | Strobe V2 | 0x49, 0x4A | assenti | `writeb(0x00)` a entrambi |
 | V1 trigger | CTRL0 bit16 | `setclear` | clear→set toggle |
+
+---
+
+## PCI Config Space — FCH LPC Bridge (1022:790e, device 00:14.3)
+
+Questi registri sono nello spazio di configurazione PCI del bridge LPC e influenzano
+il comportamento del controller SPI Cezanne. **NON sono registri MMIO SPI** — sono
+accessibili via PCI config space (setpci / RWEverything).
+
+| Offset | Size | Nome | Windows Value | Linux Default | Scrivibile | Descrizione |
+|--------|------|------|---------------|---------------|------------|-------------|
+| 0xB4 | 32bit | FIFO_LAYOUT | 0x007DFFE0 | 0x00000000 | SI | FIFO data layout / sync byte count |
+| 0xB8 | 32bit | FIFO_ACCESS | 0x33ED0084 | 0x33ED0004 | SI | bit7=1: 16-bit FIFO access mode |
+
+### PCI 0xB8 bit7 — 16-bit FIFO Access Mode
+
+Quando bit7=1 (valore Windows), il controller SPI Cezanne opera in modalita' FIFO a 16 bit.
+I dati devono essere letti come word a 16 bit (`readw`) e i byte vanno estratti con la formula:
+
+```c
+for (i = 0; i < rx_len; i++) {
+    u16 w = readw(base + read_off + (i/2)*2);
+    dst[i] = (i & 1) ? (u8)(w >> 8) : (u8)(w & 0xFF);
+}
+```
+
+**Senza questo fix**, le letture a byte (`readb`) producono byte interlacciati (high/low).
+
+### Comando setpci per applicare le impostazioni Windows
+
+```bash
+# Abilita 16-bit FIFO mode (scrive solo il byte basso di 0xB8)
+setpci -s 00:14.3 B8.L=0x0084
+
+# Scrive il valore completo di 0xB4
+setpci -s 00:14.3 B4.L=0xFFE0
+```
+
+**Nota:** Il 16-bit FIFO mode risolve il layout dei dati in lettura ma NON le operazioni
+di write (opcode 0x02), che continuano a fallire. Il meccanismo per le write e'
+controllato da altri fattori non ancora identificati (possibilmente CTRL0 bits[15:8]).
+
+### Verifica valore corrente
+
+```bash
+# Legge 0xB8
+setpci -s 00:14.3 B8.L
+
+# Legge 0xB4
+setpci -s 00:14.3 B4.L
+```
+
+---
+
+## PCI 0xB4 — FIFO Data Layout / Sync Byte Count

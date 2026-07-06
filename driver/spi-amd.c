@@ -223,13 +223,9 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 	if (ret)
 		return ret;
 
-	/* V2: toggle trigger to preserve other bits in 0x47 */
+	/* V2: write 0x80 hardcoded to 0x47 (matches Windows decomp fcn.0x4bac) */
 	if (amd_spi->version == AMD_SPI_V2) {
-		u8 trig = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
-		trig &= ~AMD_SPI_TRIGGER_CMD;
-		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, trig);
-		trig |= AMD_SPI_TRIGGER_CMD;
-		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, trig);
+		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, 0x80);
 	} else {
 		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
 		ctrl0 &= ~AMD_SPI_EXEC_CMD;
@@ -284,15 +280,17 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		amd_spi_setup_v2_regs(amd_spi);
 
 	/* V2: 0x44 dance — only for writes (opcode 0x02), as Windows does.
-	 * Windows fcn.0x4bac does TWO separate writew to 0x44:
-	 * first: r44 = (r44 & 0xF0FF) | (nibble << 8)
-	 * second: r44 = (r44 & 0x0FFF) | (nibble << 12)
-	 * Each writew to 0x44 clobbers 0x45 — latch side-effect may differ. */
+	 * Windows fcn.0x4bac decomps:
+	 *   r44 = read16(0x44)
+	 *   r44 = (r44 & 0xF0FF) | (nibble << 8)
+	 *   r44 = (r44 & 0x0FFF) | (nibble << 12)
+	 *   write16(0x44, r44)
+	 * Each write16 clobbers 0x45 — re-write opcode after. */
 	if (amd_spi->version == AMD_SPI_V2 && opcode == 0x02) {
 		u16 w = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 speed_nibble = amd_spi_readreg8(amd_spi, AMD_SPI_ENA_REG) & 0xF;
-		/* Windows mask is 0x00FF (clears ALL of bits [15:8]), not 0xF0FF */
-		w = (w & 0x00FF) | ((u16)speed_nibble << 8) | ((u16)speed_nibble << 12);
+		w = (w & 0xF0FF) | ((u16)speed_nibble << 8);
+		w = (w & 0x0FFF) | ((u16)speed_nibble << 12);
 		amd_spi_writereg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG, w);
 		amd_spi_set_opcode(amd_spi, opcode);
 	}
@@ -312,6 +310,14 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		rx_len = tx_len + 1;  /* +1 for opcode byte on wire */
 
 	writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
+
+	/* Windows decomp 0x4bac: re-write opcode after RX_COUNT, just before trigger */
+	if (amd_spi->version == AMD_SPI_V2 && opcode == 0x02)
+		amd_spi_set_opcode(amd_spi, opcode);
+
+	/* Windows decomp 0x4bac: re-apply secret bits just before trigger */
+	if (amd_spi->version == AMD_SPI_V2)
+		amd_spi_setup_v2_regs(amd_spi);
 
 	wmb();
 
@@ -354,12 +360,17 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	}
 
 	if (rx_len) {
-		u32 read_off = fifo_pos + tx_len;
+		u32 read_off;
+
+		if (opcode == 0x0B)
+			read_off = fifo_pos + tx_len;
+		else
+			read_off = fifo_pos + 4;
 		u8 scratch[80];
 		u8 *dst = rx_data ? rx_data : scratch;
 		u32 rmax = min_t(u32, rx_len, AMD_SPI_FIFO_SIZE);
 		for (i = 0; i < rmax; i++)
-			dst[i] = readb(base + read_off + i);
+			{ u16 w = readw(base + read_off + (i/2)*2); dst[i] = (i & 1) ? (u8)(w >> 8) : (u8)(w & 0xFF); };
 		if (opcode == 0x02)
 			pr_err("spi-amd: WRITE MISO rx_len=%u raw=[%*ph]\n",
 				rx_len, (int)min_t(u32, rx_len, 16), dst);
@@ -584,7 +595,7 @@ int amd_spi_probe_common(struct device *dev, struct spi_controller *host)
 	int err;
 
 	host->num_chipselect = 4;
-	host->mode_bits = 0;
+	host->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH;
 	host->flags = 0;
 	host->setup = amd_spi_host_setup;
 	host->transfer_one_message = amd_spi_host_transfer;

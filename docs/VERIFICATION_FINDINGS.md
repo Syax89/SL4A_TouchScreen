@@ -129,7 +129,7 @@ static u8 spi_hid_approval_byte8(struct spi_hid *shid)
 
 ---
 
-## Stato Fix (2026-07-04)
+## Stato Fix (2026-07-06 — FINALE)
 
 | # | Bug | Stato | File |
 |---|-----|--------|------|
@@ -139,9 +139,18 @@ static u8 spi_hid_approval_byte8(struct spi_hid *shid)
 | C7 | approval8 runtime | **FIXED** | spi-hid-core.c:1131 |
 | C1 | ALT_CS encoding | **FIXED** | spi-amd.c:106-108 |
 | C2 | secret bits in exec_segment | **FIXED** | spi-amd.c:250-251, rimosso da host_transfer |
-| C4-C7,C1-C2 | Build | **COMPILA** | Entrambi i moduli |
-| DESCREQ | TX+RX inline | **TODO** | spi-hid-core.c / spi-amd.c |
-| C3 | Strobe 0x49/0x4A | **TODO** | spi-amd.c:272-273 |
+| C3 | Strobe 0x49/0x4A | **RIMOSSI** (non usati da Windows) | spi-amd.c:272-273 |
+| C4-C7,C1-C3 | Build | **COMPILA** | Entrambi i moduli |
+| DESCREQ | Write path | **ESAURITO** — software fix insufficiente. Serve logic analyzer. | — |
+
+---
+
+## Esito Finale Test (2026-07-06)
+
+Tutti i fix software sono stati applicati. Tuttavia, **il device ignora qualsiasi write (opcode 0x02)**.
+Il blocco e' a livello fisico (CTRL0 bits[15:8] hardwired a 0xA9 vs 0x0E Windows).
+
+**Next step**: logic analyzer su SCK/MOSI/MISO/CS tra Windows e Linux.
 
 ---
 
