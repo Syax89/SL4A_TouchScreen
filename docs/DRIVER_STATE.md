@@ -38,7 +38,7 @@ MSHW0231 touchscreen recognizes.
 - Hardcoded CS1
 - Opcode prepended to the FIFO
 - Full power cycle: _PS3→_PS0→_RST via ACPI
-- GPIO power cycle via M010
+- GPIO power cycle via M010 — **DESTRUCTIVE (kills device until reboot, 2026-07-07)**
 - Vendor init @0x04 (14-byte cold boot)
 - Synchronous DESCREQ, IRQ, and workqueue
 - PCI 0xB8 bit7 (16-bit FIFO mode — fixes the read data layout, NOT the write)

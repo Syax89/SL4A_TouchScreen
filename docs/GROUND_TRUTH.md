@@ -313,7 +313,14 @@ byte[3] = 0x5A (V2 sync)
 - `_PS3`: if not D3 → asserts reset, turns power off
 - WRST/NRST: empty stubs (NOP)
 
-**M009/M010 verified working from Linux** — HW power cycle doesn't unblock writes.
+**M009/M010 verified working from Linux** — but **M010 power cycle is DESTRUCTIVE**:
+
+> **CRITICAL (2026-07-07)**: Calling `M010(0x5B,0)` (power off) or any M010 sequence
+> **permanently breaks the touchscreen device until a full system reboot**. After M010,
+> the device stops sending RESET_RSP and MISO returns only `00 03 00 00 00...`.
+> Verified across 8 different power-cycle sequences (M010 only, M009+M010, reset-only,
+> power-only, reverse order, 10s wait). All sequences produce the same dead state.
+> Only a cold BIOS boot restores functionality. **The driver must NEVER call M009/M010.**
 
 ---
 
