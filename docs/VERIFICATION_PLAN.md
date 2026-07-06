@@ -167,9 +167,12 @@ The current function walks every transfer in the list and:
 |-------|---------------|----------------|
 | 0 (WAIT_RESET) | type==3: drain x2 + DESCREQ | VerifyResetResponse: if type==3 → advance and send DESCREQ |
 | 1 (WAIT_DESC) | type==7: parse desc → state=2 | type==7: receives desc → DESCREQ2 |
-| 2 (WAIT_RPT) | type==8: drain → VENDOR_INIT | type==8: receives report desc (State2 compares against type==4!) |
-| 3 (VENDOR_INIT) | cmd1,cmd2,cmd3 | Vendor activation after descriptors |
-| 4 (DONE) | type==7 → hid_input_report | Runtime |
+| 2 (WAIT_RPT) | type==8: drain → READY | type==8: receives report desc (State2 compares against type==4!) |
+| 3 (READY/DONE) | type==1 → hid_input_report | Runtime — type==1 (DATA) input reports |
+
+NOTE: There is NO vendor init (cmd1/cmd2/cmd3) for the touchscreen — those commands
+belong to companion Device B (different SPB connection). The state machine should go
+directly from WAIT_RPT to READY/DONE after receiving the report descriptor.
 
 ### 2.2 Bug #1: memcpy offset (DRIVER_STATE.md)
 
@@ -181,7 +184,7 @@ The current function walks every transfer in the list and:
 
 **File**: spi-hid-core.c
 **Bug**: Always uses `SPI_HID_DEFAULT_INPUT_REGISTER = 0x1000`
-**Windows**: Uses 0x0000 with approval byte7=0x00 before the descriptor parse
+**Windows**: Uses 0x0000 before the descriptor parse (the "approval bytes" are buffer artifacts, not protocol fields)
 
 ### 2.4 Bug #3: DESCREQ doesn't produce type=7
 
@@ -189,9 +192,11 @@ The current function walks every transfer in the list and:
 - The 0x0B RX is a **new read command**, not the completion of the DESCREQ
 - The device processes the DESCREQ during the 0x0B RX, not before
 
-**Windows solution**: TX+RX with the same opcode (0x02) in a single SPI operation
-- CSV TXN #3: opcode 0x02, TX 10 bytes + RX 10 bytes, response = ACK
-- Then GPIO IRQ → 0x0B read → type=7
+**Windows solution** (SMENTITO — see verification reports):
+- The CSV shows full-duplex SPI at the hardware level, but the driver
+  sets RX_COUNT=0 for writes (TX-only), then issues a separate 0x0B read
+  after the GPIO interrupt. This IS the correct approach.
+- Write: TX-only 0x02 (10 bytes) → GPIO IRQ → Read: 0x0B (9+ bytes)
 
 ### 2.5 Initialization Sequence (from Windows CSV)
 
@@ -272,9 +277,9 @@ These are NOT "approval bytes" and do NOT need to be set by the driver.
 
 ### 4.2 Strobe 0x49/0x4A
 
-- Our driver writes 0x00 to both
-- The Windows decomp doesn't explicitly show these writes
-- Possibly handled by hardware or implicit in the trigger
+- **REMOVED** from the Linux driver (zero occurrences in amdspi.sys)
+- Windows never writes these registers
+- No evidence they are needed for any path
 
 ### 4.3 Secret Bits
 

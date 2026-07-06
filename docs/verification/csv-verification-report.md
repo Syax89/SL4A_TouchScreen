@@ -70,7 +70,7 @@ Transazioni chiave successive del device A:
 I due TD hanno **la stessa lunghezza** e il MISO contiene `FF` esattamente per i 5 byte di header MOSI: trasferimento simultaneo (IOCTL_SPB_FULL_DUPLEX), non write seguita da read. Vale per TUTTE le 1.357 transazioni del device A, incluse le "read" 0x0B (MOSI zero-padded alla lunghezza totale). **Confidenza: alta.**
 
 ### 2. Prime 12 transazioni
-Vedi tabella (A). Sul touchscreen (device A): **esattamente 2 read 0x0B prima della prima write** (TXN#0 → `32 10 00 5A`, TXN#1 → `03 00 00 00`, header MOSI identici `0B 00 00 00 FF 00 00 00 00`). Poi DESCREQ (→ ACK `03 00 00 00 00`), read 9 B (→ `72 80 00 5A`), read 37 B (device descriptor: contiene `5E 04 19 0C` = VID 0x045E / PID 0x0C19), DESCREQ2 (→ tutti zero), read 9 B (→ `82 B0 0E 5A`), read 945 B (report descriptor). Le txn #8–#11 cronologicamente successive sono sul device B. **Confidenza: alta.**
+Vedi tabella (A). Sul touchscreen (device A): **esattamente 2 read 0x0B prima della prima write** (TXN#0 → `32 10 00 5A`, TXN#1 → `03 00 00 00` = RESET_RSP header+body, header MOSI identici `0B 00 00 00 FF 00 00 00 00`). Poi DESCREQ (MISO mostra `FF×5 03 00 00 00 00`), read 9 B (→ `72 80 00 5A`), read 37 B (device descriptor: contiene `5E 04 19 0C` = VID 0x045E / PID 0x0C19), DESCREQ2 (→ tutti zero), read 9 B (→ `82 B0 0E 5A`), read 945 B (report descriptor). Le txn #8–#11 cronologicamente successive sono sul device B. **Confidenza: alta.**
 
 ### 3. GPIO interrupt
 Tutti gli ISR: pin **0x15**, flags **0x409**, maschera pin-state `0x200000` (bit 21) su `\_SB.GPIO` istanza 1.
@@ -79,8 +79,10 @@ Tutti gli ISR: pin **0x15**, flags **0x409**, maschera pin-state `0x200000` (bit
 - ISR a +1641.4 µs = **727.0 µs dopo l'IoComplete di DESCREQ2** (914.4 µs); TXN#6 parte **49 µs dopo**.
 - Runtime: **676 ISR totali, ognuno seguito da una read 0x0B da 9 B** (677 header totali; l'eccedenza è TXN#1, secondo drain dopo l'unico ISR iniziale). Delta ISR→read: min 10 µs, mediana 66 µs, max 338 µs. Le read "body" (37/129/221/945/4309 B) seguono l'header **senza un secondo interrupt**. **Confidenza: alta.**
 
-### 4. Approval bytes (byte 7 e 8, 0-indexed, degli header 0x0B)
-I byte 5–8 dell'header di read sono un **ECO dei byte 5–8 dell'ultima write 0x02** (e le read "body" ecoano anche i byte successivi, fino a `56 BD 0C EE 5B 44 4C` della write #531 — vedi #873):
+### 4. Buffer echo (byte 7 e 8 degli header 0x0B — NON sono "approval bytes")
+
+**SMENTITO**: i byte 6-8 della read approval NON sono campi di protocollo "approval".
+Sono un **ECO dei byte 6-8 dell'ultima write 0x02** (buffer TX riusato dal driver Windows).
 
 | Fase (boot) | Ultima write (byte 5–8) | Header read (byte 5–8) | byte7 | byte8 |
 |---|---|---|---|---|
@@ -110,7 +112,7 @@ In `surface_init.csv` (dopo disable/enable) la prima txn è la write `02 00 00 0
 2. **[GRAVE] DRIVER_STATE §6 e VERIFICATION_PLAN §2.5: "TXN#11 0x0B read → checksum"** — falso: è una **plain Read di 3 byte senza alcun comando MOSI** (`84 26 AA`), su device B conn 0x19. Anche §7 "ACK read(0x0B,16B)" non esiste nel CSV. (CSV_SEQUENCE TXN#11 invece lo descrive correttamente come RX-only.)
 3. **[GRAVE] Tabella approval VERIFICATION_PLAN §2.6 incompleta/fuorviante**: mancano le fasi `00 04 03 00` (dopo write #220) e `00 03 04 00` → **approval7=0x04** (dopo write #223); manca che anche il byte 6 cambia; e soprattutto i valori non sono costanti di fase ma **eco dell'ultima write 0x02** (surface_init: runtime con approval7=0x04, non 0x0A). Un driver che hardcoda 0x03/0x0A per stato funziona solo se replica esattamente le stesse write di Windows.
 4. **[MEDIA] CSV_SEQUENCE TXN#5: "vendor=0x03A8, product=0x0002, version=0x0320"** — errato: 0x03A8=936 è la **lunghezza del report descriptor**; VID/PID reali = `5E 04 19 0C` = 0x045E/0x0C19, presenti nello stesso payload (coerente con DRIVER_STATE §1 e col bug C4 sui +4 di offset — qui l'errore è da mis-parse del body).
-5. **[MEDIA] VERIFICATION_PLAN §2.4/§2.5: "TXN#3 DESCREQ → ACK (all zeros)"** — contraddice il CSV e lo stesso CSV_SEQUENCE: DESCREQ#1 riceve `FF×5 03 00 00 00 00`; "all zeros" è solo DESCREQ2.
+5. **[MEDIA] VERIFICATION_PLAN §2.4/§2.5: "TXN#3 DESCREQ → ACK (all zeros)"** — contraddice il CSV e lo stesso CSV_SEQUENCE: DESCREQ#1 mostra `FF×5 03 00 00 00 00` su MISO; "all zeros" è solo DESCREQ2. Comunque il driver Windows non legge il FIFO dopo una write (RX_COUNT=0), quindi il contenuto del MISO durante DESCREQ è irrilevante.
 6. **[MEDIA] Timing GPIO in CSV_SEQUENCE**: "GPIO IRQ → 0x0B read ~112 µs" e "~185 µs" — in realtà la read **parte** 10 µs (risp. 49 µs) dopo l'ISR; 112/185 µs si ottengono solo misurando fino all'IoComplete. "DESCREQ→IRQ ~58 µs" (57.8) e "DESCREQ2→IRQ ~727 µs" (727.0) sono esatti.
 7. **[MEDIA] Manca in tutti i docs l'ISR a −46 µs prima di TXN#0** (riga 55): anche la prima read del boot è interrupt-driven. Rilevante per il fix "attendere GPIO IRQ".
 8. **[MEDIA] CSV_SEQUENCE runtime: "intervallo tra letture ~110 ms"** — falso: mediana **10.0 ms** tra gli header runtime (min 5.9, max 580; 662 header tra +42.2 s e +68.1 s).

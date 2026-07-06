@@ -12,8 +12,8 @@
 | 0x45 | OPCODE_REG | 8bit | R/W | Opcode for the V2 path |
 | 0x47 | CMD_TRIGGER | 8bit | R/W | V2 trigger (bit7 = start) |
 | 0x48 | TX_COUNT | 8bit | R/W | Bytes to transmit |
-| 0x49 | — | 8bit | W | NOT used by Windows (zero occurrences in amdspi.sys). The Linux driver writes it as a V2 strobe. |
-| 0x4A | — | 8bit | W | NOT used by Windows (zero occurrences in amdspi.sys). The Linux driver writes it as a V2 strobe. |
+| 0x49 | — | 8bit | W | NOT used by Windows (zero occurrences in amdspi.sys). REMOVED from Linux driver. |
+| 0x4A | — | 8bit | W | NOT used by Windows (zero occurrences in amdspi.sys). REMOVED from Linux driver. |
 | 0x4B | RX_COUNT | 8bit | R/W | Bytes to receive |
 | 0x4C | STATUS | 8bit (Windows reads as byte) | R | Status. Windows reads it as a **byte** and the bit31 poll is a no-op. The reliable busy flag is CTRL0 bit31. |
 | 0x6C | SPEED_REG | 32bit | R/W | V2 speed (spd7 at bits 8-13) |

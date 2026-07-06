@@ -118,7 +118,7 @@ should be **reverted**. The correct behavior is to always send 0x00 in these dum
 | Bit 21 preserved (read-modify-write) | OK (clear mask = 0 in setclear) |
 | DESCREQ payload format (10 bytes) | Exact |
 | DESCREQ2 payload format | Exact |
-| cmd1/cmd2/cmd3 payload | Exact |
+| cmd1/cmd2/cmd3 payload (companion Device B only) | Exact |
 | Double drain (2x 0x0B read) before DESCREQ | Correct |
 | State machine transition logic | Correct |
 | Report descriptor buffer size (8K) | Sufficient (936 bytes) |

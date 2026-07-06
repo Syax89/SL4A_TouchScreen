@@ -49,7 +49,7 @@ Relevant content:
 | `0x3` | Feature channel: `GET_FEATURE` on Report ID 6 (DeviceMode), `SET_FEATURE` on Report ID 5 and Report ID 86 (0x56) |
 | `0x4` | Device Descriptor request |
 
-The Linux driver uses the hardcoded default `SPI_HID_DEFAULT_INPUT_REGISTER = 0x1000` before reading the descriptor — on this hardware the real register is `0x0`, so if `spi_hid_probe()` doesn't read the real address from ACPI `_DSM` *before* the very first read-approval, the initial synchronization fails.
+The Linux driver used the hardcoded default `SPI_HID_DEFAULT_INPUT_REGISTER = 0x1000` before reading the descriptor — on this hardware the real register is `0x0` (0x000000), so the pre-descriptor reads must use address 0x0000. **FIXED**: the driver now uses 0x0000 in state 0.
 
 ## No Mode-Change Command
 Throughout the entire boot sequence, Windows only ever issues a **`GET_FEATURE` on Report ID 6 (DeviceMode)**, never a `SET_FEATURE` to change it. So there is no host-side command that forces "processed contacts" mode: the device starts up already configured (presumably by firmware) to stream raw frames.
