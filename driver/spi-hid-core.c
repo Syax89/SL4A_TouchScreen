@@ -280,15 +280,11 @@ static void spi_hid_stop_hid(struct spi_hid *shid)
 	}
 }
 
+/* _RST calls M010 which DESTROYS the device (2026-07-07).
+ * On ACPI systems, _INI has already powered the device. Just wait. */
 static int spi_hid_reset_via_acpi(struct spi_hid *shid)
 {
-	acpi_handle handle = ACPI_HANDLE(&shid->spi->dev);
-	acpi_status status;
-
-	status = acpi_evaluate_object(handle, "_RST", NULL, NULL);
-	if (ACPI_FAILURE(status))
-		return -EFAULT;
-
+	msleep(300);
 	return 0;
 }
 
@@ -1999,16 +1995,14 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->ready = false;
 	shid->keep_powered = true;
 
-	/* TEST: _RST + long delay (5s) before IRQ arm */
-	if (!dev->of_node) {
-		acpi_handle my_handle = ACPI_HANDLE(dev);
-		acpi_status st;
-		st = acpi_evaluate_object(my_handle, "_RST", NULL, NULL);
-		dev_info(dev, "SEQ: _RST = %d, sleeping 5s...\n", st);
-		msleep(5000);
-	}
+	/* TEST: wait for device to stabilize after ACPI _INI power-on.
+	 * _INI is called by the ACPI subsystem before probe() and handles
+	 * GPIO power sequencing. The device is already powered and sending
+	 * RESET_RSP. Do NOT call _RST/M009/M010 — power cycle kills the
+	 * device until reboot (verified 2026-07-07, see GROUND_TRUTH §10.7). */
+	msleep(300);
 	shid->desc.input_register = 0x000000;
-	dev_info(dev, "SEQ: _RST + 5s delay, arming IRQ\n");
+	dev_info(dev, "SEQ: device powered by ACPI _INI, arming IRQ\n");
 
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
 				   irqflags, dev_name(&spi->dev), shid);
