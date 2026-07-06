@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * HID over SPI protocol implementation
- * spi-hid-core.h
+ * spi-hid-core.c
  *
  * Copyright (c) 2020 Microsoft Corporation
  *
@@ -412,9 +412,15 @@ static void spi_hid_reset_work(struct work_struct *work)
 	if (flush_work(&shid->refresh_device_work))
 		dev_err(dev, "Reset handler waited for refresh_device_work");
 
-	memset(&buf->body, 0x00, SPI_HID_OUTPUT_BODY_LEN);
-	spi_hid_output_header(buf->header, shid->hid_desc_addr,
-			round_up(sizeof(buf->body), 4));
+	{
+		u16 body_len = round_up(sizeof(buf->body), 4);
+
+		buf->body[0] = 0x00; /* content_type = COMMAND */
+		buf->body[1] = 0x03; /* content_length = 3 (len16+ContentID overhead) */
+		buf->body[2] = 0x00;
+		buf->body[3] = 0x00; /* content_id = 0 */
+		spi_hid_output_header(buf->header, shid->hid_desc_addr, body_len);
+	}
 	ret =  spi_hid_output(shid, buf, SPI_HID_OUTPUT_HEADER_LEN +
 			SPI_HID_OUTPUT_BODY_LEN);
 	if (ret) {
@@ -1273,7 +1279,14 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			spi_hid_seq_read(shid, body, rblen);
 			{
 				struct spi_hid_device_desc_raw raw;
-				u32 off = 4 + ((blen >= 31) ? 3 : 0);
+				/* body[] from spi_hid_seq_read contains raw MISO:
+				 * [sync bytes (5 or 6 x 0xFF)][body_prefix (3B)][descriptor (28B)]
+				 * Skip sync bytes, then skip the 3-byte body prefix. */
+				u32 off = 0;
+
+				while (off < rblen - 3 && body[off] == 0xFF)
+					off++;
+				off += 3; /* skip body prefix [len16 LE][ContentID] */
 				dev_info(dev, "SEQ: parsing at rx+%u\n", off);
 				memcpy(&raw, body + off,
 				       min_t(u32, sizeof(raw), rblen > off ? rblen - off : 0));

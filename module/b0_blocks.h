@@ -1,4 +1,6 @@
-/* Auto-generated B0 firmware blocks from surface_boot_auto.csv */
+/* Companion device (Device B) firmware blocks from surface_boot_auto.csv.
+ * These blocks belong to the companion chip on SPB connections 0x18/0x19/0x1A.
+ * The touchscreen (Device A, conn 0x0B) does NOT receive firmware uploads. */
 #define B0_BLOCK_SIZE 241
 #define B0_BLOCK_COUNT 120
 #define B0_TOTAL_SIZE 28920

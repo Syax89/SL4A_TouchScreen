@@ -304,60 +304,39 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	for (i = 0; i < tx_len; i++)
 		writeb(tx_data[i], base + fifo_pos + i);
 
-	/* Full-duplex for writes: device expects to drive MISO during write handshake.
-	 * Windows CSV shows RX data during writes; RX_COUNT=0 may prevent handshake. */
-	if (opcode == 0x02 && rx_len == 0)
-		rx_len = tx_len + 1;  /* +1 for opcode byte on wire */
+	/* Windows write path (0x54d0): RX_COUNT=0 for writes — TX-only.
+	 * The response arrives via a separate 0x0B read after GPIO IRQ.
+	 * For read operations (0x0B), rx_len is set by the caller. */
 
 	writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
 
-	/* Windows decomp 0x4bac: re-write opcode after RX_COUNT, just before trigger */
+	/* Windows decomp 0x4bac: re-write opcode after RX_COUNT, just before trigger.
+	 * (Needed because the 0x44 speed config writes 16 bits, clobbering 0x45.) */
 	if (amd_spi->version == AMD_SPI_V2 && opcode == 0x02)
 		amd_spi_set_opcode(amd_spi, opcode);
-
-	/* Windows decomp 0x4bac: re-apply secret bits just before trigger */
-	if (amd_spi->version == AMD_SPI_V2)
-		amd_spi_setup_v2_regs(amd_spi);
 
 	wmb();
 
 	if (opcode == 0x02) {
 		u32 c0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
 		u32 c1 = readl(base + 0x0C);
-		u32 st = readl(base + AMD_SPI_STATUS_REG);
+		u8 st = readb(base + AMD_SPI_STATUS_REG);
 		u8 al = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
 		u16 sp = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 op = amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG);
 		u8 tr = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
 		u32 ena = amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG);
 		u8 nib = (u8)(ena & 0xF);
-		pr_err("spi-amd: WRITE PRE-TRIG c0=0x%08x c1=0x%08x st=0x%08x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x ena=0x%08x nib=%u\n",
+		pr_err("spi-amd: WRITE PRE-TRIG c0=0x%08x c1=0x%08x st=0x%02x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x ena=0x%08x nib=%u\n",
 			c0, c1, st, al, sp, op, tr, ena, nib);
 	}
 
 	ret = amd_spi_execute_opcode(amd_spi);
 	if (ret) { pr_err("spi-amd: execute_opcode failed %d\n", ret); writew(saved_0x22, base + 0x22); return ret; }
 
-	/* Windows busy poll: check STATUS register (0x4C) bit 31 for busy.
-	 * If still busy after first poll, retry with 0x80→0x4B + opcode rewrite. */
-	{
-		int retries = 30;
-		u32 st;
-		st = readl(base + AMD_SPI_STATUS_REG);
-		while ((st & AMD_SPI_BUSY) && retries-- > 0) {
-			writeb(0x80, base + AMD_SPI_RX_COUNT_REG);  /* 0x4B */
-			writeb(0x02, base + AMD_SPI_OPCODE_REG);      /* 0x45 */
-			usleep_range(50, 100);
-			st = readl(base + AMD_SPI_STATUS_REG);
-		}
-		if (st & AMD_SPI_BUSY) {
-			pr_err("spi-amd: WRITE busy timeout after retries, status=0x%08x\n", st);
-			writew(saved_0x22, base + 0x22);
-			return -ETIMEDOUT;
-		}
-		if (opcode == 0x02)
-			pr_err("spi-amd: WRITE DONE status=0x%08x retries_left=%d\n", st, retries);
-	}
+	/* execute_opcode already polls CTRL0 bit31 (real busy indicator).
+	 * STATUS (0x4C) is an 8-bit register, so bit31 is always 0 —
+	 * matching Windows behavior where the STATUS poll is effectively a no-op. */
 
 	if (rx_len) {
 		u32 read_off;
