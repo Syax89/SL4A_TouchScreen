@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WPR boot-trace profile: capture ACPI + Power + PnP + Processor-Power during boot,
+  to see what powers/enables the MSHW0231 touchscreen before/at its first init.
+  Providers are given by friendly name (WPR resolves them). Add Surface/SAM providers
+  from 00_enumerate.cmd output as extra <EventProvider .../> lines and reference them
+  in <EventProviders> below.
+-->
+<WindowsPerformanceRecorder Version="1.0" Author="SL4A-touch">
+  <Profiles>
+
+    <EventCollector Id="EC_Touch" Name="TouchInitCollector">
+      <BufferSize Value="1024"/>
+      <Buffers Value="512"/>
+    </EventCollector>
+
+    <!-- Well-known kernel providers (GUIDs are stable across Windows builds) -->
+    <EventProvider Id="Kernel-Acpi"           Name="C514638F-7723-485B-BCFC-96565D735D4A"/>
+    <EventProvider Id="Kernel-Power"          Name="331C3B3A-2005-44C2-AC5E-77220C37D6B4"/>
+    <EventProvider Id="Kernel-PnP"            Name="9C205A39-1250-487D-ABD7-E831C6290539"/>
+    <EventProvider Id="Kernel-Processor-Power" Name="0F67E49F-FE51-4E9F-B490-6F2948CC6027"/>
+
+    <!-- Surface Serial Hub / System Aggregator. These GUIDs vary by device/build;
+         if the trace is empty for these, replace with the ones from 00_enumerate.cmd. -->
+    <EventProvider Id="Surface-SerialHub"  Name="Microsoft-Surface-SurfaceSerialHubDriver"/>
+    <EventProvider Id="Surface-Aggregator" Name="Microsoft-Surface-SystemAggregator"/>
+    <EventProvider Id="Surface-HidMini"    Name="Microsoft-Surface-SurfaceHidMiniDriver"/>
+
+    <Profile Id="TouchInit.Verbose.File" Name="TouchInit" Description="Touch init boot trace"
+             LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <EventCollectorId Value="EC_Touch">
+          <EventProviders>
+            <EventProviderId Value="Kernel-Acpi"/>
+            <EventProviderId Value="Kernel-Power"/>
+            <EventProviderId Value="Kernel-PnP"/>
+            <EventProviderId Value="Kernel-Processor-Power"/>
+            <EventProviderId Value="Surface-SerialHub"/>
+            <EventProviderId Value="Surface-Aggregator"/>
+            <EventProviderId Value="Surface-HidMini"/>
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+    </Profile>
+
+    <Profile Id="TouchInit.Verbose.Memory" Name="TouchInit" Description="Touch init boot trace"
+             LoggingMode="Memory" DetailLevel="Verbose" Base="TouchInit.Verbose.File"/>
+
+  </Profiles>
+</WindowsPerformanceRecorder>
