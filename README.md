@@ -2,8 +2,8 @@
 
 > Linux HID-over-SPI driver for the Microsoft Surface Laptop 4 (AMD) touchscreen
 
-[![Status](https://img.shields.io/badge/status-software%20exhausted-red)](https://github.com/Syax89/SL4A_TouchScreen)
-[![Hardware](https://img.shields.io/badge/next%20step-logic%20analyzer-blue)](#next-step)
+[![Status](https://img.shields.io/badge/status-work%20in%20progress-yellow)](https://github.com/Syax89/SL4A_TouchScreen)
+[![Hardware](https://img.shields.io/badge/device-surface%20laptop%204%20amd-blue)](#hardware)
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%7C%20BSD--3-orange)](LICENSE)
 
 ---
@@ -16,14 +16,14 @@ A **reverse-engineered Linux kernel driver** for the `MSHW0231` touchscreen cont
 
 ## Status
 
-**Reads work.** Writes don't. Every software avenue has been exhausted.
+**Reads work.** Writes are under investigation.
 
 | Path | Status |
 |------|--------|
 | Reads (opcode `0x0B`) | Working — bit-identical to Windows traces |
-| Writes (opcode `0x02`) | **Blocked** — device ignores all writes regardless of config |
+| Writes (opcode `0x02`) | **Under investigation** — device currently ignores writes |
 
-The prime suspect is **CTRL0 bits [15:8]**: Windows = `0x0E`, Linux = `0xA9` (immutable from software). These bits control chip-select timing — a wrong value could invalidate the electrical framing of writes. A **logic analyzer** on SCK/MOSI/MISO/CS is the only remaining path forward.
+CTRL0 bits [15:8] differ: Windows = `0x0E`, Linux = `0xA9` (these are automatic hardware state reflecting the last transfer's TX/RX counts, not directly configurable).
 
 Full details: [`docs/DRIVER_STATE.md`](docs/DRIVER_STATE.md) and [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §15.
 
@@ -167,7 +167,7 @@ for (i = 0; i < rx_len; i++) {
 
 ---
 
-## What's been ruled out (exhaustive)
+## What's been investigated
 
 | Category | Tests |
 |----------|-------|
@@ -227,9 +227,10 @@ Full test matrix: [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §3 and §15.
 
 ## Next step
 
-**Logic analyzer** on SCK/MOSI/MISO/CS between Windows and Linux.
-
-Without a physical measurement of the SPI bus electrical signals, no software fix is possible. The CTRL0[15:8] timing bits are the prime suspect; a logic analyzer will confirm whether the write framing is electrically valid on Linux.
+Continue debugging the write path. Key areas under investigation:
+- AMD FCH Cezanne controller register configuration for TX-only transfers
+- Timing analysis of the write signal on SCK/MOSI/MISO/CS
+- WinDbg breakpoint-based capture of the Windows write sequence for comparison
 
 ---
 

@@ -143,16 +143,16 @@ should be **reverted**. The correct behavior is to always send 0x00 in these dum
 | C2 | READ_MODE in exec_segment | **FIXED** | spi-amd.c:250-251, removed from host_transfer |
 | C3 | Strobe 0x49/0x4A | **REMOVED** (not used by Windows) | spi-amd.c:272-273 |
 | C4-C7,C1-C3 | Build | **COMPILES** | Both modules |
-| DESCREQ | Write path | **EXHAUSTED** — software fix insufficient. Logic analyzer needed. | — |
+| DESCREQ | Write path | **IN PROGRESS** — under investigation. | — |
 
 ---
 
-## Final Test Outcome (2026-07-06)
+## Final Test Outcome (2026-07-07)
 
-All software fixes have been applied. However, **the device ignores every write (opcode 0x02)**.
-The block is at the physical level (CTRL0 bits[15:8] hardwired to 0xA9 vs 0x0E on Windows).
+All software fixes have been applied. However, **the device currently ignores writes (opcode 0x02)**.
+The block is under investigation (CTRL0 bits[15:8] = 0xA9 vs 0x0E on Windows).
 
-**Next step**: logic analyzer on SCK/MOSI/MISO/CS between Windows and Linux.
+**Next step**: continue debugging the write path with additional diagnostics.
 
 ---
 

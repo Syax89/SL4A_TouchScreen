@@ -1,6 +1,6 @@
 # AMD SPI Driver (amdspi.sys) — Decomp Index
 
-> **Updated: 2026-07-06 (final)** — software exhausted. The MMIO sequence is identical to Linux.
+> **Updated: 2026-07-07 (work in progress)** — the MMIO sequence is identical to Linux.
 
 ## MMIO Register Access Functions
 | Address | Name | Description |

@@ -1,9 +1,9 @@
 # hidspi.sys DECODED — our device uses HidSpiDeviceV0, NOT the v1.0 path
 
 **Date**: 2026-07-03 evening — decomp with real PDB symbols (`idp hidspi.pdb`)
-**Updated**: 2026-07-06 (final — software exhausted)
-**Final verdict**: all the code has been verified and the Linux driver replicates
-the exact MMIO sequence. The block is at the physical level, not software.
+**Updated**: 2026-07-07 (work in progress)
+**Status**: the code has been verified and the Linux driver replicates
+the MMIO sequence. Investigation of the write path continues.
 
 ---
 
@@ -70,19 +70,19 @@ byte9   = 0x00
 
 ---
 
-## 5. HW TEST OUTCOME — SOFTWARE EXHAUSTED (2026-07-06)
+## 5. HW TEST OUTCOME (2026-07-07)
 
 The exact sequence has been implemented in the Linux driver (input 0x000000, output 0x000001,
 DESCREQ `02 00 00 01 42 00 00 03 00 00`). Reads work, but **the device ignores
-every write (opcode 0x02)**.
+writes (opcode 0x02)**.
 
-The block is at the **physical/electrical** level, not software:
+The investigation continues:
 - ACPI tables IDENTICAL between Windows/Linux (DSDT md5sum `78046fa74c0282ee59db8b04a5204d88`)
-- Bit-identical MMIO registers (except CTRL0[15:8] hardwired and CTRL1 read-only)
+- Bit-identical MMIO registers (except CTRL0[15:8] hardware-managed and CTRL1 read-only)
 - MMIO sequence identical to the Windows decomp
-- The AMD FCH Cezanne controller under Linux does not produce a valid write signal
+- The AMD FCH Cezanne controller under Linux write path is under investigation
 
-**Next step: logic analyzer** to compare SCK/MOSI/MISO/CS between Windows and Linux.
+**Next step**: continue debugging the write path asymmetry.
 
 ---
 

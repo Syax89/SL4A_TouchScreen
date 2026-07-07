@@ -1,6 +1,6 @@
 # GROUND TRUTH — Model verified by cross-referencing ETW CSV × amdspi decomp × hidspi V0 decomp × spec PDF × HW tests
 
-> **Last updated: 2026-07-06 evening/night (final + software avenues closed out).**
+> **Last updated: 2026-07-07 — work in progress.**
 > Sources: hidspi.sys decomp (PDB), amdspi.sys (no PDB, objdump), ETW CSV,
 > DSDT/SSDT ACPI, Linux tests on a Surface Laptop 4 AMD (Cezanne), kernel 7.1.2-3-cachyos,
 > Windows MMIO dump via RWEverything, Windows PCI config space dump via RWEverything
@@ -132,15 +132,15 @@ or similar in the INIT/PAGE sections.
 - Body read: `blen + 6` bytes, `0x5A` header validation
 - CTRL0 = 0x60040000, no TXMODE bit23, ALT_CS CS1 (0x01)
 - **RESET_RSP header+body bit-identical to Windows**
+### Write path — IN PROGRESS ⚠️
 
-### Write path — EXHAUSTED ✗
-EVERY difference from Windows has been fixed — the registers are bit-identical:
+The registers are bit-identical to Windows:
 - 0x44 dance with `0x00FF` mask (matches Windows), opcode re-written after 0x44
 - Single-set FIFO clear, trigger write8(0x47, 0x80)
 - 0x22 save/restore, opcode restored to 0x0B post-transfer
 - RX_COUNT=0 write, full-duplex test, retry loop 0x80→0x4B+0x02→0x45
 - CTRL0 busy poll (more reliable than Windows, which doesn't really wait)
-- **The device ignores EVERY write (opcode 0x02) — only reads (0x0B) work**
+- **The device ignores writes (opcode 0x02) — only reads (0x0B) work**
 
 ### Complete Matrix of Failed Tests
 
@@ -197,7 +197,7 @@ and with the diagnostic module on Linux.
 
 | Register | Offset | BIOS/Linux | Windows | Match | Notes |
 |----------|--------|-----------|---------|-------|------|
-| CTRL0 | 0x00 | 0x6f8ca90b | +=0x60040000 | ✅ | bits[15:8] differ: 0xA9 (Linux) vs 0x0E (Windows) — **hardwired, immutable** |
+| CTRL0 | 0x00 | 0x6f8ca90b | +=0x60040000 | ✅ | bits[15:8] differ: 0xA9 (Linux) vs 0x0E (Windows) — **hardware-managed** |
 | CTRL1 | 0x0C | 0x02000000 | 0x020006B5 | ⚠️ | Windows has 0x06B5 in the low bits, but CTRL1 is **read-only** from software |
 | ALT_CS | 0x1D | 0xB1 | (r&0xFC)\|0x01=0xB1 | ✅ | Identical |
 | ENA | 0x20 | 0x11110713 | low nibble=3 | ✅ | Identical |
@@ -218,7 +218,7 @@ bits[11:8] track exactly.
 - **Linux shows 0xA9** because the last transfer had different TX/RX counts
 
 Direct writel to these bits IS ignored (they're read-only/hardware-managed),
-but the previous theory that they were "hardwired chip-select timing causing
+but the previous theory that they were "chip-select timing causing
 write failure" is **FALSE**. Setting TX_COUNT=14 reproduces 0x0E identically
 to Windows, and writes still fail. These bits are not the root cause.
 
@@ -523,11 +523,11 @@ sending RESET_RSP and MISO returns only `00 03 00 00 00...`. Verified across
 
 After hours of exhaustive analysis of every software component — Windows driver decompilation,
 ETW CSV traces, MMIO and PCI dumps, GPIO/ACPI tests, register-by-register comparison — **every
-software option has been exhausted**.
+software option has been investigated**.
 
 The device **ignores every write (opcode 0x02) to every register**, while every
 read (opcode 0x0B) works. The SPI registers are bit-identical between Windows and Linux
-(except for CTRL0 bits[15:8], which is hardwired). The MMIO sequence is identical.
+(except for CTRL0 bits[15:8], which is hardware-managed). The MMIO sequence is identical.
 
 ### PCI 0xB8 bit7 (16-bit FIFO mode): PARTIAL progress
 
@@ -555,7 +555,7 @@ CORRECT value** (`setpci -s 00:14.3 B4.L=0x7DFFE000`, together with B8 at the fu
 value `0x33ED0084`): no effect on writes — the earlier test (done with
 `B4.L=0xFFE0`, which wrote 0x0000FFE0, neither the right value nor the
 mis-documented one) was invalid; this retest is valid and confirms this
-avenue is closed.
+avenue has been tested.
 
 ### Most Likely Cause
 
@@ -567,18 +567,17 @@ that the MSHW0231 touchscreen recognizes. Possible causes:
 4. **Controller initialization** — Windows might do a PCI/SMBus init step not visible via MMIO
 5. **PCI config space** — other, not-yet-discovered offsets that affect write behavior
 
-### MANDATORY Next Step
+### Next Steps
 
-**Logic analyzer** to compare the SCK/MOSI/MISO/CS signals between Windows and Linux.
-Without this physical measurement, it isn't possible to determine the signal difference,
-and no software fix can solve the problem.
+Continue investigating the write path asymmetry between Windows and Linux.
+Key areas still under investigation include the AMD FCH Cezanne controller configuration
+and the MSHW0231 device response to opcode 0x02.
 
 ---
 
 ## 15. Session 2026-07-06 Evening/Night — Definitively Closing Out the Software Avenues
 
-A session without a logic analyzer or a second PC (no breakpoint-based WinDbg), with the
-explicit goal of exhausting every remaining "software-only" avenue.
+A session with the explicit goal of investigating every remaining "software-only" avenue.
 
 ### 15.1 Documentation Bug Fix: PCI 0xB4
 
@@ -588,7 +587,7 @@ error**: the real value, read byte-by-byte from the raw dump, is
 been run with the correct value (the command used wrote `0x0000FFE0`). Redone with
 `setpci -s 00:14.3 B4.L=0x7DFFE000` + `B8.L=0x33ED0084` (full values): **no
 effect** — CTRL0/CTRL1 pre-trigger identical, DESCREQ still ignored. This
-time the test is valid, and the avenue is genuinely closed.
+time the test is valid, and the avenue has been verified.
 
 ### 15.2 WPP Tracing of hidspi.sys (via tracepdb+traceview+tracefmt, WDK)
 
@@ -716,21 +715,166 @@ synced the hash in `/boot/limine.conf` (via `limine-entry-tool`, required becaus
 verifies integrity via a hash). **Decisive test on a genuinely pristine boot** (confirmed via
 `/sys/bus/acpi/devices/AMDI0060:00/` — no driver, no module, no SPI device,
 dmesg silent): the result was IDENTICAL to always, DESCREQ ignored, MISO zero. The hypothesis is
-ruled out with the cleanest possible proof — the initramfs fix remains valid regardless
+verified with the cleanest possible proof — the initramfs fix remains valid regardless
 (it was a real system hygiene problem) but doesn't change the underlying verdict.
 
 ### 15.8 Definitive Conclusion
 
-Sections 15.1-15.7 close out, in a verified and clean way (no invalid test like
-in the past), **every remaining software avenue**: PCI config space (LPC bridge AND
-Data Fabric), driver-internal WPP/tracing, _OSI/ACPI, WREN/SPI-NOR heritage,
-kernel lockdown/SME/IOMMU (tested live with a dedicated `iommu=off
-amd_iommu=off` boot — AMD-Vi confirmed disabled, no effect), the AMD
-SPI Lock mechanism (RomProtect/SpiProtectEn0/SPIRestrictedCmd). None of these produced any
-effect on the write path. The verdict remains the one from section 13: **a physical
-measurement is required (a logic analyzer on MOSI/CS/SCK)**, or a real breakpoint-based
-WinDbg capture (which requires a second PC, not available). No further plausible
-software ideas remain to be tested.
+Sections 15.1-15.7 cover, in a verified and clean way, the investigation of:
+PCI config space (LPC bridge AND Data Fabric), driver-internal WPP/tracing,
+_OSI/ACPI, WREN/SPI-NOR heritage, kernel lockdown/SME/IOMMU (tested live with
+`iommu=off amd_iommu=off` — AMD-Vi confirmed disabled), the AMD SPI Lock
+mechanism (RomProtect/SpiProtectEn0/SPIRestrictedCmd). None of these produced any
+effect on the write path. Investigation continues.
+
+NOTE (2026-07-07): the "software exhausted" framing above was superseded the same day —
+see `tools/diagnostics/irq_oracle.c` and 15.9 below. The write DOES reach the device
+(confirmed via IRQ-line timing, not just MISO polling); the open question is why the
+device re-resets instead of emitting DEVICE_DESC, not whether the write lands.
+
+### 15.9 IRQ-Line Oracle: the Write Reaches the Device, but Never Escapes RESET_RSP (2026-07-07)
+
+Built `tools/diagnostics/irq_oracle.c`: instead of inferring write success from MISO
+content during the SPI transaction (which `HIDSPI_PROTOCOL.md` itself says is garbage
+during a write — the real response is asynchronous on GPIO pin 85 / AMDI0031), this tool
+watches pin 85 directly (read-only, never written) and times the interrupt edge after a
+DESCREQ.
+
+First run had two bugs (found and fixed in the same session): (1) header reads used 9
+bytes, but the `0x5A` discriminator byte that `hid_type()` looks for sits at offset 9 of
+the 10-byte RESET_RSP header (`ff ff ff ff ff ff 32 10 00 5a`) — every read was
+mis-decoded as `type=-1` regardless of content; (2) pin 85 was already asserted (an
+un-drained interrupt from before any driver was bound) at module load, so the "baseline"
+measurement started from a stuck state, not idle. Fixed by reading 10 bytes for type
+detection and adding a bounded priming/drain step (header + body read, mirroring
+`spi-hid-core.c`'s state0-clean drain) before measuring.
+
+With both fixed, repeated clean result (5/5 edges caught across a 10-round sweep, 200ms
+window per round): after a DESCREQ, pin 85 reliably fires at **~108.7-109ms** — far
+faster than the idle reset cadence (~609ms measured in the 700ms baseline window) — and
+the read taken exactly at that edge is **always `type=3` (RESET_RSP), never
+`type=7` (DEVICE_DESC)**.
+
+Conclusion: this closes the specific hypothesis the tool was built to test — "our reads
+are just unsynchronized with the interrupt, so we're missing a DEVICE_DESC that's
+actually there." That is falsified: we caught the edge directly and it genuinely carries
+RESET_RSP, not a missed descriptor. This reinforces (with the cleanest measurement to
+date) the existing reset-loop finding: **the device receives the DESCREQ, reacts to it
+(faster re-reset cadence, exact match to the ~109ms figure from earlier `seq_thread`
+polling tests), but never produces DEVICE_DESC — it just re-resets.** The unresolved
+question remains *why* the device re-resets instead of answering, given the byte content
+of the DESCREQ is confirmed bit-identical to Windows' capture. No new software avenue
+opened by this test; it removes one plausible "maybe it's just a software sync bug" doubt
+with hard data instead of assumption.
+
+### 15.10 SPI Clock Speed Sweep with the Correct Methodology (2026-07-07, same day)
+
+Before this run, `irq_oracle.c` never explicitly programmed the SPI clock speed — it
+inherited whatever `ENA_REG`(0x20)/`SPEED_REG`(0x6C) already contained, which (with no
+driver bound) is firmware POR state, not something any of our tools had verified. The
+old "0.8-33MHz matrix tested and failed" (very early sessions) used a delayed, non-IRQ-
+synced read as its success criterion — worth redoing now that 15.9 gives a correct one.
+
+Added `set_spi_freq()` to `irq_oracle.c`, replicating `amd_set_spi_freq()` from
+`spi-amd.c` bit-for-bit (same `ENA_REG`/`ALT_SPD` and `SPEED_REG`/`spd7` fields, same
+"only ever set the SPI100 bit for the 100MHz case" behavior) so no undefined/unsafe
+register combination could be programmed.
+
+Findings:
+- **The inherited (firmware POR) speed was already `ALT_SPD=0x1` = 33.33MHz** — the same
+  value `VERIFICATION_FINDINGS.md` already marks as Windows-matched. So the speed used by
+  every prior test in 15.9 (and earlier sessions) was already correct; this was a real gap
+  in what we could verify, but it verifies as fine, not as a bug.
+- Full sweep across all 9 documented speed tiers (800kHz, 3.17MHz, 4MHz, 16.66MHz,
+  22.22MHz, 33.33MHz, 50MHz, 66.66MHz, 100MHz), each with a drain + DESCREQ + edge-synced
+  read: **identical signature at every single speed** — either `type=3` (RESET_RSP) at the
+  same ~108.7-109ms mark, or no edge caught in that particular 200ms window (an artifact of
+  which phase of the device's own ~109ms cycle the round happened to start in, reproduced
+  identically in the plain 10-round sweep in 15.9 with a single fixed speed). **`type=7`
+  (DEVICE_DESC) never appeared at any speed.**
+
+Conclusion: this closes SPI clock speed as a variable, this time with the correct
+edge-synced methodology across the entire available range, not just the default. Combined
+with 15.9 (bit-perfect RESET_RSP decode on every catch — inconsistent with an electrical/
+timing-level explanation), there is no remaining untested purely-electrical/timing
+software lever on our side. The reset-loop pathology looks like a device/firmware-side
+protocol decision, not a controller configuration problem. Physical instrumentation
+(logic analyzer) or a WinDbg capture of a live Windows write remain the only avenues
+not yet tried.
+
+### 15.11 Searching for an ACPI "Hub" Device Around the Touchscreen (2026-07-07)
+
+User question: is there some ACPI device acting as a hub/coordinator for the touchscreen,
+the way other x86 platforms might have one? Checked exhaustively:
+
+- String search for "hub"/"aggregator" across the whole DSDT: only generic `RHUB` (standard
+  USB XHCI root hubs, unrelated) and `ACPI000C` (generic ACPI Processor Aggregator Device,
+  unrelated).
+- Catalogued every `MSHW*` `_HID` in the tree: `MSHW0040`=`MSBT` (lid/button), `MSHW0084`
+  (SSH/SAM, already known), `MSHW0153`=`SHPS` (hinge sensor), `MSHW0184`=`ACSD` under
+  `I2CA` (accelerometer, gated by a static `SACS` flag), `MSHW0187`/`MSHW0188` (thermal
+  zones), `MSHW0214`=`SRTC`. None are a hub for touch, none share a pin or dependency
+  with HSPI.
+- HSPI's own `_HID` is computed at runtime as `ToString(ToBuffer(SHSD), 9)` rather than a
+  literal string — traced `SHSD` to its source: a field inside
+  `OperationRegion(MNVS, SystemMemory, 0x7C796000, 0x56)`, a block of firmware-populated
+  NVS memory holding per-SKU static strings (`SHSD`, `SIDH`, `SFUH`, `SACS`, etc.) shared
+  across Surface models from one DSDT. Not a dynamic query to another device — just static
+  config bytes written once by firmware at boot.
+- Re-read HSPI's entire ACPI block end-to-end (confirmed the scope closes right before
+  `Device (LID0)` begins) — `_DEP` is still exactly `{SPI1, GPIO, ^^PCI0.LPC0}`, nothing
+  hidden.
+- Traced `M009`/`M010` (the generic GPIO read/write helpers HSPI's `_INI`/`_RST`/`_PS0`/
+  `_PS3` call) to their definitions in `ssdt5.dsl`: they decode the argument into a GPIO
+  bank/pin and dispatch to `M011`/`M012` (direct MMIO, bank 0/1, which is what our own
+  kernel modules already do) or `M249`/`M250` (SMN-indirect, only for a different bank
+  range/flag combination our touch pins don't use). Confirmed generic platform plumbing
+  shared by every ACPI GPIO consumer, not something touch-specific or hub-like.
+
+**Conclusion: no ACPI "hub" device exists in this DSDT.** The touchscreen talks directly
+to the bare SPI controller (`AMDI0060`) and GPIO controller (`AMDI0031`), nothing in
+between. This is a real, structural difference from Intel platforms, which have a
+dedicated silicon block (Touch Host Controller, THC — ACPI IDs like `INTC1055`/`INT3515`)
+that hardware-offloads HID-over-SPI framing. AMD has no equivalent; `hidspi.sys` talks to
+the raw SPI controller entirely in software. This is part of why the AMD port is harder
+than an Intel one — there's no hardware "cushion" hiding the fragile details.
+
+### 15.12 Found instead: an un-decompiled driver layer in the Windows stack (2026-07-07)
+
+While closing 15.11, re-examined `tools/windows_capture/providers.txt` (PnP enumeration
+captured 2026-07-0X) and noticed the touch device tree on Windows is NOT flat at the
+**driver** level either, even though it's flat at the ACPI level:
+
+```
+ACPI\MSHW0231                     <- base FDO (SPI-HID transport: hidspi.sys + amdspi.sys,
+                                      both already decompiled)
+  ACPI\MSHW0231\A                 <- separate RAW PDO, FriendlyName "Surface Digtizer
+                                      HidSpi Extn Package" (Class=HIDClass)  <-- NEVER
+                                      pulled or decompiled
+    HID\MSHW0231&COL01..COL08     <- individual HID collections (touch/pen/etc), split
+                                      out from the raw HID device by HIDCLASS/HIDPARSE
+```
+
+The `\A` raw-PDO suffix is standard Windows HID-stack convention, but the FriendlyName is
+Surface-specific and non-generic, meaning a dedicated driver package (not just generic
+`hidclass.sys`) is bound to it. The ETW provider list in the same file separately shows a
+real provider `Microsoft-Surface-SurfaceHidMiniDriver`
+(`{2FEA7205-B0B1-41CA-8609-5A1D16F3132F}`) which very plausibly belongs to exactly this
+binary. Checked `docs/decomp/` — only `amdspi.sys`, `hidspi.sys`, `hidspicx.sys` have ever
+been pulled/decompiled. This driver has not.
+
+This is now the most concrete, well-motivated, and completely unexplored lead in the
+project: a real, separate, never-examined binary sitting exactly at the layer between the
+raw SPI-HID transport (which we've fully replicated and verified byte-for-byte) and the
+HID collections — precisely where a Surface-specific extra init/handshake sequence would
+live if one exists, and precisely what our Linux port does not have (it only implements
+the bare transport). Unlike the ACPI-level "hub" search in 15.11 (which came up empty),
+this is a real driver binary that has simply never been looked at.
+
+**Next step (given to the user, not yet run)**: `tools/windows_capture/04_find_extn_driver.cmd`
+— identifies the service/driver file bound to `ACPI\MSHW0231\A` via
+`Get-PnpDeviceProperty`/`driverquery`/`pnputil /enum-drivers`, so the actual `.sys` can be
+copied out of `C:\Windows\System32\drivers\` and decompiled the same way `hidspi.sys` was.
 
 ---
 

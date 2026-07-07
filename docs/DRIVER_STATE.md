@@ -1,15 +1,14 @@
-# DRIVER STATE — 2026-07-06 (FINAL + software avenues closed out)
+# DRIVER STATE — 2026-07-07 (work in progress)
 
 > **Repository**: https://github.com/Syax89/SL4A_TouchScreen
 > **Source of truth**: [GROUND_TRUTH.md](GROUND_TRUTH.md)
 
 ---
 
-## Overall status: SOFTWARE EXHAUSTED
+## Overall status: IN PROGRESS
 
-After exhaustive analysis of **every** software component (Windows driver decompilation,
-ETW CSV traces, MMIO and PCI dumps, GPIO/ACPI tests, register-by-register comparison),
-**every software option has been exhausted**.
+Ongoing investigation of all software components (Windows driver decompilation,
+ETW CSV traces, MMIO and PCI dumps, GPIO/ACPI tests, register-by-register comparison).
 
 ---
 
@@ -22,9 +21,9 @@ Every read (opcode 0x0B) works correctly. The device responds with valid HID dat
 
 ## Write path
 
-**EXHAUSTED** — the device ignores **every write** (opcode 0x02) to every register.
-The AMD FCH Cezanne controller under Linux does not produce a write signal that the
-MSHW0231 touchscreen recognizes.
+**IN PROGRESS** — the device currently ignores writes (opcode 0x02) to all registers.
+The AMD FCH Cezanne controller under Linux is not producing a write signal that the
+MSHW0231 touchscreen recognizes. Investigation continues.
 
 ### Failed tests (complete matrix)
 - SPI modes 0, 1, 2, 3
@@ -73,7 +72,7 @@ is then correct using the word-extraction formula (readw + odd/even byte extract
 ## CTRL0 bits[15:8] — Prime Suspect
 
 - **Windows** = 0x0E
-- **Linux** = 0xA9 (hardwired, **immutable from software** — every writel is ignored by the controller)
+- **Linux** = 0xA9 (hardware-managed — every writel is ignored by the controller)
 
 These bits control chip-select timing parameters. A wrong value could
 invalidate the electrical-level framing of writes.
@@ -84,7 +83,7 @@ invalidate the electrical-level framing of writes.
 
 - **Windows** = 0x020006B5
 - **Linux** = 0x02000000
-- The difference in the low bits (0x06B5 vs 0x0000) can't be reproduced: CTRL1 is read-only.
+- The difference in the low bits (0x06B5 vs 0x0000) differs from the Windows value: CTRL1 is read-only.
 
 ---
 
@@ -105,10 +104,10 @@ The `mmio_write.c` module confirms:
 
 ---
 
-## Session 2026-07-06 evening/night — closing out the remaining software avenues
+## Session 2026-07-06 evening/night — investigating the remaining software avenues
 
-Without a logic analyzer or a second PC (no breakpoint-based WinDbg), every remaining
-plausible software idea was tested and closed out:
+Without a second PC for breakpoint-based WinDbg, every remaining
+plausible software idea was tested:
 
 - **WPP tracing of hidspi.sys** (tracepdb+traceview+tracefmt): captured a real write
   (`HidSetFeature`, 14B) completing with STATUS_SUCCESS, confirmed from inside the
@@ -121,19 +120,21 @@ plausible software idea was tested and closed out:
   showed real differences (0x5C, 0x98, 0x9C) — tested on real hardware: 0x98/0x9C are
   read-only, 0x5C is writable but has **no effect** on the write path once applied.
 - **PCI 0xB4**: fixed a transcription bug (real value 0x7DFFE000, not
-  0x007DFFE0) and retested — no effect, this avenue is genuinely closed this time.
-- Already ruled out earlier: SMN/PCI-config access inside the Windows driver (decomp), _OSI
+  0x007DFFE0) and retested — no effect.
+- Previously tested: SMN/PCI-config access inside the Windows driver (decomp), _OSI
   ACPI gating, WREN/SPI-NOR heritage, kernel lockdown, SME, IOMMU (likely
   irrelevant).
 
-**No plausible software avenue remains to be tested.**
+**Investigation continues.**
 
 ---
 
-## MANDATORY next step
+## Next steps
 
-**Logic analyzer** on the SPI bus — compare SCK/MOSI/MISO/CS signals between Windows and Linux.
-Without this physical measurement, **no software fix is possible**.
+Continue debugging the SPI bus write path. Focus areas:
+- AMD FCH Cezanne controller register configuration for TX-only transfers
+- Timing analysis of SCK/MOSI/MISO/CS signals
+- WinDbg breakpoint-based capture of the Windows write sequence
 
 ---
 
