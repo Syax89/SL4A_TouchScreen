@@ -29,8 +29,28 @@ PASSO 1  -  Enumera i provider (veloce, NIENTE riavvio)
   nel profilo, prima del boot trace vero. Poi ti do l'ok per il passo 2.
 
 
+================================================================
+  AGGIORNAMENTO: il boot trace ha MANCATO l'init del touch
+  (shutdown /r non power-cicla il touch). Nuovo metodo qui sotto.
+================================================================
+
 ------------------------------------------------
-PASSO 2  -  Boot trace (con riavvio)  [FALLO SOLO DOPO IL MIO OK]
+PASSO NUOVO  -  Cattura RUNTIME (niente riavvio, AFFIDABILE)
+------------------------------------------------
+  Forza il re-init del touch (disable+enable del device ACPI) mentre
+  registra ACPI/SAM/Panel/SPB. Prompt COME AMMINISTRATORE:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       capture_runtime.cmd
+
+  Crea:  Desktop\SL4A_capture\touch_runtime.etl
+  Copialo su Linux (o mandamelo). Lo decodifico io su Linux.
+  NOTA: il touch sparisce ~10s e torna. Se non tornasse, un riavvio
+  lo ripristina (nessun danno permanente).
+
+
+------------------------------------------------
+PASSO 2 (vecchio)  -  Boot trace  [solo se serve il cold-init vero]
 ------------------------------------------------
   1. Prompt dei comandi COME AMMINISTRATORE:
 
