@@ -1,0 +1,98 @@
+===== SURFACE / AGGREGATOR / SAM providers =====
+Active Directory Domain Services: SAM    {8E598056-8993-11D2-819E-0000F875A064}
+Microsoft-Surface-SurfaceBattery         {DCF09792-3C77-4D1C-8B99-A8A089841155}
+Microsoft-Surface-SurfaceHidMiniDriver   {2FEA7205-B0B1-41CA-8609-5A1D16F3132F}
+Microsoft-Surface-SurfaceHotPlug         {69CD60E3-430F-4DA4-B1B3-E3BDAF945875}
+Microsoft-Surface-SurfaceOemPanel        {3D53356D-424B-496A-A094-2154D8D2B304}
+Microsoft-Surface-SurfacePenCfuOverBleLc {AB344A2D-F48C-4FA2-BBBE-D9C6DF41AAF3}
+Microsoft-Surface-SurfacePowerTrackerCore {23AC50B3-680E-7AD3-A2B3-D5DBEF945870}
+Microsoft-Surface-SurfaceSerialHubDriver {8DDB06D0-A54B-4014-B119-5A09FB550D18}
+Microsoft-Surface-SurfaceService         {1E8D5623-6573-47F2-B69E-EEA8923CE036}
+Microsoft-Surface-SurfaceSmfClient       {A8D5FCB2-FF94-4166-920D-3338902E77E0}
+Microsoft-Surface-SurfaceSmfCoreDriver   {0EC12C6E-794A-4B5E-8E27-6D3DC98BBD38}
+Microsoft-Surface-SurfaceStorageFwUpdate {CCDF3655-15AF-426C-BAC9-8E1EA00C22F7}
+Microsoft-Surface-SurfaceTcon            {AEDABFE4-8DF5-4817-98C5-F6E69C2E72C2}
+Microsoft-Windows-Directory-Services-SAM {0D4FDC09-8C27-494A-BDA0-505E4FD8ADAE}
+Microsoft-Windows-Directory-Services-SAM-Utility {BD8FEA17-5549-4B49-AA03-1981D16396A9}
+Microsoft-Windows-Processor-Aggregator   {CBA16CF2-2FAB-49F8-89AE-894E718649E7}
+Microsoft-Windows-SAMLIB                 {80DD5D4D-EDC5-50F4-BF8E-DF008B752DD6}
+
+===== ACPI providers =====
+ACPI Driver Trace Provider               {DAB01D4D-2D48-477D-B1C3-DAAD0CE6F06B}
+Microsoft-Windows-Kernel-Acpi            {C514638F-7723-485B-BCFC-96565D735D4A}
+
+===== POWER providers =====
+Microsoft-Surface-SurfacePowerTrackerCore {23AC50B3-680E-7AD3-A2B3-D5DBEF945870}
+Microsoft-Windows-Kernel-Power           {331C3B3A-2005-44C2-AC5E-77220C37D6B4}
+Microsoft-Windows-Kernel-PowerTrigger    {AA1F73E8-15FD-45D2-ABFD-E7F64F78EB11}
+Microsoft-Windows-Kernel-Processor-Power {0F67E49F-FE51-4E9F-B490-6F2948CC6027}
+Microsoft-Windows-Power-CAD              {DABA4D32-CC40-4266-BB95-C30344DBC680}
+Microsoft-Windows-Power-Meter-Polling    {306C4E0B-E148-543D-315B-C618EB93157C}
+Microsoft-Windows-Power-Troubleshooter   {CDC05E28-C449-49C6-B9D2-88CF761644DF}
+Microsoft-Windows-PowerCfg               {9F0C4EA8-EC01-4200-A00D-B9701CBEA5D8}
+Microsoft-Windows-PowerCpl               {B1F90B27-4551-49D6-B2BD-DFC6453762A6}
+Microsoft-Windows-PowerShell             {A0C1853B-5C40-4B15-8766-3CF1C58F985A}
+Microsoft-Windows-PowerShell-DesiredStateConfiguration-FileDownloadManager {AAF67066-0BF8-469F-AB76-275590C434EE}
+Microsoft-Windows-UserModePowerService   {CE8DEE0B-D539-4000-B0F8-77BED049C590}
+
+===== PnP / Device providers =====
+Classpnp Driver Tracing Provider         {FA8DE7C4-ACDE-4443-9994-C4E2359A9EDB}
+Microsoft-Windows-Kernel-PnP             {9C205A39-1250-487D-ABD7-E831C6290539}
+Microsoft-Windows-Kernel-PnP-Rundown     {B3A0C2C8-83BB-4DDF-9F8D-4B22D3C38AD7}
+Microsoft-Windows-SCPNP                  {9F650C63-9409-453C-A652-83D7185A2E83}
+Microsoft-Windows-TerminalServices-PnPDevices {27A8C1E2-EB19-463E-8424-B399DF27A216}
+Microsoft-Windows-UserPnp                {96F4A050-7E31-453C-88BE-9634F4E02139}
+PNPX AssocDB Trace                       {7311AD03-18D6-45AC-9B08-B020BDD6A590}
+User-mode PnP Manager Trace              {A676B545-4CFB-4306-A067-502D9A0F2220}
+
+===== HID / SPB / GPIO providers (per completezza) =====
+Intel-iaLPSS-GPIO                        {D386CC7A-620A-41C1-ABF5-55018C6C699A}
+Intel-iaLPSS2-GPIO2                      {63848CFF-3EC7-4DDF-8072-5F95E8C8EB98}
+Microsoft-Surface-SurfaceHidMiniDriver   {2FEA7205-B0B1-41CA-8609-5A1D16F3132F}
+Microsoft-Windows-GPIO-ClassExtension    {55AB77F6-FA04-43EF-AF45-688FBF500482}
+Microsoft-Windows-GPIOButtons            {E13FF11E-E989-4838-A9FA-38A4D13914CF}
+Microsoft-Windows-hidcfu                 {7628E972-6D6F-4974-B58F-6428622EC09A}
+Microsoft-Windows-I3C-HIDI3C             {86E9A36C-24F5-5ACB-413B-20A31041F855}
+Microsoft-Windows-Input-HIDCLASS         {6465DA78-E7A0-4F39-B084-8F53C7C30DC6}
+Microsoft-Windows-SPB-ClassExtension     {72CD9FF7-4AF8-4B89-AEDE-5F26FDA13567}
+Microsoft-Windows-SPB-HIDI2C             {991F8FE6-249D-44D6-B93D-5A3060C1DEDB}
+
+===== Il touchscreen e i device SAM/companion in ACPI =====
+
+Status Class     FriendlyName                              InstanceId                                                  
+------ -----     ------------                              ----------                                                  
+OK     HIDClass  Surface Touch Communications              HID\MSHW0231&COL01\4&20999191&0&0000                        
+OK     System    Surface SMF Core Driver                   {16C280BF-D438-43C1-BBF3-688CA0D43E2F}\SURFACESYSTEMMANAG...
+OK     HIDClass  Surface Touch Screen Device               HID\MSHW0231&COL06\4&20999191&0&0005                        
+OK     System    Surface System Telemetry Driver           {C56EE0AC-55CF-4E64-B4FF-133FD7BC8E89}\SURFACESYSTEMTELEM...
+OK     HIDClass  Surface Digtizer HidSpi Extn Package      ACPI\MSHW0231\A                                             
+OK     System    Surface SMF Client Driver                 {C65C8174-D19C-444B-95D4-40257DB51D7C}\SURFACESMFTHERMALC...
+OK     System    Surface SMF Client Driver                 {C65C8174-D19C-444B-95D4-40257DB51D7C}\SURFACESMFSYSTEMCL...
+OK     Battery   Surface Battery                           {BFD21D0B-D701-435B-AF19-4A20677898D3}\SURFACEBATTERY\3&2...
+OK     HIDClass  Surface Touch Pen Processor               HID\MSHW0231&COL02\4&20999191&0&0001                        
+OK     HIDClass  Surface Pen BLE LC Adaptation Driver      HID\MSHW0231&COL07\4&20999191&0&0006                        
+OK     Firmware  Surface Storage Firmware Update           {98DE32A9-5D44-419E-B67D-66072BCEF58B}\SURFACESTORAGEFWUP...
+OK     HIDClass  Surface Digitizer Utility                 HID\MSHW0231&COL03\4&20999191&0&0002                        
+OK     Firmware  Surface Pen Cfu Over Ble LC Connection    HID\MSHW0231&COL08\4&20999191&0&0007                        
+OK     UCM       Surface SMC Generic Device                HID\TARGET_SAM&CATEGORY_HID\4&267C29CC&0&0000               
+OK     Computer  Microsoft Corporation Surface Laptop 4    SWD\COMPUTER\MFG_MICROSOFT_CORPORATION&FAM_SURFACE&PROD_S...
+OK     System    Surface Serial Hub Driver                 ACPI\MSHW0084\2&DABA3FF&0                                   
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     Processor AMD Ryzen 5 Microsoft Surface (R) Edition ACPI\AUTHENTICAMD_-_AMD64_FAMILY_23_MODEL_96_-_AMD_RYZEN_...
+OK     HIDClass  Surface Virtual Function Enum Device      HID\MSHW0231&COL04\4&20999191&0&0003                        
+OK     System    Surface SMF Display Client Driver         {A1B1D6F0-64EE-4B00-B2B4-F8EA484AAA50}\SURFACESMFDISPLAYC...
+OK     System    Surface SPT Core                          {D69C83F8-149B-4FD3-9275-19762BD88160}\SURFACEPOWERTRACKE...
+OK     HIDClass  Surface Hid Mini Driver                   {21635D77-3D7C-47B9-BE18-26576667BFDC}\TARGET_SAM&CATEGOR...
+OK     HIDClass  Surface Touch Pen Device                  HID\MSHW0231&COL05\4&20999191&0&0004                        
+
+

@@ -1,43 +1,71 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  WPR boot-trace profile: capture ACPI + Power + PnP + Processor-Power during boot,
-  to see what powers/enables the MSHW0231 touchscreen before/at its first init.
-  Providers are given by friendly name (WPR resolves them). Add Surface/SAM providers
-  from 00_enumerate.cmd output as extra <EventProvider .../> lines and reference them
-  in <EventProviders> below.
+  WPR boot-trace profile per MSHW0231 (Surface Laptop 4 AMD touchscreen).
+  GUID confermati da providers.txt su questa macchina (07/2026).
+  Cattura, sulla STESSA timeline:
+    - ACPI (metodi + kernel)  -> i 2 AcpiEventMethod, _PS0/_INI/M009/M010
+    - Power / PnP             -> transizioni D0/Dx, ordine di start
+    - Surface Serial Hub/SMF  -> richieste SAM al touch/display
+    - Digitizer HidSpi Extn   -> il "pacchetto estensione" vendor del touch
+    - SPB / GPIO / HIDCLASS   -> il traffico touch grezzo (per correlare)
 -->
 <WindowsPerformanceRecorder Version="1.0" Author="SL4A-touch">
   <Profiles>
 
     <EventCollector Id="EC_Touch" Name="TouchInitCollector">
       <BufferSize Value="1024"/>
-      <Buffers Value="512"/>
+      <Buffers Value="640"/>
     </EventCollector>
 
-    <!-- Well-known kernel providers (GUIDs are stable across Windows builds) -->
-    <EventProvider Id="Kernel-Acpi"           Name="C514638F-7723-485B-BCFC-96565D735D4A"/>
-    <EventProvider Id="Kernel-Power"          Name="331C3B3A-2005-44C2-AC5E-77220C37D6B4"/>
-    <EventProvider Id="Kernel-PnP"            Name="9C205A39-1250-487D-ABD7-E831C6290539"/>
-    <EventProvider Id="Kernel-Processor-Power" Name="0F67E49F-FE51-4E9F-B490-6F2948CC6027"/>
+    <!-- ACPI: metodi + kernel -->
+    <EventProvider Id="Acpi-MethodTrace" Name="dab01d4d-2d48-477d-b1c3-daad0ce6f06b"/>
+    <EventProvider Id="Kernel-Acpi"      Name="c514638f-7723-485b-bcfc-96565d735d4a"/>
 
-    <!-- Surface Serial Hub / System Aggregator. These GUIDs vary by device/build;
-         if the trace is empty for these, replace with the ones from 00_enumerate.cmd. -->
-    <EventProvider Id="Surface-SerialHub"  Name="Microsoft-Surface-SurfaceSerialHubDriver"/>
-    <EventProvider Id="Surface-Aggregator" Name="Microsoft-Surface-SystemAggregator"/>
-    <EventProvider Id="Surface-HidMini"    Name="Microsoft-Surface-SurfaceHidMiniDriver"/>
+    <!-- Power / PnP -->
+    <EventProvider Id="Kernel-Power"           Name="331c3b3a-2005-44c2-ac5e-77220c37d6b4"/>
+    <EventProvider Id="Kernel-PowerTrigger"    Name="aa1f73e8-15fd-45d2-abfd-e7f64f78eb11"/>
+    <EventProvider Id="Kernel-Processor-Power" Name="0f67e49f-fe51-4e9f-b490-6f2948cc6027"/>
+    <EventProvider Id="Kernel-PnP"             Name="9c205a39-1250-487d-abd7-e831c6290539"/>
+    <EventProvider Id="UserPnp"                Name="96f4a050-7e31-453c-88be-9634f4e02139"/>
+
+    <!-- Surface: Serial Hub (SAM transport), SMF core/client, service, panel, power, HID mini -->
+    <EventProvider Id="Surface-SerialHub"   Name="8ddb06d0-a54b-4014-b119-5a09fb550d18"/>
+    <EventProvider Id="Surface-SmfCore"     Name="0ec12c6e-794a-4b5e-8e27-6d3dc98bbd38"/>
+    <EventProvider Id="Surface-SmfClient"   Name="a8d5fcb2-ff94-4166-920d-3338902e77e0"/>
+    <EventProvider Id="Surface-Service"     Name="1e8d5623-6573-47f2-b69e-eea8923ce036"/>
+    <EventProvider Id="Surface-OemPanel"    Name="3d53356d-424b-496a-a094-2154d8d2b304"/>
+    <EventProvider Id="Surface-PowerTrack"  Name="23ac50b3-680e-7ad3-a2b3-d5dbef945870"/>
+    <EventProvider Id="Surface-HidMini"     Name="2fea7205-b0b1-41ca-8609-5a1d16f3132f"/>
+    <EventProvider Id="Surface-HotPlug"     Name="69cd60e3-430f-4da4-b1b3-e3bdaf945875"/>
+
+    <!-- Traffico touch grezzo, per correlare sulla stessa timeline -->
+    <EventProvider Id="SPB-ClassExtension"  Name="72cd9ff7-4af8-4b89-aede-5f26fda13567"/>
+    <EventProvider Id="GPIO-ClassExtension" Name="55ab77f6-fa04-43ef-af45-688fbf500482"/>
+    <EventProvider Id="Input-HIDCLASS"      Name="6465da78-e7a0-4f39-b084-8f53c7c30dc6"/>
 
     <Profile Id="TouchInit.Verbose.File" Name="TouchInit" Description="Touch init boot trace"
              LoggingMode="File" DetailLevel="Verbose">
       <Collectors>
         <EventCollectorId Value="EC_Touch">
           <EventProviders>
+            <EventProviderId Value="Acpi-MethodTrace"/>
             <EventProviderId Value="Kernel-Acpi"/>
             <EventProviderId Value="Kernel-Power"/>
-            <EventProviderId Value="Kernel-PnP"/>
+            <EventProviderId Value="Kernel-PowerTrigger"/>
             <EventProviderId Value="Kernel-Processor-Power"/>
+            <EventProviderId Value="Kernel-PnP"/>
+            <EventProviderId Value="UserPnp"/>
             <EventProviderId Value="Surface-SerialHub"/>
-            <EventProviderId Value="Surface-Aggregator"/>
+            <EventProviderId Value="Surface-SmfCore"/>
+            <EventProviderId Value="Surface-SmfClient"/>
+            <EventProviderId Value="Surface-Service"/>
+            <EventProviderId Value="Surface-OemPanel"/>
+            <EventProviderId Value="Surface-PowerTrack"/>
             <EventProviderId Value="Surface-HidMini"/>
+            <EventProviderId Value="Surface-HotPlug"/>
+            <EventProviderId Value="SPB-ClassExtension"/>
+            <EventProviderId Value="GPIO-ClassExtension"/>
+            <EventProviderId Value="Input-HIDCLASS"/>
           </EventProviders>
         </EventCollectorId>
       </Collectors>
