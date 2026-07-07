@@ -308,7 +308,7 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 		goto out;
 	}
 
-	shid->ready = false;
+	shid->ready = shid->seq_state >= 4 ? true : false;
 	sysfs_notify(&dev->kobj, NULL, "ready");
 
 	if (dev->of_node) {
@@ -393,7 +393,7 @@ static void spi_hid_reset_work(struct work_struct *work)
 	dev_err(dev, "Reset Handler\n");
 	if (shid->ready) {
 		dev_err(dev, "Spontaneous FW reset!");
-		shid->ready = false;
+		shid->ready = shid->seq_state >= 4 ? true : false;
 		shid->dir_count++;
 		sysfs_notify(&dev->kobj, NULL, "ready");
 	}
@@ -1179,17 +1179,46 @@ static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
-	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work);
+	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
 	struct device *dev = &shid->spi->dev;
-	static const u8 dr[] = {
-		0x02, 0x00, 0x00, 0x01, 0x42,
-		0x00, 0x00, 0x03, 0x00, 0x00
-	};
-	u8 dr_rx[10];
+	u8 hdr[10];
+	int type;
 
-	dev_info(dev, "SEQ: DESCREQ work — sending DESCREQ@0x000001...\n");
-	spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
-	dev_info(dev, "SEQ: DESCREQ work — sent, rx=[%*ph]\n", (int)sizeof(dr_rx), dr_rx);
+	if (shid->seq_state != 1) return;
+
+	dev_info(dev, "SEQ: poll-work: reading for DEVICE_DESC...\n");
+	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
+		dev_info(dev, "SEQ: poll-work: read failed, retrying...\n");
+		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
+		return;
+	}
+	type = spi_hid_seq_hdr_type(&hdr[6], sizeof(hdr) - 6, NULL);
+	dev_info(dev, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 10, hdr);
+	if (type == 7) {
+		dev_info(dev, "SEQ: poll-work: GOT DEVICE_DESC!\n");
+		/* Re-trigger the IRQ thread to handle it */
+	} else if (type == 3) {
+		dev_info(dev, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
+		shid->seq_state = 4;
+		shid->ready = true;
+		shid->keep_powered = true;
+		/* Hardcode and create device */
+		shid->desc.hid_version = 0x0100;
+		shid->desc.report_descriptor_length = 936;
+		shid->desc.report_descriptor_register = 0x0002;
+		shid->desc.input_register = 0x0000;
+		shid->desc.max_input_length = 0x1000;
+		shid->desc.output_register = 0x0003;
+		shid->desc.max_output_length = 0x0100;
+		shid->desc.command_register = 0x0004;
+		shid->desc.vendor_id = 0x045E;
+		shid->desc.product_id = 0x0C19;
+		shid->desc.version_id = 0x0100;
+		if (!shid->hid) spi_hid_create_device(shid);
+	} else {
+		dev_info(dev, "SEQ: poll-work: unexpected type=%d, retrying...\n", type);
+		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
+	}
 }
 
 
@@ -1198,8 +1227,14 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
 	u8 hdr[10]; int type; u16 blen = 0;
+	static ktime_t dbg_last_irq;
+	static bool dbg_expect_fast;
+	s64 dbg_dt_us;
 
 	if (!shid->seq_enabled) return IRQ_HANDLED;
+
+	dbg_dt_us = dbg_last_irq ? ktime_us_delta(ktime_get(), dbg_last_irq) : -1;
+	dbg_last_irq = ktime_get();
 
 	/* Windows reads response header first: 5 sync bytes + 4-byte header = 9 bytes.
 	 * AMD controller with TX_COUNT=3 sees 6 sync bytes; try 10 to capture full header. */
@@ -1208,8 +1243,12 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		return IRQ_HANDLED;
 	}
 	type = spi_hid_seq_hdr_type(&hdr[6], sizeof(hdr) - 6, NULL);
-	dev_info(dev, "SEQ[state=%d] type=%d hdr=[%*ph]\n",
-		 shid->seq_state, type, 4, &hdr[6]);
+	dev_info(dev, "SEQ[state=%d] type=%d hdr=[%*ph] dt=%lld us%s\n",
+		 shid->seq_state, type, 4, &hdr[6], dbg_dt_us,
+		 dbg_expect_fast ? (dbg_dt_us >= 0 && dbg_dt_us < 5000 ?
+			" <<< FAST IRQ AFTER DESCREQ: WRITE REACHED DEVICE" :
+			" <<< slow IRQ: DESCREQ ignored (device just re-reset)") : "");
+	dbg_expect_fast = false;
 	if (type < 0) {
 		dev_info(dev, "SEQ: no header found\n");
 		/* In state 0, drain any body data and send DESCREQ anyway */
@@ -1238,36 +1277,32 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		blen = sizeof(shid->input.content);
 
 	switch (shid->seq_state) {
-
-	case 0: /* WAIT_RESET — skip body, send DESCREQ directly */
+	case 0: /* WAIT_RESET — PURE WINDOWS FLOW: drain RESET_RSP body, then DESCREQ.
+		 * NO Himax vendor init (Windows never sends it; it may corrupt the
+		 * device so later DESCREQs fail). Go to state 1 and wait for DEVICE_DESC. */
 		if (type == 3) {
-			/* Skip body read — just send DESCREQ write directly */
-			static const u8 descreq[] = {
+			u8 body[20];
+			static const u8 dr[] = {
 				0x02, 0x00, 0x00, 0x01, 0x42,
 				0x00, 0x00, 0x03, 0x00, 0x00
 			};
-			u8 descreq_rx[10];
+			u8 dr_rx[10];
 
-			dev_info(dev, "SEQ: RESET_RSP seen, sending DESCREQ (full-duplex)\n");
-			spi_hid_seq_write(shid, descreq, sizeof(descreq), descreq_rx, sizeof(descreq_rx));
-			dev_info(dev, "SEQ: DESCREQ sent, rx=[%*ph]\n", (int)sizeof(descreq_rx), descreq_rx);
-
-			/* Speculative read — device may not assert IRQ immediately */
-			msleep(10);
-			{
-				u8 hdr2[10];
-				int t2;
-				spi_hid_seq_read(shid, hdr2, sizeof(hdr2));
-				t2 = spi_hid_seq_hdr_type(&hdr2[6], sizeof(hdr2) - 6, NULL);
-				dev_info(dev, "SEQ: speculative read type=%d raw=[%*ph]\n",
-					 t2, 10, hdr2);
-			}
-
+			spi_hid_seq_read(shid, body, sizeof(body));
+			dev_info(dev, "SEQ[state0-clean]: RESET_RSP body-drain=[%*ph], sending TX-ONLY DESCREQ (CS pulse = 10 bytes exactly, like Windows)\n",
+				 20, body);
+			(void)dr_rx;
+			/* TX-ONLY: rx_len=0 so spi-amd asserts CS for exactly opcode+9 bytes
+			 * then deasserts. A non-zero rx_len holds CS and clocks extra bytes,
+			 * which the device counts as part of the command → malformed DESCREQ. */
+			spi_hid_seq_write(shid, dr, sizeof(dr), NULL, 0);
+			dev_info(dev, "SEQ[state0-clean]: TX-only DESCREQ sent, waiting for DEVICE_DESC IRQ\n");
+			dbg_expect_fast = true;
 			shid->seq_state = 1;
 		}
 		break;
 
-	case 1: /* WAIT_DESC → read DEVICE_DESC body, parse, send DESCREQ2 */
+	case 1: /* WAIT_DESC — poll for DEVICE_DESC even without IRQ */
 		if (type == 7) {
 			u8 body[64];
 			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
@@ -1301,7 +1336,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			{
 				u8 dr2[10] = {
 					0x02, 0x00, 0x00, 0x02, 0x42,
-					0x00, 0x00, 0x03, 0x00, 0x00
+					0x00, 0x02, 0x03, 0x00, 0x00  /* content_type=0x02 per MS spec */
 				};
 				u8 dr2_rx[10];
 				dr2[1] = (shid->desc.report_descriptor_register >> 16) & 0xFF;
@@ -1361,16 +1396,76 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		}
 		break;
 
-	case 3: /* VENDOR_INIT — removed, not needed for this device */
-		dev_info(dev, "SEQ: skipping VENDOR_INIT (not for this device)\n");
-		shid->seq_state = 4;
-		shid->ready = true;
-		shid->keep_powered = true;
-		if (!shid->hid)
-			schedule_work(&shid->create_device_work);
+	case 3: /* VENDOR_INIT — wait for DATA (type=1) or RESET_RSP (type=3) */
+		if (type == 1) {
+			dev_info(dev, "SEQ: VENDOR_INIT: got DATA! Creating HID device...\n");
+			shid->seq_state = 4;
+			shid->ready = true;
+			shid->keep_powered = true;
+			if (!shid->hid) {
+				spi_hid_create_device(shid);
+			}
+			/* Also handle this first DATA report */
+			goto handle_data;
+		} else if (type == 3) {
+			dev_info(dev, "SEQ: VENDOR_INIT: got RESET_RSP, vendor init ignored. Hardcoding descriptors...\n");
+			/* Vendor init didn't work. Hardcode and go to READY anyway. */
+			shid->desc.hid_version = 0x0100;
+			shid->desc.report_descriptor_length = 936;
+			shid->desc.report_descriptor_register = 0x0002;
+			shid->desc.input_register = 0x0000;
+			shid->desc.max_input_length = 0x1000;
+			shid->desc.output_register = 0x0003;
+			shid->desc.max_output_length = 0x0100;
+			shid->desc.command_register = 0x0004;
+			shid->desc.vendor_id = 0x045E;
+			shid->desc.product_id = 0x0C19;
+			shid->desc.version_id = 0x0100;
+			shid->seq_state = 4;
+			shid->ready = true;
+			shid->keep_powered = true;
+			if (!shid->hid) {
+				dev_info(dev, "SEQ: creating HID device with hardcoded descriptors...\n");
+				spi_hid_create_device(shid);
+			}
+		}
 		break;
 
 	case 4: /* DONE — forward input reports (type==1 DATA) */
+handle_data:
+		if (type == 3) {
+			/* DIAGNOSTIC: device is still in reset loop. Send a clean DESCREQ
+			 * and let the timing at the NEXT interrupt reveal whether the
+			 * write reached the device (fast ~58us reply) or was dropped
+			 * (next IRQ is the normal ~609ms reset retry). */
+			static const u8 dr[] = {
+				0x02, 0x00, 0x00, 0x01, 0x42,
+				0x00, 0x00, 0x03, 0x00, 0x00
+			};
+			u8 dr_rx[10];
+			ktime_t t0;
+			int wret, p;
+			u8 body[20];
+
+			/* Windows Phase 1 = TWO reads: header (already read above) THEN
+			 * body drain. Replicate the body drain before DESCREQ — the device
+			 * may refuse the next command until RESET_RSP is fully consumed. */
+			spi_hid_seq_read(shid, body, sizeof(body));
+			dev_info(dev, "SEQ[state4-diag]: RESET_RSP body-drain read=[%*ph]\n",
+				 20, body);
+
+			t0 = ktime_get();
+			wret = spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
+			dev_info(dev, "SEQ[state4-diag]: DESCREQ sent ret=%d write_took=%lld us rx=[%*ph] — returning fast, waiting for NATURAL descriptor IRQ\n",
+				 wret, ktime_us_delta(ktime_get(), t0), 10, dr_rx);
+			/* Return IMMEDIATELY: do NOT poll. IRQF_ONESHOT keeps the IRQ masked
+			 * for as long as we stay in this thread fn, which would prevent the
+			 * device's ~58us descriptor interrupt from being serviced. Arm the
+			 * latency probe so the NEXT interrupt is timestamped/classified. */
+			(void)p; (void)t0;
+			dbg_expect_fast = true;
+			break;
+		}
 		if (type == 1 && shid->hid) {
 			u8 body[512];
 			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
@@ -1496,7 +1591,7 @@ static void spi_hid_ll_close(struct hid_device *hid)
 		shid->logic_last_error = -ENOEXEC;
 	}
 
-	shid->ready = false;
+	shid->ready = shid->seq_state >= 4 ? true : false;
 	sysfs_notify(&dev->kobj, NULL, "ready");
 	shid->attempts = 0;
 	ret = spi_hid_power_down(shid);
@@ -1528,39 +1623,33 @@ static int spi_hid_ll_power(struct hid_device *hid, int level)
 	return ret;
 }
 
+/* Hardcoded HID Report Descriptor from Windows dump (936 bytes) */
+#include "hardcoded_rd.h"
+
 static int spi_hid_ll_parse(struct hid_device *hid)
 {
 	struct spi_device *spi = hid->driver_data;
 	struct spi_hid *shid = spi_get_drvdata(spi);
 	struct device *dev = &spi->dev;
-	int ret, len;
+	int ret;
+
+	dev_info(dev, "SEQ: ll_parse — using HARDCODED report descriptor (%d bytes)\n",
+		 HARDCODED_RD_SIZE);
 
 	mutex_lock(&shid->lock);
 
-	len = spi_hid_report_descriptor_request(shid);
-	if (len < 0) {
-		dev_err(dev, "Report descriptor request failed, %d\n", len);
-		ret = len;
-		goto out;
-	}
+	/* Copy hardcoded descriptor into response buffer */
+	memcpy(shid->response.content, hardcoded_report_descriptor, HARDCODED_RD_SIZE);
 
-	/*
-	* TODO: below call returning 0 doesn't mean that the report descriptor
-	* is good. We might be caching a crc32 of a corrupted r. d. or who
-	* knows what the FW sent. Need to have a feedback loop about r. d.
-	* being ok and only then cache it.
-	*/
-	ret = hid_parse_report(hid, (__u8 *) shid->response.content, len);
+	ret = hid_parse_report(hid, (__u8 *) shid->response.content, HARDCODED_RD_SIZE);
 	if (ret)
 		dev_err(dev, "failed parsing report: %d\n", ret);
 	else
 		shid->report_descriptor_crc32 = crc32_le(0,
-					(unsigned char const *)  shid->response.content,
-					len);
+			(unsigned char const *) shid->response.content,
+			HARDCODED_RD_SIZE);
 
-out:
 	mutex_unlock(&shid->lock);
-
 	return ret;
 }
 
@@ -1950,7 +2039,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_WORK(&shid->refresh_device_work, spi_hid_refresh_device_work);
 	INIT_WORK(&shid->error_work, spi_hid_error_work);
 	INIT_WORK(&shid->fw_work, spi_hid_fw_work);
-	INIT_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
+	INIT_DELAYED_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
 
 	dev_err(dev, "PROBE: before GPIO\n");
 	if (dev->of_node) {
@@ -1992,7 +2081,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	}
 	shid->seq_enabled = true;
 	shid->seq_state = 0;
-	shid->ready = false;
+	shid->ready = shid->seq_state >= 4 ? true : false;
 	shid->keep_powered = true;
 
 	/* TEST: wait for device to stabilize after ACPI _INI power-on.

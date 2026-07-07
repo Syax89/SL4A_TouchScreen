@@ -240,7 +240,7 @@ struct spi_hid {
 	bool irq_enabled;
 	int irq;
 	struct gpio_desc *gpiod;
-	struct work_struct descreq_work;
+	struct delayed_work descreq_work;
 
 	struct regulator *supply;
 	struct pinctrl *pinctrl;
