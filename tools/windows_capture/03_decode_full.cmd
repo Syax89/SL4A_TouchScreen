@@ -1,20 +1,30 @@
 @echo off
-REM Decodifica COMPLETA dell'ETL gia' catturato (NIENTE riavvio).
+REM Decodifica COMPLETA di un ETL gia' catturato (NIENTE riavvio).
 REM tracerpt in CSV/XML scarta i provider "manifest" (SPB, ACPI, Surface/SAM):
 REM xperf (o netsh) li decodifica tutti. Serve a capire se i dati ci sono
-REM davvero nell'ETL o se il boot trace non li ha proprio catturati.
+REM davvero nell'ETL o se la cattura non li ha proprio presi.
+REM
+REM Uso:
+REM   03_decode_full.cmd                     -> decodifica touch_boot.etl (default)
+REM   03_decode_full.cmd touch_sleep_resume.etl  -> decodifica quel file
+REM   03_decode_full.cmd touch_runtime.etl
 
 setlocal
 set DIR=%USERPROFILE%\Desktop\SL4A_capture
-set ETL=%DIR%\touch_boot.etl
-if not exist "%ETL%" set ETL=%SystemDrive%\touch_boot.etl
+set NAME=%~1
+if "%NAME%"=="" set NAME=touch_boot.etl
+set ETL=%DIR%\%NAME%
+if not exist "%ETL%" set ETL=%SystemDrive%\%NAME%
 if not exist "%ETL%" (
-  echo ERRORE: touch_boot.etl non trovato ne' sul Desktop\SL4A_capture ne' su C:\
+  echo ERRORE: %NAME% non trovato ne' su Desktop\SL4A_capture ne' su C:\
+  echo Uso:  03_decode_full.cmd [nomefile.etl]
   exit /b 1
 )
-set OUT=%DIR%\touch_boot_full.txt
+set OUT=%DIR%\%~n1_full.txt
+if "%NAME%"=="touch_boot.etl" set OUT=%DIR%\touch_boot_full.txt
 
 echo ETL: %ETL%
+echo OUT: %OUT%
 echo.
 
 where xperf >nul 2>&1
@@ -33,12 +43,12 @@ if exist "%OUT%" (
   for %%A in ("%OUT%") do echo    dimensione: %%~zA byte
   echo.
   echo Anteprima provider trovati:
-  findstr /I "SPB Acpi GPIO Surface Serial SMF MSHW0231 RESET" "%OUT%" | find /c /v "" > "%TEMP%\_cnt.txt"
+  findstr /I "SPB Acpi GPIO Surface Serial SMF MSHW0231 RESET AmlMethod" "%OUT%" | find /c /v "" > "%TEMP%\_cnt.txt"
   set /p N=<"%TEMP%\_cnt.txt"
-  echo    righe che citano SPB/Acpi/Surface/MSHW0231: %N%
+  echo    righe che citano SPB/Acpi/Surface/MSHW0231/AmlMethod: %N%
 ) else (
   echo ERRORE: decodifica non riuscita. Ne' xperf ne' netsh disponibili?
   echo Installa "Windows Performance Toolkit" (gia' presente se hai wpr/wpa)
-  echo oppure apri touch_boot.etl in WPA (Windows Performance Analyzer).
+  echo oppure apri l'ETL in WPA (Windows Performance Analyzer).
 )
 endlocal
