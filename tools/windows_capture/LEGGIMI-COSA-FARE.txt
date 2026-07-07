@@ -30,12 +30,31 @@ PASSO 1  -  Enumera i provider (veloce, NIENTE riavvio)
 
 
 ================================================================
-  AGGIORNAMENTO: il boot trace ha MANCATO l'init del touch
-  (shutdown /r non power-cicla il touch). Nuovo metodo qui sotto.
+  AGGIORNAMENTO 2: trovato _SB.SPI1.HSPI._PS0/_PS3 con guardia FLAG.
+  Il disable/enable (capture_runtime.cmd) richiama _PS0 ma con FLAG=0
+  -> ramo "no-op" (46us, niente toccato). Serve un vero _PS3 prima
+  (sleep completo), cosi' _PS0 esegue il ramo VERO (power-on GPIO +
+  sleep 300ms). Nuovo metodo qui sotto, e' il piu' importante ora.
 ================================================================
 
 ------------------------------------------------
-PASSO NUOVO  -  Cattura RUNTIME (niente riavvio, AFFIDABILE)
+PASSO PIU' IMPORTANTE ORA  -  Cattura SLEEP/RESUME (vero _PS3->_PS0)
+------------------------------------------------
+  Prompt COME AMMINISTRATORE:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       capture_sleep_resume.cmd
+
+  Lo script ti guida: 1) Start->Accensione->Sospendi (NON chiudere
+  il coperchio, usa il menu) 2) aspetta schermo spento 3) risveglia
+  4) aspetta 15s 5) torna e premi un tasto per fermare la cattura.
+
+  Crea:  Desktop\SL4A_capture\touch_sleep_resume.etl
+  Copialo su Linux ( ~/Scrivania/SL4A_capture/ ). Lo decodifico io.
+
+
+------------------------------------------------
+PASSO (fatto gia' una volta)  -  Cattura RUNTIME (disable/enable)
 ------------------------------------------------
   Forza il re-init del touch (disable+enable del device ACPI) mentre
   registra ACPI/SAM/Panel/SPB. Prompt COME AMMINISTRATORE:
@@ -47,6 +66,8 @@ PASSO NUOVO  -  Cattura RUNTIME (niente riavvio, AFFIDABILE)
   Copialo su Linux (o mandamelo). Lo decodifico io su Linux.
   NOTA: il touch sparisce ~10s e torna. Se non tornasse, un riavvio
   lo ripristina (nessun danno permanente).
+  GIA' FATTO UNA VOLTA: ha confermato che _PS0 viene chiamato ma con
+  FLAG=0 (no-op) -> serve il PASSO SLEEP/RESUME sopra per il ramo vero.
 
 
 ------------------------------------------------
