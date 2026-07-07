@@ -1,0 +1,69 @@
+================================================================
+  SL4A TOUCHSCREEN - CATTURA LOG WINDOWS
+  Cosa fare, passo per passo. Cartella: Desktop\SL4A_capture\
+================================================================
+
+OBIETTIVO
+  Scoprire se un componente Windows diverso dal driver del touch
+  (ACPI / power / Surface Aggregator "SAM") mette il touchscreen
+  in stato ricettivo prima o durante l'inizializzazione.
+  I log che abbiamo gia' (SPB+GPIO) NON lo mostrano: serve questa
+  cattura piu' larga, fatta al BOOT (il touch si inizializza li').
+
+
+------------------------------------------------
+PASSO 1  -  Enumera i provider (veloce, NIENTE riavvio)
+------------------------------------------------
+  1. Apri il Prompt dei comandi COME AMMINISTRATORE
+     (Start -> scrivi cmd -> click destro -> "Esegui come amministratore")
+
+  2. Incolla questi due comandi:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       00_enumerate.cmd > providers.txt
+
+  3. Mandami il file:  Desktop\SL4A_capture\providers.txt
+
+  >>> FERMATI QUI e mandami providers.txt. <<<
+  Mi serve per mettere i GUID Surface/SAM ESATTI di questa macchina
+  nel profilo, prima del boot trace vero. Poi ti do l'ok per il passo 2.
+
+
+------------------------------------------------
+PASSO 2  -  Boot trace (con riavvio)  [FALLO SOLO DOPO IL MIO OK]
+------------------------------------------------
+  1. Prompt dei comandi COME AMMINISTRATORE:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       wpr -boottrace -addboot touch_boot.wprp
+
+  2. Riavvia:
+
+       shutdown /r /t 0
+
+  3. Dopo il riavvio, fai il LOGIN e ASPETTA ~30 secondi
+     (cosi' il touch ha finito di inizializzarsi), poi apri di
+     nuovo il Prompt COME AMMINISTRATORE e incolla:
+
+       wpr -boottrace -stopboot %SystemDrive%\touch_boot.etl
+
+  4. Esporta in testo:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       02_export.cmd
+
+  5. Mandami:  C:\touch_boot.csv   (e se puoi anche C:\touch_boot.etl)
+
+
+------------------------------------------------
+NOTE
+------------------------------------------------
+ - Tutti i comandi vanno dati come AMMINISTRATORE, altrimenti wpr
+   e logman danno errore "Accesso negato".
+ - Se "wpr -boottrace -addboot" dice che un boot trace e' gia'
+   attivo, annullalo con:   wpr -boottrace -cancelboot
+   e ripeti.
+ - Il touch NON si inizializza con disable/enable in Gestione
+   Dispositivi (quello fa solo un resume). Serve il riavvio vero.
+ - Dettagli e spiegazione completa: README.md in questa cartella.
+================================================================
