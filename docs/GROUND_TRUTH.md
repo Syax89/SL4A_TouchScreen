@@ -876,6 +876,38 @@ this is a real driver binary that has simply never been looked at.
 `Get-PnpDeviceProperty`/`driverquery`/`pnputil /enum-drivers`, so the actual `.sys` can be
 copied out of `C:\Windows\System32\drivers\` and decompiled the same way `hidspi.sys` was.
 
+### 15.13 Result: `ACPI\MSHW0231\A` Is Just `hidspi.sys` — Hypothesis Falsified, New Thread Opened (2026-07-07)
+
+Ran `04_find_extn_driver.cmd` on the real hardware (output: `fine extn driver.txt`).
+Result for `ACPI\MSHW0231\A`:
+
+```
+DEVPKEY_Device_Service       hidspi
+DEVPKEY_Device_DriverInfPath hidspi_km.inf
+```
+
+**The 15.12 hypothesis is falsified**: this raw PDO is bound to the exact same `hidspi.sys`
+(via `hidspi_km.inf`) we already decompiled — not a separate Surface-specific binary. The
+FriendlyName "Surface Digtizer HidSpi Extn Package" is just a device-description string
+that `hidspi_km.inf` associates with this hardware ID in its `[Strings]`/models section; it
+does not imply separate code. So there is no hidden extra driver running for this raw PDO
+specifically — `hidspi.sys` (already fully decompiled) is the whole story here.
+
+However, `driverquery`/`pnputil /enum-drivers` in the same capture surfaced something real
+and not yet explained: a **separately published** driver package,
+`surfacedigitizerhidspiextnpackage.inf` (provider: Surface), sitting in the DriverStore —
+name almost identical to the FriendlyName above, but **not currently bound to
+`ACPI\MSHW0231\A`** (confirmed bound to `hidspi_km.inf` instead). Two explanations are
+possible: (a) this INF targets a different digitizer generation/hardware ID entirely
+(dead weight on this machine) or the pen sub-device rather than the touchscreen, or
+(b) it genuinely targets this same hardware ID but lost driver-ranking to the in-box
+`hidspi_km.inf` for some reason — which would be a real, novel lead (a vendor driver that
+*should* be running but isn't, possibly the actual source of Surface-specific extra init).
+
+**Next step (given to the user, not yet run)**: `tools/windows_capture/05_check_extn_inf.cmd`
+— locates `surfacedigitizerhidspiextnpackage.inf` in `C:\Windows\System32\DriverStore\` and
+dumps its contents (hardware ID / Models section) to determine what it actually targets.
+
 ---
 
 ## 14. References
