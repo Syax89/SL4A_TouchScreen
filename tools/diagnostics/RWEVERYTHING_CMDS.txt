@@ -1,0 +1,52 @@
+RWEVERYTHING COMMANDS — Salvare su C:\Users\simone\Desktop\spi_dump\
+
+Apri Rw.exe come AMMINISTRATORE, poi menu Access -> Command (o premi Ctrl+C).
+Incolla i comandi uno per uno:
+
+=== 1) PCI Config Space LPC Bridge (00:14.3) — 256 byte ===
+SAVE C:\Users\simone\Desktop\spi_dump\LPC_PCI_256.BIN PCI 0 20 3
+SAVE C:\Users\simone\Desktop\spi_dump\LPC_PCI_256.TXT PCI 0 20 3
+
+(Nota: Dev# 0x14 = 20 decimale, Fun# 3)
+
+=== 2) MMIO SPI Controller @ 0xFEC10000 — 256 byte (IDLE, senza toccare lo schermo) ===
+SAVE C:\Users\simone\Desktop\spi_dump\MMIO_IDLE.TXT DMEM 0xFEC10000 256
+SAVE C:\Users\simone\Desktop\spi_dump\MMIO_IDLE.BIN DMEM 0xFEC10000 256
+
+=== 3) MMIO SPI Controller DOPO un tocco (tocca lo schermo, poi premi subito:) ===
+SAVE C:\Users\simone\Desktop\spi_dump\MMIO_TOUCH.TXT DMEM 0xFEC10000 256
+
+=== 4) PCI Config Space Data Fabric Fn0-7 (Device 00:18.0 - 00:18.7) ===
+SAVE C:\Users\simone\Desktop\spi_dump\DF_Fn0_PCI.BIN PCI 0 24 0
+SAVE C:\Users\simone\Desktop\spi_dump\DF_Fn1_PCI.BIN PCI 0 24 1
+SAVE C:\Users\simone\Desktop\spi_dump\DF_Fn2_PCI.BIN PCI 0 24 2
+SAVE C:\Users\simone\Desktop\spi_dump\DF_Fn3_PCI.BIN PCI 0 24 3
+SAVE C:\Users\simone\Desktop\spi_dump\DF_Fn4_PCI.BIN PCI 0 24 4
+SAVE C:\Users\simone\Desktop\spi_dump\DF_Fn5_PCI.BIN PCI 0 24 5
+SAVE C:\Users\simone\Desktop\spi_dump\DF_Fn6_PCI.BIN PCI 0 24 6
+SAVE C:\Users\simone\Desktop\spi_dump\DF_Fn7_PCI.BIN PCI 0 24 7
+
+(Nota: Dev# 0x18 = 24 decimale)
+
+=== 5) SMN Read: FCH registers (tramite MMIO Data Fabric 0xBF000000) ===
+Prima leggi questi indirizzi SMN nel Command, uno per volta:
+
+R SMN 0x00000000
+R SMN 0x03B10000
+R SMN 0x03B10004
+R SMN 0x03B10008
+R SMN 0x03B1000C
+R SMN 0x03B10010
+R SMN 0x03B10020
+R SMN 0x03B10040
+R SMN 0x03B10060
+R SMN 0x03B10080
+R SMN 0x03B100A0
+R SMN 0x03B100C0
+R SMN 0x03B100E0
+
+(Copia il risultato di ogni comando R SMN in un file di testo a mano)
+
+=== DOPO AVER ESEGUITO TUTTO, RIAVVIA IN LINUX ===
+I file saranno in /mnt/windows/Users/simone/Desktop/spi_dump/
+(o nel percorso corrispondente al mount della partizione Windows)
