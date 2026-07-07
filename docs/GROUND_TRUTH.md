@@ -908,6 +908,55 @@ possible: (a) this INF targets a different digitizer generation/hardware ID enti
 — locates `surfacedigitizerhidspiextnpackage.inf` in `C:\Windows\System32\DriverStore\` and
 dumps its contents (hardware ID / Models section) to determine what it actually targets.
 
+### 15.14 Result: the "Extn Package" Is Not Code At All — Thread Definitively Closed (2026-07-08)
+
+Ran `05_check_extn_inf.cmd`. Full contents of
+`SurfaceDigitizerHidSpiExtnPackage.inf` (DriverStore path
+`surfacedigitizerhidspiextnpackage.inf_amd64_4caecc051d4c6e2a`):
+
+```ini
+[Version]
+Class = Extension
+ClassGuid = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}   ; the standard "Extension" class —
+                                                       ; AddReg/co-installer only, NOT a
+                                                       ; loadable driver binary
+...
+[Standard.NTamd64]
+%...DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0134   ; Surface Pro X (SQ1)
+%...DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0162   ; Surface Laptop 3 (AMD)
+%...DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0230
+%...DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0231   ; <- our device
+%...DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0235   ; Surface Laptop 4 (Intel)
+
+[SurfaceDigitizerHidSpiExtnPackage.HWAddReg]
+HKR,,FriendlyName,,%SpiHidFriendlyName%
+HKR,,"SelectiveSuspendEnabled",%REG_DWORD%,1
+HKR,,"SelectiveSuspendTimeout",%REG_DWORD%,2000
+HKR,,"SuppressInputInCS",%REG_DWORD%,1
+```
+
+The DriverStore directory contains only the `.inf` and its `.cat` signature catalog — no
+`.sys`, no `.dll`. **This "package" is not executable code at all.** It's a generic
+`Class=Extension` co-installer (the standard Windows mechanism for attaching registry
+values to a device without a driver), applied identically across five different Surface
+HidSpi digitizer generations (Pro X SQ1, Laptop 3 AMD, Laptop 4 both AMD and Intel, plus
+one more). All it does is `AddReg` three values on the device's driver key:
+- `FriendlyName` — purely cosmetic (explains the name we saw in Device Manager)
+- `SelectiveSuspendEnabled=1` + `SelectiveSuspendTimeout=2000` — enables USB/SPB selective
+  suspend (idle power-down) after 2 seconds of inactivity
+- `SuppressInputInCS=1` — tells the HID stack to suppress/ignore input reports while the
+  system is in Connected Standby (Modern Standby), to avoid spurious wake events
+
+**This closes the entire "Extn Package" investigation started in 15.12, definitively and
+with full certainty** (we've read the complete file, not inferred from metadata): there is
+no hidden vendor driver, no extra protocol handshake, no separate binary anywhere in the
+Windows stack for this touchscreen beyond `hidspi.sys` + `amdspi.sys` (both already fully
+decompiled) and this cosmetic/power-management registry overlay. The reset-loop mystery is
+not explained by anything in the Windows driver stack that we haven't already examined —
+it's either in the bytes of a transaction we still can't distinguish from Windows', or it's
+physical/electrical, which brings this back to needing a logic analyzer or a live WinDbg
+capture, same as the 15.10 conclusion.
+
 ---
 
 ## 14. References
