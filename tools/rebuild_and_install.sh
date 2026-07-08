@@ -56,10 +56,18 @@ if [ -n "$EXTRA_PARAMS" ]; then
 	# Manual one-off load with extra module params, bypassing the service
 	# (the service itself never takes parameters, so this only affects
 	# this run — reboot or a plain `systemctl start` reverts to raw_mode=0).
+	# Load spi-hid.ko BEFORE spi-amd.ko: once install.sh (DKMS) has run on this
+	# machine, spi_hid is also registered as a kernel module alias pointing at
+	# the DKMS-installed copy. spi-amd.ko is what creates the SPI child device
+	# (spi-MSHW0231:00) on insertion — if that happens while our own spi_hid
+	# isn't loaded yet, the kernel's alias-based autoload wins the race and
+	# pulls in the DKMS copy first, so our insmod then fails with "File exists".
+	# Loading spi-hid.ko first means our driver is already registered before
+	# the device exists, so there's nothing left for autoload to fill in.
 	info "Loading manually with extra params: $EXTRA_PARAMS"
-	sudo insmod "$DRIVER_DIR/spi-amd.ko"
-	sleep 1
 	sudo insmod "$DRIVER_DIR/spi-hid.ko" $EXTRA_PARAMS
+	sleep 1
+	sudo insmod "$DRIVER_DIR/spi-amd.ko"
 else
 	sudo systemctl start sl4a-touch.service
 fi
