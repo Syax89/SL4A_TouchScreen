@@ -1250,6 +1250,63 @@ No new leads from this pass — it independently re-found the same facts already
 two corrections (trigger bit misread as FIFO-mode bit; factory-only code misread as
 general unlock).
 
+### 15.20 Testing Every Remaining Structural Delta, Combined and Individually (2026-07-08)
+
+Built a full three-way (Windows/UEFI/Linux) comparison table across every aspect examined
+in 15.17-15.19 (base address discovery, ALT_CS masking, FIFO_CLEAR, speed config
+mechanism, opcode double-write, TRIGGER write style, busy-wait register, FAST_READ mode
+bits, DESCREQ bytes, IRQ mechanism). Only one row fit the concerning "Windows+UEFI agree,
+we differ" pattern (FIFO_CLEAR single-set vs toggle) — already tested in 15.10, no effect.
+The other deltas are "Windows+us agree, UEFI differs" (TRIGGER write style, FAST_READ
+bits) — less concerning since Windows already demonstrates the behavior works — but the
+user asked to test everything regardless, not just the ones that looked risky.
+
+Built `tools/diagnostics/uefi_exact_replica_test.c`: four variants layered onto the
+already-proven DESCREQ path — (A) `TRIGGER |= 0x80` instead of a blind `write8`, (B)
+busy-wait via `STATUS(0x4C)` read as a 32-bit dword instead of `CTRL0` bit31, (C) skip
+setting the FAST_READ mode bits (`0x60040000`) for the write entirely, (D) A+B+C combined
+— the closest possible byte-for-byte replica of `AmdSpiHcProtocolDxe.efi`'s actual
+`Transfer()` path. 5 rounds each, edge-synced methodology throughout.
+
+**Operational incident during this test (resolved, logged for future sessions)**: mid-run,
+the device stopped signaling entirely — 0 spontaneous edges in a full 2000ms passive
+observation window (expected ~3, given the known ~609ms idle cadence), independently
+confirmed with the already-validated `irq_oracle.ko` too (not just the new tool). `CTRL0`/
+`STATUS`/`ENA_REG` all read back as ordinary, non-corrupted values — this was **not** the
+04/07 "corrupted CTRL0" pattern. Checked `M009(0x5B)`/`M009(0x103)` (a read-only ACPI
+GPIO-value tool from an earlier session): **`pin103` (the reset line) read 0 — the device
+was physically held in reset.** Recovered without a reboot using `ps3_ps0_cycle.ko` (a
+real ACPI `_PS3`→`_PS0` cycle, already built from an earlier session): pin103 returned to
+1 and the spontaneous idle cadence resumed immediately (edges at +546/+1155/+1763ms,
+~609ms apart, normal). **Operational lesson for future sessions**: if the device goes
+completely silent mid-testing, check the reset line (`M009(0x103)`) with a read-only tool
+before assuming a reboot is needed — if it reads 0, `ps3_ps0_cycle.ko` is a clean,
+non-destructive recovery. Root cause not pinned down (likely one of the day's many
+register-level experiments left the reset line asserted) but the recovery path is now
+known-good and repeatable.
+
+**Result, on the recovered/healthy device, all 5 variants × 5 rounds (25 total)**:
+
+```
+baseline (ours)      : 5/5 rounds, edge ~108.5-108.8ms, type=3 (RESET_RSP)
+A: RMW trigger        : 5/5 rounds, edge ~108.5-108.8ms, type=3 (RESET_RSP)
+B: STATUS busy-wait    : 5/5 rounds, edge ~108.5-108.8ms, type=3 (RESET_RSP)
+C: skip FAST_READ      : 5/5 rounds, edge ~108.5-108.8ms, type=3 (RESET_RSP)
+D: A+B+C combined       : 5/5 rounds, edge ~108.5-108.8ms, type=3 (RESET_RSP)
+```
+
+Remarkably tight, consistent timing across every variant (all within ~300µs of each
+other) and unanimous `type=3`, never `type=7`. **This exhaustively closes every
+structural difference identified in the entire Windows/UEFI/Linux comparison** — including
+the ones judged low-priority. None of them, individually or combined into the closest
+possible byte-for-byte replica of UEFI's real write path, changes the outcome. The
+reset-loop pathology is confirmed, with very high confidence now, to be independent of
+every SPI-controller-level register/bit/sequencing choice examined across three
+independent working-or-partially-working implementations. Whatever explains it is not in
+this project's reach via register-level analysis or replication — it is either something
+about the device's internal firmware state/timing not observable from the host side at
+all, or genuinely requires physical instrumentation (logic analyzer) to see.
+
 ---
 
 ## 14. References
