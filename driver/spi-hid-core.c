@@ -1210,7 +1210,8 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 }
 static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 { return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len); }
-static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len)
+static int spi_hid_seq_write_speed(struct spi_hid *shid, const u8 *buf, int len,
+				    u8 *rx, int rx_len, u32 speed_hz)
 {
 	struct spi_transfer xf[2];
 	struct spi_message msg;
@@ -1221,16 +1222,25 @@ static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *r
 	memset(xf, 0, sizeof(xf));
 	xf[0].tx_buf = (void *)buf;
 	xf[0].len = len;
+	if (speed_hz)
+		xf[0].speed_hz = speed_hz;
 	spi_message_init(&msg);
 	spi_message_add_tail(&xf[0], &msg);
 
 	if (rx && rx_len > 0) {
 		xf[1].rx_buf = rx;
 		xf[1].len = rx_len;
+		if (speed_hz)
+			xf[1].speed_hz = speed_hz;
 		spi_message_add_tail(&xf[1], &msg);
 	}
 
 	return spi_sync(shid->spi, &msg);
+}
+
+static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len)
+{
+	return spi_hid_seq_write_speed(shid, buf, len, rx, rx_len, 0);
 }
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
@@ -1391,6 +1401,22 @@ module_param(raw_mode, bool, 0644);
 MODULE_PARM_DESC(raw_mode,
 	"0 = standard HID mode (single-touch, Report ID 0x40); "
 	"1 = raw DFT heatmap mode (send GET_FEATURE/SET_FEATURE, multi-touch blob detection)");
+
+/* 2026-07-08 (handshake reliability experiments, GROUND_TRUTH.md §18.7): SET_FEATURE
+ * always writes fine at the driver level but the device silently stops responding
+ * afterward most of the time. Two testable hypotheses, toggled independently so results
+ * aren't conflated: (1) the write happens too fast/at the wrong SPI clock speed for the
+ * touch chip to sample correctly; (2) our seq_write() opcode-doubling quirk (needed for
+ * DESCREQ/GET_FEATURE) doesn't apply the same way to this specific, longer write. */
+static uint setfeat_speed_hz;
+module_param(setfeat_speed_hz, uint, 0644);
+MODULE_PARM_DESC(setfeat_speed_hz,
+	"Override SPI clock speed (Hz) for the SET_FEATURE write only; 0 = bus default (33.33MHz)");
+
+static bool setfeat_no_double;
+module_param(setfeat_no_double, bool, 0644);
+MODULE_PARM_DESC(setfeat_no_double,
+	"Send SET_FEATURE without the leading-opcode-doubling quirk (14 bytes instead of 15)");
 
 struct touch_point { u16 x; u16 y; bool active; };
 
@@ -2117,6 +2143,13 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 					0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
 					0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
 				};
+				/* 2026-07-08: setfeat[] without the leading-opcode-doubling
+				 * quirk (14 real wire bytes, matching surface_boot_auto.csv
+				 * exactly) — used only when setfeat_no_double=1. */
+				static const u8 setfeat_nd[] = {
+					0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
+					0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
+				};
 				/* 2026-07-08 (handshake reliability investigation): the real
 				 * Windows trace (surface_boot_auto.csv) waits ~4.6ms between
 				 * finishing the GET_FEAT_RESP body read (clock 134276452230781999)
@@ -2127,8 +2160,14 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 				 * far against a device that intermittently goes silent/rejects
 				 * right after this exact write. */
 				usleep_range(4500, 5500);
-				dev_info(dev, "SEQ: sending SET_FEATURE(id=4), replicating surface_boot_auto.csv TXN#223...\n");
-				spi_hid_seq_write(shid, setfeat, sizeof(setfeat), NULL, 0);
+				dev_info(dev, "SEQ: sending SET_FEATURE(id=4) speed=%u no_double=%d, replicating surface_boot_auto.csv TXN#223...\n",
+					 setfeat_speed_hz, setfeat_no_double);
+				if (setfeat_no_double)
+					spi_hid_seq_write_speed(shid, setfeat_nd, sizeof(setfeat_nd),
+								 NULL, 0, setfeat_speed_hz);
+				else
+					spi_hid_seq_write_speed(shid, setfeat, sizeof(setfeat),
+								 NULL, 0, setfeat_speed_hz);
 			}
 			shid->seq_state = 4;
 		} else if (type == 3) {

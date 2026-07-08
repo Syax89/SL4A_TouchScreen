@@ -2230,6 +2230,47 @@ timeout around 2000ms (not the ~4.6ms pre-SET_FEATURE pacing gap, which — in l
 was likely just incidental I/O-stack latency, not a deliberate protocol delay) and up to 3
 automatic retries of the whole DESCREQ→...→SET_FEATURE sequence before surfacing failure.
 
+### 18.8 Post-reboot: raw_mode fails far more consistently than earlier estimated (~12/12
+full attempts, ~48 sub-attempts) — two more hypotheses tested and ruled out
+
+After a full system reboot (clean state, no lingering software/power state), `raw_mode=1`
+failed **every single time** across many separate module load cycles — always in the exact
+same place: DESCREQ→DEVICE_DESC→RPT_DESC→GET_FEATURE→**GET_FEAT_RESP succeeds every time**,
+then SET_FEATURE is sent and the device never sends another IRQ. This is a much worse ratio
+than the ~20-25% success estimated earlier in the same session (which included at least 2
+genuine successes, one confirmed live via `evtest` showing correct 2-slot tracking) — either
+that earlier estimate was too optimistic (small sample), or something about the device's
+state right now (possibly related to how many power-cycles it has been through today) makes
+it worse. Neither the ACPI `_PS3`/`_PS0` power-cycle nor the ACPI `\M010` GPIO power-cycle
+(`tools/reset_touch.sh`) un-stuck it, including immediately after the reboot.
+
+Since `HidSpiCx.sys`'s dispatch path treats GET_FEATURE and SET_FEATURE identically (§18.7 —
+same generic `ConfigureTransfer`/`Dispatch`/timer/retry machinery, differing only by a request
+type tag), there's no missing *software* step to find there. Two remaining, purely
+*electrical* hypotheses were tested live, both against a fresh `setfeat_speed_hz`/
+`setfeat_no_double` pair of module params added for exactly this purpose
+(`driver/spi-hid-core.c`, `spi_hid_seq_write_speed()`):
+
+- **Clock speed**: tried `setfeat_speed_hz=800000` (2/2 full failures) and `=100000` (1/1
+  full failure) for the SET_FEATURE transfer specifically, vs. the bus default 33.33MHz
+  (also failed). No speed tried made any difference.
+- **Opcode-doubling quirk removed** (`setfeat_no_double=1`, sending the real 14-byte wire
+  frame directly instead of the 15-byte buffer `spi_hid_seq_write()` normally needs — see
+  §16.2): **made things measurably worse**, not better — instead of going silent, the device
+  started replying to every subsequent IRQ with another `GET_FEAT_RESP`-shaped response,
+  causing the driver to re-enter the GET_FEAT_RESP→SET_FEATURE branch dozens of times per
+  second in a tight loop (no crash, but clearly a mis-framed wire transaction). This
+  positively confirms the doubling quirk is required for SET_FEATURE too, same as
+  DESCREQ/GET_FEATURE — not something specific to shorter writes.
+
+**Both hypotheses ruled out.** The remaining candidates are: (a) something inside the touch
+chip's own firmware reacting specifically to the *semantic* SET_FEATURE(id=4, val=1) command
+— invisible to any Windows driver decompilation since it's on a physically separate chip; or
+(b) a physical-layer signal integrity issue specific to this exact transaction that would need
+a logic analyzer to observe directly, not more guessing from software. Not chased further live
+this session — the watchdog (§18.7) at least means when it does eventually catch a lucky
+attempt, no manual intervention is needed.
+
 ---
 
 ## 19. BREAKTHROUGH: Standard HID mode (2026-07-08)
