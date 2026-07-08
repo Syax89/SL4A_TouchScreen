@@ -6,7 +6,7 @@
 #
 set -e
 
-MODULE=/home/simone/spi-hid/tools/diagnostics/oneshot.ko
+MODULE=/home/simone/spi-hid/tools/diagnostics/archive/oneshot.ko
 LPC="00:14.3"
 
 echo "=== SL4A Touchscreen One-Shot Test ==="

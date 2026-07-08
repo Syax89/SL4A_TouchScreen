@@ -1,7 +1,7 @@
 #!/bin/bash
 # Auto-executed by systemd at boot — tests SL4A touchscreen before anything else
 LOG=/tmp/oneshot_boot.log
-MOD=/home/simone/spi-hid/tools/diagnostics/oneshot.ko
+MOD=/home/simone/spi-hid/tools/diagnostics/archive/oneshot.ko
 LPC=00:14.3
 
 echo "=== $(date) SL4A One-Shot ===" > $LOG

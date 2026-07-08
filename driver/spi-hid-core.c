@@ -190,11 +190,18 @@ static int spi_hid_output(struct spi_hid *shid, void *buf, u16 length)
 	struct spi_transfer transfer;
 	struct spi_message message;
 	int ret;
+	u8 *tx_buf;
+
+	tx_buf = kmalloc(length + 1, GFP_KERNEL);
+	if (!tx_buf)
+		return -ENOMEM;
+
+	tx_buf[0] = 0x02; /* Prepend write register opcode 0x02 */
+	memcpy(&tx_buf[1], buf, length);
 
 	memset(&transfer, 0, sizeof(transfer));
-
-	transfer.tx_buf = buf;
-	transfer.len = length;
+	transfer.tx_buf = tx_buf;
+	transfer.len = length + 1;
 
 	spi_message_init_with_transfers(&message, &transfer, 1);
 
@@ -211,6 +218,8 @@ static int spi_hid_output(struct spi_hid *shid, void *buf, u16 length)
 
 	trace_spi_hid_output_end(shid, transfer.tx_buf,
 			transfer.len, NULL, 0, ret);
+
+	kfree(tx_buf);
 
 	if (ret) {
 		shid->bus_error_count++;
@@ -236,6 +245,49 @@ static const char *spi_hid_power_mode_string(u8 power_state)
 	}
 }
 
+static int spi_hid_set_power(struct spi_hid *shid, u8 power_mode)
+{
+	u8 *raw_buf;
+	u16 body_len = 3; /* len16 LE = ContentID(1) + SET_POWER(1) + param(1) = 3 */
+	u16 total_len = 1 + 3 + 2 + body_len; /* opcode(1) + addr(3) + len(2) + body(3) */
+	int ret;
+
+	if (shid->desc.command_register == 0)
+		return 0;
+
+	raw_buf = kmalloc(total_len, GFP_KERNEL);
+	if (!raw_buf)
+		return -ENOMEM;
+
+	raw_buf[0] = 0x02; /* write opcode */
+	raw_buf[1] = (shid->desc.command_register >> 16) & 0xff;
+	raw_buf[2] = (shid->desc.command_register >> 8) & 0xff;
+	raw_buf[3] = (shid->desc.command_register >> 0) & 0xff;
+	raw_buf[4] = body_len & 0xff; /* len16 LE */
+	raw_buf[5] = (body_len >> 8) & 0xff;
+	raw_buf[6] = 0x00; /* ContentID */
+	raw_buf[7] = 0x08; /* SET_POWER opcode */
+	raw_buf[8] = power_mode;
+
+	mutex_lock(&shid->output_lock);
+	{
+		struct spi_transfer transfer;
+		struct spi_message message;
+
+		memset(&transfer, 0, sizeof(transfer));
+		transfer.tx_buf = raw_buf;
+		transfer.len = total_len;
+
+		spi_message_init_with_transfers(&message, &transfer, 1);
+		ret = spi_sync(shid->spi, &message);
+	}
+	mutex_unlock(&shid->output_lock);
+
+	kfree(raw_buf);
+
+	return ret;
+}
+
 static int spi_hid_power_down(struct spi_hid *shid)
 {
 	struct device *dev = &shid->spi->dev;
@@ -243,6 +295,10 @@ static int spi_hid_power_down(struct spi_hid *shid)
 
 	if (!shid->powered)
 		return 0;
+
+	ret = spi_hid_set_power(shid, SPI_HID_POWER_MODE_SLEEP);
+	if (ret)
+		dev_err(dev, "failed to set power SLEEP: %d\n", ret);
 
 	if (shid->spi->dev.of_node) {
 		pinctrl_select_state(shid->pinctrl, shid->pinctrl_sleep);
@@ -408,19 +464,23 @@ static void spi_hid_reset_work(struct work_struct *work)
 	if (flush_work(&shid->refresh_device_work))
 		dev_err(dev, "Reset handler waited for refresh_device_work");
 
+	mutex_lock(&shid->output_lock);
 	{
-		u16 body_len = round_up(sizeof(buf->body), 4);
+		u16 body_len = round_up(sizeof(buf->body) + 2, 4);
 
 		buf->body[0] = 0x00; /* content_type = COMMAND */
-		buf->body[1] = 0x03; /* content_length = 3 (len16+ContentID overhead) */
+		buf->body[1] = 0x04; /* content_length = 4 (len16+ContentID+opcode) */
 		buf->body[2] = 0x00;
 		buf->body[3] = 0x00; /* content_id = 0 */
-		spi_hid_output_header(buf->header, shid->hid_desc_addr, body_len);
+		buf->content[0] = 0x01; /* RESET command opcode */
+		buf->content[1] = 0x00; /* padding/reserved */
+		spi_hid_output_header(buf->header, shid->desc.command_register, body_len);
+
+		ret =  spi_hid_output(shid, buf, sizeof(buf->header) + body_len);
 	}
-	ret =  spi_hid_output(shid, buf, SPI_HID_OUTPUT_HEADER_LEN +
-			SPI_HID_OUTPUT_BODY_LEN);
+	mutex_unlock(&shid->output_lock);
 	if (ret) {
-		dev_err(dev, "failed to send device descriptor request\n");
+		dev_err(dev, "failed to send device reset request\n");
 		schedule_work(&shid->error_work);
 		return;
 	}
@@ -503,52 +563,49 @@ static int spi_hid_response_handler(struct spi_hid *shid,
 static int spi_hid_send_output_report(struct spi_hid *shid, u32 output_register,
 		struct spi_hid_output_report *report)
 {
-	struct spi_hid_output_buf *buf = &shid->output;
-	struct device *dev = &shid->spi->dev;
-
-	u16 padded_length;
-	u16 body_length;
-	u8 padding;
-	u16 max_length;
-
+	u8 *raw_buf;
+	u16 content_len = report->content_length;
+	u16 body_len; /* len16 LE = ContentID(1) + content_len */
+	u16 total_len;
 	int ret;
 
-	body_length = sizeof(buf->body) + report->content_length;
-	padded_length = round_up(body_length, 4);
-	padding = padded_length - body_length;
-	max_length = round_up(shid->desc.max_output_length + 3
-						+ sizeof(buf->body), 4);
+	body_len = content_len + 1;
+	total_len = 1 + 3 + 2 + body_len; /* opcode(1) + addr(3) + len(2) + body_len */
 
-	if (padded_length < report->content_length) {
-		dev_err(dev, "Output report padded_length overflow\n");
-		ret = -E2BIG;
-		goto out;
+	raw_buf = kmalloc(total_len, GFP_KERNEL);
+	if (!raw_buf)
+		return -ENOMEM;
+
+	/* Format the packet in V0 format */
+	raw_buf[0] = 0x02; /* write opcode */
+	raw_buf[1] = (output_register >> 16) & 0xff;
+	raw_buf[2] = (output_register >> 8) & 0xff;
+	raw_buf[3] = (output_register >> 0) & 0xff;
+	raw_buf[4] = body_len & 0xff; /* len16 LE */
+	raw_buf[5] = (body_len >> 8) & 0xff;
+	raw_buf[6] = report->content_id;
+	if (content_len)
+		memcpy(&raw_buf[7], report->content, content_len);
+
+	mutex_lock(&shid->output_lock);
+	{
+		struct spi_transfer transfer;
+		struct spi_message message;
+
+		memset(&transfer, 0, sizeof(transfer));
+		transfer.tx_buf = raw_buf;
+		transfer.len = total_len;
+
+		spi_message_init_with_transfers(&message, &transfer, 1);
+		ret = spi_sync(shid->spi, &message);
 	}
+	mutex_unlock(&shid->output_lock);
 
-	if (padded_length > max_length) {
-		dev_err(dev, "Output report too big\n");
-		ret = -E2BIG;
-		goto out;
-	}
+	kfree(raw_buf);
 
-	spi_hid_output_header(buf->header, output_register, padded_length);
-	spi_hid_output_body(buf->body, report);
+	if (ret)
+		dev_err(&shid->spi->dev, "failed output transfer: %d\n", ret);
 
-	if (report->content_length > 3)
-		memcpy(&buf->content, report->content, report->content_length);
-
-	memset(&buf->content[report->content_length], 0, padding);
-
-	ret = spi_hid_output(shid, buf, sizeof(buf->header) +
-			padded_length);
-	if (ret) {
-		dev_err(dev, "failed output transfer\n");
-		goto out;
-	}
-
-	return 0;
-
-out:
 	return ret;
 }
 
@@ -761,7 +818,6 @@ static void spi_hid_create_device_work(struct work_struct *work)
 	struct spi_hid *shid =
 		container_of(work, struct spi_hid, create_device_work);
 	struct device *dev = &shid->spi->dev;
-	u8 prev_state = shid->power_state;
 	int ret;
 
 	trace_spi_hid_create_device_work(shid);
@@ -781,25 +837,7 @@ static void spi_hid_create_device_work(struct work_struct *work)
 	}
 
 	shid->attempts = 0;
-	if (shid->irq_enabled) {
-		disable_irq(shid->irq);
-		shid->irq_enabled = false;
-	} else {
-		dev_err(dev, "%s called with interrupt already disabled\n",
-								__func__);
-		shid->logic_error_count++;
-		shid->logic_last_error = -ENOEXEC;
-	}
-	ret = spi_hid_power_down(shid);
-	if (ret) {
-		dev_err(dev, "%s: could not power down\n", __func__);
-		return;
-	}
-
-	shid->power_state = SPI_HID_POWER_MODE_OFF;
-	dev_err(dev, "%s: %s -> %s\n", __func__,
-			spi_hid_power_mode_string(prev_state),
-			spi_hid_power_mode_string(shid->power_state));
+	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
 }
 
 static void spi_hid_refresh_device_work(struct work_struct *work)
@@ -1090,6 +1128,10 @@ static int spi_hid_power_up(struct spi_hid *shid)
 		usleep_range(5000, 6000);
 	}
 
+	ret = spi_hid_set_power(shid, SPI_HID_POWER_MODE_ACTIVE);
+	if (ret)
+		dev_err(&shid->spi->dev, "failed to set power ACTIVE: %d\n", ret);
+
 	return 0;
 
 err0:
@@ -1233,6 +1275,8 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	if (!shid->seq_enabled) return IRQ_HANDLED;
 
+	dev_info(dev, "SEQ: thread entry seq_state=%d seq_enabled=%d\n", shid->seq_state, shid->seq_enabled);
+
 	dbg_dt_us = dbg_last_irq ? ktime_us_delta(ktime_get(), dbg_last_irq) : -1;
 	dbg_last_irq = ktime_get();
 
@@ -1258,11 +1302,10 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			dev_info(dev, "SEQ: body drain done, forcing DESCREQ@0x000001...\n");
 			{
 				static const u8 dr[] = {
-					0x02, 0x00, 0x00, 0x01, 0x42,
+					0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
-				u8 dr_rx[10];
-				spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
+				spi_hid_seq_write(shid, dr, sizeof(dr), NULL, 0);
 			}
 			shid->seq_state = 1;
 		} else {
@@ -1283,10 +1326,10 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		if (type == 3) {
 			u8 body[20];
 			static const u8 dr[] = {
-				0x02, 0x00, 0x00, 0x01, 0x42,
+				0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
 				0x00, 0x00, 0x03, 0x00, 0x00
 			};
-			u8 dr_rx[10];
+			u8 dr_rx[11];
 
 			spi_hid_seq_read(shid, body, sizeof(body));
 			dev_info(dev, "SEQ[state0-clean]: RESET_RSP body-drain=[%*ph], sending TX-ONLY DESCREQ (CS pulse = 10 bytes exactly, like Windows)\n",
@@ -1334,15 +1377,14 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			dev_info(dev, "SEQ: sending DESCREQ2 to reg=0x%04X...\n",
 				 shid->desc.report_descriptor_register);
 			{
-				u8 dr2[10] = {
-					0x02, 0x00, 0x00, 0x02, 0x42,
+				u8 dr2[11] = {
+					0x02, 0x02, 0x00, 0x00, 0x02, 0x42,
 					0x00, 0x02, 0x03, 0x00, 0x00  /* content_type=0x02 per MS spec */
 				};
-				u8 dr2_rx[10];
-				dr2[1] = (shid->desc.report_descriptor_register >> 16) & 0xFF;
-				dr2[2] = (shid->desc.report_descriptor_register >> 8) & 0xFF;
-				dr2[3] = shid->desc.report_descriptor_register & 0xFF;
-				spi_hid_seq_write(shid, dr2, sizeof(dr2), dr2_rx, sizeof(dr2_rx));
+				dr2[2] = (shid->desc.report_descriptor_register >> 16) & 0xFF;
+				dr2[3] = (shid->desc.report_descriptor_register >> 8) & 0xFF;
+				dr2[4] = shid->desc.report_descriptor_register & 0xFF;
+				spi_hid_seq_write(shid, dr2, sizeof(dr2), NULL, 0);
 			}
 			shid->seq_state = 2;
 		} else if (type == 3) {
@@ -1354,29 +1396,47 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			dev_info(dev, "SEQ: RESET_RSP in state 1, sending DESCREQ directly (no _RST, no workqueue)\n");
 			{
 				static const u8 dr[] = {
-					0x02, 0x00, 0x00, 0x01, 0x42,
+					0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
-				u8 dr_rx[10];
-				spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
+				spi_hid_seq_write(shid, dr, sizeof(dr), NULL, 0);
 			}
 			dev_info(dev, "SEQ: DESCREQ sent synchronously, waiting for next IRQ\n");
 			shid->seq_state = 1;
 		}
 		break;
 
-	case 2: /* WAIT_RPT → read RPT_DESC body, go to DONE */
+	case 2: /* WAIT_RPT → read RPT_DESC body, then replicate Windows's GET_FEATURE/
+		 * SET_FEATURE exchange on the output register before going DONE. This exact
+		 * exchange (content_id=4) was found in traces/surface_boot_auto.csv (TXN#220-223,
+		 * via tools/parse_spi.py) sitting ~10-16ms after RPT_DESC and ~1.6ms before the
+		 * first real DATA report — never replicated before. Device has a ~507-508ms
+		 * internal reset timer after RPT_DESC if nothing further happens (measured
+		 * empirically); this exchange is the candidate for what it's waiting for. */
 		if (type == 8) {
 			u8 body[1024];
 			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
 			dev_info(dev, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
 			spi_hid_seq_read(shid, body, rblen);
-			dev_info(dev, "SEQ: report descriptor received, creating HID device\n");
-			shid->seq_state = 4;
+			dev_info(dev, "SEQ: report descriptor received, shid->hid=%p, scheduling create_device_work...\n", shid->hid);
 			shid->ready = true;
 			shid->keep_powered = true;
-			if (!shid->hid)
-				schedule_work(&shid->create_device_work);
+			if (!shid->hid) {
+				bool queued = schedule_work(&shid->create_device_work);
+				dev_info(dev, "SEQ: scheduled create_device_work, queued=%d\n", queued);
+			}
+			{
+				/* Windows TXN#220 (surface_boot_auto.csv): 02 00 00 03 42 00 04 03 00 06
+				 * -- opcode+reg0x0003+len16=0x42+body[ContentID=04,cmd=03,00,06].
+				 * Doubled leading 0x02 to match the seq_write quirk proven by DESCREQ. */
+				static const u8 getfeat[] = {
+					0x02, 0x02, 0x00, 0x00, 0x03, 0x42, 0x00,
+					0x04, 0x03, 0x00, 0x06
+				};
+				dev_info(dev, "SEQ: sending GET_FEATURE(id=4) on output reg, replicating surface_boot_auto.csv TXN#220...\n");
+				spi_hid_seq_write(shid, getfeat, sizeof(getfeat), NULL, 0);
+			}
+			shid->seq_state = 5;
 		} else if (type == 3) {
 			u8 body[16];
 			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
@@ -1386,11 +1446,48 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			dev_info(dev, "SEQ: RESET_RSP in state 2, sending DESCREQ directly\n");
 			{
 				static const u8 dr[] = {
-					0x02, 0x00, 0x00, 0x01, 0x42,
+					0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
 					0x00, 0x00, 0x03, 0x00, 0x00
 				};
-				u8 dr_rx[10];
-				spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
+				spi_hid_seq_write(shid, dr, sizeof(dr), NULL, 0);
+			}
+			shid->seq_state = 1;
+		}
+		break;
+
+	case 5: /* WAIT_FEAT_RESP -- GET_FEATURE(id=4) sent, then SET_FEATURE, then DONE.
+		 * Mirrors surface_boot_auto.csv TXN#221-223 (GET_FEAT_RESP read, then the
+		 * SET_FEATURE write) which Windows does right before real DATA reports start. */
+		if (type == 5) {
+			u8 body[256];
+			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+			dev_info(dev, "SEQ: GET_FEAT_RESP! reading body (%u bytes)...\n", blen);
+			spi_hid_seq_read(shid, body, rblen);
+			{
+				/* Windows TXN#223: 02 00 00 03 82 00 03 04 00 05 01 00 00 00 --
+				 * opcode+reg0x0003+len16=0x82+body[cmd=03,id=04,00,05,01,00,00,00].
+				 * Doubled leading 0x02, same quirk as GET_FEATURE/DESCREQ above. */
+				static const u8 setfeat[] = {
+					0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
+					0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
+				};
+				dev_info(dev, "SEQ: sending SET_FEATURE(id=4), replicating surface_boot_auto.csv TXN#223...\n");
+				spi_hid_seq_write(shid, setfeat, sizeof(setfeat), NULL, 0);
+			}
+			shid->seq_state = 4;
+		} else if (type == 3) {
+			u8 body[16];
+			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+
+			if (rblen)
+				spi_hid_seq_read(shid, body, rblen);
+			dev_info(dev, "SEQ: RESET_RSP in state 5, sending DESCREQ directly\n");
+			{
+				static const u8 dr[] = {
+					0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
+					0x00, 0x00, 0x03, 0x00, 0x00
+				};
+				spi_hid_seq_write(shid, dr, sizeof(dr), NULL, 0);
 			}
 			shid->seq_state = 1;
 		}
@@ -1434,36 +1531,15 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	case 4: /* DONE — forward input reports (type==1 DATA) */
 handle_data:
 		if (type == 3) {
-			/* DIAGNOSTIC: device is still in reset loop. Send a clean DESCREQ
-			 * and let the timing at the NEXT interrupt reveal whether the
-			 * write reached the device (fast ~58us reply) or was dropped
-			 * (next IRQ is the normal ~609ms reset retry). */
+			dev_info(dev, "SEQ: Device reset detected in state 4. Re-initializing sequencer...\n");
 			static const u8 dr[] = {
-				0x02, 0x00, 0x00, 0x01, 0x42,
+				0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
 				0x00, 0x00, 0x03, 0x00, 0x00
 			};
-			u8 dr_rx[10];
-			ktime_t t0;
-			int wret, p;
 			u8 body[20];
-
-			/* Windows Phase 1 = TWO reads: header (already read above) THEN
-			 * body drain. Replicate the body drain before DESCREQ — the device
-			 * may refuse the next command until RESET_RSP is fully consumed. */
 			spi_hid_seq_read(shid, body, sizeof(body));
-			dev_info(dev, "SEQ[state4-diag]: RESET_RSP body-drain read=[%*ph]\n",
-				 20, body);
-
-			t0 = ktime_get();
-			wret = spi_hid_seq_write(shid, dr, sizeof(dr), dr_rx, sizeof(dr_rx));
-			dev_info(dev, "SEQ[state4-diag]: DESCREQ sent ret=%d write_took=%lld us rx=[%*ph] — returning fast, waiting for NATURAL descriptor IRQ\n",
-				 wret, ktime_us_delta(ktime_get(), t0), 10, dr_rx);
-			/* Return IMMEDIATELY: do NOT poll. IRQF_ONESHOT keeps the IRQ masked
-			 * for as long as we stay in this thread fn, which would prevent the
-			 * device's ~58us descriptor interrupt from being serviced. Arm the
-			 * latency probe so the NEXT interrupt is timestamped/classified. */
-			(void)p; (void)t0;
-			dbg_expect_fast = true;
+			spi_hid_seq_write(shid, dr, sizeof(dr), NULL, 0);
+			shid->seq_state = 1;
 			break;
 		}
 		if (type == 1 && shid->hid) {
@@ -1512,101 +1588,11 @@ static void spi_hid_ll_stop(struct hid_device *hid)
 
 static int spi_hid_ll_open(struct hid_device *hid)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
-	struct device *dev = &spi->dev;
-	u8 prev_state = shid->power_state;
-	int ret;
-
-	if (shid->refresh_in_progress || prev_state == SPI_HID_POWER_MODE_ACTIVE)
-		return 0;
-
-	ret = spi_hid_assert_reset(shid);
-	if (ret) {
-		dev_err(dev, "%s: failed to assert reset\n", __func__);
-		goto err0;
-	}
-
-	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
-	if (!shid->irq_enabled) {
-		enable_irq(shid->irq);
-		shid->irq_enabled = true;
-	} else {
-		dev_err(dev, "%s called with interrupt already enabled\n",
-								__func__);
-		shid->logic_error_count++;
-		shid->logic_last_error = -EEXIST;
-	}
-
-	ret = spi_hid_power_up(shid);
-	if (ret) {
-		dev_err(dev, "%s: could not power up\n", __func__);
-		goto err1;
-	}
-
-	ret = spi_hid_deassert_reset(shid);
-	if (ret) {
-		dev_err(dev, "%s: failed to deassert reset\n", __func__);
-		goto err2;
-	}
-
-	dev_err(dev, "%s: %s -> %s\n", __func__,
-			spi_hid_power_mode_string(prev_state),
-			spi_hid_power_mode_string(shid->power_state));
-
 	return 0;
-
-err2:
-	spi_hid_power_down(shid);
-
-err1:
-	shid->power_state = SPI_HID_POWER_MODE_OFF;
-	if (dev->of_node)
-		pinctrl_select_state(shid->pinctrl, shid->pinctrl_sleep);
-
-err0:
-	return ret;
 }
 
 static void spi_hid_ll_close(struct hid_device *hid)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
-	struct device *dev = &spi->dev;
-	u8 prev_state = shid->power_state;
-	int ret;
-
-	if (shid->refresh_in_progress || prev_state == SPI_HID_POWER_MODE_OFF)
-		return;
-
-	mutex_lock(&shid->power_lock);
-
-	if (shid->irq_enabled) {
-		disable_irq(shid->irq);
-		shid->irq_enabled = false;
-	} else {
-		dev_err(dev, "%s called with interrupt already disabled\n",
-								__func__);
-		shid->logic_error_count++;
-		shid->logic_last_error = -ENOEXEC;
-	}
-
-	shid->ready = shid->seq_state >= 4 ? true : false;
-	sysfs_notify(&dev->kobj, NULL, "ready");
-	shid->attempts = 0;
-	ret = spi_hid_power_down(shid);
-	if (ret) {
-		dev_err(dev, "%s: could not power down\n", __func__);
-		goto out;
-	}
-
-	shid->power_state = SPI_HID_POWER_MODE_OFF;
-	dev_err(dev, "%s: %s -> %s\n", __func__,
-			spi_hid_power_mode_string(prev_state),
-			spi_hid_power_mode_string(shid->power_state));
-
-out:
-	mutex_unlock(&shid->power_lock);
 }
 
 static int spi_hid_ll_power(struct hid_device *hid, int level)
@@ -1978,6 +1964,7 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	mutex_init(&shid->lock);
 	mutex_init(&shid->power_lock);
+	mutex_init(&shid->output_lock);
 	init_completion(&shid->output_done);
 
 	if (dev->of_node) {
@@ -2079,6 +2066,19 @@ static int spi_hid_probe(struct spi_device *spi)
 
 		dev_info(dev, "GPIO dance: mask→reconf→clear done\n");
 	}
+
+	/* Force a clean electrical reset via ACPI _PS3 -> _PS0 power cycle */
+	{
+		acpi_handle h = ACPI_HANDLE(dev);
+		if (h) {
+			dev_info(dev, "SEQ: Power cycling device via ACPI _PS3 -> _PS0...\n");
+			acpi_evaluate_object(h, "_PS3", NULL, NULL);
+			msleep(50);
+			acpi_evaluate_object(h, "_PS0", NULL, NULL);
+			msleep(100);
+		}
+	}
+
 	shid->seq_enabled = true;
 	shid->seq_state = 0;
 	shid->ready = shid->seq_state >= 4 ? true : false;

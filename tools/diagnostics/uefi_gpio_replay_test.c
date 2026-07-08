@@ -118,6 +118,9 @@ static s64 wait_edge_us(int max_us){
 	ktime_t t0=ktime_get();
 	bool was=pin85_asserted();
 	while(was && ktime_us_delta(ktime_get(),t0)<max_us){ was=pin85_asserted(); cpu_relax(); }
+	/* stuck asserted for the whole window -- no idle baseline to time a real edge from;
+	 * report distinctly (-2) instead of falling into the second loop and reporting a bogus ~0us edge */
+	if(was) return -2;
 	t0=ktime_get();
 	while(ktime_us_delta(ktime_get(),t0)<max_us){
 		if(pin85_asserted()) return ktime_us_delta(ktime_get(),t0);

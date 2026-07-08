@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
+#include <linux/pci.h>
 
 #include "spi-amd.h"
 
@@ -349,7 +350,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		u8 *dst = rx_data ? rx_data : scratch;
 		u32 rmax = min_t(u32, rx_len, AMD_SPI_FIFO_SIZE);
 		for (i = 0; i < rmax; i++)
-			{ u16 w = readw(base + read_off + (i/2)*2); dst[i] = (i & 1) ? (u8)(w >> 8) : (u8)(w & 0xFF); };
+			dst[i] = readb(base + read_off + i);
 		if (opcode == 0x02)
 			pr_err("spi-amd: WRITE MISO rx_len=%u raw=[%*ph]\n",
 				rx_len, (int)min_t(u32, rx_len, 16), dst);
@@ -606,6 +607,23 @@ static int amd_spi_probe(struct platform_device *pdev)
 				     "ioremap of SPI registers failed\n");
 
 	dev_info(dev, "spi-amd-v2-multi: io_remap=%p\n", amd_spi->io_remap_addr);
+
+	/* Set LPC bridge registers to enable 8-bit FIFO mode with Windows layout */
+	{
+		struct pci_dev *lpc = pci_get_device(PCI_VENDOR_ID_AMD, 0x790e, NULL);
+		if (lpc) {
+			u32 val;
+			pci_read_config_dword(lpc, 0xB8, &val);
+			val &= ~0x80; // force 8-bit mode (bit7 = 0)
+			pci_write_config_dword(lpc, 0xB8, val);
+
+			pci_write_config_dword(lpc, 0xB4, 0x7DFFE000); // Windows FIFO layout
+			pci_dev_put(lpc);
+			dev_info(dev, "Configured LPC bridge 00:14.3 for 8-bit FIFO mode (0xB8&=~0x80, 0xB4=0x7DFFE000)\n");
+		} else {
+			dev_warn(dev, "LPC bridge 1022:790e not found, skipping 8-bit FIFO configuration\n");
+		}
+	}
 
 	/* Dump initial CTRL0 value (BIOS/UEFI preset) */
 	{

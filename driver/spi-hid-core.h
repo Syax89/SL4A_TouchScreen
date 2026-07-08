@@ -255,6 +255,7 @@ struct spi_hid {
 
 	struct mutex lock;
 	struct mutex power_lock;
+	struct mutex output_lock;
 	struct completion output_done;
 
 	__u8 read_approval[SPI_HID_READ_APPROVAL_MAX];

@@ -380,7 +380,7 @@ def analyze_init(path):
     return s
 
 if __name__ == '__main__':
-    base = '/home/simone/Scrivania/traces'
+    base = '/home/simone/spi-hid/traces'
     summaries = {}
     
     # Warm boot

@@ -95,6 +95,9 @@ static s64 wait_edge_us(int max_us){
 	ktime_t t0=ktime_get();
 	bool was=pin_asserted();
 	while(was && ktime_us_delta(ktime_get(),t0)<max_us){ was=pin_asserted(); cpu_relax(); }
+	/* stuck asserted for the whole window -- no idle baseline to time a real edge from;
+	 * report distinctly (-2) instead of falling into the second loop and reporting a bogus ~0us edge */
+	if(was) return -2;
 	t0=ktime_get();
 	while(ktime_us_delta(ktime_get(),t0)<max_us){
 		if(pin_asserted()) return ktime_us_delta(ktime_get(),t0);
@@ -138,7 +141,10 @@ static int __init fcst_init(void){
 	for(i=0;i<10;i++){
 		u8 dq[]={0x00,0x00,0x01, 0x42,0x00, 0x00,0x03,0x00,0x00};
 		(void)pin_asserted();
-		do_write(0x02, dq, sizeof(dq));
+		if(do_write(0x02, dq, sizeof(dq)) != 0){
+			pr_info("fcst:    round %d: do_write FAILED (busy timeout) — skipping\n", i);
+			continue;
+		}
 		us = wait_edge_us(200000);
 		do_read(0x000000, 10, rx);
 		t = hid_type(rx,10);

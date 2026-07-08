@@ -168,12 +168,27 @@ The registers are bit-identical to Windows:
 
 ## 4. FIFO Diagnostics
 
-The `mmio_write.c` module dumps the full 70-byte FIFO after every operation.
+> **SUPERSEDED (2026-07-07) — see §15.8's note and §15.9.** The "device selectively ignores
+> opcode 0x02" conclusion below rests entirely on MISO staying zero *during* the write
+> transaction, which `HIDSPI_PROTOCOL.md` says is expected regardless of outcome (the real
+> response is asynchronous, on GPIO pin 85, not synchronous on MISO). `irq_oracle.c` (§15.9)
+> proved the write does reach the device — pin 85 fires ~108-109ms later, far faster than the
+> idle cadence — it just never progresses past RESET_RSP. Kept below as the historical
+> MISO-only evidence, not the current understanding.
 
-### Write (opcode 0x02) — pre/post-write FIFO
-- **Pre-write FIFO**: contains the correct TX data (first byte = opcode 0x02, payload data)
-- **MOSI confirmed**: the bytes are correctly written into the FIFO register
-- **Post-write MISO**: **ALL ZEROS** across the whole 70-byte dump
+The `mmio_write.c` module's write path (`windows_write()`) reads back FIFO bytes from
+offset `TX_COUNT` immediately after the trigger completes (the `mmio: RX read_off=...` log
+line) — this is the actual per-write "post-write MISO" evidence, not a paired pre/post
+70-byte dump. A single full 70-byte `fifo_dump()` runs once, at the very end of the whole
+`mmio_init()` sequence (after READ1, READ2, WRITE, and READ3 have all already executed) —
+useful as a final-state snapshot, but it does not correspond one-to-one with the write step
+described below.
+
+### Write (opcode 0x02)
+- **MOSI confirmed**: the TX bytes (opcode + payload) are correctly staged into the FIFO
+  before the trigger (`fifo_fill`/inline `reg_write8(0x80+i,...)` loop)
+- **Post-write MISO** (read back from FIFO offset `TX_COUNT` right after the trigger
+  completes): **ALL ZEROS**
 - The device does NOT drive MISO during the write — the line stays undriven/floating
 
 ### Read (opcode 0x0B) — pre/post-read FIFO
@@ -181,12 +196,15 @@ The `mmio_write.c` module dumps the full 70-byte FIFO after every operation.
 - **Post-read MISO**: contains correct HID data (sync bytes + header + body)
 - Reading from offset `0x80 + TX_COUNT` works perfectly
 
-### FIFO Diagnostic Conclusion
+### FIFO Diagnostic Conclusion (historical — see superseded note above)
 The AMD FCH controller correctly writes the TX data onto the MOSI bus.
-The touchscreen device **selectively ignores** transactions with opcode 0x02:
+At the time, this looked like the touchscreen device **selectively ignoring** transactions
+with opcode 0x02:
 - MISO stays at zero (undriven/floating) for the entire duration of the write
-- No ACK, no error, no response of any kind
-- Reads (0x0B) work immediately before and after the failed write
+- No ACK, no error, no response of any kind *synchronous with the write itself*
+- Reads (0x0B) work immediately before and after the write
+- (Now understood per §15.9: the response IS there, just asynchronous on pin 85 and never
+  advancing past RESET_RSP — this section's MISO-only view couldn't see that.)
 
 ---
 
@@ -304,7 +322,10 @@ byte[3] = 0x5A (V2 sync)
 
 ---
 
-## 10. GPIO (from SSDT5 M009/M010)
+## 9.1 GPIO (from SSDT5 M009/M010)
+
+(Renumbered 2026-07-08 from a duplicate "## 10." heading — this block is unrelated to
+§10 "ACPI Device Tree" below, which has its own 10.1-10.7 subsections.)
 
 - **M084** (GPIO base) = pointer in the CPNV OperationRegion @0x7C7A3018+8
 - **M009(0x0103)**: Bank 1, Pin 3, reads `M084 + 0x1202 + pin*4`
@@ -491,10 +512,19 @@ All power management is handled by the ACPI subsystem transparently.
 
 ### M010 Power Cycle Destroys the Device (2026-07-07)
 
-Calling `M010(0x5B,0)` (power off) or any M010 sequence **permanently breaks
-the touchscreen until a full system reboot**. After M010, the device stops
+Calling `M010(0x5B,0)` (power off) or any *raw, standalone* M010 sequence **permanently
+breaks the touchscreen until a full system reboot**. After M010, the device stops
 sending RESET_RSP and MISO returns only `00 03 00 00 00...`. Verified across
-8 different power-cycle sequences. The driver must NEVER call M009/M010.
+8 different power-cycle sequences. The driver must NEVER call M009/M010 directly.
+
+**Clarification (2026-07-08, this audit pass)**: this does not contradict §15.20's use of
+`tools/diagnostics/ps3_ps0_cycle.c` to recover the device mid-session. That tool evaluates
+the ACPI `_PS3`/`_PS0` methods (exactly what §10.7 recommends letting the ACPI subsystem
+do), which internally sequence M010 together with the `FLAG` state-machine checks from
+§10.5 — it is not a raw, out-of-sequence M010 poke like the destructive case above. The
+distinguishing factor is *properly-sequenced ACPI _PS3/_PS0* (safe, used for recovery) vs.
+*ad-hoc direct M010 calls outside that sequence* (destructive, must never happen in the
+driver).
 
 ---
 
@@ -520,6 +550,15 @@ sending RESET_RSP and MISO returns only `00 03 00 00 00...`. Verified across
 ---
 
 ## 13. Final Conclusion
+
+> **SUPERSEDED (2026-07-07) — see §15.8's note and §15.9.** The "device ignores every write"
+> verdict below was based entirely on MISO staying zero during the write, which
+> `HIDSPI_PROTOCOL.md` itself says is expected (the real response is asynchronous, on GPIO
+> pin 85, not on MISO during the transaction). `tools/diagnostics/irq_oracle.c` proved the
+> write DOES reach the device — pin 85 fires at ~108-109ms after every DESCREQ, far faster
+> than the ~609ms idle reset cadence. The device reacts to the write; it just re-resets
+> instead of emitting DEVICE_DESC. Read this section as a historical snapshot of the
+> MISO-only evidence available at the time, not as the project's current understanding.
 
 After hours of exhaustive analysis of every software component — Windows driver decompilation,
 ETW CSV traces, MMIO and PCI dumps, GPIO/ACPI tests, register-by-register comparison — **every
@@ -1183,8 +1222,10 @@ and read through every remaining candidate:
     — **exactly our register map**.
   - `FUN_00001664` (the actual Transfer): `CTRL0(+0x00) |= BIT(20)` — **single set, never
     cleared first** (confirms independently, from the real hardware-touching code this
-    time rather than just doc commentary, the Windows-style single-set behavior already
-    tested in 15.10's `fifo_clear_singleset_test.c` with no effect) — then
+    time rather than just doc commentary, the Windows-style single-set behavior that
+    `tools/diagnostics/fifo_clear_singleset_test.c` was built to test — see the
+    correction note in §15.20 below: that tool's own hardware run was never actually
+    quoted in this document) — then
     `TX_COUNT(+0x48)`, fills `FIFO(+0x80)`, `OPCODE(+0x45)`, `TRIGGER(+0x47) |= 0x80`,
     reads back from `FIFO+0x80+offset` into the caller's RX buffer. **Every offset matches
     our driver exactly.**
@@ -1233,10 +1274,13 @@ against the actual decompiled C (not just raw disassembly) to confirm or correct
    traced in the decompiled C (`FUN_00001664` line `*(byte*)(...+0x47) |= 0x80`): this is
    `TRIGGER(+0x47) |= 0x80`, the ordinary SPI transaction start bit, identical to what our
    own driver does at every transfer. Separately confirmed `_DAT_bf0a30b8` (PCI 0xB8) is
-   **only ever read** (bit0, in the busy-wait condition, 15.18) in both
-   `AmdSpiHcProtocolDxe.efi` and `BoardSpiBusDxe.efi` — grepped for any write and found
-   none. UEFI never sets PCI 0xB8 bit7 ("16-bit FIFO mode") at all; that register is
-   simply never written by this code path.
+   **only ever read** (bit0, in the busy-wait condition, 15.18) in
+   `AmdSpiHcProtocolDxe.efi` — grepped for any write and found none. **Correction**:
+   `BoardSpiBusDxe.efi`'s decompiled source has **zero** references to `bf0a30b8`, `0xB8`,
+   or the ECAM base at all — it doesn't touch this register, read or write, so the earlier
+   "in both" framing overstated what that second file actually does. UEFI never sets PCI
+   0xB8 bit7 ("16-bit FIFO mode") at all; that register is simply never written by either
+   code path.
 3. **The `0xfc065`/`0x7E` bytes in `MsTouchUnlockDxe.efi`** are the same ones read earlier
    in this session (`FUN_00001510`, §15.17) — real, but gated behind
    `gMsCalibrationServicingProtocol`'s status check, i.e. only executed in **factory/
@@ -1256,7 +1300,13 @@ Built a full three-way (Windows/UEFI/Linux) comparison table across every aspect
 in 15.17-15.19 (base address discovery, ALT_CS masking, FIFO_CLEAR, speed config
 mechanism, opcode double-write, TRIGGER write style, busy-wait register, FAST_READ mode
 bits, DESCREQ bytes, IRQ mechanism). Only one row fit the concerning "Windows+UEFI agree,
-we differ" pattern (FIFO_CLEAR single-set vs toggle) — already tested in 15.10, no effect.
+we differ" pattern (FIFO_CLEAR single-set vs toggle). `tools/diagnostics/fifo_clear_singleset_test.c`
+was built specifically to test it (§4/§15's citation of this as "already tested in 15.10" was
+wrong — 15.10 is the SPI clock-speed sweep and never mentions FIFO_CLEAR). **Correction
+(2026-07-08, this audit pass): the tool exists and is implemented correctly, but no dmesg
+output from an actual run of it is quoted anywhere in this document.** Its result should be
+treated as untested/unconfirmed until an actual run's output is pasted in here, not as a
+closed row in the comparison table.
 The other deltas are "Windows+us agree, UEFI differs" (TRIGGER write style, FAST_READ
 bits) — less concerning since Windows already demonstrates the behavior works — but the
 user asked to test everything regardless, not just the ones that looked risky.
@@ -1306,6 +1356,225 @@ independent working-or-partially-working implementations. Whatever explains it i
 this project's reach via register-level analysis or replication — it is either something
 about the device's internal firmware state/timing not observable from the host side at
 all, or genuinely requires physical instrumentation (logic analyzer) to see.
+
+### 15.21 The Reaction-Window Hypothesis: Tested and Falsified (2026-07-08)
+
+User's instinct: UEFI is the first thing to ever touch this hardware, so the "trick" is
+sequencing/timing, not register content. Re-examined `docs/CSV_SEQUENCE.md`
+(`surface_boot_auto.csv`, a real Windows **warm boot** ETW trace — confirming warm reboots
+do reliably work on Windows, matching the user's own report of "touch works even after a
+thousand reboots") from a fresh angle: **how fast does Windows react to a freshly observed
+RESET_RSP?**
+
+```
+TXN #0: reads RESET_RSP header (type=3)
+   ↓ 168us
+TXN #1: reads RESET_RSP body
+   ↓ 147us
+TXN #2: sends DESCREQ
+```
+
+Windows sends DESCREQ ~300us after first observing a fresh RESET_RSP. Checked every active
+diagnostic tool in this project (`irq_oracle.c`, `uefi_exact_replica_test.c`,
+`uefi_gpio_replay_test.c`, `fifo_clear_singleset_test.c`): **none of them replicate this**.
+They all fire DESCREQ "blind" — at an arbitrary phase of the ongoing reset cycle, not
+synced to having just observed a fresh RESET_RSP assertion. This specific hypothesis (device
+only accepts a new command within a short window after asserting RESET_RSP, otherwise
+ignores it until the next cycle) had never been tested.
+
+Built `tools/diagnostics/reactive_descreq_test.c`: waits for the pin85 falling edge (a fresh
+RESET_RSP assertion), then reacts with zero artificial delay — read header (confirm
+type=3), read body (mirrors Windows's TXN #1 drain), send DESCREQ (mirrors TXN #2) —
+timing the whole edge-to-write-issued reaction.
+
+**Result (15 rounds, real hardware)**: reaction time **95-157us** — actually *faster* than
+Windows's ~300us, not slower. **15/15 reacted successfully; 0/15 got DEVICE_DESC.** Every
+round that produced a response got `type=3` (RESET_RSP) again, same as always (3 of the 15
+rounds saw no response edge within the 200ms window at all — a minor anomaly, not
+investigated further, doesn't change the verdict).
+
+**Conclusion**: the reaction-window hypothesis is falsified. We already react to a fresh
+RESET_RSP faster than Windows does, using byte-identical content, and still never get
+DEVICE_DESC. Raw reaction speed to the RESET_RSP edge is not the missing piece. This
+doesn't kill the broader "it's sequencing/timing, not content" instinct — it narrows it:
+whatever timing detail matters, it is not "how quickly do you respond to seeing RESET_RSP."
+
+---
+
+## 16. BREAKTHROUGH: DEVICE_DESC + RPT_DESC Achieved on Real Hardware (2026-07-08)
+
+> **This supersedes the "closed exhaustively, needs physical instrumentation" framing of
+> §15.20/§15.21.** That conclusion was correct given the evidence available at the time —
+> every deliberate, understood variation of the write path had been tested and falsified.
+> What follows was found by accident while instrumenting a live, mid-refactor,
+> uncommitted version of the actual driver (`driver/spi-hid-core.c`/`spi-amd.c`) rather
+> than a fresh diagnostic tool — for the first time in this entire project, **the device
+> returns `DEVICE_DESC` (type=7) and `RPT_DESC` (type=8)** instead of looping RESET_RSP
+> forever. It is not yet a stable, finished fix (see §16.3), but the core reset-loop
+> pathology that §13-§15 spent days failing to crack is, in a specific and now
+> byte-identified sense, cracked.
+
+### 16.1 How it was found
+
+While investigating the user's "UEFI touches it first, it's timing not content" instinct
+(§15.21), a `git status` check (unrelated to that investigation) revealed uncommitted,
+in-progress changes to `driver/spi-amd.c` and `driver/spi-hid-core.c` that had appeared
+during a background sub-agent run — not written by the assistant, almost certainly the
+user's own concurrent edit in another window. Read cold, the diff looked like a bug: every
+DESCREQ byte array in `spi_hid_seq_thread()` had gained an extra leading `0x02` byte
+(`02 02 00 00 01 42 00 00 03 00 00`, 11 bytes, instead of the byte-identical-to-Windows
+10-byte `02 00 00 01 42 00 00 03 00 00` established since the very start of this project).
+Reasoned (wrongly) that this would shift the address/len16 fields by one byte and corrupt
+the command, and reverted the source with `git checkout`.
+
+**The already-loaded kernel modules kept running the pre-revert code** (rmmod/insmod is
+required to replace a loaded module; reverting the source on disk does not touch memory).
+A routine `dmesg` check minutes later, while investigating something unrelated, showed this
+"buggy" version was actively getting `type=7` and `type=8` responses on real hardware — the
+one thing every tool in this entire project had never once produced. The revert was undone
+by manually reconstructing the diff from this conversation's own context (no git stash had
+been made) and reapplying it hunk by hunk, then rebuilding and reloading.
+
+**Lesson for future sessions**: a change that looks structurally wrong by static reasoning
+against an established "confirmed correct" format is not necessarily wrong — check the
+live, running behavior before reverting undocumented in-progress work, especially when it
+touches the exact code path this project has spent the most effort on. Un-reviewed
+concurrent edits to `driver/` should be diffed and *tested*, not just read and judged.
+
+### 16.2 The winning format
+
+Every place in `spi_hid_seq_thread()` that sends a raw command via `spi_hid_seq_write()`
+needs the SPI opcode byte doubled at the front of the buffer passed to that function —
+i.e. the wire format is unchanged (still `02 00 00 01 42 00 00 03 00 00`, 10 bytes over
+the actual SPI bus, confirmed identical to Windows/UEFI), but the **buffer handed to
+`spi_hid_seq_write()`** needs an extra leading `0x02`:
+
+```c
+static const u8 dr[] = {
+    0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
+    0x00, 0x00, 0x03, 0x00, 0x00
+};
+spi_hid_seq_write(shid, dr, sizeof(dr), NULL, 0);
+```
+
+This is specific to this driver's own `spi_hid_seq_write()` helper (a thin wrapper around
+`spi_sync`/`spi_message` — see `driver/spi-hid-core.c` around line 1188) — **not** a
+protocol-level change, and **not** reproduced in any of the raw-MMIO `tools/diagnostics/*.c`
+modules (which bypass this function entirely and poke the AMD FCH controller directly).
+Why exactly this specific driver-level function needs a doubled leading byte to produce a
+correct 10-byte wire transaction is not understood yet — plausibly something in
+`amd_spi_exec_segment()` (`driver/spi-amd.c`) consumes/strips the first TX byte under some
+condition the raw-MMIO tools' hand-rolled register sequences don't hit. This is a genuine
+open question, not a solved one — but the empirical fact (confirmed across 60+ repeated
+cycles in this session) is not in doubt.
+
+The other structural changes bundled in the same uncommitted diff (`spi-amd.c`: PCI
+0xB8 forced to 8-bit FIFO mode + 0xB4 Windows layout, `readb`-based FIFO reads instead of
+`readw`-interleaved; `spi-hid-core.c`: new `spi_hid_set_power()`, rewritten
+`spi_hid_send_output_report()`/`spi_hid_reset_work()`, gutted `spi_hid_ll_open()`/
+`spi_hid_ll_close()`, an ACPI `_PS3`→`_PS0` power-cycle added to `probe()`) were restored
+alongside the doubled-opcode fix since they were all part of the one working snapshot and
+untangling which subset is load-bearing hasn't been done — see §16.5.
+
+### 16.3 Current behavior: gets the descriptors, then resets every ~508ms
+
+With the restored driver loaded, every single cycle (60+ observed across two separate
+module loads) follows this exact sequence:
+
+```
+RESET_RSP (idle loop)
+  → DESCREQ (reg 0x000001)     → DEVICE_DESC (type=7), ~250-300us later
+  → DESCREQ2 (reg 0x000002)    → RPT_DESC (type=8), ~850-900us later
+  → [reaches seq_state=4, schedules create_device_work — 6+ real Linux HID input
+     devices get created under /devices/platform/AMDI0060:00/.../spi-MSHW0231:00/,
+     confirmed via /proc/bus/input/devices]
+  → ... exactly 507.4-508.3us later, every time ...
+  → spontaneous RESET_RSP again, driver detects it and restarts the whole cycle
+```
+
+**Zero `type=1` (DATA, real touch input) reports have ever been observed** — not once
+across 60+ full cycles. The device never stays "up" long enough to deliver real input; it
+just re-proves it can reach RPT_DESC, forever, roughly every 1-2 seconds.
+
+Three independent attempts to prevent the ~508ms reset, all tested live, all with **zero**
+effect on the timing (not even a few ms of drift):
+
+1. **Do nothing extra** (baseline) — resets at 507.4-508.3ms after reaching RPT_DESC.
+2. **`spi_hid_set_power(shid, SPI_HID_POWER_MODE_ACTIVE)`** sent immediately after
+   RPT_DESC (a generic HID-over-SPI SET_POWER command to `command_register`) — no effect,
+   same timing, same reset.
+3. **Exact byte-for-byte replica of a real Windows GET_FEATURE/SET_FEATURE exchange**,
+   mined directly from `traces/surface_boot_auto.csv` via `tools/parse_spi.py`
+   (fixed in this session: hardcoded path was `~/Scrivania/traces`, now
+   `traces/` relative to the repo):
+   - GET_FEATURE (content_id=4): `02 00 00 03 42 00 04 03 00 06` (to output register
+     0x0003, doubled-opcode framing as above)
+   - SET_FEATURE (content_id=4): `02 00 00 03 82 00 03 04 00 05 01 00 00 00`
+   - Sent as a new `seq_state=5` in `spi_hid_seq_thread()` right after RPT_DESC.
+   - Result: the GET_FEAT_RESP (type=5) **never arrives** — the device just resets at the
+     same 507.6-508.3ms mark, now caught in state 5 instead of state 4. No difference.
+4. **Physical touch during the live cycle** (user touched the screen while the module was
+   loaded and cycling) — 12/12 observed cycles during active touching were identical to
+   the untouched baseline: same `type=3/7/8` sequence, same ~505-508ms reset, zero
+   `type=1` reports. Touch input does not influence the timer.
+
+### 16.4 Correction: Windows survives ~5.9 SECONDS of total silence after RPT_DESC
+
+Initial (wrong) reading of `docs/CSV_SEQUENCE.md`'s prose suggested Windows sends its
+next touchscreen command (GET_FEATURE) only ~10-16ms after RPT_DESC — which would have
+meant our ~508ms budget was generous and content, not timing, was the remaining variable.
+That number was an artifact of how `tools/parse_spi.py` numbers transactions: Device A
+(touchscreen) and Device B (companion chip, doing a multi-second firmware upload in
+parallel) are interleaved by wall-clock time into one sequential `TXN#N` list, and the
+"+Xus" gap column is relative to whatever transaction (A or B) immediately precedes it —
+almost always a Device B transaction during this window, not the touchscreen's own RPT_DESC.
+
+Recomputed using the actual raw ETW `clock_100ns` timestamps for the two Device-A-specific
+transactions directly:
+
+```
+RPT_DESC body read completes:  clock 134276452171777038
+GET_FEATURE sent:               clock 134276452230777475
+Real elapsed delta:             5900.04 ms
+```
+
+**Windows's touchscreen sits completely idle — zero SPI transactions, confirmed via the
+raw trace, not just the summary prose — for ~5.9 seconds after RPT_DESC, and does not
+reset.** This matches the CSV_SEQUENCE.md-documented "~5902ms from boot start" figure for
+when Device A's runtime phase resumes, now confirmed to be measured from RPT_DESC specifically,
+not just from boot start coincidentally.
+
+This rules out "GET_FEATURE needs to arrive within some tight window" as the explanation
+for our ~508ms reset (§16.3 point 3 already showed the exact right bytes don't help
+regardless), and reframes the mystery: **it is not about which command arrives when — our
+device resets on an internal ~508ms schedule that fires regardless of content, while
+Windows's does not fire at all for at least 6 seconds under the same post-RPT_DESC
+conditions.** Whatever differs, it's something about the state of the bus/controller
+during the *idle* period itself, not about any specific command sent into it.
+
+### 16.5 Open questions for the next session
+
+- Which subset of the restored uncommitted diff is actually load-bearing for reaching
+  RPT_DESC at all? The doubled-opcode fix is almost certainly necessary (it's the one
+  thing every prior byte-identical-content test lacked); the PCI 0xB8/0xB4 FIFO-mode
+  change, the `readb`-vs-`readw` FIFO read, and the ACPI `_PS3`/`_PS0` probe-time
+  power-cycle have not been individually isolated — any could be incidental or load-bearing.
+  Bisecting this (toggle one change at a time, rebuild, retest for RPT_DESC) is the most
+  valuable next mechanical step and doesn't require new hypotheses, just discipline.
+- Why does `spi_hid_seq_write()` specifically need the doubled leading opcode byte to put
+  a correct 10-byte frame on the wire, when the raw-MMIO diagnostic tools (which build the
+  FCH register sequence by hand, bypassing this function and `amd_spi_exec_segment()`
+  entirely) do not? Reading `amd_spi_exec_segment()` (`driver/spi-amd.c`) side-by-side with
+  what the diagnostic tools do, specifically around how `tx_len`/opcode are counted, is the
+  concrete next research task here — not a new experiment, a code-reading one.
+- Whatever gates the ~508ms reset independent of content is genuinely unexplained. It is
+  not touch, not any single command tried. Worth checking, in order of cheapness: (a)
+  whether the reset timing shifts at all if the SPI clock speed is changed post-RPT_DESC
+  (§15.10's speed sweep never ran with the device already past RPT_DESC); (b) whether
+  CTRL0/STATUS/ENA_REG drift or change value at all during the idle window (a `health_check.c`-style
+  read on a timer during the 508ms would show this cheaply); (c) whether the reset is
+  tied to CS (chip-select) state — does the AMD controller release/reassert CS differently
+  in the idle gap under our config vs whatever Windows's driver leaves it in.
 
 ---
 

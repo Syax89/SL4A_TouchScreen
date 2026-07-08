@@ -145,6 +145,10 @@ static s64 wait_edge_us(int max_us){
 	bool was=pin_asserted();
 	/* if it is already asserted at entry, wait for it to go idle first so we time a real edge */
 	while(was && ktime_us_delta(ktime_get(),t0)<max_us){ was=pin_asserted(); cpu_relax(); }
+	/* stuck asserted for the entire window: there was never an idle baseline to time a real
+	 * edge from, so falling through to the second loop would immediately see "asserted" and
+	 * report a bogus ~0us edge. Report this distinctly (-2) instead of a normal timeout (-1). */
+	if(was) return -2;
 	t0=ktime_get();
 	while(ktime_us_delta(ktime_get(),t0)<max_us){
 		if(pin_asserted()) return ktime_us_delta(ktime_get(),t0);
@@ -243,7 +247,8 @@ static int __init orac_init(void){
 		u8 descreq[]={0x00,0x00,0x01, 0x42,0x00, 0x00,0x03,0x00,0x00};
 		/* prime the level so wait_edge_us times a genuine post-write edge */
 		(void)pin_asserted();
-		do_write(0x02, descreq, sizeof(descreq));
+		if(do_write(0x02, descreq, sizeof(descreq)) != 0)
+			pr_info("orac: [D] WARNING: do_write timed out (busy stuck) — result below is not meaningful\n");
 		us = wait_edge_us(200000);
 	}
 	pr_info("orac: [D] DESCREQ sent. time-to-edge = %lld us  (Windows reference: ~58 us)\n", us);
@@ -260,6 +265,9 @@ static int __init orac_init(void){
 	} else if(us>=0 && us<1000 && t!=7){
 		pr_info("orac: VERDICT: tight edge (%lldus) BUT read still type=%d(%s).\n", us, t, tname(t));
 		pr_info("orac:          Write may reach device but response read/register is wrong — investigate read addr/len/timing.\n");
+	} else if(us>=1000 && t==7){
+		pr_info("orac: VERDICT: *** DEVICE_DESC *** at the realistic ~109ms accelerated reset-loop\n");
+		pr_info("orac:          cadence (edge %lldus). THE WRITE WORKS — this is the breakthrough.\n", us);
 	} else if(us>=1000 && t==3){
 		pr_info("orac: VERDICT: device DID react to the DESCREQ (edge at %lldus, far faster than the\n", us);
 		pr_info("orac:          ~609ms idle cadence) but only re-asserts RESET_RSP, never DEVICE_DESC.\n");
@@ -291,7 +299,10 @@ static int __init orac_init(void){
 	for(i=0;i<10;i++){
 		u8 dq[]={0x00,0x00,0x01, 0x42,0x00, 0x00,0x03,0x00,0x00};
 		(void)pin_asserted();
-		do_write(0x02, dq, sizeof(dq));
+		if(do_write(0x02, dq, sizeof(dq)) != 0){
+			pr_info("orac:    round %d: do_write FAILED (busy timeout) — skipping\n", i);
+			continue;
+		}
 		us = wait_edge_us(200000);
 		do_read(0x000000, 10, rx);
 		t = hid_type(rx,10);

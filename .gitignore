@@ -29,14 +29,21 @@ driver/.module*
 driver/Module.symvers
 driver/modules.order
 
-# Build artifacts (tools/diagnostics/ — many one-off kernel modules)
-tools/diagnostics/*.o
-tools/diagnostics/*.ko
-tools/diagnostics/*.mod
-tools/diagnostics/*.mod.c
-tools/diagnostics/*.mod.o
-tools/diagnostics/*.cmd
-tools/diagnostics/.*.cmd
-tools/diagnostics/.module*
-tools/diagnostics/Module.symvers
-tools/diagnostics/modules.order
+# Build artifacts (tools/diagnostics/ and tools/diagnostics/archive/ — many
+# one-off kernel modules; ** so it also matches the archive/ subdirectory)
+tools/diagnostics/**/*.o
+tools/diagnostics/**/*.ko
+tools/diagnostics/**/*.mod
+tools/diagnostics/**/*.mod.c
+tools/diagnostics/**/*.mod.o
+tools/diagnostics/**/*.cmd
+tools/diagnostics/**/.*.cmd
+tools/diagnostics/**/.module*
+tools/diagnostics/**/Module.symvers
+tools/diagnostics/**/modules.order
+
+# Ghidra project databases are regenerable (see tools/ghidra/README.md) — only the
+# decompiled .c output goes in docs/decomp/, never the binary .gpr/.rep project itself.
+tools/ghidra/project/
+tools/ghidra/*.gpr
+tools/ghidra/*.rep/

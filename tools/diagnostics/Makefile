@@ -1,8 +1,8 @@
-# Build the companion probe diagnostic module
+# Build the companion probe diagnostic module (superseded/dead-end, see archive/)
 # Usage: make -f Makefile.companion
 KDIR := /lib/modules/$(shell uname -r)/build
 
-obj-m += companion_probe.o
+obj-m += archive/companion_probe.o
 
 all:
 	$(MAKE) -C $(KDIR) M=$(shell pwd) modules
