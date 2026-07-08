@@ -1145,14 +1145,110 @@ test. Falsified with a clean, direct, ground-truth-motivated experiment, not a g
 
 **Where this leaves the investigation**: the premise-flip (BIOS works ⇒ no Windows-only
 magic needed) still stands and remains the strongest reason to believe a software fix is
-possible in principle. The concrete next steps this opens, not yet done: (1) decompile
-`AmdSpiHcProtocolDxe.efi` for the actual register-level SPI controller setup UEFI uses
-(may reveal a controller configuration difference our SPI framing analysis hasn't caught,
-since UEFI's implementation is likely far simpler/less legacy-laden than `amdspi.sys`);
-(2) decompile `BoardSpiBusDxe.efi`/`SpiConfigDxe.efi` for any board-level SPI init (clock
-enables, power sequencing) done before the touch driver ever runs; (3) look for other
-raw-MMIO pokes in `SurfaceTouchHidDxe.efi` beyond the ones read so far (only ~15 of its 44
-functions have been read in detail).
+possible in principle.
+
+### 15.18 Completing the UEFI Sweep: Every Remaining Module, and the Real Register-Level SPI Code (2026-07-08)
+
+User: "impossibile che non ci sia altro, verifichiamo che le nostre istruzioni combacino
+almeno" — pushed to finish the job rather than stop at 15.17's partial read. Decompiled
+and read through every remaining candidate:
+
+- **`UspHidDxe.efi`** (43 functions): strings (`KipHidPacketRegistrationCallback`,
+  `KipDataPortRegistration`, `UspHidControlKeyboard`) show this is the **keyboard/KIP**
+  (Keyboard Input Processor, the SAM-attached keyboard channel) HID driver — completely
+  unrelated subsystem, not touch. Ruled out.
+- **`SpiConfigDxe.efi`** (10 functions, fully read — it's tiny): just declares SPI bus
+  topology (a literal Unicode string `"SPI_BUS_0"`, standard EDK2 `EFI_SPI_CONFIGURATION_PROTOCOL`
+  instance data). No register access, no logic beyond bus/device enumeration metadata.
+  Ruled out.
+- **`AmdCpmGpioInitDxe.efi`** + its companion data file **`AmdCpmOemGpioAsl.raw`**: the
+  `.raw` file turned out to be a **compiled ACPI SSDT** (`SSDT`/`OAMD`/`GPIO` header) that
+  this driver injects into the ACPI namespace at boot — a genuinely new discovery
+  (firmware-injected table, not from the static DSDT). It defines `\_SB.GPIO._AEI`
+  (ACPI Event Interrupt — the catch-all wake/event GPIO list), but checking its raw bytes
+  for our three pin numbers (85/0x55, 91/0x5B, 259/0x103) byte-for-byte: **none appear**.
+  The `_AEI` list is for other devices' wake pins (audio codec, power button, WiFi, lid,
+  RTC) only. Also confirmed this exact `_AEI` mechanism is already present in our own
+  `docs/acpi/linux/ssdt9.dsl` — not a table Linux is missing, just irrelevant to touch.
+  Ruled out.
+- **`AmdSpiHcProtocolDxe.efi`** (30 functions) — **this is the one that matters**, the
+  actual register-level SPI Host Controller implementation. Earlier searches for a
+  hardcoded `0xFEC10000`/`0x60040000` literal came up empty because the base address is
+  stored in a per-instance context struct (populated once, likely from a HOB/PCD at
+  driver init) and accessed via `base+offset` pointer arithmetic afterward, not a repeated
+  immediate. Found the real functions:
+  - `FUN_00001544` (clock/speed setup): buckets the requested frequency into the same
+    6-tier table our `amd_spi_freq[]` uses (800kHz/16/22/33/66/100MHz thresholds), writes
+    `ENA_REG(+0x20) |= 1` and packs the tier into 3 nibbles at `SPI100_SPEED_CONFIG(+0x22)`
+    — **exactly our register map**.
+  - `FUN_00001664` (the actual Transfer): `CTRL0(+0x00) |= BIT(20)` — **single set, never
+    cleared first** (confirms independently, from the real hardware-touching code this
+    time rather than just doc commentary, the Windows-style single-set behavior already
+    tested in 15.10's `fifo_clear_singleset_test.c` with no effect) — then
+    `TX_COUNT(+0x48)`, fills `FIFO(+0x80)`, `OPCODE(+0x45)`, `TRIGGER(+0x47) |= 0x80`,
+    reads back from `FIFO+0x80+offset` into the caller's RX buffer. **Every offset matches
+    our driver exactly.**
+  - `FUN_000017e0` (busy-wait / completion check) is the one real difference: it polls
+    `STATUS(+0x4C) bit31 == 0` (not `CTRL0 bit31` like our `wait_busy()`) **AND** a second
+    condition on a PCI config register — decoded the ECAM address
+    (`_DAT_bf0a30b8`, base `0xBF000000` + offset `0x0A30B8`) to **Bus 0 / Device 0x14 /
+    Function 3 / register 0xB8** — the *same* LPC-bridge register already investigated for
+    its bit7 ("16-bit FIFO mode", 15.x history) — but this checks **bit 0**, never
+    examined before. Checked the already-known values: Windows dump `0x33ED0084` and Linux
+    default `0x33ED0004` both have **bit0 = 0** — identical on both systems already, so
+    this gate cannot be the source of the asymmetry, and since our own reads already
+    complete with correct data using our own `CTRL0`-based wait, the different
+    completion-detection register doesn't change behavior in a way that matters here.
+
+**Conclusion**: verified, at the level of individual register offsets and bit operations
+(not just high-level protocol bytes), that our SPI transfer implementation matches AMD's
+own UEFI reference implementation almost exactly — same clock table, same FIFO_CLEAR
+single-set behavior, same OPCODE/TX_COUNT/RX_COUNT/TRIGGER/FIFO offsets. The only
+mechanistic difference found (busy-wait register choice) resolves to an already-identical
+static value on both systems and doesn't affect observed transfer correctness. **Every
+module in the firmware volume plausibly related to touch or SPI has now been examined**;
+none contain an undiscovered register poke that would explain the reset-loop. The
+remaining explanation is almost certainly sequencing/timing (when, relative to power-on,
+the first DESCREQ lands) rather than a missing instruction — not verifiable by further
+static analysis, only by physical instrumentation or precise timestamped comparison.
+
+### 15.19 Reconciling an Independent Disassembly Pass (2026-07-08)
+
+User independently disassembled the same binaries and flagged three items; checked each
+against the actual decompiled C (not just raw disassembly) to confirm or correct:
+
+1. **`0xBF0A30A0`/`0xBF0A30B8` are not a generic "SMN index/data pair"** — they're ECAM
+   addresses (`0xBF000000` MCFG base, confirmed in this project's own ACPI dumps) for
+   **Bus 0 / Device 0x14 / Function 3 / registers 0xA0 and 0xB8** — the LPC bridge, the
+   *same* device this project has been probing via `setpci -s 00:14.3` all along.
+   `0xA0` turns out to be how `AmdSpiHcProtocolDxe.efi` **discovers the SPI controller's
+   MMIO base at runtime** (`FUN_00001334`: reads the register, masks off the low byte
+   `& 0xFFFFFF00`, stores it as the base for every later CTRL0/FIFO/TRIGGER access) rather
+   than hardcoding `0xFEC10000` as a literal — this is why the earlier literal-search for
+   `0xFEC10000` in this binary came up empty. **Verified the actual live value**:
+   `setpci -s 00:14.3 A0.L` → `0xFEC1000A`; masked → `0xFEC10000`, exactly what we already
+   use. No discrepancy — nice independent confirmation the base address assumption was
+   always correct, not a new lead.
+2. **The `or $0x80` in `AmdSpiHcProtocolDxe.efi` is not "setting 16-bit FIFO mode"** —
+   traced in the decompiled C (`FUN_00001664` line `*(byte*)(...+0x47) |= 0x80`): this is
+   `TRIGGER(+0x47) |= 0x80`, the ordinary SPI transaction start bit, identical to what our
+   own driver does at every transfer. Separately confirmed `_DAT_bf0a30b8` (PCI 0xB8) is
+   **only ever read** (bit0, in the busy-wait condition, 15.18) in both
+   `AmdSpiHcProtocolDxe.efi` and `BoardSpiBusDxe.efi` — grepped for any write and found
+   none. UEFI never sets PCI 0xB8 bit7 ("16-bit FIFO mode") at all; that register is
+   simply never written by this code path.
+3. **The `0xfc065`/`0x7E` bytes in `MsTouchUnlockDxe.efi`** are the same ones read earlier
+   in this session (`FUN_00001510`, §15.17) — real, but gated behind
+   `gMsCalibrationServicingProtocol`'s status check, i.e. only executed in **factory/
+   manufacturing calibration mode**, building a checksummed 16-byte "TDM replacement mode
+   trigger" command. On a normal boot (ours, and any customer using BIOS Setup) that
+   protocol is absent and the code takes the other branch (a plain "lock touch flash"
+   call, `FUN_00001420`). Not a general-purpose unlock sequence.
+
+No new leads from this pass — it independently re-found the same facts already logged in
+15.17/15.18, with one useful confirmation (the SPI base-discovery register matches) and
+two corrections (trigger bit misread as FIFO-mode bit; factory-only code misread as
+general unlock).
 
 ---
 
