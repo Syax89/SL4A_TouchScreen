@@ -1271,6 +1271,20 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	shid->raw_handshake_retries_left--;
 	dev_warn(dev, "SEQ: raw_mode handshake watchdog: no heatmap data after %dms, retrying (%d left)\n",
 		 RAW_HANDSHAKE_TIMEOUT_MS, shid->raw_handshake_retries_left);
+	/* 2026-07-08 (found live): a plain DESCREQ resend isn't always enough —
+	 * some failures leave the device deaf even to DESCREQ, needing the same
+	 * ACPI _PS3 -> _PS0 electrical power-cycle spi_hid_probe() does (the
+	 * only other place currently able to "unstick" the device). Replicate
+	 * that here so a watchdog retry is as strong as a fresh module reload. */
+	{
+		acpi_handle h = ACPI_HANDLE(dev);
+		if (h) {
+			acpi_evaluate_object(h, "_PS3", NULL, NULL);
+			msleep(50);
+			acpi_evaluate_object(h, "_PS0", NULL, NULL);
+			msleep(100);
+		}
+	}
 	{
 		static const u8 dr[] = {
 			0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
