@@ -19,9 +19,18 @@ set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="sl4a-touch"
-PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0-beta1")"
+# NB: whatever's in VERSION must never contain a literal "-" — see the comment in
+# driver/dkms.conf for why (breaks Arch/CachyOS's pacman dkms hook on every kernel update).
+PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SRC_DEST="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 SERVICE_PATH="/etc/systemd/system/sl4a-touch.service"
+
+if [[ "$PKG_VERSION" == *-* ]]; then
+	echo "FAIL: VERSION ('$PKG_VERSION') contains a '-', which breaks Arch/CachyOS's pacman"
+	echo "      dkms hook on the next kernel update (see driver/dkms.conf). Use '~' or no"
+	echo "      separator instead (e.g. 1.0.0~beta1) and re-run."
+	exit 1
+fi
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info() { echo -e "${YELLOW}$1${NC}"; }
@@ -58,14 +67,19 @@ MISSING=0
 for cmd in dkms make; do
 	command -v "$cmd" >/dev/null 2>&1 || { echo "  missing: $cmd"; MISSING=1; }
 done
+KVER_CONFIG="/lib/modules/$(uname -r)/build/.config"
 if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
 	echo "  missing: kernel headers/build tree for $(uname -r)"
 	echo "           (package name varies by distro: linux-headers, linux-<flavor>-headers, ...)"
 	MISSING=1
-fi
-if ! command -v clang >/dev/null 2>&1; then
-	echo "  missing: clang (this driver requires LLVM=1 — a plain gcc build will fail)"
-	MISSING=1
+elif grep -q '^CONFIG_CC_IS_CLANG=y' "$KVER_CONFIG" 2>/dev/null; then
+	# Only require clang when the running kernel was itself built with it (e.g. CachyOS) --
+	# its build flags are clang-only and a gcc build would fail. driver/dkms.conf detects
+	# this per-kernel automatically (relevant when this driver later rebuilds for a
+	# *different* installed kernel after a kernel update, not just this one).
+	command -v clang >/dev/null 2>&1 || { echo "  missing: clang (kernel $(uname -r) was built with clang)"; MISSING=1; }
+else
+	command -v gcc >/dev/null 2>&1 || { echo "  missing: gcc"; MISSING=1; }
 fi
 if [ "$MISSING" -ne 0 ]; then
 	fail "Install the missing dependencies above, then re-run this script."
