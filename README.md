@@ -19,9 +19,11 @@ The driver successfully initializes the MSHW0231 touchscreen on the Surface Lapt
 | Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
 | BTN_TOUCH (tap/lift detection) | **Working** |
 | Stylus/Pen (Report ID 1) | **Working** |
-| Multi-touch (2+ fingers) | Not yet — requires raw heatmap blob detection |
+| Multi-touch (2+ fingers) | Experimental — see below |
 
 Multi-touch requires processing the raw capacitive heatmap frames (content_id=0x0C, ~4302 bytes) through blob detection. The Windows `TouchPenProcessor0C19.dll` handles this with DFT processing on dual-frequency antenna data. This is a complex computer-vision task (see [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) §D).
+
+An experimental `raw_mode=1` module param exists (default `0`, off) that sends `GET_FEATURE`/`SET_FEATURE` to switch the device into raw heatmap streaming and runs a connected-component blob detector to emit real multitouch events. The blob detection and slot-tracking logic is confirmed correct (verified live with `evtest`), but the `SET_FEATURE` handshake itself only succeeds intermittently for reasons not yet root-caused (a software watchdog retries automatically — same 2000ms-timeout/3-retry pattern Windows's own driver uses, discovered by decompiling it — but doesn't fix the underlying cause). Not recommended for daily use; standard mode (`raw_mode=0`, the default) is what's stable.
 
 ---
 
@@ -167,10 +169,14 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 | `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
 | `decode_hidspi.py` | `tools/decode_hidspi.py` | HID-over-SPI protocol decoder |
 | `extract_companion.py` | `tools/extract_companion.py` | Companion device sequence extractor |
-| `mmio_write.c` | `tools/diagnostics/mmio_write.c` | Raw MMIO test module |
-| `gpio_test.c` | `tools/gpio_test.c` | GPIO power/reset via ACPI |
+| `reset_touch.sh` | `tools/reset_touch.sh` | Power-cycle just the touchscreen via ACPI `\M010`, no reboot needed |
 | `test_coldboot.sh` | `tools/test_coldboot.sh` | Virgin-boot test harness |
 | `ghidra/` | `tools/ghidra/` | Headless decompilation scripts |
+
+The early bring-up phase (proving DESCREQ/writes reach the device at all) used dozens of
+one-off raw-MMIO kernel modules and exploratory shell scripts; now that the driver works
+end-to-end, those are removed (still recoverable from git history) — only the tools still
+useful going forward are listed above.
 
 ---
 
@@ -178,18 +184,20 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 
 | File | Contents |
 |------|----------|
-| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | **Canonical knowledge base** — cross-verified model (CSV × decomp × ACPI × PCI × tests) |
-| [`docs/DRIVER_STATE.md`](docs/DRIVER_STATE.md) | Status, test matrix, PCI findings |
-| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Roadmap: heatmap blob detection for multi-touch |
+| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | **Canonical knowledge base** — cross-verified model (CSV × decomp × ACPI × PCI × tests), the full investigation journal |
+| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Roadmap: multi-touch handshake reliability + heatmap blob detection |
 | [`docs/SPI_REGISTERS.md`](docs/SPI_REGISTERS.md) | AMD FCH SPI + PCI config register map |
 | [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol decoded |
 | [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md) | Annotated Windows boot SPI trace |
 | [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md) | `amdspi.sys` decompilation index |
-| [`docs/VERIFICATION_FINDINGS.md`](docs/VERIFICATION_FINDINGS.md) | Independent code audit — 8 bugs found and fixed |
-| [`docs/VERIFICATION_PLAN.md`](docs/VERIFICATION_PLAN.md) | Phased verification methodology |
-| [`docs/analisi_MSHW0231.md`](docs/analisi_MSHW0231.md) | Touchscreen register/feature analysis |
 | [`docs/decomp/uefi/`](docs/decomp/uefi/) | Decompiled UEFI DXE drivers (SurfaceTouchHidDxe, AmdSpiHc, MsTouchUnlock) |
 | [`docs/decomp/clean/`](docs/decomp/clean/) | Clean `hidspi.sys` and `HidSpiCx.sys` decompilations |
+
+Earlier bring-up-phase docs (independent SPI-controller bug audit from before the driver
+worked, verification methodology, a stale mid-investigation session summary, an early
+hardware-identification analysis whose conclusions were later superseded by the working
+driver itself) have been removed now that the driver is functional — recoverable from git
+history if needed.
 
 ### Verification reports
 
@@ -228,8 +236,8 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 
 ## Next Steps
 
-- **Multi-touch**: reverse-engineer the DFT antenna layout in `TouchPenProcessor0C19.dll` to correctly map blob centroids to screen coordinates
-- **Cleanup**: reduce `dev_info` logging noise in production builds
+- **Multi-touch handshake reliability**: `raw_mode=1` (experimental, see `docs/NEXT_STEPS.md` §D) enables `SET_FEATURE`-based raw heatmap streaming with blob detection, but the device only accepts `SET_FEATURE` intermittently for reasons not yet understood at the hardware/firmware level (a software watchdog retries automatically, matching Windows's own behavior, but doesn't fix the root cause)
+- **Multi-touch coordinate mapping**: once connected, reverse-engineer the DFT antenna layout in `TouchPenProcessor0C19.dll` to correctly map blob centroids to screen coordinates
 - **Upstreaming**: split into proper Linux kernel patches (SPI controller + HID transport)
 
 ---

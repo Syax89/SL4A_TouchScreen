@@ -10,7 +10,6 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DRIVER_DIR="$SCRIPT_DIR/driver"
-GPIOTEST="$SCRIPT_DIR/tools/gpio_test.c"
 TMPDIR="/tmp/spi-test-$$"
 RESULTS=""
 

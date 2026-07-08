@@ -2330,6 +2330,58 @@ check `rl - 2 <= avail`.
 | Pen/Stylus (Report ID 0x01) | Working |
 | Multi-touch | Requires raw heatmap blob detection (future) |
 
+## 20. Repo-wide cleanup and consolidation (2026-07-08, night)
+
+With the driver stable (standard mode) and the multi-touch investigation clearly scoped
+(§18.7/§18.8), did a general pass to remove now-obsolete bring-up-phase scaffolding and dead
+code, per an explicit request to "consolidate the information and clean up."
+
+**Driver**: removed 6 functions the compiler flagged as unused dead code
+(`spi_hid_output_body`, `spi_hid_bus_input_report`, `spi_hid_assert_reset`,
+`spi_hid_deassert_reset`, `spi_hid_power_up`, `heatmap_report_touch` — all leftovers from the
+generic hid-over-spi v1.0 template this driver was originally adapted from, fully superseded
+by the custom `spi_hid_seq_thread()` state machine built for this device's V0 protocol
+quirks) plus two unused local variables (`gpiod` in `spi_hid_probe()`, `valid_count` in
+`heatmap_process_frame()`). Build now has **zero warnings** (was 8). Verified live afterward:
+standard mode still binds and streams identically, zero regressions.
+
+**Tools removed** (all recoverable from git history, none needed for the driver or the two
+open investigation threads): `tools/diagnostics/` (dozens of one-off raw-MMIO kernel modules
+that answered "does DESCREQ reach the device at all" — solved long ago), `tools/raw-mmio-test/`,
+root-level `test_raw.sh`/`test_seq.sh` (same category — early hypothesis-testing scripts for
+the pre-breakthrough SPI write problem), `tools/gpio_test.c` (superseded by the new, cleaner
+`tools/reset_touch.sh`), `module/b0_blocks.h` + the now-empty `module/`/`firmware/`
+directories (companion-chip firmware block data — confirmed via grep to be referenced nowhere
+in `driver/`, consistent with the project's own "companion chip not needed" finding), three
+small ETW-snippet scratch files in `tools/` (`BOOT_SEQUENCE_ETW.txt`, `COMPANION_1a_firmware.txt`,
+`TOUCH_0b_sequence.txt` — regenerable any time via `tools/parse_spi.py`, and superseded by the
+polished `docs/CSV_SEQUENCE.md`).
+
+**Docs removed**: `docs/analisi_MSHW0231.md` (an early hardware-identification analysis whose
+central conclusion — "no mode-change command exists, the device always streams raw frames" —
+is now known to be *wrong*: §19's standard-mode breakthrough is precisely the mode-change
+command Windows sends by default that this doc didn't know to look for; keeping it around
+risked misleading a future reader), `docs/SESSION_2026-07-06.md` (explicitly states "write path
+not yet functional," a stale mid-investigation snapshot), `docs/VERIFICATION_FINDINGS.md` +
+`docs/VERIFICATION_PLAN.md` (an independent SPI-controller bug audit from 2026-07-04 — a
+different, much earlier "8 bugs" than the 2026-07-08 multi-touch code review in §18.7's
+neighborhood; all those controller-level bugs are long since fixed and folded into the current
+`driver/spi-amd.c`), `docs/DRIVER_STATE.md` (a thin duplicate of the top-level `README.md`'s
+own status summary), `docs/WINDOWS_DATA_COLLECTION.txt` (a one-time "how to capture Windows
+MMIO data" guide whose goal was achieved long ago).
+
+**Kept as-is**: this file and `docs/NEXT_STEPS.md` (the canonical journal/roadmap),
+`docs/SPI_REGISTERS.md`/`HIDSPI_PROTOCOL.md`/`AMDSPI_DECOMP.md`/`CSV_SEQUENCE.md` (stable
+protocol/register reference material, not investigation journal), `docs/verification/*.md`
+(the independent audit reports that those four reference docs were corrected against — kept
+even though a few of their internal line-number citations now point at the just-deleted
+`VERIFICATION_PLAN.md`/`DRIVER_STATE.md`, since the corrections themselves remain the valid,
+citable history), `docs/decomp/`, `docs/acpi/`, `docs/windows_mmio_dumps/`, `traces/`.
+
+Updated `README.md`'s tool/doc tables and `docs/NEXT_STEPS.md` §E to match, and added a
+"What's still open" quick-summary block at the top of `NEXT_STEPS.md` naming the two real
+remaining threads: multi-touch handshake reliability (§18.8) and DFT coordinate mapping (§D).
+
 ## 14. References
 
 | Resource | Path |
@@ -2344,7 +2396,6 @@ check `rl - 2 <= avail`.
 | ACPI Linux | `docs/acpi/linux/` |
 | ACPI Windows | `docs/acpi/windows/` |
 | CSV parser | `tools/parse_spi.py` |
-| MMIO test module | `tools/diagnostics/mmio_write.c` |
 | WPP TMF + PDB + decoded logs | Windows-side, `Desktop\windrivers\` (hidspi.pdb/.sys, *.tmf, logtouch*.etl/_decoded*.txt) |
 | 11-device PCI dump (Windows .BIN + Linux reference) | Windows-side, `Desktop\windrivers\` |
 | GitHub Repository | https://github.com/Syax89/SL4A_TouchScreen |

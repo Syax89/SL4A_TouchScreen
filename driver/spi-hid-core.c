@@ -125,17 +125,6 @@ static void spi_hid_output_header(__u8 *buf,
 	buf[5] = (output_report_length >> 4) & 0xff;
 }
 
-static void spi_hid_output_body(__u8 *buf,
-		struct spi_hid_output_report *report)
-{
-	u16 content_length = report->content_length;
-
-	buf[0] = report->content_type;
-	buf[1] = (content_length >> 0) & 0xff;
-	buf[2] = (content_length >> 8) & 0xff;
-	buf[3] = report->content_id;
-}
-
 static void spi_hid_read_approval(u32 input_register, u8 *buf)
 {
 	buf[0] = SPI_HID_READ_APPROVAL_OPCODE_READ;
@@ -1077,94 +1066,6 @@ out:
 	spin_unlock_irqrestore(&shid->input_lock, flags);
 }
 
-static int spi_hid_bus_input_report(struct spi_hid *shid)
-{
-	struct device *dev = &shid->spi->dev;
-	int ret;
-
-	trace_spi_hid_bus_input_report(shid);
-	if (shid->input_transfer_pending++)
-		return 0;
-
-	ret = spi_hid_input_async(shid, shid->input.header,
-			sizeof(shid->input.header),
-			spi_hid_input_header_complete);
-	if (ret) {
-		dev_err(dev, "Failed to receive header: %d\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int spi_hid_assert_reset(struct spi_hid *shid)
-{
-	int ret;
-
-	if (!shid->spi->dev.of_node)
-		return 0;
-
-	ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_reset);
-	if (ret)
-		return ret;
-
-	/* Let VREG_TS_5V0 stabilize */
-	usleep_range(10000, 11000);
-
-	return 0;
-}
-
-static int spi_hid_deassert_reset(struct spi_hid *shid)
-{
-	int ret;
-
-	if (!shid->spi->dev.of_node)
-		return spi_hid_reset_via_acpi(shid);
-
-	ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_active);
-	if (ret)
-		return ret;
-
-	/* Let VREG_S10B_1P8V stabilize */
-	usleep_range(5000, 6000);
-
-	return 0;
-}
-
-static int spi_hid_power_up(struct spi_hid *shid)
-{
-	int ret;
-
-	if (shid->powered)
-		return 0;
-
-	shid->input_transfer_pending = 0;
-	shid->powered = true;
-
-	if (shid->spi->dev.of_node) {
-		ret = regulator_enable(shid->supply);
-		if (ret) {
-			shid->regulator_error_count++;
-			shid->regulator_last_error = ret;
-			goto err0;
-		}
-
-		/* Let VREG_S10B_1P8V stabilize */
-		usleep_range(5000, 6000);
-	}
-
-	ret = spi_hid_set_power(shid, SPI_HID_POWER_MODE_ACTIVE);
-	if (ret)
-		dev_err(&shid->spi->dev, "failed to set power ACTIVE: %d\n", ret);
-
-	return 0;
-
-err0:
-	shid->powered = false;
-
-	return ret;
-}
-
 static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
 {
 	struct spi_hid_output_report report = {
@@ -1658,7 +1559,6 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 		static u16 prev_gx[HEATMAP_MAX_SLOTS] = {0xFFFF, 0xFFFF};
 		static u16 prev_gy[HEATMAP_MAX_SLOTS] = {0xFFFF, 0xFFFF};
 		bool any_touch = false;
-		u8 valid_count = 0;
 		struct { u16 gx; u16 gy; u32 w; u8 idx; } sorted[HEATMAP_MAX_BLOBS];
 		u8 sorted_count = 0;
 
@@ -1768,28 +1668,6 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 		input_mt_sync_frame(input);
 		input_sync(input);
 	}
-}
-
-static void heatmap_report_touch(struct spi_hid *shid, struct touch_point *pts, int count)
-{
-	struct input_dev *input = shid->touch_input;
-	int i, active = 0;
-
-	for (i = 0; i < count && active < 10; i++) {
-		if (!pts[i].active) continue;
-		input_mt_slot(input, active);
-		input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
-		input_report_abs(input, ABS_MT_POSITION_X, pts[i].x);
-		input_report_abs(input, ABS_MT_POSITION_Y, pts[i].y);
-		active++;
-	}
-	for (i = active; i < 10; i++) {
-		input_mt_slot(input, i);
-		input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
-	}
-	input_report_key(input, BTN_TOUCH, active > 0 ? 1 : 0);
-	input_mt_sync_frame(input);
-	input_sync(input);
 }
 
 static ssize_t heatmap_debug_show(struct device *dev,
@@ -2706,7 +2584,6 @@ static int spi_hid_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
 	struct spi_hid *shid;
-	struct gpio_desc *gpiod;
 	unsigned long irqflags;
 	int ret;
 

@@ -5,6 +5,24 @@
 
 ---
 
+## What's still open (quick summary)
+
+1. **Multi-touch handshake reliability** (§D.0) — `raw_mode=1`'s `SET_FEATURE` write only
+   succeeds intermittently; root cause not found (ruled out: clock speed, opcode-doubling
+   framing — see `GROUND_TRUTH.md` §18.8). A watchdog auto-retries (matching Windows's own
+   2000ms-timeout/3-retry behavior) but doesn't fix the underlying cause. Blocks efficient
+   multi-touch calibration work since the device doesn't reliably connect in raw mode.
+2. **Multi-touch coordinate mapping** (§D) — once raw mode connects, the DFT antenna
+   layout → screen position mapping is still unknown (4297 bytes isn't a clean rectangular
+   grid); needs `TouchPenProcessor0C19.dll` reverse-engineering or empirical calibration once
+   the device connects reliably enough to do it.
+3. **Logging/polish** (§E) — a few lower-priority cleanup items remain (see below).
+
+Everything else (device init, report descriptor, standard-mode single-touch + pen) is stable
+and done — see DONE below.
+
+---
+
 ## DONE
 
 - [x] Device init: DESCREQ → DEVICE_DESC → DESCREQ2 → RPT_DESC
@@ -106,16 +124,36 @@ This requires reverse-engineering the `TouchPenProcessor0C19.dll` to extract:
 | `windrivers/TouchPenProcessor0C19.dll` | 9.8 MB | Main touch/pen processing DLL |
 | `docs/decomp/uefi/SurfaceTouchHidDxe.c` | 1944 lines | UEFI touch driver (>>5 coordinate transform) |
 | `docs/decomp/uefi/MsTouchUnlockDxe.c` | 2220 lines | Touch unlock/calibration sequences |
-| `docs/analisi_MSHW0231.md` | 59 lines | Touchscreen register analysis |
 
 ---
 
 ## §E — Cleanup and polish
 
-- [ ] Reduce dev_info logging noise in production
-- [ ] Remove unused heatmap blob detection code (or guard behind module param)
+- [x] Remove unused heatmap blob detection code — done 2026-07-08: guarded `touch_input`/blob
+      pipeline behind `raw_mode`, deleted 6 dead functions the compiler flagged as unused
+      (`spi_hid_output_body`, `spi_hid_bus_input_report`, `spi_hid_assert_reset`,
+      `spi_hid_deassert_reset`, `spi_hid_power_up`, `heatmap_report_touch`) — build now has
+      zero warnings.
+- [x] Repo-wide cleanup 2026-07-08 — removed the entire bring-up-phase scaffolding now that
+      the driver works end-to-end: `tools/diagnostics/` (dozens of one-off raw-MMIO kernel
+      modules answering "does DESCREQ even reach the device" — long since answered yes),
+      `tools/raw-mmio-test/`, root-level `test_raw.sh`/`test_seq.sh`, `tools/gpio_test.c`
+      (superseded by `tools/reset_touch.sh`), unused companion-chip firmware blob data
+      (`module/b0_blocks.h`, confirmed unreferenced anywhere in `driver/`), stale/superseded
+      docs (`docs/analisi_MSHW0231.md` — pre-breakthrough analysis whose "no mode-change
+      command exists" conclusion is now known wrong; `docs/SESSION_2026-07-06.md` — explicitly
+      says "write path not yet functional"; `docs/VERIFICATION_FINDINGS.md`/`VERIFICATION_PLAN.md`
+      — an earlier, unrelated SPI-controller bug audit from 2026-07-04, long since fixed;
+      `docs/DRIVER_STATE.md` — thin duplicate of this README). All recoverable from git
+      history. `docs/GROUND_TRUTH.md`, `docs/NEXT_STEPS.md`, and the protocol/register
+      reference docs (`SPI_REGISTERS.md`, `HIDSPI_PROTOCOL.md`, `AMDSPI_DECOMP.md`,
+      `CSV_SEQUENCE.md`) remain as the current source of truth.
+- [ ] Reduce `dev_info` logging noise on the stable standard-mode path (the RPT_DESC/
+      GET_FEAT_RESP hex-dump-style `DIFFCHECK:` logs are harmless but verbose; not gated
+      behind a debug flag yet)
 - [ ] Proper sysfs interface for diagnostics
-- [ ] Systemd service for auto-load at boot
+- [ ] Systemd service for auto-load at boot (a `driver/sl4a-touch.service` unit already
+      exists — needs wiring up/testing as an actual boot-time default)
 - [ ] Kernel module signing for Secure Boot
 
 ---

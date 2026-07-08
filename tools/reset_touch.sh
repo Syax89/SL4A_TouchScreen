@@ -9,8 +9,8 @@
 # driver do NOT power-cycle the physical device, so a bad state from a
 # previous attempt may persist across reloads. This script asks ACPI to
 # power the device off and back on directly (same M010 0x5B/0x0103 calls
-# used in test.sh/test_raw.sh's inline gpio_cycle module), independent of
-# whether spi-amd/spi-hid are currently loaded.
+# used in test.sh's inline gpio_cycle module), independent of whether
+# spi-amd/spi-hid are currently loaded.
 #
 # Usage: sudo ./reset_touch.sh   (or just ./reset_touch.sh — it sudo's itself)
 # ============================================================================

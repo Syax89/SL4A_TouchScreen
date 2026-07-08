@@ -1,4 +1,0 @@
-obj-m += irq_oracle.o
-obj-m += m009_read.o
-obj-m += ps3_ps0_cycle.o
-obj-m += reactive_descreq_test.o
