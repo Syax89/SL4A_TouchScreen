@@ -1,16 +1,14 @@
 [Unit]
-Description=Surface Laptop 4 Touchscreen Driver
+Description=Surface Laptop 4 Touchscreen Driver (spi-amd + spi-hid, standard HID mode)
 After=local-fs.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStartPre=/usr/bin/setpci -s 00:14.3 B8.L=0x33ED0004
-ExecStartPre=/usr/bin/setpci -s 00:14.3 B4.L=0x00000000
 ExecStart=/sbin/insmod /home/simone/spi-hid/driver/spi-amd.ko
 ExecStart=/sbin/insmod /home/simone/spi-hid/driver/spi-hid.ko
-ExecStop=/sbin/rmmod spi-hid
-ExecStop=/sbin/rmmod spi-amd
+ExecStop=/sbin/rmmod spi_hid
+ExecStop=/sbin/rmmod spi_amd
 
 [Install]
 WantedBy=multi-user.target
