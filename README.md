@@ -121,11 +121,25 @@ make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
 
 ### Loading
 
+Manually:
+
 ```bash
-sudo rmmod spi-hid spi-amd 2>/dev/null
+sudo rmmod spi_hid spi_amd 2>/dev/null
 sudo insmod driver/spi-amd.ko
 sudo insmod driver/spi-hid.ko
 ```
+
+Or install `driver/sl4a-touch.service` as a systemd unit for auto-load at every boot
+(standard mode, `raw_mode=0`):
+
+```bash
+sudo cp driver/sl4a-touch.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sl4a-touch.service
+```
+
+After pulling driver changes or after a kernel update, use `tools/rebuild_and_install.sh` to
+rebuild and reload in one step (see [Tools](#tools)).
 
 ### After loading
 
@@ -170,6 +184,7 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 | `decode_hidspi.py` | `tools/decode_hidspi.py` | HID-over-SPI protocol decoder |
 | `extract_companion.py` | `tools/extract_companion.py` | Companion device sequence extractor |
 | `reset_touch.sh` | `tools/reset_touch.sh` | Power-cycle just the touchscreen via ACPI `\M010`, no reboot needed |
+| `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Rebuild the driver and reload it via the `sl4a-touch` systemd service (use after pulling changes or after a kernel update) |
 | `test_coldboot.sh` | `tools/test_coldboot.sh` | Virgin-boot test harness |
 | `ghidra/` | `tools/ghidra/` | Headless decompilation scripts |
 
