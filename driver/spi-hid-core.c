@@ -1299,11 +1299,23 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
  * centroids, and emit multitouch events.
  */
 #define HEATMAP_MAX_CELLS   4300
-#define HEATMAP_TOUCH_THRESHOLD  25
+#define HEATMAP_TOUCH_THRESHOLD  15    /* diff from baseline to mark a node touched */
 #define HEATMAP_MAX_BLOBS   10
 #define HEATMAP_BLOB_MIN_WEIGHT  150    /* total deviation sum across blob */
 #define HEATMAP_MAX_SLOTS   2            /* max fingers (Surface Laptop 4 = 2) */
-#define HEATMAP_EMA_ALPHA   3            /* smoothing: new_weight = 1, old_weight = 3 */
+#define HEATMAP_EMA_ALPHA   3            /* smoothing: 75% old (=3) + 25% new (=1) */
+
+/* DFT antenna frame layout (content_id=0x0C, ~4302 bytes):
+ *   byte[0]      content_id (0x0C)
+ *   byte[1..2]   SurfaceSwitch (16-bit timestamp)
+ *   byte[3..25]  frame metadata/timestamp (HEATMAP_DFT_META_LEN bytes)
+ *   byte[26..]   antenna DFT node magnitudes (86x50 grid, row-major, 1 byte each)
+ * The reverse-engineered TouchPenProcessor0C19.dll pipeline computes DFT
+ * magnitudes from real+imaginary antenna components; for this initial
+ * implementation we treat each post-metadata byte as one physical node's
+ * magnitude (the DFT real part) and run blob detection over the 86x50 grid. */
+#define HEATMAP_DFT_META_LEN  23
+#define HEATMAP_DATA_OFFSET   (3 + HEATMAP_DFT_META_LEN)   /* = 26 */
 
 static bool debug_coords;
 module_param(debug_coords, bool, 0644);
@@ -1321,12 +1333,19 @@ static bool swap_xy;
 module_param(swap_xy, bool, 0644);
 MODULE_PARM_DESC(swap_xy, "Swap X and Y axes");
 
+static bool raw_mode;
+module_param(raw_mode, bool, 0644);
+MODULE_PARM_DESC(raw_mode,
+	"0 = standard HID mode (single-touch, Report ID 0x40); "
+	"1 = raw DFT heatmap mode (send GET_FEATURE/SET_FEATURE, multi-touch blob detection)");
+
 struct touch_point { u16 x; u16 y; bool active; };
 
 static u8  heatmap_baseline[HEATMAP_MAX_CELLS];
 static u32 heatmap_baseline_cells;
 static bool heatmap_have_baseline;
 static u8  heatmap_touched[HEATMAP_MAX_CELLS];
+static u8  heatmap_expanded[HEATMAP_MAX_CELLS];
 static u16 heatmap_label[HEATMAP_MAX_CELLS];
 
 /* Screen mapping: logical range 0..32767 for both X and Y.
@@ -1349,18 +1368,22 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 	u16 nlabels;
 	int touched_count = 0;
 
-	if (data_len < 5) return;
-	/* cell_data starts after content_id (1 byte) + SurfaceSwitch (2 bytes).
-	 * The HID descriptor defines Report ID 0x0C as: 16-bit SurfaceSwitch + 4297 bytes DeviceIndex constant.
-	 * 4302 (content_length) - 1 (content_id) - 2 (SurfaceSwitch) = 4299. */
-	cell_count = data_len - 3;
+	if (data_len <= HEATMAP_DATA_OFFSET) return;
+	/* Parse as a DFT antenna frame, not a flat capacitance grid: skip the
+	 * content_id (1) + SurfaceSwitch (2) + frame metadata (HEATMAP_DFT_META_LEN)
+	 * so cell_count counts only antenna DFT node magnitudes. The physical
+	 * node grid is GRID_COLS x GRID_ROWS (86 x 50); the tail of the last row
+	 * may be missing when the frame carries fewer than GRID_CELLS nodes. */
+	cell_count = data_len - HEATMAP_DATA_OFFSET;
+	if (cell_count > GRID_CELLS)
+		cell_count = GRID_CELLS;
 
 	if (!shid->heatmap_grid_cols || !shid->heatmap_grid_rows) {
 		ncols = GRID_COLS; nrows = GRID_ROWS;
 		shid->heatmap_grid_cols = ncols;
 		shid->heatmap_grid_rows = nrows;
-		dev_info(dev, "HEATMAP: grid %u cols x %u rows (up to %u cells, actual %u)\n",
-			 ncols, nrows, ncols * nrows, cell_count);
+		dev_info(dev, "HEATMAP: DFT grid %u cols x %u rows (up to %u nodes, offset %u, actual %u)\n",
+			 ncols, nrows, ncols * nrows, HEATMAP_DATA_OFFSET, cell_count);
 	}
 	ncols = shid->heatmap_grid_cols;
 	nrows = shid->heatmap_grid_rows;
@@ -1389,8 +1412,8 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 		if (content_id == 0x0C && cell_count >= 1000) {
 			baseline_frames++;
 			for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++)
-				if (baseline_frames == 1 || data[3 + i] > heatmap_baseline[i])
-					heatmap_baseline[i] = data[3 + i];
+				if (baseline_frames == 1 || data[HEATMAP_DATA_OFFSET + i] > heatmap_baseline[i])
+					heatmap_baseline[i] = data[HEATMAP_DATA_OFFSET + i];
 			if (baseline_frames >= 30) {
 				heatmap_baseline_cells = cell_count;
 				heatmap_have_baseline = true;
@@ -1402,8 +1425,8 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 	}
 	/* Update baseline max on every frame (lifts are immediately captured) */
 	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++)
-		if (data[3 + i] > heatmap_baseline[i])
-			heatmap_baseline[i] = data[3 + i];
+		if (data[HEATMAP_DATA_OFFSET + i] > heatmap_baseline[i])
+			heatmap_baseline[i] = data[HEATMAP_DATA_OFFSET + i];
 
 	if (!shid->touch_input) return;
 
@@ -1412,7 +1435,7 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 	 * to avoid edge/bezel cells where calibration is not uniform. */
 	memset(heatmap_touched, 0, cell_count);
 	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-		u8 cell = data[3 + i];
+		u8 cell = data[HEATMAP_DATA_OFFSET + i];
 		s16 diff = (s16)heatmap_baseline[i] - (s16)cell;
 		if (diff > HEATMAP_TOUCH_THRESHOLD && heatmap_baseline[i] >= 0x20)
 			heatmap_touched[i] = 1;
@@ -1421,7 +1444,7 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 	/* Morphological dilation: expand touched region by 1 cell to merge
 	 * nearby clusters into a single blob. */
 	{
-		u8 expanded[HEATMAP_MAX_CELLS];
+		u8 *expanded = heatmap_expanded;
 		memcpy(expanded, heatmap_touched, cell_count);
 		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
 			if (!heatmap_touched[i]) continue;
@@ -1512,7 +1535,7 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 		row = i / ncols;
 		if (row >= nrows) break;
 
-		diff = (s16)heatmap_baseline[i] - (s16)data[3 + i];
+		diff = (s16)heatmap_baseline[i] - (s16)data[HEATMAP_DATA_OFFSET + i];
 		blob_xsum[label] += (u32)col * (u32)diff;
 		blob_ysum[label] += (u32)row * (u32)diff;
 		blob_wsum[label] += (u32)diff;
@@ -1699,7 +1722,8 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	if (!shid->seq_enabled) return IRQ_HANDLED;
 
-	dev_info(dev, "SEQ: thread entry seq_state=%d seq_enabled=%d\n", shid->seq_state, shid->seq_enabled);
+	if (shid->seq_state != shid->seq_enabled) /* log only state transitions */
+		dev_info(dev, "SEQ: thread seq_state=%d\n", shid->seq_state);
 
 	dbg_dt_us = dbg_last_irq ? ktime_us_delta(ktime_get(), dbg_last_irq) : -1;
 	dbg_last_irq = ktime_get();
@@ -1917,19 +1941,32 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 				}
 			}
 			dev_info(dev, "SEQ: report descriptor received, shid->hid=%p, scheduling create_device_work...\n", shid->hid);
-			/* Standard HID mode (no GET_FEATURE/SET_FEATURE):
-			 * device sends Report ID 0x40 (TouchScreen) with
-			 * pre-computed X, Y, TipSwitch — single-touch.
-			 * Multi-touch requires raw heatmap mode (send
-			 * GET_FEATURE+SEND_FEATURE) with grid blob detection
-			 * which needs reverse-engineering of the DFT antenna
-			 * layout (see docs/NEXT_STEPS.md §D). */
-			shid->seq_state = 4;
 			shid->ready = true;
 			shid->keep_powered = true;
 			if (!shid->hid) {
 				bool queued = schedule_work(&shid->create_device_work);
 				dev_info(dev, "SEQ: scheduled create_device_work, queued=%d\n", queued);
+			}
+			if (raw_mode) {
+				/* Raw heatmap mode: replicate the Windows GET_FEATURE(id=4)
+				 * -> SET_FEATURE(id=4, val=1) exchange (traces/surface_boot_auto.csv
+				 * TXN#221-223, docs/GROUND_TRUTH.md §19). SET_FEATURE flips the
+				 * device from standard HID (Report ID 0x40, single-touch) into
+				 * raw DFT streaming (content_id=0x0C, ~4302B frames) which we
+				 * turn into multitouch via heatmap_process_frame(). The
+				 * SET_FEATURE half is sent from case 5 after GET_FEAT_RESP. */
+				static const u8 getfeat[] = {
+					0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
+					0x00, 0x04, 0x03, 0x00, 0x06
+				};
+				dev_info(dev, "SEQ: raw_mode=1 -> sending GET_FEATURE(id=4), going to state 5\n");
+				spi_hid_seq_write(shid, getfeat, sizeof(getfeat), NULL, 0);
+				shid->seq_state = 5;
+			} else {
+				/* Standard HID mode (no GET_FEATURE/SET_FEATURE):
+				 * device sends Report ID 0x40 (TouchScreen) with
+				 * pre-computed X, Y, TipSwitch — single-touch. */
+				shid->seq_state = 4;
 			}
 		} else if (type == 3) {
 			u8 body[16];
@@ -2080,10 +2117,21 @@ handle_data:
 				kfree(body);
 				break;
 			}
-			rl = body[6] | (body[7] << 8);
-			dev_info(dev, "SEQ: DATA report type=1 len=%u content_id=0x%02x\n",
-				 rl, body[8]);
-			if (rl > 2 && rl - 2 <= avail) {
+	rl = body[6] | (body[7] << 8);
+	if (rl != 4302) /* only log non-heatmap reports (standard HID) */
+		dev_info(dev, "SEQ: report type=1 len=%u content_id=0x%02x\n", rl, body[8]);
+			if (raw_mode && body[8] == 0x0C && shid->touch_input) {
+				u32 clen = (rl > 2) ? (rl - 2) : 0;
+				if (clen > avail) clen = avail;
+				heatmap_process_frame(shid, &body[8], clen, body[8]);
+			} else if (rl > 2 && rl - 2 <= avail) {
+				/* In raw_mode, log standard HID 0x40 coords for
+				 * calibration comparison against blob detector. */
+				if (raw_mode && body[8] == 0x40 && rl - 2 >= 6) {
+					u16 hx = body[9] | (body[10] << 8);
+					u16 hy = body[11] | (body[12] << 8);
+					dev_info(dev, "CALIB_REF: hid=(%u,%u)\n", hx, hy);
+				}
 				int hret = hid_input_report(shid->hid, HID_INPUT_REPORT,
 						 &body[8], rl - 2, 1);
 				if (hret)
