@@ -44,6 +44,7 @@
 #include <linux/of.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/firmware.h>
+#include "spi-amd.h"
 #include <linux/regulator/consumer.h>
 #include <linux/workqueue.h>
 #include <linux/dma-mapping.h>
@@ -52,6 +53,8 @@
 
 #include "spi-hid-core.h"
 #include "spi-hid_trace.h"
+/* Hardcoded HID Report Descriptor from Windows dump (936 bytes) */
+#include "hardcoded_rd.h"
 
 #define SPI_HID_MAX_RESET_ATTEMPTS 3
 
@@ -798,6 +801,20 @@ static int spi_hid_create_device(struct spi_hid *shid)
 	shid->hid = hid;
 
 	ret = hid_add_device(hid);
+	/* 2026-07-08: hid_add_device() only reports whether the device was
+	 * registered on the bus, not whether any driver actually bound to it
+	 * — a corrupted wire-read descriptor can make hid_parse_report()
+	 * return success (its own per-item validation is lenient, e.g.
+	 * "unexpected long global item" is only a warning there) while the
+	 * matched driver's own probe (hid-generic in our case) fails
+	 * synchronously inside this same call, leaving hid->driver NULL.
+	 * That's the actual reliable "this descriptor wasn't good enough"
+	 * signal (see docs/NEXT_STEPS.md §C), not hid_parse_report()'s return
+	 * code or hid_add_device()'s return code. */
+	if (!ret && !hid->driver) {
+		dev_warn(dev, "SEQ: hid_add_device succeeded but no driver bound to it\n");
+		ret = -ENODEV;
+	}
 	if (ret) {
 		dev_err(dev, "Failed to add hid device: %d\n", ret);
 		/*
@@ -807,6 +824,13 @@ static int spi_hid_create_device(struct spi_hid *shid)
 		hid = spi_hid_disconnect_hid(shid);
 		if (hid)
 			hid_destroy_device(hid);
+
+		if (shid->wire_report_descriptor_len > 0 &&
+		    !shid->wire_report_descriptor_rejected) {
+			dev_warn(dev, "SEQ: forcing hardcoded report descriptor fallback and retrying once\n");
+			shid->wire_report_descriptor_rejected = true;
+			return spi_hid_create_device(shid);
+		}
 		return ret;
 	}
 
@@ -1351,6 +1375,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
 			dev_info(dev, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
 			spi_hid_seq_read(shid, body, rblen);
+			dev_info(dev, "DIFFCHECK: DEVICE_DESC full body=[%*ph]\n", rblen, body);
 			{
 				struct spi_hid_device_desc_raw raw;
 				/* body[] from spi_hid_seq_read contains raw MISO:
@@ -1379,7 +1404,11 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			{
 				u8 dr2[11] = {
 					0x02, 0x02, 0x00, 0x00, 0x02, 0x42,
-					0x00, 0x02, 0x03, 0x00, 0x00  /* content_type=0x02 per MS spec */
+					0x00, 0x00, 0x03, 0x00, 0x00  /* byte6 fixed 2026-07-08: was 0x02
+					 * ("content_type=0x02 per MS spec"), but the real Windows wire
+					 * trace (surface_boot_auto.csv, clock 134276452171762154) shows
+					 * this byte as 0x00 for its DESCREQ2 -- verified byte-for-byte
+					 * against DESCREQ (byte6=0x00 there too, confirmed matching). */
 				};
 				dr2[2] = (shid->desc.report_descriptor_register >> 16) & 0xFF;
 				dr2[3] = (shid->desc.report_descriptor_register >> 8) & 0xFF;
@@ -1418,6 +1447,75 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
 			dev_info(dev, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
 			spi_hid_seq_read(shid, body, rblen);
+			{
+				u32 off;
+				for (off = 0; off < rblen; off += 64) {
+					u32 chunk = min_t(u32, 64, rblen - off);
+					dev_info(dev, "DIFFCHECK: RPT_DESC+%u=[%*ph]\n", off, chunk, body + off);
+				}
+			}
+			{
+				/* 2026-07-08: stash the wire-read descriptor for
+				 * spi_hid_ll_parse() to prefer over the hardcoded fallback
+				 * (docs/NEXT_STEPS.md §C). Same prefix-skip convention as
+				 * the DEVICE_DESC parse above: variable-length leading
+				 * 0xFF dummy bytes, then a fixed 3-byte [len16 LE][ContentID]
+				 * body prefix before the real descriptor bytes begin. */
+				u32 off = 0;
+				u32 len;
+
+				while (off < rblen - 3 && body[off] == 0xFF)
+					off++;
+				off += 3;
+				len = min_t(u32, shid->desc.report_descriptor_length,
+					    sizeof(shid->wire_report_descriptor));
+				if (off < rblen && len > 0 && off + len <= rblen) {
+					u32 k;
+
+					memcpy(shid->wire_report_descriptor, body + off, len);
+
+					/* 2026-07-08 (docs/GROUND_TRUTH.md §18.6): a
+					 * characterized, clock-speed-independent,
+					 * chunk-boundary-independent hardware defect reads
+					 * back a spurious 0xFF at every content offset
+					 * n*64+58 (confirmed: tied to the device's own
+					 * 64-byte page structure, not to our fetch
+					 * chunking — verified by deliberately misaligning
+					 * fetch chunks and observing the corruption stay
+					 * anchored to these same absolute offsets, just
+					 * widening). This is a targeted, minimal patch of
+					 * only those specific known-bad bytes using
+					 * hardcoded_report_descriptor (same physical touch
+					 * chip) as ground truth — not a blanket fallback;
+					 * every other byte still comes from the live wire
+					 * read, so a genuinely different firmware/SKU would
+					 * still be picked up everywhere except these 14
+					 * positions.
+					 *
+					 * Phase note: offset 58 was measured against a
+					 * buffer that still included the 3-byte
+					 * [len16 LE][ContentID] prefix (`ours_c` in the
+					 * diagnostic diff script); `wire_report_descriptor`
+					 * here starts right at the real descriptor bytes
+					 * (after `off`, which already skips that prefix),
+					 * so the equivalent phase in *this* buffer's own
+					 * indexing is 58-3=55. */
+					for (k = 55; k < len; k += 64) {
+						if (shid->wire_report_descriptor[k] == 0xFF &&
+						    k < HARDCODED_RD_SIZE &&
+						    hardcoded_report_descriptor[k] != 0xFF) {
+							dev_info(dev, "SEQ: patching known-corrupt wire descriptor byte at offset %u (0xff -> 0x%02x)\n",
+								 k, hardcoded_report_descriptor[k]);
+							shid->wire_report_descriptor[k] =
+								hardcoded_report_descriptor[k];
+						}
+					}
+
+					shid->wire_report_descriptor_len = len;
+				} else {
+					shid->wire_report_descriptor_len = 0;
+				}
+			}
 			dev_info(dev, "SEQ: report descriptor received, shid->hid=%p, scheduling create_device_work...\n", shid->hid);
 			shid->ready = true;
 			shid->keep_powered = true;
@@ -1436,6 +1534,11 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 				dev_info(dev, "SEQ: sending GET_FEATURE(id=4) on output reg, replicating surface_boot_auto.csv TXN#220...\n");
 				spi_hid_seq_write(shid, getfeat, sizeof(getfeat), NULL, 0);
 			}
+			/* Priority 3 investigation (docs/NEXT_STEPS.md, 2026-07-08): watch
+			 * CTRL0/STATUS/ENA_REG on a timer during the idle window leading up
+			 * to the ~508ms self-reset, to catch any register drifting before
+			 * the RESET_RSP arrives. */
+			amd_spi_debug_poll_start(600);
 			shid->seq_state = 5;
 		} else if (type == 3) {
 			u8 body[16];
@@ -1463,10 +1566,20 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
 			dev_info(dev, "SEQ: GET_FEAT_RESP! reading body (%u bytes)...\n", blen);
 			spi_hid_seq_read(shid, body, rblen);
+			dev_info(dev, "DIFFCHECK: GET_FEAT_RESP full body=[%*ph]\n", rblen, body);
 			{
 				/* Windows TXN#223: 02 00 00 03 82 00 03 04 00 05 01 00 00 00 --
 				 * opcode+reg0x0003+len16=0x82+body[cmd=03,id=04,00,05,01,00,00,00].
-				 * Doubled leading 0x02, same quirk as GET_FEATURE/DESCREQ above. */
+				 * Doubled leading 0x02, same quirk as GET_FEATURE/DESCREQ above.
+				 * Confirmed byte-identical to Windows's real wire frame
+				 * (traces/surface_boot_auto.csv, clock 134276452230827844) —
+				 * 2026-07-08: bisected by skipping this write entirely, which
+				 * reverted the post-SET_FEATURE reset from ~109ms back to the
+				 * old ~508ms idle timeout. So SET_FEATURE's *content* is not
+				 * the problem; sending it (correctly) is what triggers a fast
+				 * ~109ms reset instead of the passive ~508ms one — meaning the
+				 * device is actively rejecting something else about our state
+				 * at that point (see docs/NEXT_STEPS.md §A). */
 				static const u8 setfeat[] = {
 					0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
 					0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
@@ -1543,17 +1656,52 @@ handle_data:
 			break;
 		}
 		if (type == 1 && shid->hid) {
-			u8 body[512];
-			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+			/* 2026-07-08: DEVICE_DESC reports max_input_length=8192 — this
+			 * device legitimately sends reports far larger than a small
+			 * fixed stack buffer (confirmed live: a real, non-touch report
+			 * repeating every ~625ms regardless of touch state has
+			 * content-length 4302, consistent with e.g. the heat-map report
+			 * IDs already known to this driver, SPI_HID_*_HEAT_MAP_REPORT_ID
+			 * in spi-hid-core.h). The previous fixed `body[512]` silently
+			 * under-read every such report (rblen clamped to 512 regardless
+			 * of the device's true length) and separately risked a stack
+			 * buffer over-read if `rl` ever exceeded what was actually read
+			 * (the bug that crashed the kernel the first time a real report
+			 * reached this path). Fixed properly: heap-allocate a buffer
+			 * sized to the report's own claimed length (capped at
+			 * max_input_length, with a hard sanity ceiling regardless of
+			 * what the device claims), and bound `rl` against what was
+			 * actually read into it. */
+			u32 cap = shid->desc.max_input_length ?
+				  shid->desc.max_input_length : 0x1000;
+			u32 rblen = (blen + 6) < cap ? (blen + 6) : cap;
+			u32 avail;
 			u16 rl;
+			u8 *body;
 
-			if (spi_hid_seq_read(shid, body, rblen))
+			rblen = min_t(u32, rblen, 8200);
+			body = kmalloc(rblen, GFP_KERNEL);
+			if (!body)
 				break;
+			avail = (rblen > 8) ? (rblen - 8) : 0;
+
+			if (spi_hid_seq_read(shid, body, rblen)) {
+				kfree(body);
+				break;
+			}
 			rl = body[6] | (body[7] << 8);
-			dev_info(dev, "SEQ: DATA report type=1 len=%u\n", rl);
-			if (rl > 0 && rl <= blen)
-				hid_input_report(shid->hid, HID_INPUT_REPORT,
+			dev_info(dev, "SEQ: DATA report type=1 len=%u content_id=0x%02x\n",
+				 rl, body[8]);
+			if (rl > 0 && rl <= avail) {
+				int hret = hid_input_report(shid->hid, HID_INPUT_REPORT,
 						 &body[8], rl, 1);
+				if (hret)
+					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x len=%u)\n",
+						 hret, body[8], rl);
+			} else if (rl > avail)
+				dev_warn(dev, "SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
+					 rl, avail);
+			kfree(body);
 		}
 		break;
 	}
@@ -1609,9 +1757,6 @@ static int spi_hid_ll_power(struct hid_device *hid, int level)
 	return ret;
 }
 
-/* Hardcoded HID Report Descriptor from Windows dump (936 bytes) */
-#include "hardcoded_rd.h"
-
 static int spi_hid_ll_parse(struct hid_device *hid)
 {
 	struct spi_device *spi = hid->driver_data;
@@ -1619,10 +1764,33 @@ static int spi_hid_ll_parse(struct hid_device *hid)
 	struct device *dev = &spi->dev;
 	int ret;
 
+	mutex_lock(&shid->lock);
+
+	/* 2026-07-08: prefer the descriptor actually read off the wire
+	 * (docs/NEXT_STEPS.md §C) — a real driver shouldn't permanently rely on
+	 * a descriptor hardcoded from one past capture, which can't track
+	 * firmware revisions or other SKUs of the same VID/PID. Trust
+	 * hid_parse_report()'s own structural validation as the sanity check:
+	 * if the wire-read bytes don't parse, fall back to the hardcoded copy
+	 * exactly as before. */
+	if (shid->wire_report_descriptor_len > 0 && !shid->wire_report_descriptor_rejected) {
+		dev_info(dev, "SEQ: ll_parse — trying device-read report descriptor (%u bytes)\n",
+			 shid->wire_report_descriptor_len);
+		ret = hid_parse_report(hid, shid->wire_report_descriptor,
+					shid->wire_report_descriptor_len);
+		if (!ret) {
+			shid->report_descriptor_crc32 = crc32_le(0,
+				shid->wire_report_descriptor,
+				shid->wire_report_descriptor_len);
+			mutex_unlock(&shid->lock);
+			return 0;
+		}
+		dev_warn(dev, "SEQ: device-read report descriptor failed to parse (%d), falling back to hardcoded\n",
+			 ret);
+	}
+
 	dev_info(dev, "SEQ: ll_parse — using HARDCODED report descriptor (%d bytes)\n",
 		 HARDCODED_RD_SIZE);
-
-	mutex_lock(&shid->lock);
 
 	/* Copy hardcoded descriptor into response buffer */
 	memcpy(shid->response.content, hardcoded_report_descriptor, HARDCODED_RD_SIZE);

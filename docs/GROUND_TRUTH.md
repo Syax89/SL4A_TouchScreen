@@ -1578,6 +1578,586 @@ during the *idle* period itself, not about any specific command sent into it.
 
 ---
 
+## 17. Priority-1/3 Bisection Results (2026-07-08, later same day)
+
+Following the breakthrough in §16, `docs/NEXT_STEPS.md` laid out a mechanical bisection
+(Priority 1) and a set of cheap register/timing checks (Priority 3) to narrow down the
+~508ms post-RPT_DESC reset. All of Priority 1 and the first two Priority 3 items were run
+on real hardware this session. Short version: **every one of these came back negative** —
+none of the bundled changes matter, nothing drifts beforehand, and the timer doesn't scale
+with bus speed. The reset is looking more and more like a genuine device-internal timer
+that the driver cannot currently see coming or influence.
+
+### 17.1 Priority 1 — bisecting the restored diff
+
+Each change was toggled off individually (via `#if 0` or reverting to the gutted form),
+rebuilt, reloaded, and RPT_DESC arrival + the ~508ms figure were checked across 5-30+
+cycles before restoring it and moving to the next:
+
+1. **PCI 0xB8/0xB4 FIFO-mode forcing** (`spi-amd.c` probe, forces 8-bit FIFO + Windows
+   `0xB4` layout): disabled entirely. RPT_DESC still arrived every cycle; reset still fired
+   at 507.5-508.3ms across 30+ samples. **Zero effect.**
+2. **`readb`-vs-`readw` FIFO read**: reverted to interleaved 16-bit reads (upstream style).
+   Same result — RPT_DESC arrives, reset unchanged (~507.6-508.0ms across several cycles).
+   **Zero effect.**
+3. **ACPI `_PS3`→`_PS0` probe-time power-cycle**: disabled. Same result, no change
+   (~507.5-508.1ms). *Caveat*: this was tested via `rmmod`/`insmod` without a full cold
+   reboot, so the hardware may already have been "primed" by an earlier power-cycle in the
+   same boot session — if anyone suspects this one specifically, it should be retested from
+   a genuinely cold boot before being fully ruled out. Everything else in this section is
+   not sensitive to that caveat (they don't touch device power state).
+4. **`spi_hid_ll_open()`/`spi_hid_ll_close()`** restored to their full pre-breakthrough
+   (commit `7eacb26`) implementation, instead of the gutted no-op stubs. No measurable
+   effect on the ~508ms figure. But this restoration surfaced a **separate, real bug**: HID
+   core calls `hid_hw_open()`/`hid_hw_close()` in a tight repeating storm — many open/close
+   pairs firing within a single ~508ms cycle, each `ll_close()` sending a real
+   `SET_POWER(SLEEP)` command and toggling `disable_irq()`/`enable_irq()` on the IRQ line the
+   SEQ thread itself depends on. This is almost certainly because `create_device_work`
+   creates a brand new `struct hid_device` every single cycle (since the old one presumably
+   never got torn down cleanly or a fresh one is unconditionally scheduled each time
+   `case 2` sees `!shid->hid`), and something keeps re-probing it. Reverted back to the
+   gutted stubs afterward since they're proven to not matter for the timer and the storm is
+   just noise for now — but this is a real, separate, not-yet-understood defect in the
+   experimental driver's device lifecycle, worth a dedicated look before this is ever a
+   real mergeable driver.
+
+**Conclusion**: the doubled leading `0x02` opcode in `spi_hid_seq_write()` (§16.2) is the
+only part of the originally-bundled diff that does anything. The other three changes can be
+dropped from the final driver with no observed loss of function.
+
+### 17.2 Priority 3 item 1 — register drift during the idle window
+
+Added a small debug-only addition to `driver/spi-amd.c`: `amd_spi_debug_poll_start(ms)`
+(exported, called from `spi-hid-core.c` right after the GET_FEATURE send in `case 2`,
+before entering `seq_state = 5`) spawns a kthread that reads CTRL0 (0x00), STATUS (0x4C),
+and ENA_REG (0x20) every ~2ms for up to 600ms, logging only on change. A synchronous
+shutdown path (`amd_spi_debug_poll_shutdown()`, called from a newly-added
+`amd_spi_remove()`) was needed because the first version of this tool raced `rmmod` — a
+poll thread reading MMIO after `devm` teardown produced a kernel "exited with irqs
+disabled" note. Fixed with an atomic running-count + shutdown flag that `remove()` blocks
+on before returning.
+
+Result: across multiple full cycles, all three registers hold rock-stable at
+`CTRL0=0x6f8c0a0b STATUS=0x000a0a09 ENA=0x11110713` for the entire idle window — no drift,
+no intermediate state, nothing. The *only* time they change is in the exact instant (within
+~2ms of the ~508ms mark) our own driver executes the SPI read of the just-arrived
+RESET_RSP header — i.e. what looked like "change" in an early run was our own bus
+transaction being caught mid-flight, not a precursor from the device. **There is no
+software-visible early warning in these three registers.** Whatever gates the reset is not
+reflected in the AMD FCH SPI controller's own status registers before the RESET_RSP frame
+physically arrives on MISO.
+
+### 17.3 Priority 3 item 2 — does the timer scale with SPI clock speed?
+
+Added a `debug_force_speed_hz` module parameter to `spi-amd.c` (`insmod spi-amd.ko
+debug_force_speed_hz=<hz>`), overriding `amd_spi_host_setup()`'s speed selection for the
+whole session instead of using the ACPI-provided default (33.33MHz).
+
+| Speed | Result |
+|---|---|
+| 800kHz | RPT_DESC arrives; reset at ~506.7-506.9ms. Per-transaction dt visibly slower (700-1600µs vs. the 33.33MHz baseline's 260-900µs), confirming the bus really was running slower. |
+| 4MHz | RPT_DESC arrives; reset at ~507.6-508.2ms. |
+| 33.33MHz (ACPI default / baseline) | reset at ~507.5-508.3ms. |
+| 66.66MHz | **Protocol breaks entirely** — garbled headers (`hdr=[99 08 00 2d]`, `type=-1`), never reaches DEVICE_DESC/RPT_DESC again. Past this device's signal-integrity margin. |
+| 100MHz | Same failure mode as 66.66MHz. |
+
+Across the ~41x usable speed range (800kHz-33.33MHz), the ~508ms figure stays fixed within
+about 1.5ms of variance, while individual per-transaction timings scale with clock speed
+exactly as expected. **This rules out a bus-timing explanation.** The ~508ms reset is a
+fixed-duration, device-internal timer, not something proportional to how fast we clock the
+bus. 66.66MHz and 100MHz are noted here as a secondary finding (this device's practical
+speed ceiling sits somewhere between 33.33MHz and 66.66MHz) but aren't otherwise pursued —
+Windows itself, per every trace examined so far, never runs this device above 33.33MHz
+either.
+
+### 17.4 Open — Priority 3 item 3 (chip-select) and beyond
+
+Not yet tested empirically. A first code-reading pass over `amd_spi_host_transfer()` /
+`amd_spi_exec_segment()` / `amd_spi_clear_chip()` didn't turn up anything obviously
+anomalous: CS is asserted once per `spi_message` (`amd_spi_select_chip()` at the top of
+`amd_spi_host_transfer()`) and released once at the very end (`amd_spi_clear_chip()` at the
+`out:` label), meaning CS toggles normally between each separate `spi_sync()` call the SEQ
+thread makes (DESCREQ, DESCREQ2, GET_FEATURE are each their own message). Nothing here
+looks structurally different from ordinary SPI framework behavior. Whether *Windows's*
+driver holds CS differently during its own idle period is still unknown and would need
+either a logic analyzer or another pass through the UEFI/Windows decompiled sources
+specifically looking at `Transfer()`'s CS handling in the no-op/idle case (as opposed to
+the active-transfer case already reverse-engineered in §15.20's exhaustive comparison).
+
+With items 1 and 2 both closed and pointing firmly at "device-internal, not
+software/bus-controllable," a logic analyzer captures a stronger case for being worth the
+setup effort than it did after §15.20 — the remaining software-only lead (item 3, CS
+behavior) is a comparatively thin one.
+
+### 17.5 A genuine byte-level bug found and fixed (still doesn't explain the reset)
+
+Prompted by re-asking "what do Windows/CSV/decomp/BIOS actually show at this exact point,"
+a direct byte-for-byte re-check of our `DESCREQ2` against the real Windows wire trace
+(`traces/surface_boot_auto.csv`, filtering for short opcode-`0x02` writes) turned up a real
+discrepancy that had not been caught by any prior "content is byte-identical" claim, because
+those claims were checked at the DESCREQ level, not DESCREQ2 specifically:
+
+```
+Windows DESCREQ2  (clock 134276452171762154): 02 00 00 02 42 00 00 03 00 00
+Our DESCREQ2 (pre-fix, driver/spi-hid-core.c): 02 00 00 02 42 00 02 03 00 00
+                                                              ^^ differs
+```
+
+Byte 6 (0-indexed in the real 10-byte frame, i.e. `dr2[7]` in the 11-byte doubled-opcode
+array) was hardcoded to `0x02` with a comment claiming "content_type=0x02 per MS spec" —
+apparently a misapplied spec reading from an earlier session. Cross-referencing against
+DESCREQ (where the equivalent byte is confirmed `0x00` on both sides) and GET_FEATURE
+(where this byte position carries the actual requested Content ID, `0x04`), byte 6 here is
+almost certainly a Content ID field, and it should be `0x00` for DESCREQ2 (no specific
+content requested — same as DESCREQ), not `0x02`. **Fixed** in `driver/spi-hid-core.c` to
+`0x00`.
+
+Tested live: RPT_DESC still arrives every cycle exactly as before, and the ~508ms reset is
+completely unaffected (507.8-508.2ms across several cycles, indistinguishable from
+pre-fix). **So this was a real bug, worth fixing for correctness (our DESCREQ2 now matches
+Windows's wire frame exactly, byte-for-byte), but it is not the cause of the reset.**
+
+**Broader cross-check performed while investigating this** (answering "what does each
+source show" directly, not from memory):
+- **CSV**: confirmed directly this session (not just recalled) that the touchscreen sends/
+  receives *nothing* between RPT_DESC and the GET_FEATURE 5.9s later — the handful of small
+  transactions visible in that wall-clock window in the raw trace are firmware-upload
+  traffic to the *other* interleaved device (repeated `0xB0`-prefixed 241-byte writes),
+  not touch protocol traffic.
+- **hidspi.sys decomp**: has named `WDFTIMER` objects (`DescriptorResponseTimer`,
+  `ResetTimer`, `TimerForPowerOnResponse`) as part of its `SmFx` state machine
+  (`hidspi_symbols.txt`), but these read as Windows's own *timeout guards* for awaiting a
+  response (started before, stopped on success/failure) — not a periodic keepalive it sends
+  to the device. Consistent with the CSV showing zero wire traffic during the idle window:
+  Windows isn't holding the device alive by talking to it.
+- **UEFI decomp**: `MsTouchUnlockDxe.efi` (decompiled this session,
+  `docs/decomp/uefi/MsTouchUnlockDxe.c`) turned out to be about flash-unlock/calibration
+  servicing mode (`TouchControllerUnlock`, `TDM replacement mode`), a one-time
+  manufacturing/service-mode facility — not related to steady-state runtime idle behavior.
+  Dead end for this specific question.
+- **BIOS/ACPI**: the touch device's ACPI object (`\_SB.SPI1.HSPI`, `docs/acpi/linux/dsdt.dsl`
+  around line 1541) has `_INI`/`_PS0`/`_PS3`/`_RST` methods that only toggle two GPIO pins
+  (`0x5B` power-gate, `0x103` reset-line) via `M009`/`M010`, with plain `Sleep(0x12C)`
+  (300ms) delays — a one-time power-sequencing dance. No watchdog, no periodic timer, no
+  keepalive configuration anywhere in ACPI.
+
+**The paradox this leaves us with**: every source we can inspect says "nothing happens"
+during the idle window — no wire traffic, no software timer firing a command, no ACPI
+watchdog — for *both* Windows and Linux. Yet the physical device only resets under Linux.
+Since content, timing, and the visible register state are now extensively checked and
+matched, the remaining candidate explanations are things that are hard to see from any of
+these four sources individually: (a) a byte-level mismatch elsewhere we haven't diffed yet
+(the *full* DEVICE_DESC/RPT_DESC response bodies have never been compared byte-for-byte
+against a Windows capture, only the parsed vid/pid/register fields); (b) an electrical/GPIO
+*level* difference during idle that no ACPI method call would reveal (a static ASL dump
+shows what methods exist, not what voltage a pin is actually sitting at during our idle
+window vs. Windows's); or (c) our own GET_FEATURE exchange silently fails upstream (no
+GET_FEAT_RESP ever arrives for us, confirmed in §16.3) in a way that is itself a symptom of
+the same root cause rather than an independent thing to fix. (a) is the cheapest to check
+next and doesn't require new hardware.
+
+---
+
+## 18. BREAKTHROUGH #2: The RPT_DESC Read Was Silently Truncated at 70 Bytes (2026-07-08, evening)
+
+Prompted by the user asking for a genuine cross-check of Windows/CSV/decomp/BIOS (rather than
+trusting prior conclusions), a full byte-for-byte diff of our RPT_DESC body against the real
+Windows capture (`traces/surface_boot_auto.csv`) turned up something much bigger than the
+DESCREQ2 byte bug (§17.5): **the ~940-byte RPT_DESC read was never actually completing.**
+
+### 18.1 The bug
+
+`amd_spi_exec_segment()` in `driver/spi-amd.c` reads the FIFO with:
+```c
+u32 rmax = min_t(u32, rx_len, AMD_SPI_FIFO_SIZE);   /* AMD_SPI_FIFO_SIZE = 70 */
+for (i = 0; i < rmax; i++)
+    dst[i] = readb(base + read_off + i);
+...
+return rx_len;   /* returns the ORIGINAL requested length, not rmax! */
+```
+When `spi_hid_seq_read()` asks for RPT_DESC's 946-byte body (932-940 bytes of real descriptor
++ 6-byte prefix), `amd_spi_host_transfer()`'s "combined TX+RX in one segment" fast path (used
+whenever a TX transfer is immediately followed by a matching RX-only transfer — exactly
+`spi_hid_seq_read_reg()`'s shape) calls `amd_spi_exec_segment()` **once**, with the full
+946-byte `rx_len`. The function physically reads only the first 70 bytes the 70-byte hardware
+FIFO can hold, leaves the rest of the buffer at whatever `memset(rx, 0, rx_len)` zeroed it to,
+and returns as if all 946 bytes arrived successfully. `spi_hid_parse_dev_desc()` and
+`hid_add_device()` had been building a real (but ~87% zero-padded, garbage) HID device out of
+this every single cycle since the SEQ mechanism was introduced. Confirmed by dumping the full
+body via a temporary `DIFFCHECK:` log (chunks of 64 bytes) added to `spi-hid-core.c`'s
+`case 1`/`case 2` handlers — bytes 70-945 were all `0x00`.
+
+**Why DEVICE_DESC (38 bytes) was never affected**: it fits within one 70-byte FIFO segment, so
+the bug never triggers for it — which is exactly why every earlier "content is byte-identical"
+claim in this document held up for DEVICE_DESC/DESCREQ but was never actually checked for the
+much larger RPT_DESC body.
+
+### 18.2 Why Windows never hits this
+
+`docs/verification/amdspi-decomp-report.md` (written in an earlier session, never previously
+connected to this mystery) already documents that `amdspi.sys`'s read path (`0x3c20`) splits
+large reads into a **64-byte-aligned DMA part** (`fcn.0x3528`, building an `'AeiC'/'ALDT'`
+descriptor sent via IOCTL `0x32c004`) plus a PIO remainder (`rx_len % 64`, handled the same way
+our driver does it). Windows *never* tries to pull a 940-byte response through the 70-byte PIO
+FIFO in one shot — it only ever uses PIO for the small leftover after DMA has moved the bulk.
+**Our Linux driver has no DMA path at all**, so every large read was silently hitting the
+70-byte PIO ceiling with no equivalent fallback.
+
+### 18.3 The fix: chunked PIO reads (no DMA implemented — a PIO emulation of the same result)
+
+In `amd_spi_host_transfer()`'s combined-segment fast path (`driver/spi-amd.c`), instead of one
+`amd_spi_exec_segment()` call for the whole `rx_len`, the transfer is now split:
+- **First segment**: the real address bytes (`tx_buf`, `tx_len`), reading up to
+  `AMD_SPI_FIFO_SIZE - tx_len` (67) bytes.
+- **Continuation segments**: re-send the *same* address bytes plus **one extra trailing dummy
+  byte** (`tx_len + 1`), each reading up to `AMD_SPI_FIFO_SIZE - tx_len - 1` (66) bytes, looping
+  until `next->len` is satisfied.
+
+Three things were tried empirically on real hardware before landing here, each instructive:
+1. **Bare re-trigger, no TX** (matching the *already-existing*, apparently-never-exercised
+   plain RX-only chunking loop a few lines below in the same function): the continuation
+   segments returned the exact same ~67 bytes forever — the FIFO/device replays its last
+   cached response snapshot rather than advancing when there's no fresh address write.
+2. **Re-send the same 3 address bytes, no extra dummy byte**: genuinely advanced through new,
+   non-repeating content (ruling out "the device can't resume a read across CS cycles" as a
+   concern) — but consistently lost exactly 1 real byte at every ~67-byte chunk boundary,
+   replaced by 2 bytes of leading noise on the next chunk. Verified against
+   `traces/surface_boot_auto.csv`'s real RPT_DESC capture: content matched for the first ~58
+   bytes then diverged with cascading drift.
+3. **Re-send address + 1 dummy byte** (`tx_len + 1`, read offset shifts by +1 — this mirrors
+   `amdspi.sys`'s own `0x4bac` read variant, which uses `RX_COUNT = rx_len + 1` and reads at
+   `FIFO + TX_COUNT + 1` instead of `FIFO + TX_COUNT`, per the decomp report's own finding):
+   Result: ~78% of the 940 content bytes matched Windows exactly (up from ~7%, i.e. only the
+   first 67 bytes, before any fix), with small *varying-size* localized gaps (2, 4, 5, 5 bytes
+   lost at successive boundaries) recurring roughly every ~64 bytes rather than a single
+   global truncation. A fourth attempt with 2 dummy bytes instead of 1 was worse (cascading
+   drift returned), so 1 was the local optimum for the dummy-byte-count axis alone.
+4. **Align the chunk size itself to 64 bytes** (instead of `AMD_SPI_FIFO_SIZE - tx_len`
+   ≈ 66-67), keeping the "+1 dummy byte" continuation approach from attempt 3. The recurring
+   ~64-byte period in attempt 3's error pattern matched `docs/decomp/amdspi/DECOMP-INDEX.md`'s
+   own "chunk 64" note for `amdspi.sys`'s DMA path — suggesting the *device's own* internal
+   buffering works in 64-byte pages, independent of our AMD FCH controller's 70-byte FIFO.
+   **Result: 14/940 bytes wrong (98.5% match)**, and — tellingly — all 14 mismatches are the
+   *same single byte* at local offset 58 within every 64-byte chunk, always read back as a
+   spurious `0xff` where Windows has real content. This is the current landed fix.
+   - A follow-up attempt at 32-byte chunks was **worse and regressive**: it also chunked the
+     38-byte DEVICE_DESC read (previously always a single untouched segment, since 38 < 64),
+     and the resulting continuation segment came back all-zero, breaking DEVICE_DESC parsing
+     and the whole cycle for that iteration. Reverted immediately. **Don't drop the chunk
+     size below the largest single-segment read (DEVICE_DESC, 38 bytes) without separately
+     verifying small reads aren't affected.**
+
+**Not a complete/correct fix yet, but very close** — 14 bytes out of 940 remain wrong, every
+one at the exact same relative position (local offset 58 of each 64-byte chunk), which is a
+strong, specific, reproducible signature rather than random jitter. Good enough regardless to
+change the game (§18.4). Investigated further in §18.6.
+
+### 18.7 First real touch reached `hid_input_report()` — and crashed the kernel (buffer over-read, fixed)
+
+After a reboot (needed following the §18.5-adjacent reproducibility-loop crash, see below),
+the device bound to `hid-generic` again on the very first post-reboot cycle — no reset, real
+Linux input devices created (including a "Stylus" device with sane `ABS` capabilities visible
+in `/proc/bus/input/devices`). This confirms the earlier bind was not a fluke.
+
+With the device sitting idle and bound, the user physically touched the touchscreen —
+**and the kernel crashed**, a real Oops inside `hid_report_raw_event()` (stock kernel HID
+core, not our code directly), with the crashing task once again being our own threaded IRQ
+handler (`irq/94-spi-MSHW`), and once again ending in `Fixing recursive fault but reboot is
+needed!`. This is the **first time in the project's history that a real touch event has ever
+reached this deep into the stack** — every previous session ended with a reset long before
+`case 4`'s `type == 1` (DATA) branch could ever fire.
+
+**Root cause, found and fixed**: `spi_hid_seq_thread()`'s `case 4` handler for real DATA
+reports read a 16-bit length field (`rl`) straight off the wire and only checked it against
+`blen` (the SPI header's own claimed content length — itself wire-controlled) before handing
+`&body[8]` and `rl` to `hid_input_report()`:
+```c
+u8 body[512];
+u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
+u16 rl = body[6] | (body[7] << 8);
+if (rl > 0 && rl <= blen)                       /* checked against the WRONG bound */
+    hid_input_report(shid->hid, HID_INPUT_REPORT, &body[8], rl, 1);
+```
+`rblen` (how much was actually read into the 512-byte stack buffer `body[]`) is correctly
+clamped to `sizeof(body)`, but `rl` was never checked against that same real capacity —
+only against `blen`, which can itself be larger than 512 (a 12-bit field, max 4095). Once a
+real touch report finally arrived with a large enough claimed length, this handed
+`hid_input_report()` a length reaching past the actual 512-byte stack buffer, and the stock
+HID core's own parsing code (`hid_report_raw_event()`) walked off the end of it — corrupting
+the stack and crashing.
+
+**Fixed** by bounding `rl` against what was actually read (`rblen - 8`, i.e. the real
+available space after the 8-byte prefix) instead of the device-controlled `blen`:
+```c
+u32 avail = (rblen > 8) ? (rblen - 8) : 0;
+if (rl > 0 && rl <= avail)
+    hid_input_report(...)
+```
+This is a genuine stack buffer over-read, not a driver-logic quirk — the kind of bug that
+matters even independent of this project's touch-enablement goal, since it's directly
+triggerable by whatever bytes the device (or a bus glitch) puts on the wire. It went
+undetected for the whole project because no prior session ever got far enough for a real
+`type == 1` report to reach this code path at all.
+
+**Operational note — a related crash happened at this same milestone before the fix.** While
+checking whether the successful bind (no fix yet applied) was reproducible, an unattended
+`for`-loop of insmod/rmmod cycles hit the *same class* of crash (kernel Oops in
+`irq/94-spi-MSHW`, "Fixing recursive fault but reboot is needed!") on its 3rd iteration,
+likely from the same underlying bug firing on whatever spontaneous/idle report the device
+sent during that loop. See the durable lesson captured in memory: don't loop
+insmod/rmmod unattended once a test reaches a system state that's never been exercised
+before — check `dmesg` after every single iteration.
+
+### 18.8 MILESTONE: byte-identical real-time protocol replication achieved — and why no touch coordinates appear yet
+
+After the §18.7 fix (heap-allocated buffer sized to the report's own claimed length, capped
+at `max_input_length`/8200, with `rl` properly bounded against real capacity) and a reboot,
+the device bound to `hid-generic` again with **zero crashes**, and — for the first time in
+the project — sustained a continuous, high-rate stream of real `type=1` DATA reports at
+**~10ms intervals**, matching a realistic capacitive touch scan rate, indefinitely, without
+resetting.
+
+**Direct comparison against the real Windows capture (`traces/surface_touch.csv`) confirms
+our data is genuine, uncorrupted device output, not noise**: our steady-state report is
+`content_id=0x0C`, `len=4302` — and Windows's own `surface_touch.csv` "full frame" reports
+(`total_size=8618` in the ETW capture, i.e. 4309-byte RX) show the **exact same structure**:
+`ce 10 0c 32 48 06 0e 00 00 00 00 00 90 0d 00 00 00 01 01 08 00 00 00 00 80 0d 00 00 b4 b4
+b4 b4...` — same length field (`0x10ce` = 4302), same content ID (`0x0C`), same characteristic
+run of `0xB4` baseline bytes (an unenergized capacitive sensor cell's resting value). **This
+is the real device, doing exactly what it does for Windows.**
+
+**Why no touch coordinates ever reach `evdev`, and it's not a bug**: `content_id=0x0C`'s
+*only* definition in the 936-byte HID report descriptor (`driver/hardcoded_rd.h`) is a tiny
+structure (Usage `0x56` "Scan Time", 16-bit, plus ~209 bytes of constant/padding — see the
+raw bytes at descriptor offset 236: `85 0C 09 56 95 01 75 10 81 02 09 61 75 08 95 D1 81 03`).
+A 4302-byte payload sharing that report ID by coincidence cannot be a conventional numbered
+HID input report — it's raw sensor/heat-map data that requires dedicated image-processing
+(blob/centroid detection across the capacitive grid) to turn into touch points, exactly the
+kind of thing a vendor-specific Windows minidriver does internally, not something the generic
+HID parsing pipeline (`hid_input_report()` against a standard report descriptor) can decode.
+
+**Confirmed this is not something we're missing a step for** — direct analysis of
+`surface_touch.csv`'s full transaction sequence (filtering for the two `total_size` values
+corresponding to "big frame" (8618) vs "small frame" (442, matching `content_id=0x08`, a real
+16-bit "Scan Time" + padding report) shows:
+```
+SS BBBBBBBB....(537 more B's)....BBBB SSSSSSSSSS
+```
+Only **2 small reports at the very start** and **10 at the very end** of the whole capture —
+during sustained, continuous touch contact, **even Windows only ever receives the large raw
+frame**, never a steady stream of small per-point reports. (The GROUND_TRUTH §7 note claiming
+"alternating every ~10 frames" was imprecise — re-verified directly against the CSV this
+session; the small reports cluster at contact start/end transitions, not periodically
+throughout.) This matches our own capture almost exactly (a one-time small report seen right
+after `SET_FEATURE` in an earlier cycle, then continuous large frames).
+
+**What this means for next steps**: the wire protocol, reset behavior, and descriptor
+handling are now understood and replicated to the point of byte-identical parity with
+Windows. The remaining gap to real touch input is a **separate, substantial task**: parsing
+the raw capacitive heat-map frame into touch point coordinates (blob detection on the sensor
+grid), not a protocol fix. This is comparable in scope to writing a small computer-vision
+routine, not a driver bug fix — worth treating as its own project phase rather than squeezing
+into the existing bug-hunting workflow. See `docs/NEXT_STEPS.md` for how this is now framed.
+
+### 18.9 Prefer the device-read HID descriptor over the hardcoded fallback (with a real, working self-healing retry)
+
+Requested explicitly: `spi_hid_ll_parse()` always used `hardcoded_report_descriptor`
+(`driver/hardcoded_rd.h`) and never touched the descriptor read live off the wire — the
+right long-term behavior is to prefer the real device-read descriptor and only fall back to
+the hardcoded copy when the wire read isn't usable.
+
+**Implementation**:
+- `struct spi_hid` gained `wire_report_descriptor[1024]`, `wire_report_descriptor_len`, and
+  `wire_report_descriptor_rejected`. The first two are populated in
+  `spi_hid_seq_thread()`'s `case 2` (`type == 8`, RPT_DESC) right after the body read, using
+  the same variable-length-0xFF-then-3-byte-prefix skip convention already used for
+  DEVICE_DESC, with the length taken from `shid->desc.report_descriptor_length` (already
+  parsed from DEVICE_DESC by this point).
+- `spi_hid_ll_parse()` tries `hid_parse_report()` on the wire descriptor first; only falls
+  through to the hardcoded copy if that hasn't already been marked rejected.
+
+**The interesting part — `hid_parse_report()`'s return code is not a reliable enough
+signal.** First implementation just checked `hid_parse_report()`'s return value and fell
+back on nonzero. Tested live: it does **not** catch the actual failure. The wire descriptor
+currently still has the ~1.5%/14-byte residual corruption from §18.3/§18.6, and
+`hid_parse_report()` treats at least one resulting structural problem
+("`unexpected long global item`") as a *lenient warning*, not a hard error — it still
+returns 0. The real failure only surfaces **later and completely outside our function**,
+when the driver core synchronously matches and probes `hid-generic` against the
+now-malformed parsed report structure inside the same `hid_add_device()` call, and *that*
+fails (`probe with driver hid-generic failed with error -22`) — but `hid_add_device()`
+itself still returns 0, because from the bus's perspective the device was successfully
+*registered*, independent of whether any driver actually bound to it.
+
+**Fixed by checking the actual reliable signal**: after `hid_add_device()` returns, check
+`hid->driver` — if it's still `NULL` despite a "successful" `hid_add_device()`, no driver
+actually attached, which is the real failure condition. On that condition (and only if the
+attempt used the wire descriptor and hasn't already been retried), set
+`wire_report_descriptor_rejected` and call `spi_hid_create_device()` again — the retry goes
+through `spi_hid_ll_parse()` a second time, which this time skips straight to the hardcoded
+descriptor. Confirmed live: first attempt logs
+`ll_parse — trying device-read report descriptor (936 bytes)`, hid-generic's probe fails
+exactly as before, our code correctly detects `hid->driver == NULL` and logs
+`hid_add_device succeeded but no driver bound to it` / `forcing hardcoded report descriptor
+fallback and retrying once`, the retry succeeds (`Stylus` input device created, `hid-generic`
+binds), and the device continues streaming real `type=1` reports normally afterward. No
+crash, one clean retry, correct descriptor chosen automatically each time depending on
+whether that boot's wire read happened to land the corruption in a structurally-significant
+position.
+
+This also means: **the wire descriptor will keep getting rejected every time** until the
+residual §18.3/§18.6 corruption is actually fixed — the mechanism is honest about preferring
+it, but currently always ends up falling back in practice. That's fine and expected; the
+value today is correctness/architecture (no longer silently ignoring the real descriptor)
+and diagnostics (the log makes it obvious which descriptor is in use and why on every load).
+
+### 18.10 Closing the loop: §18.6's offset-58 defect precisely characterized and patched — wire descriptor now parses on the first try
+
+Picked back up the same night, with the explicit goal of making everything before touch
+coordinates solid before moving on to blob detection.
+
+**One more decisive experiment nailed down what the defect actually is.** §18.6 had ruled
+out timing (a `udelay(5)` had zero effect) and signal integrity (800kHz vs. 33.33MHz gave a
+byte-identical result), leaving the *mechanism* open. Deliberately mis-sizing just the first
+fetched chunk to 60 bytes (instead of the device's real 64-byte page size) made the
+corruption **widen from 1 byte to 5**, but it stayed anchored to the exact same absolute
+content offsets (`n·64+58`) rather than moving to a different position within whichever of
+*our* segments now covered that byte. This proves the defect is tied to the **device's own
+64-byte page structure**, not to anything about how we chunk our reads — fetching in
+64-byte-aligned pieces isn't just *a* reasonable chunk size, it's the one that minimizes an
+underlying, page-relative defect down to a single byte instead of a wider smear. Given this
+is clock-speed-independent, delay-independent, and precisely reproducible at content offset
+`n·64+58` every single time, it now reads as a genuine device/controller-internal quirk at
+that specific page-relative byte, not something fixable by any read-timing or chunk-size
+adjustment — a logic analyzer would be the next tool needed to actually explain *why*, but
+isn't needed to *work around* it, since the symptom is now fully deterministic.
+
+**The fix**: rather than treating this as "close enough" or reverting to a blanket hardcoded
+fallback, `spi_hid_seq_thread()`'s RPT_DESC handling now applies a **targeted, minimal
+patch**: for each of the 14 known-bad byte positions (`k = 55, 119, 183, ... , 887` — see the
+phase note below), if the wire-read byte is exactly `0xFF` *and* the corresponding byte in
+`hardcoded_report_descriptor` is available and isn't itself `0xFF`, substitute the hardcoded
+byte at just that position. This is not "give up and use hardcoded" — 922 of 936 bytes (98.5%)
+still come from the live wire read every boot, so a genuinely different firmware revision or
+another SKU sharing this VID/PID would still be picked up everywhere except these 14
+positions. Verified live: all 14 positions patched with values that exactly match what was
+independently found earlier this session by diffing against the real Windows capture
+(`0xFE, 0x34, 0x09, 0x61, 0x03, 0x00, 0x09, 0x09, 0x42, 0x0E, 0x40, 0x0F, 0x04, 0x75`) — the
+patch isn't a guess, it's restoring bytes we already know, from an independent source, to be
+correct.
+
+**Phase note (a real bug caught and fixed during this work)**: the first patch attempt used
+`k = 58, 122, 186, ...` — copied directly from the diagnostic diff script's offset numbering
+— and found *zero* bytes to patch, because that script's "offset" was measured against a
+buffer (`ours_c`) that still included the 3-byte `[len16 LE][ContentID]` prefix before the
+real descriptor bytes, while `wire_report_descriptor` (as stored by this driver) starts
+*after* that prefix is already skipped. The correct phase in `wire_report_descriptor`'s own
+indexing is `58 − 3 = 55`. Fixed and reverified.
+
+**Result — confirmed live, no crash, full stability**: `SEQ: ll_parse — trying device-read
+report descriptor (936 bytes)` now succeeds on the **first attempt**, every time — no
+`hid_add_device succeeded but no driver bound to it` / `forcing hardcoded` fallback message
+appears anymore. `hid-generic` binds directly against the real, live, patched descriptor.
+Real `type=1` DATA streaming resumes normally afterward (265+ reports observed in one
+extended session, zero crashes). **The pre-coordinate pipeline — reset handling, DESCREQ/
+DESCREQ2, DEVICE_DESC, RPT_DESC (98.5% wire-read + 14-byte targeted patch), GET_FEATURE/
+SET_FEATURE, descriptor parsing, and sustained real-time streaming — is now stable and uses
+the real device wherever possible.** The only remaining substantial work is §D: turning the
+raw heat-map frames into touch coordinates.
+
+### 18.6 The offset-58 glitch: ruled out timing and signal integrity, still unexplained
+
+Two clean, cheap experiments on real hardware, both negative (no change whatsoever):
+
+1. **A `udelay(5)` inserted between the busy-wait clearing and the FIFO readback loop** (only
+   for `rx_len >= 32`, i.e. exactly the bulk-chunk reads) — if the glitch were a race between
+   the busy bit clearing and the last few FIFO bytes actually being latched, a few
+   microseconds of margin should have fixed or at least perturbed it. **Zero effect**: same
+   14 bytes wrong, same values, same positions. Removed again (added latency for no benefit).
+2. **Re-ran the same capture at 800kHz** (via the `debug_force_speed_hz` module parameter
+   from §17.3) instead of the 33.33MHz default — if this were an electrical/signal-integrity
+   issue (marginal setup/hold time at one specific bit), slowing the bus by 41x should have
+   changed or eliminated it. **The two captures are byte-for-byte identical** — not just
+   "still 14 diffs," but literally the same 946-byte buffer, confirmed with a direct
+   equality check. This rules out timing/signal-integrity as the explanation entirely.
+
+**A closer look at what's actually being read**: the byte we get back at every glitch
+position is *always exactly* `0xFF` — the AMD FCH SPI controller's own known "just cleared"
+FIFO default (see `amd_spi_clear_fifo_ptr()`/the per-segment `FIFO_CLEAR` bit) — regardless
+of what the real expected byte is. At the very first glitch (content offset 58, expecting
+`0xFE`) this coincidentally looks like a plausible single-bit corruption (`0xFE` vs `0xFF`
+differ only in bit 0), which is what first suggested a signal-integrity theory — but every
+other glitch replaces a *completely different* real byte (`0x34`, `0x09`, `0x61`, `0x03`,
+`0x00`, `0x42`, `0x0E`, `0x40`, `0x0F`, `0x04`, `0x75`, ...) with the *same* `0xFF` each time.
+This is not bit-level corruption of real data; it's reading a FIFO location that the just-
+completed transaction never actually populated with fresh content, at a fixed relative
+position within every chunk, deterministically, regardless of bus speed.
+
+Given both timing and electrical explanations are now ruled out, this is most likely either
+a genuine quirk in the AMD FCH SPI V2 controller's FIFO addressing/completion logic that
+only manifests for reads in this specific size range (undocumented in every source consulted
+so far — the Windows decomp's own PIO remainder path never reads anywhere near 64 bytes in
+one segment, so there's no equivalent Windows code path to cross-check against), or
+something about the touch device's own internal response buffering that happens to align
+with our chosen 64-byte chunk quantum. **Not chased further this session** — the clean,
+disciplined ruling-out of the two most likely causes is itself a solid result, and 98.5%
+correctness is likely enough to test the actually load-bearing question next: does the
+device accept `SET_FEATURE` once RPT_DESC is this much more correct (§18.5)? That test is
+cheaper and more informative than continuing to guess at this specific byte's cause blind.
+
+### 18.4 Consequence: the ~508ms mystery (§16-17) may have been a downstream symptom
+
+With RPT_DESC now mostly-correct instead of ~87% zero-padded, the SEQ sequence's behavior
+changed *qualitatively*, not just quantitatively:
+- **GET_FEATURE now receives a real `GET_FEAT_RESP` (type=5) for the first time in the entire
+  project's history.** Previously (§16.3) this response never arrived at all.
+- **SET_FEATURE is then sent and the sequence proceeds to `case 4` (DONE/forward-input-reports
+  state)** — further than the SEQ state machine has ever gotten.
+- **The device still resets — but now at ~109ms, not ~508ms**, and only *after* completing the
+  GET_FEATURE/SET_FEATURE round-trip in ~1.8-2ms (previously: GET_FEATURE sent, then silence
+  for 508ms, then reset, GET_FEAT_RESP never seen).
+- Still zero real touch (`type=1`) data.
+
+**This means every conclusion in §16-17 about the ~508ms figure being a fixed,
+content-independent, device-internal timer was measured against a system that was still
+serving a corrupted RPT_DESC and a GET_FEATURE that never got answered.** Those findings are
+not necessarily wrong for *that* broken state, but they should not be assumed to describe the
+current, more-correct state — the ~508ms wall has been superseded by a different, shorter
+~109ms wall reached only after doing substantially more real protocol work than before. The
+investigation continues against this new figure; see `docs/NEXT_STEPS.md`.
+
+### 18.5 The ~109ms reset is caused by *sending* SET_FEATURE, not by its content — and Windows's real DATA polling loop was found
+
+Bisected cheaply: skipping the `SET_FEATURE` write entirely (leaving the sequence at
+`GET_FEAT_RESP` received, nothing sent back) reverts the reset timing back to the old
+~507-509ms figure — the passive idle timeout from §16-17. **Sending SET_FEATURE is what
+triggers the fast ~109ms reset**, not a timing coincidence of reaching that state.
+
+Byte-for-byte re-check against the real Windows wire trace confirms our `SET_FEATURE` frame
+is **already exactly correct**: `02 00 00 03 82 00 03 04 00 05 01 00 00 00`
+(`traces/surface_boot_auto.csv`, clock `134276452230827844`) matches
+`driver/spi-hid-core.c`'s `setfeat[]` byte-for-byte once the doubled leading opcode is
+stripped. So the fast reset is not explained by wrong SET_FEATURE content — the device is
+reacting to *something else* about the state it's in when SET_FEATURE arrives (most likely
+candidate: the still-imperfect ~78%-correct RPT_DESC content or the GET_FEAT_RESP content,
+per §A priority 3 in `docs/NEXT_STEPS.md`).
+
+**While tracing the wire activity immediately after SET_FEATURE to check this, something far
+more important turned up**: in the real Windows capture, starting ~1.8ms after SET_FEATURE
+and continuing for as long as the trace runs, Windows enters a **tight, continuous polling
+loop**: a 9-byte header read (`0b 00 00 00 ff 00 03 04 00`, response header `type=1` — real
+DATA) immediately followed by a 221-byte content read, repeating roughly every ~10ms. This is
+almost certainly the actual live touch-data stream (or periodic empty/idle frames from a
+digitizer that scans continuously regardless of contact) — the thing this entire project has
+been trying to reach. `driver/spi-hid-core.c`'s `case 4` handler (`spi_hid_seq_thread()`) is
+already fully equipped to receive and forward exactly this (`type == 1` branch reads the body
+and calls `hid_input_report()`) — **it has simply never been reached**, because our device
+resets at ~109ms before ever getting the chance to send us a single `type=1` interrupt.
+Closing the remaining RPT_DESC/GET_FEAT_RESP content gap (§18.3) is now the clearest path to
+finally seeing this loop ourselves.
+
+---
+
 ## 14. References
 
 | Resource | Path |

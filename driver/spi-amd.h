@@ -39,4 +39,11 @@ struct amd_spi {
 
 int amd_spi_probe_common(struct device *dev, struct spi_controller *host);
 
+/* Priority 3 investigation (docs/NEXT_STEPS.md, 2026-07-08): spawn a kthread
+ * that polls CTRL0/STATUS/ENA_REG every ~2ms for duration_ms, logging any
+ * change, to catch a register drifting during the ~508ms post-RPT_DESC idle
+ * window before the device resets on its own. No-op if no amd_spi instance
+ * has probed yet. */
+void amd_spi_debug_poll_start(unsigned int duration_ms);
+
 #endif /* AMD_SPI_H */

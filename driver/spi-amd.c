@@ -6,9 +6,12 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/atomic.h>
 #include <linux/delay.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/iopoll.h>
+#include <linux/kthread.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
@@ -351,12 +354,19 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		u32 rmax = min_t(u32, rx_len, AMD_SPI_FIFO_SIZE);
 		for (i = 0; i < rmax; i++)
 			dst[i] = readb(base + read_off + i);
-		if (opcode == 0x02)
-			pr_err("spi-amd: WRITE MISO rx_len=%u raw=[%*ph]\n",
-				rx_len, (int)min_t(u32, rx_len, 16), dst);
-		else
-			pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
-				(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), dst);
+		/* 2026-07-08: gated behind DBG_VERBOSE — with real DATA reports now
+		 * reaching up to ~4KB every ~625ms (max_input_length=8192), one
+		 * pr_err() per ~64-byte chunk floods dmesg and evicts other
+		 * messages (confirmed live: the hid-generic bind line got rotated
+		 * out of the ring buffer during a single large report). */
+		if (DBG_VERBOSE) {
+			if (opcode == 0x02)
+				pr_err("spi-amd: WRITE MISO rx_len=%u raw=[%*ph]\n",
+					rx_len, (int)min_t(u32, rx_len, 16), dst);
+			else
+				pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
+					(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), dst);
+		}
 		if (!rx_data && dst == scratch) {
 			/* Write with forced RX — discard MISO, restore rx_len */
 			rx_len = 0;
@@ -483,14 +493,23 @@ fin_msg:
 	return message->status;
 }
 
+/* Priority 3 item 2 (docs/NEXT_STEPS.md, 2026-07-08): override the bus speed
+ * used for the whole session, to test whether the ~508ms post-RPT_DESC reset
+ * scales with SPI clock speed (bus-timing related) or stays fixed in
+ * wall-clock terms (device-internal timer). 0 = use ACPI-provided speed. */
+static uint debug_force_speed_hz;
+module_param(debug_force_speed_hz, uint, 0444);
+MODULE_PARM_DESC(debug_force_speed_hz, "Override SPI clock speed in Hz (0 = use ACPI default)");
+
 static int amd_spi_host_setup(struct spi_device *spi)
 {
 	struct amd_spi *amd_spi = spi_controller_get_devdata(spi->controller);
+	u32 hz = debug_force_speed_hz ? debug_force_speed_hz : spi->max_speed_hz;
 
 	amd_spi_clear_fifo_ptr(amd_spi);
-	amd_set_spi_freq(amd_spi, spi->max_speed_hz);
-	dev_info(&spi->dev, "spi-amd-v2-multi: set speed to %u Hz\n",
-		 amd_spi->speed_hz);
+	amd_set_spi_freq(amd_spi, hz);
+	dev_info(&spi->dev, "spi-amd-v2-multi: set speed to %u Hz%s\n",
+		 amd_spi->speed_hz, debug_force_speed_hz ? " (forced override)" : "");
 	return 0;
 }
 
@@ -524,10 +543,69 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 			if (!list_is_last(&xfer->transfer_list, &msg->transfers)) {
 				next = list_next_entry(xfer, transfer_list);
 				if (next->rx_buf && next->len > 0 && !next->tx_buf) {
+					u8 *rx_ptr = (u8 *)next->rx_buf;
+					u32 rx_remaining = next->len;
+					/* 2026-07-08 attempt 5: align chunk size to 64 bytes,
+					 * matching amdspi.sys's own DMA quantum ("chunk 64" in
+					 * docs/decomp/amdspi/DECOMP-INDEX.md) instead of the
+					 * FIFO's raw 70-byte ceiling — the residual ~22%
+					 * mismatch from attempt 3 recurred at ~64-byte intervals
+					 * (offsets ~59, ~123, ~187, ~251 in a captured RPT_DESC),
+					 * suggesting the device's own internal buffering (not
+					 * just our controller's FIFO) works in 64-byte pages. */
+					/* 2026-07-08 night: tested first_chunk=60 (vs. the
+					 * device's real 64-byte page size) — corruption widened
+					 * from 1 byte to 5, but stayed anchored to the SAME
+					 * absolute content offsets (n*64+58), proving the
+					 * defect is tied to the device's own page-relative
+					 * position, not to our chunk/segment boundaries.
+					 * 64-byte-aligned chunks remain the best known fetch
+					 * strategy (minimizes the damage to 1 byte/page). See
+					 * GROUND_TRUTH.md §18.6. */
+					u32 first_chunk = min_t(u32, rx_remaining, 64);
+
+					/* 2026-07-08: amd_spi_exec_segment() caps its RX read at
+					 * AMD_SPI_FIFO_SIZE (70) regardless of the requested
+					 * rx_len, silently truncating any larger single-segment
+					 * read while still reporting success — this is how every
+					 * RPT_DESC read (940B) ended up delivering only its first
+					 * ~67 real bytes, zero-padded, and calling it complete
+					 * (see docs/GROUND_TRUTH.md §18). amdspi.sys never hits
+					 * this case: bulk reads >64B go over a separate DMA path
+					 * we don't have, so Windows's PIO code only ever serves
+					 * the <64B remainder. Emulate the missing bulk path by
+					 * chunking: first segment carries the address bytes,
+					 * subsequent segments re-trigger with no TX (matching the
+					 * already-working plain-RX-only chunking loop below) to
+					 * continue draining the same pending response. */
 					ret = amd_spi_exec_segment(amd_spi, opcode,
-						tx_buf, tx_len,
-						(u8 *)next->rx_buf, next->len);
+						tx_buf, tx_len, rx_ptr, first_chunk);
 					if (ret < 0) { msg->status = ret; goto out; }
+					rx_ptr += first_chunk;
+					rx_remaining -= first_chunk;
+
+					while (rx_remaining > 0) {
+						u32 chunk = min_t(u32, rx_remaining, 64);
+						u8 tx_pad[8];
+						/* 2026-07-08 attempt 3: re-send the address bytes plus
+						 * ONE extra trailing dummy byte (tx_len+1, read_off
+						 * shifts by +1) for continuation chunks. Attempt 2
+						 * (re-send address, no extra dummy) advanced through
+						 * genuinely new content but lost exactly 1 real byte
+						 * at every chunk boundary (verified byte-for-byte
+						 * against traces/surface_boot_auto.csv's RPT_DESC
+						 * capture) — matches amdspi.sys's own 0x4bac read
+						 * variant, which uses RX_COUNT+1 and reads at
+						 * FIFO+TX_COUNT+1 instead of FIFO+TX_COUNT (see
+						 * docs/verification/amdspi-decomp-report.md). */
+						memcpy(tx_pad, tx_buf, tx_len);
+						tx_pad[tx_len] = 0x00;
+						ret = amd_spi_exec_segment(amd_spi, opcode,
+							tx_pad, tx_len + 1, rx_ptr, chunk);
+						if (ret < 0) { msg->status = ret; goto out; }
+						rx_ptr += chunk;
+						rx_remaining -= chunk;
+					}
 					xfer = next;
 					continue;
 				}
@@ -568,6 +646,92 @@ out:
 static size_t amd_spi_max_transfer_size(struct spi_device *spi)
 {
 	return 65536; /* chunking handled internally in host_transfer */
+}
+
+/* Priority 3 investigation (docs/NEXT_STEPS.md, 2026-07-08) */
+static struct amd_spi *g_debug_amd_spi;
+static atomic_t g_dbgpoll_running = ATOMIC_INIT(0);
+static atomic_t g_dbgpoll_shutdown = ATOMIC_INIT(0);
+
+struct amd_spi_dbgpoll_arg {
+	struct amd_spi *amd_spi;
+	unsigned int duration_ms;
+};
+
+static int amd_spi_dbgpoll_thread(void *_arg)
+{
+	struct amd_spi_dbgpoll_arg *arg = _arg;
+	void __iomem *base = arg->amd_spi->io_remap_addr;
+	ktime_t t0 = ktime_get();
+	u32 last_c0 = ~0, last_st = ~0, last_ena = ~0;
+	bool first = true;
+
+	pr_info("spi-amd: dbgpoll: starting, duration=%ums\n", arg->duration_ms);
+
+	while (!kthread_should_stop() && !atomic_read(&g_dbgpoll_shutdown)) {
+		s64 elapsed_us = ktime_us_delta(ktime_get(), t0);
+		u32 c0, st, ena;
+
+		if (elapsed_us >= (s64)arg->duration_ms * 1000)
+			break;
+
+		c0 = readl(base + AMD_SPI_CTRL0_REG);
+		st = readl(base + AMD_SPI_STATUS_REG);
+		ena = readl(base + AMD_SPI_ENA_REG);
+
+		if (first || c0 != last_c0 || st != last_st || ena != last_ena) {
+			pr_info("spi-amd: dbgpoll: t=+%lldus CTRL0=0x%08x STATUS=0x%08x ENA=0x%08x%s\n",
+				elapsed_us, c0, st, ena,
+				first ? " (initial)" : " (CHANGED)");
+			last_c0 = c0; last_st = st; last_ena = ena;
+			first = false;
+		}
+
+		usleep_range(1800, 2200);
+	}
+
+	pr_info("spi-amd: dbgpoll: stopped at t=+%lldus\n",
+		ktime_us_delta(ktime_get(), t0));
+	kfree(arg);
+	atomic_dec(&g_dbgpoll_running);
+	return 0;
+}
+
+void amd_spi_debug_poll_start(unsigned int duration_ms)
+{
+	struct amd_spi_dbgpoll_arg *arg;
+	struct task_struct *t;
+
+	if (!g_debug_amd_spi || atomic_read(&g_dbgpoll_shutdown)) {
+		pr_warn("spi-amd: dbgpoll: no amd_spi instance registered (or shutting down), skipping\n");
+		return;
+	}
+
+	arg = kmalloc(sizeof(*arg), GFP_ATOMIC);
+	if (!arg)
+		return;
+	arg->amd_spi = g_debug_amd_spi;
+	arg->duration_ms = duration_ms;
+
+	atomic_inc(&g_dbgpoll_running);
+	t = kthread_run(amd_spi_dbgpoll_thread, arg, "amd_spi_dbgpoll");
+	if (IS_ERR(t)) {
+		pr_err("spi-amd: dbgpoll: failed to start kthread: %ld\n", PTR_ERR(t));
+		atomic_dec(&g_dbgpoll_running);
+		kfree(arg);
+	}
+}
+EXPORT_SYMBOL_GPL(amd_spi_debug_poll_start);
+
+/* Block until every in-flight dbgpoll thread has stopped touching MMIO,
+ * called from amd_spi_remove() before devm ioremap teardown runs — without
+ * this, a thread can race module unload and read unmapped memory. */
+static void amd_spi_debug_poll_shutdown(void)
+{
+	atomic_set(&g_dbgpoll_shutdown, 1);
+	while (atomic_read(&g_dbgpoll_running) > 0)
+		msleep(10);
+	g_debug_amd_spi = NULL;
 }
 
 int amd_spi_probe_common(struct device *dev, struct spi_controller *host)
@@ -647,6 +811,8 @@ static int amd_spi_probe(struct platform_device *pdev)
 	amd_spi->speed_cfg = ioread16(amd_spi->io_remap_addr + 0x22);
 	dev_info(dev, "SPI100_SPEED_CONFIG at MMIO+0x22 = 0x%04X\n", amd_spi->speed_cfg);
 
+	g_debug_amd_spi = amd_spi;
+
 	return amd_spi_probe_common(dev, host);
 }
 
@@ -660,12 +826,18 @@ static const struct acpi_device_id spi_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, spi_acpi_match);
 #endif
 
+static void amd_spi_remove(struct platform_device *pdev)
+{
+	amd_spi_debug_poll_shutdown();
+}
+
 static struct platform_driver amd_spi_driver = {
 	.driver = {
 		.name = "spi_amd_v2_multi",
 		.acpi_match_table = ACPI_PTR(spi_acpi_match),
 	},
 	.probe = amd_spi_probe,
+	.remove = amd_spi_remove,
 };
 
 module_platform_driver(amd_spi_driver);
