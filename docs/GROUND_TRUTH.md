@@ -994,6 +994,56 @@ code**:
 **Next step (given to the user, not yet done)**: copy both files off Windows and decompile
 them the same way as `hidspi.sys`/`amdspi.sys`.
 
+### 15.16 Ghidra Installed Locally on Linux — Decompilation No Longer Needs a Windows Round-Trip (2026-07-08)
+
+Found both candidate binaries locally without any further Windows round-trip: the user
+had already downloaded the official Surface Laptop 4 AMD driver bundle
+(`~/Scaricati/SurfaceLaptop4_AMD_Win11_22631_26.040.2105.0.msi`, ~735MB). Extracted it on
+Linux with `msiextract` (package `msitools`, already installed) — every driver in 15.15's
+triage is inside `SurfaceUpdate/<package>/`, including both candidates and `amdspi.sys`
+itself. Copied `TouchPenProcessor0C19.dll`, `TouchPenProcessor0C18.dll` (a near-identical
+sibling, only 8281 bytes differ — likely a different pen-calibration table, not different
+code) and `SurfaceVirtualFunctionEnum.sys` into `~/windrivers/` (the existing local,
+git-ignored staging folder for proprietary Microsoft binaries — never commit these).
+
+**Ghidra is now installed locally** (`pacman -S ghidra`, pulled in `jdk-openjdk` as its
+`java-environment` dependency) — headless decompilation no longer requires the user's
+Windows machine. Working recipe (the two gotchas that cost time: `-postScript foo.py`
+fails with "Ghidra was not started with PyGhidra" — this Ghidra build's headless mode
+does not support Python scripts, use a `.java` GhidraScript instead; and `-scriptPath`
+must be an **absolute** path, `.` silently fails to resolve):
+
+```
+/opt/ghidra/support/analyzeHeadless <project_dir> <project_name> \
+  -import /path/to/binary.sys \
+  -scriptPath /absolute/path/to/scripts_dir \
+  -postScript DecompileAll.java /absolute/output/path.c
+```
+
+(`DecompileAll.java`, a ~40-line `GhidraScript` using `DecompInterface` to dump every
+function's decompiled C to a file, is the reusable script — ask for it again in a future
+session rather than re-deriving it.)
+
+**First real use**: full headless decompile of `SurfaceVirtualFunctionEnum.sys` (535
+functions, 20k lines of output, 0 failures). Confirms the `strings` first look from 15.15:
+no PDB/symbols (every function is `FUN_<addr>`), no SPI/HID/DESCREQ content anywhere. The
+only readable string tied to program logic is a device-naming format string
+(`SurfaceVirtualFunctionEnum_%02d`); the surrounding code is DMF/WDF module registration
+boilerplate (e.g. registering a `ScheduledTask` DMF module). **This closes candidate #2
+from 15.15**: it's generic virtual-child-device bookkeeping, not touch/SPI protocol code.
+
+Candidate #1 (`TouchPenProcessor0C19.dll`) was not yet run through Ghidra — `strings`
+alone was so unambiguously pen-DSP-specific (`HastaPostProcessing`, `PenPosition_Reset`,
+`PenPressureProcess`, `interpolation FIFO`, `TrackManager`) that a full decompile is very
+unlikely to change the conclusion; skipped for now, revisit only if asked.
+
+**Net effect of 15.15/15.16**: both MSHW0231-specific candidates found in the full driver
+triage turn out to be dead ends (one confirmed by decompilation, one confirmed strongly by
+strings). Combined with 15.14 (Extn Package = registry only), this closes the entire
+"maybe some other Windows driver does the missing init" investigation with much higher
+confidence than before — there is no more Windows-side code left to check. The physical/
+electrical avenue (logic analyzer) or a live WinDbg capture remain the only paths forward.
+
 ---
 
 ## 14. References
