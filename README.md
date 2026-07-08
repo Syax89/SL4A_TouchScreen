@@ -2,30 +2,26 @@
 
 > Linux HID-over-SPI driver for the Microsoft Surface Laptop 4 (AMD) touchscreen
 
-[![Status](https://img.shields.io/badge/status-work%20in%20progress-yellow)](https://github.com/Syax89/SL4A_TouchScreen)
+[![Status](https://img.shields.io/badge/status-functional-brightgreen)](https://github.com/Syax89/SL4A_TouchScreen)
 [![Hardware](https://img.shields.io/badge/device-surface%20laptop%204%20amd-blue)](#hardware)
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%7C%20BSD--3-orange)](LICENSE)
 
 ---
 
-## What is this?
+## Status: FUNCTIONAL — Single-touch working
 
-A **reverse-engineered Linux kernel driver** for the `MSHW0231` touchscreen controller used in the Surface Laptop 4 (AMD). Windows ships with proprietary drivers (`amdspi.sys` + `hidspi.sys`) downloaded via Windows Update. This project reverse-engineers their behavior to produce a native Linux driver.
+The driver successfully initializes the MSHW0231 touchscreen on the Surface Laptop 4 AMD. **Single-touch works** via standard HID mode (Report ID 0x40). The KDE/Wayland desktop recognizes touches correctly — tap, drag, and single-finger gestures all work.
 
----
+| Feature | Status |
+|---------|--------|
+| Device initialization (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
+| HID report descriptor (936 bytes, 98.5% wire-read + 14-byte targeted patch) | Complete |
+| Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
+| BTN_TOUCH (tap/lift detection) | **Working** |
+| Stylus/Pen (Report ID 1) | **Working** |
+| Multi-touch (2+ fingers) | Not yet — requires raw heatmap blob detection |
 
-## Status
-
-**Reads work.** Writes are under investigation.
-
-| Path | Status |
-|------|--------|
-| Reads (opcode `0x0B`) | Working — bit-identical to Windows traces |
-| Writes (opcode `0x02`) | **Under investigation** — device currently ignores writes |
-
-CTRL0 bits [15:8] differ: Windows = `0x0E`, Linux = `0xA9` (these are automatic hardware state reflecting the last transfer's TX/RX counts, not directly configurable).
-
-Full details: [`docs/DRIVER_STATE.md`](docs/DRIVER_STATE.md) and [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §15.
+Multi-touch requires processing the raw capacitive heatmap frames (content_id=0x0C, ~4302 bytes) through blob detection. The Windows `TouchPenProcessor0C19.dll` handles this with DFT processing on dual-frequency antenna data. This is a complex computer-vision task (see [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) §D).
 
 ---
 
@@ -41,15 +37,8 @@ Full details: [`docs/DRIVER_STATE.md`](docs/DRIVER_STATE.md) and [`docs/GROUND_T
 | GPIO IRQ | Pin `0x55` (DSDT), Power=`0x5B`, Reset=`0x0103` |
 | SPI Mode | MODE 0 (CPOL=0, CPHA=0) at 33.33 MHz |
 | Protocol | HID-over-SPI **V0** (pre-release, "version 2" wire format) |
-
-**Key finding**: the system has **two SPB devices**:
-
-| Device | Connection | Opcodes | Purpose |
-|--------|-----------|---------|---------|
-| **A** — Touchscreen | `0x0B` | `0x0B`, `0x02` | HID input reports, descriptor discovery |
-| **B** — Companion chip | `0x18`, `0x19`, `0x1A` | `0x00`, `0x70`, `0xB0`, `0xB1`, `0x22`, ... | Activation, firmware upload |
-
-The touchscreen receives **only** reads (`0x0B`) and writes (`0x02`) — no firmware, no vendor activation.
+| VID/PID | 0x045E / 0x0C19 |
+| Report descriptor | 936 bytes (HID v1.00, 8 top-level collections) |
 
 ---
 
@@ -59,17 +48,18 @@ The touchscreen receives **only** reads (`0x0B`) and writes (`0x02`) — no firm
 ┌──────────────────────────────────────┐
 │  spi-hid.ko (driver/spi-hid-core.c)  │
 │  HID-over-SPI protocol state machine │
-│  · Device discovery (DESCREQ/2)      │
-│  · Reset Response drain              │
-│  · Runtime HID input reports (type 1)│
+│  · DESCREQ → DEVICE_DESC → RPT_DESC  │
+│  · IRQ-driven seq_thread (states 0-4)│
+│  · Standard HID mode (Report 0x40)   │
+│  · Optional raw heatmap interception │
 └──────────────┬───────────────────────┘
                │ Linux SPI framework
 ┌──────────────┴───────────────────────┐
 │  spi-amd.ko (driver/spi-amd.c)       │
 │  AMD FCH SPI controller driver (V2)  │
-│  · TX-only writes + GPIO-gated reads │
-│  · Secret bits (CTRL0: 30,29,18)     │
-│  · 16-bit FIFO mode (PCI 0xB8 bit7)  │
+│  · TX/RX FIFO management             │
+│  · Chunked reads (>70B = DMA quanta) │
+│  · PIO remainder path                │
 └──────────────┬───────────────────────┘
                │ MMIO
 ┌──────────────┴───────────────────────┐
@@ -77,112 +67,95 @@ The touchscreen receives **only** reads (`0x0B`) and writes (`0x02`) — no firm
 └──────────────────────────────────────┘
 ```
 
+The driver uses an **IRQ-driven sequencer** (`spi_hid_seq_thread`) that mirrors the Windows HidSpiCx automaton:
+
+```
+State 0 (WAIT_RESET)  → drain RESET_RSP → DESCREQ → State 1
+State 1 (WAIT_DESC)   → read DEVICE_DESC → DESCREQ2 → State 2
+State 2 (WAIT_RPT)    → read RPT_DESC → create HID device → State 4
+State 4 (DONE)        → forward input reports via hid_input_report()
+```
+
+**No GET_FEATURE/SET_FEATURE is sent** — the device stays in standard HID mode and sends proper Report ID 0x40 (TouchScreen) and Report ID 1 (Pen) reports with pre-computed X/Y coordinates.
+
 ---
 
 ## Protocol
 
 The device uses the **HidSpiDeviceV0** path (pre-release protocol), not the public v1.0 spec.
 
-### Wire format (V0, "version 2")
+### Wire format (V0 "version 2")
 
 ```
-Header: [TYPE:4|VERSION:4] [u16 LE] [0x5A]
-        version = 2, low nibble of u16 must be 0
-Body:   [len16 LE = content+3] [ContentID] [content...]
+Header: [TYPE:4|VERSION:4] [u16 LE report_length] [0x5A]
+        version = 2
+Body:   [content_length LE] [content_id] [payload...]
 ```
 
 ### Report types
 
-| Type | Name | When |
-|------|------|------|
+| Type | Name | Description |
+|------|------|-------------|
 | `1` | DATA | Runtime input reports |
 | `3` | RESET_RSP | Device reset signal |
+| `5` | GET_FEAT_RESP | Feature report response |
 | `7` | DEVICE_DESC | 28-byte device descriptor |
 | `8` | RPT_DESC | 936-byte HID report descriptor |
 
-### Touchscreen init sequence (from Windows ETW traces)
+### Active report IDs (standard HID mode)
 
-```
-GPIO IRQ → 0x0B read 9B → RESET_RSP header (32 10 00 5A)
-         → 0x0B read 9B → RESET_RSP body   (03 00 00 00)   ← same report, not "ACK"
-         → 0x02 write 10B → DESCREQ (register 0x000001)      ← TX-only
-         → GPIO IRQ (~58 µs)
-         → 0x0B read 9B → DEVICE_DESC header (72 80 00 5A)
-         → 0x0B read 37B → device descriptor body
-            VID=0x045E, PID=0x0C19, Ver=0x0100
-         → 0x02 write 10B → DESCREQ2 (register 0x000002)     ← TX-only
-         → GPIO IRQ (~727 µs)
-         → 0x0B read 9B → RPT_DESC header (82 B0 0E 5A)
-         → 0x0B read 945B → 936-byte HID report descriptor
-         ~ runtime HID input reports (type=1) ~
-```
+| Report ID | Usage | Fields |
+|-----------|-------|--------|
+| `0x40` (64) | TouchScreen | TipSwitch (1 bit), X (16-bit), Y (16-bit) |
+| `0x01` (1) | Pen/Stylus | InRange, TipSwitch, BarrelSwitch, Invert, Eraser, X, Y, TipPressure |
 
 ---
 
 ## Building
 
 ```bash
-# SPI controller driver
 make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
-
-# Or for HID-only:
-make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver -f Makefile.hid modules
 ```
 
-### Load
+### Loading
 
 ```bash
-sudo rmmod spi_hid spi_amd 2>/dev/null
+sudo rmmod spi-hid spi-amd 2>/dev/null
 sudo insmod driver/spi-amd.ko
 sudo insmod driver/spi-hid.ko
 ```
 
+### After loading
+
+The touchscreen appears as:
+- `/dev/input/eventN` — `spi 045E:0C19` (ABS_X, ABS_Y, BTN_TOUCH) for touch
+- `/dev/input/eventN` — `spi 045E:0C19 Stylus` for pen
+
 ### Debug
 
 ```bash
-sudo dmesg -w | grep -E "SEQ|spi-amd|spi-hid"
+sudo dmesg -w | grep "SEQ\|spi-hid"
 ```
 
 ---
 
-## PCI Configuration
+## Key Technical Decisions
 
-The FCH LPC bridge (`1022:790e`, device `00:14.3`) needs two registers set to match Windows:
+### HID Report Descriptor (98.5% wire-read + 14-byte patch)
 
-```bash
-# 16-bit FIFO access mode (fixes byte ordering on reads)
-sudo setpci -s 00:14.3 B8.L=0x33ED0084
+The 936-byte report descriptor is read live from the device. 14 specific byte positions (at offsets n·64+55 from descriptor start) are corrupted to `0xFF` by a characterized hardware defect in the device's 64-byte page structure. These bytes are patched from a hardcoded ground-truth copy. The remaining 922 bytes (98.5%) come from the live wire read every boot — meaning firmware updates or different SKUs would be picked up.
 
-# FIFO data layout
-sudo setpci -s 00:14.3 B4.L=0x7DFFE000
-```
+### No vendor init (Himax, 0x04 register)
 
-With `0xB8` bit7=1, data must be read as 16-bit words:
-```c
-for (i = 0; i < rx_len; i++) {
-    u16 w = readw(base + read_off + (i/2)*2);
-    dst[i] = (i & 1) ? (u8)(w >> 8) : (u8)(w & 0xFF);
-}
-```
+Windows cold-boot traces show a 14-byte vendor init write to register 0x04. Testing proved this is optional — the device initializes without it. Sending it may corrupt state.
 
----
+### Standard HID mode (no raw heatmap)
 
-## What's been investigated
+By NOT sending `SET_FEATURE(id=4)`, the device stays in standard HID mode and sends Report ID 0x40 with pre-computed touch coordinates. This avoids the complex blob detection on raw heatmap data that Windows handles via `TouchPenProcessor0C19.dll` (9.7 MB, DFT processing, CCL, Kalman tracking).
 
-| Category | Tests |
-|----------|-------|
-| SPI modes | 0, 1, 2, 3 |
-| Speeds | 800 KHz through 33 MHz |
-| Triggers | V1 (CTRL0 bit16), V2 (0x47 bit7), hardcoded 0x80 |
-| PCI config | 0xB4, 0xB8 (full 32-bit values), extended config space of 11 devices |
-| MMIO | CTRL1, 0x44 dance, TXMODE, CS selection, opcode prepend, FIFO variants |
-| ACPI | Full power cycle (_PS3→_PS0→_RST), GPIO M009/M010 toggle |
-| Protocol | Vendor init @0x04, synchronous/async DESCREQ, IRQ timing |
-| Kernel | `iommu=off`, `amd_iommu=off`, SME, clean boot (no stale module) |
-| PCI lock | RomProtect, SpiProtectEn, SPIRestrictedCmd — identical Windows/Linux |
-| WPP tracing | Confirmed: Windows `hidspi.sys` succeeds with opcode 0x02 on this hardware |
+### Companion chip (0x18/0x19/0x1A) not needed
 
-Full test matrix: [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §3 and §15.
+The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip is absent. The touchscreen works standalone.
 
 ---
 
@@ -190,12 +163,14 @@ Full test matrix: [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §3 and §15.
 
 | Tool | Path | Description |
 |------|------|-------------|
-| `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, GPIO) |
+| `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (2384 transactions, timing, GPIO) |
 | `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
 | `decode_hidspi.py` | `tools/decode_hidspi.py` | HID-over-SPI protocol decoder |
+| `extract_companion.py` | `tools/extract_companion.py` | Companion device sequence extractor |
 | `mmio_write.c` | `tools/diagnostics/mmio_write.c` | Raw MMIO test module |
 | `gpio_test.c` | `tools/gpio_test.c` | GPIO power/reset via ACPI |
 | `test_coldboot.sh` | `tools/test_coldboot.sh` | Virgin-boot test harness |
+| `ghidra/` | `tools/ghidra/` | Headless decompilation scripts |
 
 ---
 
@@ -203,17 +178,18 @@ Full test matrix: [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §3 and §15.
 
 | File | Contents |
 |------|----------|
-| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | **Single source of truth** — cross-verified model (CSV × decomp × ACPI × PCI × tests) |
-| [`docs/DRIVER_STATE.md`](docs/DRIVER_STATE.md) | Status, test matrix, PCI findings, next steps |
+| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | **Canonical knowledge base** — cross-verified model (CSV × decomp × ACPI × PCI × tests) |
+| [`docs/DRIVER_STATE.md`](docs/DRIVER_STATE.md) | Status, test matrix, PCI findings |
+| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Roadmap: heatmap blob detection for multi-touch |
 | [`docs/SPI_REGISTERS.md`](docs/SPI_REGISTERS.md) | AMD FCH SPI + PCI config register map |
-| [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol and touchscreen behavior |
-| [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md) | Annotated Windows boot SPI trace (2384 transactions) |
-| [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md) | `amdspi.sys` decompilation with function index |
+| [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol decoded |
+| [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md) | Annotated Windows boot SPI trace |
+| [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md) | `amdspi.sys` decompilation index |
 | [`docs/VERIFICATION_FINDINGS.md`](docs/VERIFICATION_FINDINGS.md) | Independent code audit — 8 bugs found and fixed |
 | [`docs/VERIFICATION_PLAN.md`](docs/VERIFICATION_PLAN.md) | Phased verification methodology |
-| [`docs/SESSION_2026-07-06.md`](docs/SESSION_2026-07-06.md) | Final debugging session log |
 | [`docs/analisi_MSHW0231.md`](docs/analisi_MSHW0231.md) | Touchscreen register/feature analysis |
-| [`docs/decomp/amdspi/DECOMP-INDEX.md`](docs/decomp/amdspi/DECOMP-INDEX.md) | Authoritative function index for amdspi.sys |
+| [`docs/decomp/uefi/`](docs/decomp/uefi/) | Decompiled UEFI DXE drivers (SurfaceTouchHidDxe, AmdSpiHc, MsTouchUnlock) |
+| [`docs/decomp/clean/`](docs/decomp/clean/) | Clean `hidspi.sys` and `HidSpiCx.sys` decompilations |
 
 ### Verification reports
 
@@ -225,16 +201,39 @@ Full test matrix: [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) §3 and §15.
 
 ---
 
-## Next step
+## Traces
 
-Continue debugging the write path. Key areas under investigation:
-- AMD FCH Cezanne controller register configuration for TX-only transfers
-- Timing analysis of the write signal on SCK/MOSI/MISO/CS
-- WinDbg breakpoint-based capture of the Windows write sequence for comparison
+| File | Size | Description |
+|------|------|-------------|
+| `traces/surface_boot_auto.csv` | 29.3 MB | Warm boot, 2384 SPI transactions |
+| `traces/surface_init.csv` | 9.1 MB | Cold boot vendor init sequence |
+| `traces/surface_touch.csv` | 19.5 MB | Runtime touch data capture |
+
+---
+
+## UEFI / Windows Binaries
+
+| File | Size | Description |
+|------|------|-------------|
+| `windrivers/hidspi.sys` | 143 KB | Windows HID-over-SPI transport driver |
+| `windrivers/HidSpiCx.sys` | 135 KB | Windows HidSpiCx class extension |
+| `windrivers/amdspi.sys` | 233 KB | Windows AMD FCH SPI controller driver |
+| `windrivers/TouchPenProcessor0C19.dll` | 9.8 MB | Windows touch/pen processing DLL |
+| `windrivers/AmdSpiHcProtocolDxe.efi` | 11 KB | UEFI SPI host controller protocol |
+| `windrivers/SurfaceTouchHidDxe.efi` | 15 KB | UEFI touch HID driver |
+| `windrivers/MsTouchUnlockDxe.efi` | 15 KB | UEFI touch unlock/calibration |
+| `windrivers/HidSpiProtocolSpec.pdf` | 1.3 MB | Microsoft HID-over-SPI v1.0 spec |
+
+---
+
+## Next Steps
+
+- **Multi-touch**: reverse-engineer the DFT antenna layout in `TouchPenProcessor0C19.dll` to correctly map blob centroids to screen coordinates
+- **Cleanup**: reduce `dev_info` logging noise in production builds
+- **Upstreaming**: split into proper Linux kernel patches (SPI controller + HID transport)
 
 ---
 
 ## License
 
 Dual **GPL-2.0** / **BSD-3-Clause**. See source file headers.
-

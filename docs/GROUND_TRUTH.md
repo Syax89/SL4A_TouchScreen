@@ -2158,6 +2158,63 @@ finally seeing this loop ourselves.
 
 ---
 
+## 19. BREAKTHROUGH: Standard HID mode (2026-07-08)
+
+After exhaustive analysis of the CSV traces, UEFI drivers, and `TouchPenProcessor0C19.dll`,
+the correct approach emerged: **do NOT send GET_FEATURE/SET_FEATURE**.
+
+### 19.1 The mode switch mechanism
+
+Windows sends `GET_FEATURE(id=4)` followed by `SET_FEATURE(id=4, val=1)` to register 0x0003.
+This switches the device from **standard HID mode** to **raw heatmap mode**:
+
+| Mode | Trigger | Reports | Touch |
+|------|---------|---------|-------|
+| Standard HID | Default (no SET_FEATURE) | Report ID 0x40 (TouchScreen), 0x01 (Pen) | Pre-computed X/Y/TipSwitch |
+| Raw heatmap | SET_FEATURE(id=4, val=1) | content_id=0x0C (4302-byte frames) | Raw capacitive DFT data |
+
+### 19.2 Standard mode behavior
+
+In standard mode, the device sends Report ID 0x40 at ~10ms intervals:
+- ABS_X: 16-bit (0-32767)
+- ABS_Y: 16-bit (0-32767)
+- BTN_TOUCH: 1-bit tip switch
+- Report size: 6 bytes (1 report ID + 1 tip byte + 2 X + 2 Y)
+
+These are pre-computed coordinates from the touch controller firmware — no blob detection needed.
+
+### 19.3 Raw heatmap mode behavior
+
+In raw mode, the device sends content_id=0x0C frames (~4302 bytes):
+- The 4297-byte payload is NOT a simple capacitance grid
+- It is DFT antenna data with dual-frequency processing (9 Short + 9 Long antennas,
+  real/imaginary components)
+- 4297 is a prime number — cannot be a rectangular grid colsxrows
+- Windows processes through `TouchPenProcessor0C19.dll` (9.7MB):
+  - DFT processing: PenMagToBits, ShortDftRefAntAllTouchedReal/Image
+  - Connected Component Labeling: TouchDetectionCclLogic
+  - Kalman tracking: TrackLibRunTrackingLogicEntry
+  - Coordinate calculation: PenPosition, PenProcessing
+  - 3 gain sets (0/1/2), 15%/22.5%/25%/37.5% detection thresholds
+
+### 19.4 Small report buffer overflow fix
+
+For small reports (content_id=0x40, rl=8), the `avail = rblen - 8` check was
+wrong: `rl > avail` dropped all standard reports. Fixed: pass `rl - 2` to
+`hid_input_report()` (subtracting the 2-byte content_length overhead) and
+check `rl - 2 <= avail`.
+
+### 19.5 Current capabilities
+
+| Feature | Status |
+|---------|--------|
+| Device init (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
+| HID report descriptor (936B, 98.5% wire + 14B patch) | Complete |
+| Single-touch (Report ID 0x40) | Working |
+| BTN_TOUCH tap/lift | Working |
+| Pen/Stylus (Report ID 0x01) | Working |
+| Multi-touch | Requires raw heatmap blob detection (future) |
+
 ## 14. References
 
 | Resource | Path |

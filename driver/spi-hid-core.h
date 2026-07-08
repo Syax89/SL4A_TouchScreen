@@ -298,6 +298,19 @@ struct spi_hid {
 	u8 wire_report_descriptor[1024];
 	u32 wire_report_descriptor_len;
 	bool wire_report_descriptor_rejected;
+
+	/* Heatmap-to-touch pipeline (2026-07-08 §D).
+	 * Raw sensor frames (content_id=0x0C, ~4302 bytes) are capacitive
+	 * heatmaps — not standard HID input reports. We intercept them before
+	 * hid_input_report(), run blob detection, and emit multitouch events
+	 * on a dedicated input_dev. */
+	struct input_dev *touch_input;
+	u8 *heatmap_buf;          /* last captured frame buffer, kmalloc'd */
+	u32 heatmap_len;
+	u32 heatmap_content_id;
+	u16 heatmap_grid_cols;    /* determined from frame analysis */
+	u16 heatmap_grid_rows;
+	bool heatmap_active;
 };
 
 #endif

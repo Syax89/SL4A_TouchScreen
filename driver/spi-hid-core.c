@@ -50,6 +50,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/crc32.h>
 #include <linux/kernel.h>
+#include <linux/input/mt.h>
 
 #include "spi-hid-core.h"
 #include "spi-hid_trace.h"
@@ -1288,6 +1289,405 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 }
 
 
+/* Heatmap blob detection (2026-07-08 D).
+ * The raw content_id=0x0C frame is a capacitive sensor heatmap:
+ * 2 bytes SurfaceSwitch (timestamp/scan ID), then 4297 bytes of cell data.
+ * Each byte represents one capacitive cell's deviation from baseline (~0xB4).
+ * Low values = touched area (finger absorbs charge).
+ * We track a baseline per cell, detect significant drops, cluster into
+ * contiguous blobs via connected-component labeling, compute weighted
+ * centroids, and emit multitouch events.
+ */
+#define HEATMAP_MAX_CELLS   4300
+#define HEATMAP_TOUCH_THRESHOLD  25
+#define HEATMAP_MAX_BLOBS   10
+#define HEATMAP_BLOB_MIN_WEIGHT  150    /* total deviation sum across blob */
+#define HEATMAP_MAX_SLOTS   2            /* max fingers (Surface Laptop 4 = 2) */
+#define HEATMAP_EMA_ALPHA   3            /* smoothing: new_weight = 1, old_weight = 3 */
+
+static bool debug_coords;
+module_param(debug_coords, bool, 0644);
+MODULE_PARM_DESC(debug_coords, "Log raw blob grid coordinates for calibration");
+
+static bool invert_x;
+module_param(invert_x, bool, 0644);
+MODULE_PARM_DESC(invert_x, "Invert X axis");
+
+static bool invert_y;
+module_param(invert_y, bool, 0644);
+MODULE_PARM_DESC(invert_y, "Invert Y axis");
+
+static bool swap_xy;
+module_param(swap_xy, bool, 0644);
+MODULE_PARM_DESC(swap_xy, "Swap X and Y axes");
+
+struct touch_point { u16 x; u16 y; bool active; };
+
+static u8  heatmap_baseline[HEATMAP_MAX_CELLS];
+static u32 heatmap_baseline_cells;
+static bool heatmap_have_baseline;
+static u8  heatmap_touched[HEATMAP_MAX_CELLS];
+static u16 heatmap_label[HEATMAP_MAX_CELLS];
+
+/* Screen mapping: logical range 0..32767 for both X and Y.
+ * Physical dims from HID descriptor: 2934 x 1652 (0.1mm) = 293.4mm x 165.2mm.
+ * Aspect ratio 2934/1652 ≈ 1.78. 4300 cells / grid: 86 cols × 50 rows = 4300 cells,
+ * aspect 86/50 = 1.72 (close match). */
+#define GRID_COLS 86
+#define GRID_ROWS 50
+#define GRID_CELLS (GRID_COLS * GRID_ROWS)
+
+static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, u8 content_id)
+{
+	struct device *dev = &shid->spi->dev;
+	u32 i, cell_count, ncols, nrows;
+	static u16 blob_x[HEATMAP_MAX_BLOBS], blob_y[HEATMAP_MAX_BLOBS];
+	static u32 blob_wsum[HEATMAP_MAX_BLOBS], blob_xsum[HEATMAP_MAX_BLOBS];
+	static u32 blob_ysum[HEATMAP_MAX_BLOBS];
+	static bool blob_active[HEATMAP_MAX_BLOBS];
+	static u16 label_equiv[256];
+	u16 nlabels;
+	int touched_count = 0;
+
+	if (data_len < 5) return;
+	/* cell_data starts after content_id (1 byte) + SurfaceSwitch (2 bytes).
+	 * The HID descriptor defines Report ID 0x0C as: 16-bit SurfaceSwitch + 4297 bytes DeviceIndex constant.
+	 * 4302 (content_length) - 1 (content_id) - 2 (SurfaceSwitch) = 4299. */
+	cell_count = data_len - 3;
+
+	if (!shid->heatmap_grid_cols || !shid->heatmap_grid_rows) {
+		ncols = GRID_COLS; nrows = GRID_ROWS;
+		shid->heatmap_grid_cols = ncols;
+		shid->heatmap_grid_rows = nrows;
+		dev_info(dev, "HEATMAP: grid %u cols x %u rows (up to %u cells, actual %u)\n",
+			 ncols, nrows, ncols * nrows, cell_count);
+	}
+	ncols = shid->heatmap_grid_cols;
+	nrows = shid->heatmap_grid_rows;
+
+	if (cell_count > HEATMAP_MAX_CELLS) {
+		dev_warn(dev, "HEATMAP: frame too large (%u cells > %u max)\n", cell_count, HEATMAP_MAX_CELLS);
+		return;
+	}
+
+	/* Store raw frame for sysfs debug */
+	if (!shid->heatmap_buf || shid->heatmap_len < data_len) {
+		kfree(shid->heatmap_buf);
+		shid->heatmap_buf = kmalloc(data_len, GFP_KERNEL);
+	}
+	if (shid->heatmap_buf) {
+		memcpy(shid->heatmap_buf, data, data_len);
+		shid->heatmap_len = data_len;
+		shid->heatmap_content_id = content_id;
+	}
+
+	/* Continuous max-tracking baseline: touches always reduce capacitance,
+	 * so the maximum value seen per cell is the resting (no-touch) state.
+	 * Update every frame — lifts are immediately reflected. */
+	if (!heatmap_have_baseline) {
+		static u32 baseline_frames;
+		if (content_id == 0x0C && cell_count >= 1000) {
+			baseline_frames++;
+			for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++)
+				if (baseline_frames == 1 || data[3 + i] > heatmap_baseline[i])
+					heatmap_baseline[i] = data[3 + i];
+			if (baseline_frames >= 30) {
+				heatmap_baseline_cells = cell_count;
+				heatmap_have_baseline = true;
+				dev_info(dev, "HEATMAP: baseline stabilized after %u frames (%u cells, first val=0x%02x)\n",
+					 baseline_frames, cell_count, heatmap_baseline[0]);
+			}
+		}
+		return;
+	}
+	/* Update baseline max on every frame (lifts are immediately captured) */
+	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++)
+		if (data[3 + i] > heatmap_baseline[i])
+			heatmap_baseline[i] = data[3 + i];
+
+	if (!shid->touch_input) return;
+
+	/* Step 1: mark touched cells.
+	 * Only consider cells with an established baseline (resting value > 0x20)
+	 * to avoid edge/bezel cells where calibration is not uniform. */
+	memset(heatmap_touched, 0, cell_count);
+	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
+		u8 cell = data[3 + i];
+		s16 diff = (s16)heatmap_baseline[i] - (s16)cell;
+		if (diff > HEATMAP_TOUCH_THRESHOLD && heatmap_baseline[i] >= 0x20)
+			heatmap_touched[i] = 1;
+	}
+
+	/* Morphological dilation: expand touched region by 1 cell to merge
+	 * nearby clusters into a single blob. */
+	{
+		u8 expanded[HEATMAP_MAX_CELLS];
+		memcpy(expanded, heatmap_touched, cell_count);
+		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
+			if (!heatmap_touched[i]) continue;
+			u16 col = i % ncols, row = i / ncols;
+			if (col > 0 && i > 0) expanded[i - 1] = 1;
+			if (col + 1 < ncols && i + 1 < cell_count && i + 1 < HEATMAP_MAX_CELLS) expanded[i + 1] = 1;
+			if (row > 0 && i >= ncols) {
+				expanded[i - ncols] = 1;
+				if (col > 0) expanded[i - ncols - 1] = 1;
+				if (col + 1 < ncols && i - ncols + 1 < cell_count) expanded[i - ncols + 1] = 1;
+			}
+			if (row + 1 < nrows) {
+				u32 idx = i + ncols;
+				if (idx < cell_count && idx < HEATMAP_MAX_CELLS) {
+					expanded[idx] = 1;
+					if (col > 0 && idx > 0) expanded[idx - 1] = 1;
+					if (col + 1 < ncols && idx + 1 < cell_count) expanded[idx + 1] = 1;
+				}
+			}
+		}
+		memcpy(heatmap_touched, expanded, cell_count);
+	}
+
+	/* Step 2: two-pass connected-component labeling (8-way) */
+	memset(heatmap_label, 0xFF, cell_count * 2);
+	memset(label_equiv, 0, sizeof(label_equiv));
+	nlabels = 0;
+
+	for (i = 0; i < cell_count; i++) {
+		u16 col, row, new_label, up;
+
+		if (!heatmap_touched[i]) continue;
+		col = i % ncols;
+		row = i / ncols;
+		if (row >= nrows) break;
+
+		new_label = 0xFFFF;
+		if (col > 0 && heatmap_touched[i - 1])
+			new_label = heatmap_label[i - 1];
+		up = 0;
+		if (row > 0) {
+			if (col > 0 && heatmap_touched[i - ncols - 1])
+				up = heatmap_label[i - ncols - 1];
+			if (heatmap_touched[i - ncols])
+				up = up ?: heatmap_label[i - ncols];
+			if (col + 1 < ncols && heatmap_touched[i - ncols + 1])
+				up = up ?: heatmap_label[i - ncols + 1];
+		}
+		if (up && new_label != 0xFFFF && new_label != up) {
+			u16 a = min(new_label, up), b = max(new_label, up);
+			if (a < 256 && b < 256) {
+				while (label_equiv[a]) a = label_equiv[a];
+				while (label_equiv[b]) b = label_equiv[b];
+				if (a != b) label_equiv[b] = a;
+			}
+		}
+		if (up) new_label = new_label != 0xFFFF ? new_label : up;
+		if (new_label == 0xFFFF) {
+			new_label = nlabels++;
+			if (nlabels >= 256) new_label = 255;
+		}
+		heatmap_label[i] = new_label;
+	}
+
+	/* Resolve label equivalence */
+	for (i = 0; i < nlabels && i < 256; i++) {
+		u16 r = label_equiv[i];
+		while (r && r < 256 && label_equiv[r]) r = label_equiv[r];
+		label_equiv[i] = r;
+	}
+
+	/* Step 3: accumulate blob sums (weighted by deviation from baseline) */
+	memset(blob_xsum, 0, sizeof(blob_xsum));
+	memset(blob_ysum, 0, sizeof(blob_ysum));
+	memset(blob_wsum, 0, sizeof(blob_wsum));
+	memset(blob_active, 0, sizeof(blob_active));
+
+	for (i = 0; i < cell_count; i++) {
+		u16 label, col, row;
+		s16 diff;
+
+		if (!heatmap_touched[i]) continue;
+		label = heatmap_label[i];
+		while (label < 256 && label_equiv[label]) label = label_equiv[label];
+		if (label >= HEATMAP_MAX_BLOBS) continue;
+
+		col = i % ncols;
+		row = i / ncols;
+		if (row >= nrows) break;
+
+		diff = (s16)heatmap_baseline[i] - (s16)data[3 + i];
+		blob_xsum[label] += (u32)col * (u32)diff;
+		blob_ysum[label] += (u32)row * (u32)diff;
+		blob_wsum[label] += (u32)diff;
+		blob_active[label] = true;
+		touched_count++;
+	}
+
+	/* Step 4: compute centroids and emit */
+	for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
+		if (!blob_active[i] || blob_wsum[i] < HEATMAP_BLOB_MIN_WEIGHT)
+			continue;
+		blob_x[i] = (u16)(blob_xsum[i] / blob_wsum[i]);
+		blob_y[i] = (u16)(blob_ysum[i] / blob_wsum[i]);
+	}
+
+	/* Step 5: emit multitouch events with EMA smoothing and slot tracking.
+	 * Map grid coords to logical: x_screen = (col * 32767) / (ncols - 1),
+	 * y_screen = (row * 32767) / (nrows - 1). */
+	{
+		struct input_dev *input = shid->touch_input;
+		static u16 prev_gx[HEATMAP_MAX_SLOTS] = {0xFFFF, 0xFFFF};
+		static u16 prev_gy[HEATMAP_MAX_SLOTS] = {0xFFFF, 0xFFFF};
+		bool any_touch = false;
+		u8 valid_count = 0;
+		struct { u16 gx; u16 gy; u32 w; u8 idx; } sorted[HEATMAP_MAX_BLOBS];
+		u8 sorted_count = 0;
+
+		for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
+			if (!blob_active[i] || blob_wsum[i] < HEATMAP_BLOB_MIN_WEIGHT)
+				continue;
+			sorted[sorted_count].gx = blob_x[i];
+			sorted[sorted_count].gy = blob_y[i];
+			sorted[sorted_count].w = blob_wsum[i];
+			sorted[sorted_count].idx = i;
+			sorted_count++;
+		}
+		for (i = 0; i + 1 < sorted_count; i++)
+			for (u8 j = i + 1; j < sorted_count; j++)
+				if (sorted[j].w > sorted[i].w) {
+					typeof(sorted[0]) t = sorted[i];
+					sorted[i] = sorted[j]; sorted[j] = t;
+				}
+		if (sorted_count > HEATMAP_MAX_SLOTS)
+			sorted_count = HEATMAP_MAX_SLOTS;
+
+		if (debug_coords) {
+			for (i = 0; i < sorted_count; i++)
+				dev_info(dev, "CALIB: blob[%u] grid=(%u,%u) weight=%u screen=(%u,%u)\n",
+					 i, sorted[i].gx, sorted[i].gy, sorted[i].w,
+					 (sorted[i].gx * 32767) / (ncols - 1),
+					 (sorted[i].gy * 32767) / (nrows - 1));
+			if (sorted_count || touched_count)
+				dev_info(dev, "CALIB: blobs=%u cells_touched=%d\n",
+					 sorted_count, touched_count);
+		}
+
+		{
+			u8 assigned[HEATMAP_MAX_SLOTS] = {0xFF, 0xFF};
+			u16 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
+			bool new_active[HEATMAP_MAX_SLOTS] = {false, false};
+
+			for (i = 0; i < sorted_count; i++) {
+				u16 best_dist = 0xFFFF;
+				u8  best_slot = HEATMAP_MAX_SLOTS;
+
+				for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
+					if (assigned[s] != 0xFF) continue;
+					if (prev_gx[s] == 0xFFFF) {
+						if (best_slot == HEATMAP_MAX_SLOTS) best_slot = s;
+						continue;
+					}
+					u16 dx = abs((s16)sorted[i].gx - (s16)prev_gx[s]);
+					u16 dy = abs((s16)sorted[i].gy - (s16)prev_gy[s]);
+					u16 dist = dx + dy;
+					if (dist < best_dist || best_slot == HEATMAP_MAX_SLOTS) {
+						best_dist = dist;
+						best_slot = s;
+					}
+				}
+				if (best_slot < HEATMAP_MAX_SLOTS) assigned[best_slot] = i;
+			}
+
+			for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
+				if (assigned[s] != 0xFF) {
+					u8 bi = assigned[s];
+					if (prev_gx[s] != 0xFFFF) {
+						new_gx[s] = (prev_gx[s] * HEATMAP_EMA_ALPHA +
+							     sorted[bi].gx) / (HEATMAP_EMA_ALPHA + 1);
+						new_gy[s] = (prev_gy[s] * HEATMAP_EMA_ALPHA +
+							     sorted[bi].gy) / (HEATMAP_EMA_ALPHA + 1);
+					} else {
+						new_gx[s] = sorted[bi].gx;
+						new_gy[s] = sorted[bi].gy;
+					}
+					new_active[s] = true;
+				} else {
+					new_gx[s] = prev_gx[s];
+					new_gy[s] = prev_gy[s];
+					new_active[s] = false;
+				}
+			}
+
+			for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
+				input_mt_slot(input, s);
+				input_mt_report_slot_state(input, MT_TOOL_FINGER, new_active[s]);
+				if (new_active[s]) {
+					u16 sx, sy, tmp;
+					sx = (new_gx[s] * 32767) / (ncols - 1);
+					sy = (new_gy[s] * 32767) / (nrows - 1);
+					if (swap_xy) { tmp = sx; sx = sy; sy = tmp; }
+					if (invert_x)  sx = 32767 - sx;
+					if (invert_y)  sy = 32767 - sy;
+					input_report_abs(input, ABS_MT_POSITION_X, sx);
+					input_report_abs(input, ABS_MT_POSITION_Y, sy);
+					any_touch = true;
+				}
+				prev_gx[s] = new_gx[s];
+				prev_gy[s] = new_gy[s];
+			}
+		}
+
+		for (u8 s = (u8)HEATMAP_MAX_SLOTS; s < 10; s++) {
+			input_mt_slot(input, s);
+			input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
+		}
+		input_report_key(input, BTN_TOUCH, any_touch ? 1 : 0);
+		input_mt_sync_frame(input);
+		input_sync(input);
+	}
+}
+
+static void heatmap_report_touch(struct spi_hid *shid, struct touch_point *pts, int count)
+{
+	struct input_dev *input = shid->touch_input;
+	int i, active = 0;
+
+	for (i = 0; i < count && active < 10; i++) {
+		if (!pts[i].active) continue;
+		input_mt_slot(input, active);
+		input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
+		input_report_abs(input, ABS_MT_POSITION_X, pts[i].x);
+		input_report_abs(input, ABS_MT_POSITION_Y, pts[i].y);
+		active++;
+	}
+	for (i = active; i < 10; i++) {
+		input_mt_slot(input, i);
+		input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
+	}
+	input_report_key(input, BTN_TOUCH, active > 0 ? 1 : 0);
+	input_mt_sync_frame(input);
+	input_sync(input);
+}
+
+static ssize_t heatmap_debug_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct spi_hid *shid = dev_get_drvdata(dev);
+	u32 off = 0, i;
+
+	if (!shid->heatmap_buf || !shid->heatmap_len)
+		return snprintf(buf, PAGE_SIZE, "no frame captured\n");
+	off += snprintf(buf + off, PAGE_SIZE - off,
+		"content_id=0x%02x len=%u cells=%u grid=%ux%u\n",
+		shid->heatmap_content_id, shid->heatmap_len,
+		shid->heatmap_len - 2,
+		shid->heatmap_grid_cols, shid->heatmap_grid_rows);
+	for (i = 0; i < shid->heatmap_len && off < PAGE_SIZE - 4; i += 32) {
+		u32 chunk = min_t(u32, 32, shid->heatmap_len - i);
+		off += snprintf(buf + off, PAGE_SIZE - off,
+			"%04x: %*ph\n", i, chunk, shid->heatmap_buf + i);
+	}
+	return off;
+}
+static DEVICE_ATTR_RO(heatmap_debug);
+
 static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
@@ -1517,29 +1917,20 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 				}
 			}
 			dev_info(dev, "SEQ: report descriptor received, shid->hid=%p, scheduling create_device_work...\n", shid->hid);
+			/* Standard HID mode (no GET_FEATURE/SET_FEATURE):
+			 * device sends Report ID 0x40 (TouchScreen) with
+			 * pre-computed X, Y, TipSwitch — single-touch.
+			 * Multi-touch requires raw heatmap mode (send
+			 * GET_FEATURE+SEND_FEATURE) with grid blob detection
+			 * which needs reverse-engineering of the DFT antenna
+			 * layout (see docs/NEXT_STEPS.md §D). */
+			shid->seq_state = 4;
 			shid->ready = true;
 			shid->keep_powered = true;
 			if (!shid->hid) {
 				bool queued = schedule_work(&shid->create_device_work);
 				dev_info(dev, "SEQ: scheduled create_device_work, queued=%d\n", queued);
 			}
-			{
-				/* Windows TXN#220 (surface_boot_auto.csv): 02 00 00 03 42 00 04 03 00 06
-				 * -- opcode+reg0x0003+len16=0x42+body[ContentID=04,cmd=03,00,06].
-				 * Doubled leading 0x02 to match the seq_write quirk proven by DESCREQ. */
-				static const u8 getfeat[] = {
-					0x02, 0x02, 0x00, 0x00, 0x03, 0x42, 0x00,
-					0x04, 0x03, 0x00, 0x06
-				};
-				dev_info(dev, "SEQ: sending GET_FEATURE(id=4) on output reg, replicating surface_boot_auto.csv TXN#220...\n");
-				spi_hid_seq_write(shid, getfeat, sizeof(getfeat), NULL, 0);
-			}
-			/* Priority 3 investigation (docs/NEXT_STEPS.md, 2026-07-08): watch
-			 * CTRL0/STATUS/ENA_REG on a timer during the idle window leading up
-			 * to the ~508ms self-reset, to catch any register drifting before
-			 * the RESET_RSP arrives. */
-			amd_spi_debug_poll_start(600);
-			shid->seq_state = 5;
 		} else if (type == 3) {
 			u8 body[16];
 			u32 rblen = (blen + 6) < sizeof(body) ? (blen + 6) : sizeof(body);
@@ -1692,13 +2083,13 @@ handle_data:
 			rl = body[6] | (body[7] << 8);
 			dev_info(dev, "SEQ: DATA report type=1 len=%u content_id=0x%02x\n",
 				 rl, body[8]);
-			if (rl > 0 && rl <= avail) {
+			if (rl > 2 && rl - 2 <= avail) {
 				int hret = hid_input_report(shid->hid, HID_INPUT_REPORT,
-						 &body[8], rl, 1);
+						 &body[8], rl - 2, 1);
 				if (hret)
-					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x len=%u)\n",
-						 hret, body[8], rl);
-			} else if (rl > avail)
+					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x)\n",
+						 hret, body[8]);
+			} else if (rl > 2 && rl - 2 > avail)
 				dev_warn(dev, "SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
 					 rl, avail);
 			kfree(body);
@@ -2041,6 +2432,7 @@ static const struct attribute *const spi_hid_attributes[] = {
 	&dev_attr_logic_error_count.attr,
 	&dev_attr_spi_hid_latency.attr,
 	&dev_attr_spi_hid_perf_mode.attr,
+	&dev_attr_heatmap_debug.attr,
 	NULL	/* Terminator */
 };
 
@@ -2261,6 +2653,32 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->desc.input_register = 0x000000;
 	dev_info(dev, "SEQ: device powered by ACPI _INI, arming IRQ\n");
 
+	/* Create multitouch input device for heatmap-to-touch pipeline */
+	shid->touch_input = input_allocate_device();
+	if (shid->touch_input) {
+		shid->touch_input->name = "MSHW0231 Touchscreen";
+		shid->touch_input->phys = "spi-hid/input1";
+		shid->touch_input->id.bustype = BUS_SPI;
+		shid->touch_input->id.vendor = 0x045E;
+		shid->touch_input->id.product = 0x0C19;
+		set_bit(EV_ABS, shid->touch_input->evbit);
+		set_bit(EV_KEY, shid->touch_input->evbit);
+		set_bit(BTN_TOUCH, shid->touch_input->keybit);
+		input_set_abs_params(shid->touch_input, ABS_MT_POSITION_X, 0, 32767, 0, 0);
+		input_set_abs_params(shid->touch_input, ABS_MT_POSITION_Y, 0, 32767, 0, 0);
+		input_mt_init_slots(shid->touch_input, HEATMAP_MAX_SLOTS, 0);
+		if (input_register_device(shid->touch_input)) {
+			dev_warn(dev, "HEATMAP: failed to register touch input device\n");
+			input_free_device(shid->touch_input);
+			shid->touch_input = NULL;
+		} else {
+			dev_info(dev, "HEATMAP: multitouch input device registered\n");
+		}
+	}
+	shid->heatmap_active = true;
+	heatmap_have_baseline = false;
+	heatmap_baseline_cells = 0;
+
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
 				   irqflags, dev_name(&spi->dev), shid);
 	if (ret)
@@ -2287,6 +2705,11 @@ static void spi_hid_remove(struct spi_device *spi)
 
 	spi_hid_power_down(shid);
 	free_irq(shid->irq, shid);
+	if (shid->touch_input) {
+		input_unregister_device(shid->touch_input);
+		shid->touch_input = NULL;
+	}
+	kfree(shid->heatmap_buf);
 	if (shid->gpiod)
 		gpiod_put(shid->gpiod);
 	shid->irq_enabled = false;

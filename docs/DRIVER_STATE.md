@@ -1,170 +1,70 @@
-# DRIVER STATE — 2026-07-07 (work in progress)
+# DRIVER STATE — 2026-07-08
 
 > **Repository**: https://github.com/Syax89/SL4A_TouchScreen
-> **Source of truth**: [GROUND_TRUTH.md](GROUND_TRUTH.md)
+> **Source of truth**: [GROUND_TRUTH.md](GROUND_TRUTH.md) §19
 
 ---
 
-## Overall status: IN PROGRESS
+## Overall status: FUNCTIONAL — Single-touch + Pen working
 
-Ongoing investigation of all software components (Windows driver decompilation,
-ETW CSV traces, MMIO and PCI dumps, GPIO/ACPI tests, register-by-register comparison).
+The driver successfully initializes and streams touch and pen data. Single-touch is recognized
+by KDE/Wayland. Multi-touch requires raw heatmap blob detection (future work).
 
 ---
 
 ## Read path
 
-**WORKING** — RESET_RSP identical to Windows (`32 10 00 5A` + `03 00 00 00`), bit-identical.
-Every read (opcode 0x0B) works correctly. The device responds with valid HID data.
-
----
+**WORKING** — All reads (opcode 0x0B) work correctly. The device responds with valid HID data
+in standard mode (Report ID 0x40, 0x01) and raw heatmap mode (content_id 0x0C). The 936-byte
+report descriptor is read live from the device with a 14-byte targeted patch for a
+characterized hardware defect at page-relative offsets (n*64+55).
 
 ## Write path
 
-**IN PROGRESS** — the device currently ignores writes (opcode 0x02) to all registers.
-The AMD FCH Cezanne controller under Linux is not producing a write signal that the
-MSHW0231 touchscreen recognizes. Investigation continues.
+**WORKING** — Writes (opcode 0x02) reach the device. The DESCREQ/DESCREQ2 commands
+successfully trigger DEVICE_DESC and RPT_DESC responses. No other writes are needed
+in standard HID mode. GET_FEATURE/SET_FEATURE are intentionally NOT sent — they would
+switch the device to raw heatmap mode (not needed for single-touch).
 
-### Failed tests (complete matrix)
-- SPI modes 0, 1, 2, 3
-- Speeds 800 KHz - 33 MHz
-- Trigger V1 (CTRL0 bit16)
-- Trigger V2 (0x47 bit7)
-- Hardcoded trigger V2 0x80
-- CTRL1 write, Windows value 0x020006B5 (read-only register, ignored)
-- 0x44 dance with masks 0xF0FF, 0x0FFF
-- TXMODE CTRL0 bit23
-- Hardcoded CS1
-- Opcode prepended to the FIFO
-- Full power cycle: _PS3→_PS0→_RST via ACPI
-- GPIO power cycle via M010 — **DESTRUCTIVE (kills device until reboot, 2026-07-07)**
-- Vendor init @0x04 (14-byte cold boot)
-- Synchronous DESCREQ, IRQ, and workqueue
-- PCI 0xB8 bit7 (16-bit FIFO mode — fixes the read data layout, NOT the write)
-- **Every combination of the categories above**
+## Standard HID mode (2026-07-08 breakthrough)
 
----
+By NOT sending GET_FEATURE/SET_FEATURE, the device stays in standard HID mode:
+- Report ID 0x40: TouchScreen (ABS_X, ABS_Y, BTN_TOUCH)
+- Report ID 0x01: Pen (InRange, TipSwitch, X, Y, TipPressure)
+- Reports arrive at ~10ms intervals
+- Coordinates are pre-computed by the controller firmware
+- No blob detection or calibration needed
 
-## PCI Configuration Discovery (CRITICAL)
+## Raw heatmap mode (multi-touch investigation)
 
-Dump of the FCH LPC bridge (1022:790e, device 00:14.3) from Windows:
+With SET_FEATURE(id=4, val=1), the device switches to raw mode:
+- content_id 0x0C frames (4302 bytes)
+- Data is DFT antenna output (not a simple capacitance grid)
+- 4297 data bytes (prime number — not a rectangular grid)
+- Blob detection on this data produces unstable coordinates
+- Multi-touch requires reverse-engineering the DFT antenna layout
+  in TouchPenProcessor0C19.dll (see [NEXT_STEPS.md](NEXT_STEPS.md) §D)
 
-### PCI 0xB4 — FIFO Data Layout
-| | Value | Description |
-|--|-------|-------------|
-| Windows | 0x7DFFE000 | FIFO data layout / sync byte count (**corrected on the night of 2026-07-06**, was previously mis-transcribed as 0x007DFFE0) |
-| Linux | 0x00000000 | BIOS default |
-| Writable | YES | Via setpci — retested with the correct value: no effect on writes |
+## HID Report Descriptor
 
-### PCI 0xB8 — 16-bit FIFO Access Mode
-| | Value | Description |
-|--|-------|-------------|
-| Windows | 0x33ED0084 | bit7=1: 16-bit FIFO access |
-| Linux | 0x33ED0004 | bit7=0: 8-bit FIFO access (default) |
-| Writable | YES | Via `setpci -s 00:14.3 B8.L=0x33ED0084` (full value — a partial write like `B8.L=0x0084` clobbers the whole dword instead of only setting bit7) |
-
-Setting 0xB8 to the Windows value enables 16-bit FIFO mode. The data read out
-is then correct using the word-extraction formula (readw + odd/even byte extraction).
-**However, writes (opcode 0x02) still fail.**
-
----
-
-## CTRL0 bits[15:8] — Prime Suspect
-
-- **Windows** = 0x0E
-- **Linux** = 0xA9 (hardware-managed — every writel is ignored by the controller)
-
-These bits control chip-select timing parameters. A wrong value could
-invalidate the electrical-level framing of writes.
-
----
-
-## CTRL1 — Read-only
-
-- **Windows** = 0x020006B5
-- **Linux** = 0x02000000
-- The difference in the low bits (0x06B5 vs 0x0000) differs from the Windows value: CTRL1 is read-only.
-
----
-
-## FIFO diagnostics
-
-The `mmio_write.c` module confirms:
-- Write: the TX data is correct in the FIFO, but MISO stays **all zeros** (the device doesn't drive the line)
-- Read: MISO contains valid HID data (sync bytes + header + body) — with PCI 0xB8 bit7=1, the layout is correct
-- The device **selectively ignores** writes, not reads
-
----
-
-## ACPI verification
-
-- DSDT md5sum identical between Windows/Linux: `78046fa74c0282ee59db8b04a5204d88`
-- The ACPI tables are **bit-identical** — no hardware configuration difference
-- SPI mode: MODE 0 (ClockPolarityLow, ClockPhaseFirst) at 33.33 MHz
-
----
-
-## Session 2026-07-06 evening/night — investigating the remaining software avenues
-
-Without a second PC for breakpoint-based WinDbg, every remaining
-plausible software idea was tested:
-
-- **WPP tracing of hidspi.sys** (tracepdb+traceview+tracefmt): captured a real write
-  (`HidSetFeature`, 14B) completing with STATUS_SUCCESS, confirmed from inside the
-  driver itself — independent confirmation that opcode 0x02 works on
-  Windows. Cross-checked against "Vendor init @0x04" (already in the FAILED test
-  matrix on Linux, same register): the block remains uniform Windows-vs-Linux, not
-  specific to a single register.
-- **Extended PCI config space**: compared the Root Complex, IOMMU, SMBus, and all 8
-  Data Fabric functions in addition to the LPC bridge. Only Data Fabric Fn4 (00:18.4)
-  showed real differences (0x5C, 0x98, 0x9C) — tested on real hardware: 0x98/0x9C are
-  read-only, 0x5C is writable but has **no effect** on the write path once applied.
-- **PCI 0xB4**: fixed a transcription bug (real value 0x7DFFE000, not
-  0x007DFFE0) and retested — no effect.
-- Previously tested: SMN/PCI-config access inside the Windows driver (decomp), _OSI
-  ACPI gating, WREN/SPI-NOR heritage, kernel lockdown, SME, IOMMU (likely
-  irrelevant).
-
-**Investigation continues.**
-
----
-
-## Next steps
-
-Continue debugging the SPI bus write path. Focus areas:
-- AMD FCH Cezanne controller register configuration for TX-only transfers
-- Timing analysis of SCK/MOSI/MISO/CS signals
-- WinDbg breakpoint-based capture of the Windows write sequence
-
----
-
-## Diagnostic Tools
-
-| Tool | Path | Description |
-|------|------|-------------|
-| `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, IRQ, init) |
-| `mmio_write.c` | `tools/diagnostics/mmio_write.c` | Raw MMIO test: Windows-exact write + FIFO dump |
-| `gpio_test.c` | `tools/gpio_test.c` | GPIO M009/M010 test via ACPI evaluate |
-| PCI dump | Windows-side, `Desktop\windrivers\` | PCI config space (bridge 1022:790e) and 11-device comparison |
-
----
-
-## Modules
-
-Built from `driver/` (single source of truth — `spi-amd.c` and `spi-hid-core.c` live and
-build together from this one directory; there is no longer a separate working copy).
-
----
+- 936 bytes, read live from device
+- 14 bytes at positions n*64+55 are corrupted to 0xFF by a hardware defect
+  (characterized: clock-independent, timing-independent, tied to device's
+  internal 64-byte page structure)
+- Targeted patch restores correct values from hardcoded ground truth
+- 922/936 bytes (98.5%) come from live wire read every boot
+- 8 top-level collections: TouchScreen, Pen, Digitizer raw data, vendor features
 
 ## Key Files
 
 | File | Contents |
-|------|-----------|
-| `driver/spi-hid-core.c` | WINSEQ + GPIO in probe |
-| `driver/spi-amd.c` | Pre-trigger CTRL0 fix |
-| `tools/diagnostics/mmio_write.c` | Raw MMIO test module |
-| `tools/parse_spi.py` | ETW CSV parser |
-| `traces/surface_*.csv` | Windows ETW traces |
-| `docs/decomp/` | Windows driver decompilation |
-| `docs/windows_mmio_dumps/` | Windows MMIO dump (RWEverything) |
-| Windows-side, `Desktop\windrivers\` | PCI config space dump (LPC bridge + 11-device comparison), hidspi.pdb/.sys, WPP TMF files, decoded logs |
+|------|----------|
+| `driver/spi-hid-core.c` | HID-over-SPI protocol driver + seq_thread state machine |
+| `driver/spi-amd.c` | AMD FCH SPI V2 controller driver |
+| `driver/spi-hid-core.h` | Shared definitions, struct spi_hid |
+| `driver/hardcoded_rd.h` | 936-byte hardcoded report descriptor (ground truth) |
+| `tools/parse_spi.py` | ETW CSV parser (2384 transactions) |
+| `traces/surface_*.csv` | Windows ETW boot/touch traces |
+| `docs/decomp/clean/` | hidspi.sys + HidSpiCx.sys decompilations |
+| `docs/decomp/uefi/` | UEFI DXE driver decompilations |
+| `windrivers/` | Windows binaries and spec PDF |
