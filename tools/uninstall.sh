@@ -40,6 +40,21 @@ pass "Modules unloaded"
 info "Removing DKMS registration ($PKG_NAME/$PKG_VERSION, all kernels)..."
 dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all 2>/dev/null || true
 rm -rf "/usr/src/${PKG_NAME}-${PKG_VERSION}"
+
+# Also sweep any leftovers from a *previous* version's source tree (e.g. from a mid-beta
+# VERSION bump) -- found live 2026-07-08: a stray /usr/src/sl4a-touch-1.0.0-beta1 directory
+# from before a hotfix kept getting rediscovered and rebuilt (under the wrong name) by
+# Arch/CachyOS's pacman dkms hook on every later kernel update, since that hook scans
+# /usr/src/*-*/dkms.conf directly instead of only trusting `dkms status`.
+for stale in /usr/src/${PKG_NAME}-*; do
+	[ -d "$stale" ] || continue
+	stale_nv="$(grep -oP '(?<=PACKAGE_VERSION=").*(?=")' "$stale/dkms.conf" 2>/dev/null || true)"
+	if [ -n "$stale_nv" ]; then
+		dkms remove -m "$PKG_NAME" -v "$stale_nv" --all 2>/dev/null || true
+	fi
+	rm -rf "$stale"
+done
+
 depmod -a
 pass "DKMS source tree removed"
 

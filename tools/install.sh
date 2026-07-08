@@ -89,6 +89,20 @@ pass "All build dependencies present"
 info "Step 3: Installing driver sources via DKMS ($SRC_DEST)..."
 dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all >/dev/null 2>&1 || true
 rm -rf "$SRC_DEST"
+# Also sweep leftovers from any *other* version previously installed on this machine (e.g.
+# from a mid-beta VERSION bump) -- a stray /usr/src/sl4a-touch-<old-version> directory gets
+# rediscovered and rebuilt under the wrong name by Arch/CachyOS's pacman dkms hook on every
+# later kernel update, since that hook scans /usr/src/*-*/dkms.conf directly instead of only
+# trusting `dkms status` (found live 2026-07-08).
+for stale in /usr/src/${PKG_NAME}-*; do
+	[ -d "$stale" ] || continue
+	[ "$stale" = "$SRC_DEST" ] && continue
+	stale_nv="$(grep -oP '(?<=PACKAGE_VERSION=").*(?=")' "$stale/dkms.conf" 2>/dev/null || true)"
+	if [ -n "$stale_nv" ]; then
+		dkms remove -m "$PKG_NAME" -v "$stale_nv" --all >/dev/null 2>&1 || true
+	fi
+	rm -rf "$stale"
+done
 mkdir -p "$SRC_DEST"
 cp -a "$REPO_DIR"/driver/. "$SRC_DEST"/
 # Drop any local build artifacts that shouldn't ship with the DKMS source tree.
