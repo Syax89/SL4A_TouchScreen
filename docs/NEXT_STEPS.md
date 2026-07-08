@@ -22,6 +22,52 @@ The device supports multi-touch, but only in **raw heatmap mode** (enabled by
 SET_FEATURE(id=4, val=1)). In this mode the device sends content_id=0x0C
 frames (~4302 bytes) containing DFT antenna data.
 
+### §D.0 — raw_mode handshake reliability (blocking further calibration work)
+
+`SET_FEATURE` succeeds only ~1 in 4-6 attempts; the rest go completely silent (zero further
+GPIO interrupts — not even a `RESET_RSP`). Found that real Windows waits ~4.6ms between
+reading `GET_FEAT_RESP` and sending `SET_FEATURE` (we sent it instantly); added a matching
+`usleep_range(4500, 5500)` in `driver/spi-hid-core.c` `case 5`, but live testing across
+several attempts (including a fresh power-cycle via the new `tools/reset_touch.sh`) showed no
+clear improvement (see GROUND_TRUTH.md §18.6). Blob detection / CCL / slot-tracking logic
+fixes are confirmed working live in the one session where the handshake did succeed, but
+further calibration work (mapping grid position to physical screen position) needs a
+reliably-connectable device to do efficiently.
+
+**Proposed next step (not yet implemented)**: a software watchdog — a delayed_work armed
+right after sending `SET_FEATURE`, that if no `type=1` DATA report arrives within a bounded
+window, treats it exactly like a detected `RESET_RSP` (re-send DESCREQ, reset state to 1)
+instead of waiting forever for an IRQ that in the failure case never comes. This wouldn't fix
+the root cause but would turn a ~20% per-attempt success rate into an automatic retry loop
+that converges within a few seconds most of the time, without requiring manual insmod/rmmod
+cycles.
+
+**Update — decompiled the real answer from `HidSpiCx.sys` (GROUND_TRUTH.md §18.7)**: Windows
+does exactly this. `HidSpiCx.sys`'s SmFx state machine arms a **2000ms response timer** for
+GET_FEATURE/SET_FEATURE (and report descriptor/write requests), and on timeout runs
+`CheckingResetRetryCountEntry`, which retries up to a hardcoded **3 times** before giving up.
+Windows is not more reliable than us at the protocol level — it just automatically retries
+invisibly. Concrete parameters to match: **2000ms per-attempt timeout, 3 retries**.
+
+**[x] DONE (2026-07-08)** — implemented `spi_hid_raw_handshake_watchdog()` in
+`driver/spi-hid-core.c`, matching Windows's parameters exactly (`RAW_HANDSHAKE_TIMEOUT_MS`
+2000, `RAW_HANDSHAKE_MAX_RETRIES` 3). Armed via `schedule_delayed_work()` right after sending
+GET_FEATURE; cancelled/confirmed on the first real heatmap frame (`raw_handshake_confirmed`);
+on timeout, resends DESCREQ and retries, decrementing a counter initialized once in `probe()`
+(a first version reset the counter every retry inside the RPT_DESC branch itself, which is
+re-entered by the watchdog's own DESCREQ retry — found live: the same "(2 left)" message
+repeated forever instead of counting down; fixed by initializing the counter only in
+`probe()`). Verified live: counter correctly counts down 2→1→0 and gives up cleanly when the
+device really won't cooperate; confirms and cancels itself cleanly on first-try success with
+no spurious re-firing; zero crashes across several load/unload cycles; standard mode
+(`raw_mode=0`, default) confirmed completely unaffected (new fields are simply never touched
+when raw_mode is off).
+
+**`tools/reset_touch.sh`** (new): power-cycles just the touchscreen via ACPI `\M010`
+(same GPIO method as `test.sh`'s inline module), independent of whether spi-amd/spi-hid are
+loaded. Confirmed working. Useful as a general recovery tool (e.g. after `raw_mode=1` leaves
+the device stuck in raw mode, which otherwise needs a full reboot).
+
 ### What we know
 
 - The raw payload is 4297 bytes of "constant" data per the HID descriptor

@@ -311,6 +311,17 @@ struct spi_hid {
 	u16 heatmap_grid_cols;    /* determined from frame analysis */
 	u16 heatmap_grid_rows;
 	bool heatmap_active;
+
+	/* raw_mode handshake watchdog (2026-07-08, GROUND_TRUTH.md §18.7).
+	 * SET_FEATURE occasionally makes the device go completely silent (no
+	 * further IRQ at all, not even a RESET_RSP), so the existing
+	 * IRQ-triggered retry in spi_hid_seq_thread() never gets a chance to
+	 * run. Decompiling HidSpiCx.sys showed Windows hits the same
+	 * intermittent failure and papers over it with a bounded, timer-based
+	 * retry (2000ms timeout, 3 retries) — this mirrors that exactly. */
+	struct delayed_work raw_handshake_watchdog;
+	int raw_handshake_retries_left;
+	bool raw_handshake_confirmed;
 };
 
 #endif

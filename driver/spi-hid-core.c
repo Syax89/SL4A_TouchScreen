@@ -1244,6 +1244,45 @@ static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 	return -1;
 }
 
+/* raw_mode handshake watchdog (2026-07-08, docs/GROUND_TRUTH.md §18.7): SET_FEATURE
+ * occasionally makes the device go completely silent (no further IRQ at all, not even
+ * a RESET_RSP), so the existing IRQ-triggered retry in spi_hid_seq_thread() never gets
+ * a chance to run. Decompiling the real HidSpiCx.sys showed Windows's own SmFx state
+ * machine hits the same intermittent failure and papers over it with a bounded,
+ * timer-based retry — CompleteTransferIfDoneOrStartResponseTimer arms a 2000ms response
+ * timer, and CheckingResetRetryCountEntry retries up to 3 times before giving up. This
+ * mirrors those exact parameters. */
+#define RAW_HANDSHAKE_TIMEOUT_MS 2000
+#define RAW_HANDSHAKE_MAX_RETRIES 3
+
+static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(work, struct spi_hid, raw_handshake_watchdog.work);
+	struct device *dev = &shid->spi->dev;
+
+	if (shid->raw_handshake_confirmed)
+		return;
+
+	if (shid->raw_handshake_retries_left <= 0) {
+		dev_err(dev, "SEQ: raw_mode handshake failed after %d retries, giving up (docs/GROUND_TRUTH.md #18.7)\n",
+			RAW_HANDSHAKE_MAX_RETRIES);
+		return;
+	}
+	shid->raw_handshake_retries_left--;
+	dev_warn(dev, "SEQ: raw_mode handshake watchdog: no heatmap data after %dms, retrying (%d left)\n",
+		 RAW_HANDSHAKE_TIMEOUT_MS, shid->raw_handshake_retries_left);
+	{
+		static const u8 dr[] = {
+			0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
+			0x00, 0x00, 0x03, 0x00, 0x00
+		};
+		spi_hid_seq_write(shid, dr, sizeof(dr), NULL, 0);
+	}
+	shid->seq_state = 1;
+	schedule_delayed_work(&shid->raw_handshake_watchdog,
+			      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+}
+
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
@@ -1344,9 +1383,24 @@ struct touch_point { u16 x; u16 y; bool active; };
 static u8  heatmap_baseline[HEATMAP_MAX_CELLS];
 static u32 heatmap_baseline_cells;
 static bool heatmap_have_baseline;
+static u32 heatmap_baseline_frames;
 static u8  heatmap_touched[HEATMAP_MAX_CELLS];
 static u8  heatmap_expanded[HEATMAP_MAX_CELLS];
 static u16 heatmap_label[HEATMAP_MAX_CELLS];
+
+/* Bug fix (2026-07-08 review): heatmap_baseline_frames used to live as a
+ * `static` local inside heatmap_process_frame(), so a module rebind reset
+ * heatmap_have_baseline (in probe) but not this counter nor the stale
+ * heatmap_baseline[] contents — the baseline could "stabilize" after a
+ * single post-rebind frame instead of the intended 30-frame window. Give
+ * probe() a single entry point that resets all of it together. */
+static void heatmap_reset_baseline(void)
+{
+	heatmap_have_baseline = false;
+	heatmap_baseline_cells = 0;
+	heatmap_baseline_frames = 0;
+	memset(heatmap_baseline, 0, sizeof(heatmap_baseline));
+}
 
 /* Screen mapping: logical range 0..32767 for both X and Y.
  * Physical dims from HID descriptor: 2934 x 1652 (0.1mm) = 293.4mm x 165.2mm.
@@ -1408,17 +1462,16 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 	 * so the maximum value seen per cell is the resting (no-touch) state.
 	 * Update every frame — lifts are immediately reflected. */
 	if (!heatmap_have_baseline) {
-		static u32 baseline_frames;
 		if (content_id == 0x0C && cell_count >= 1000) {
-			baseline_frames++;
+			heatmap_baseline_frames++;
 			for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++)
-				if (baseline_frames == 1 || data[HEATMAP_DATA_OFFSET + i] > heatmap_baseline[i])
+				if (heatmap_baseline_frames == 1 || data[HEATMAP_DATA_OFFSET + i] > heatmap_baseline[i])
 					heatmap_baseline[i] = data[HEATMAP_DATA_OFFSET + i];
-			if (baseline_frames >= 30) {
+			if (heatmap_baseline_frames >= 30) {
 				heatmap_baseline_cells = cell_count;
 				heatmap_have_baseline = true;
 				dev_info(dev, "HEATMAP: baseline stabilized after %u frames (%u cells, first val=0x%02x)\n",
-					 baseline_frames, cell_count, heatmap_baseline[0]);
+					 heatmap_baseline_frames, cell_count, heatmap_baseline[0]);
 			}
 		}
 		return;
@@ -1481,19 +1534,25 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 		row = i / ncols;
 		if (row >= nrows) break;
 
+		/* Bug fix (2026-07-08 review): `up` used to default to 0, which
+		 * collides with a genuine label 0 (the first blob found always
+		 * gets label 0) — a real label-0 neighbor was indistinguishable
+		 * from "no neighbor found" and got silently discarded/ignored,
+		 * occasionally splitting one blob into two. Use the same 0xFFFF
+		 * "not found" sentinel as new_label instead. */
 		new_label = 0xFFFF;
 		if (col > 0 && heatmap_touched[i - 1])
 			new_label = heatmap_label[i - 1];
-		up = 0;
+		up = 0xFFFF;
 		if (row > 0) {
 			if (col > 0 && heatmap_touched[i - ncols - 1])
 				up = heatmap_label[i - ncols - 1];
 			if (heatmap_touched[i - ncols])
-				up = up ?: heatmap_label[i - ncols];
+				up = (up != 0xFFFF) ? up : heatmap_label[i - ncols];
 			if (col + 1 < ncols && heatmap_touched[i - ncols + 1])
-				up = up ?: heatmap_label[i - ncols + 1];
+				up = (up != 0xFFFF) ? up : heatmap_label[i - ncols + 1];
 		}
-		if (up && new_label != 0xFFFF && new_label != up) {
+		if (up != 0xFFFF && new_label != 0xFFFF && new_label != up) {
 			u16 a = min(new_label, up), b = max(new_label, up);
 			if (a < 256 && b < 256) {
 				while (label_equiv[a]) a = label_equiv[a];
@@ -1501,7 +1560,7 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 				if (a != b) label_equiv[b] = a;
 			}
 		}
-		if (up) new_label = new_label != 0xFFFF ? new_label : up;
+		if (up != 0xFFFF) new_label = (new_label != 0xFFFF) ? new_label : up;
 		if (new_label == 0xFFFF) {
 			new_label = nlabels++;
 			if (nlabels >= 256) new_label = 255;
@@ -1657,10 +1716,14 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 			}
 		}
 
-		for (u8 s = (u8)HEATMAP_MAX_SLOTS; s < 10; s++) {
-			input_mt_slot(input, s);
-			input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
-		}
+		/* Bug fix (2026-07-08 review): only HEATMAP_MAX_SLOTS slots were
+		 * ever allocated via input_mt_init_slots() — the loop above
+		 * already reports the correct active/inactive state for all of
+		 * them. Calling input_mt_slot() with an out-of-range index here
+		 * was a no-op in the input core (slot left unchanged at the last
+		 * valid one, HEATMAP_MAX_SLOTS-1), so this loop was re-clearing
+		 * that last real slot immediately after it was just reported
+		 * active, silently deactivating the second finger every frame. */
 		input_report_key(input, BTN_TOUCH, any_touch ? 1 : 0);
 		input_mt_sync_frame(input);
 		input_sync(input);
@@ -1718,12 +1781,20 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	u8 hdr[10]; int type; u16 blen = 0;
 	static ktime_t dbg_last_irq;
 	static bool dbg_expect_fast;
+	static int dbg_last_seq_state = -1;
 	s64 dbg_dt_us;
 
 	if (!shid->seq_enabled) return IRQ_HANDLED;
 
-	if (shid->seq_state != shid->seq_enabled) /* log only state transitions */
+	/* Bug fix (2026-07-08 review): this used to compare seq_state (int,
+	 * values 0-5) against seq_enabled (bool), which collapses to
+	 * "seq_state != 1" and fired on every IRQ while parked in any other
+	 * state — including state 4, the steady-state loop that handles every
+	 * touch report — defeating the point of only logging on transitions. */
+	if (shid->seq_state != dbg_last_seq_state) {
 		dev_info(dev, "SEQ: thread seq_state=%d\n", shid->seq_state);
+		dbg_last_seq_state = shid->seq_state;
+	}
 
 	dbg_dt_us = dbg_last_irq ? ktime_us_delta(ktime_get(), dbg_last_irq) : -1;
 	dbg_last_irq = ktime_get();
@@ -1962,6 +2033,26 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 				dev_info(dev, "SEQ: raw_mode=1 -> sending GET_FEATURE(id=4), going to state 5\n");
 				spi_hid_seq_write(shid, getfeat, sizeof(getfeat), NULL, 0);
 				shid->seq_state = 5;
+
+				/* Arm the handshake watchdog (docs/GROUND_TRUTH.md §18.7):
+				 * if no heatmap frame confirms success within
+				 * RAW_HANDSHAKE_TIMEOUT_MS, retry the whole sequence from
+				 * DESCREQ, up to RAW_HANDSHAKE_MAX_RETRIES times — matching
+				 * Windows's own timeout+retry parameters exactly.
+				 *
+				 * Bug fix (2026-07-08, found live): raw_handshake_confirmed/
+				 * raw_handshake_retries_left must NOT be reset here — the
+				 * watchdog's own retry action re-sends DESCREQ, which comes
+				 * back through RPT_DESC and lands right back in this same
+				 * branch. Resetting retries_left here made every retry
+				 * cycle "successfully" restart with a fresh budget of 3,
+				 * so the counter never reached zero (confirmed live: same
+				 * "(2 left)" message repeating forever). Both fields are
+				 * initialized once in probe() instead, so the budget is
+				 * spent across the whole handshake attempt, not per
+				 * individual DESCREQ restart. */
+				schedule_delayed_work(&shid->raw_handshake_watchdog,
+						      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 			} else {
 				/* Standard HID mode (no GET_FEATURE/SET_FEATURE):
 				 * device sends Report ID 0x40 (TouchScreen) with
@@ -2012,6 +2103,16 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 					0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
 					0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
 				};
+				/* 2026-07-08 (handshake reliability investigation): the real
+				 * Windows trace (surface_boot_auto.csv) waits ~4.6ms between
+				 * finishing the GET_FEAT_RESP body read (clock 134276452230781999)
+				 * and sending SET_FEATURE (clock 134276452230827844) — we were
+				 * sending it essentially instantly (same IRQ thread invocation,
+				 * sub-microsecond gap). Matching Windows's real timing here is
+				 * untested but the most concrete, measured difference found so
+				 * far against a device that intermittently goes silent/rejects
+				 * right after this exact write. */
+				usleep_range(4500, 5500);
 				dev_info(dev, "SEQ: sending SET_FEATURE(id=4), replicating surface_boot_auto.csv TXN#223...\n");
 				spi_hid_seq_write(shid, setfeat, sizeof(setfeat), NULL, 0);
 			}
@@ -2117,12 +2218,28 @@ handle_data:
 				kfree(body);
 				break;
 			}
-	rl = body[6] | (body[7] << 8);
-	if (rl != 4302) /* only log non-heatmap reports (standard HID) */
-		dev_info(dev, "SEQ: report type=1 len=%u content_id=0x%02x\n", rl, body[8]);
+			/* Bug fix (2026-07-08 review): body[6..8] were read below
+			 * unconditionally, but rblen (and therefore what was actually
+			 * read into `body`) can be as small as 6 bytes when blen==0 —
+			 * reading body[6]/[7]/[8] would be a 3-byte heap over-read of
+			 * uninitialized/adjacent memory. Guard against it explicitly. */
+			if (rblen < 9) {
+				dev_warn(dev, "SEQ: DATA report too short for a header (rblen=%u), dropped\n",
+					 rblen);
+				kfree(body);
+				break;
+			}
+			rl = body[6] | (body[7] << 8);
+			if (rl != 4302) /* only log non-heatmap reports (standard HID) */
+				dev_info(dev, "SEQ: report type=1 len=%u content_id=0x%02x\n", rl, body[8]);
 			if (raw_mode && body[8] == 0x0C && shid->touch_input) {
 				u32 clen = (rl > 2) ? (rl - 2) : 0;
 				if (clen > avail) clen = avail;
+				if (!shid->raw_handshake_confirmed) {
+					shid->raw_handshake_confirmed = true;
+					cancel_delayed_work(&shid->raw_handshake_watchdog);
+					dev_info(dev, "SEQ: raw_mode handshake confirmed (first heatmap frame received)\n");
+				}
 				heatmap_process_frame(shid, &body[8], clen, body[8]);
 			} else if (rl > 2 && rl - 2 <= avail) {
 				/* In raw_mode, log standard HID 0x40 coords for
@@ -2137,9 +2254,17 @@ handle_data:
 				if (hret)
 					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x)\n",
 						 hret, body[8]);
-			} else if (rl > 2 && rl - 2 > avail)
+			} else if (rl > 2 && rl - 2 > avail) {
 				dev_warn(dev, "SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
 					 rl, avail);
+			} else if (rl <= 2) {
+				/* Bug fix (2026-07-08 review): previously fell through
+				 * every branch silently (all require rl > 2) — dropped
+				 * with no log at all, an invisible regression from the
+				 * old `rl > 0` gate. */
+				dev_warn(dev, "SEQ: DATA report too short to contain a report ID (len=%u), dropped\n",
+					 rl);
+			}
 			kfree(body);
 		}
 		break;
@@ -2635,6 +2760,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_WORK(&shid->error_work, spi_hid_error_work);
 	INIT_WORK(&shid->fw_work, spi_hid_fw_work);
 	INIT_DELAYED_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
+	INIT_DELAYED_WORK(&shid->raw_handshake_watchdog, spi_hid_raw_handshake_watchdog);
+	shid->raw_handshake_confirmed = false;
+	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 
 	dev_err(dev, "PROBE: before GPIO\n");
 	if (dev->of_node) {
@@ -2701,31 +2829,41 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->desc.input_register = 0x000000;
 	dev_info(dev, "SEQ: device powered by ACPI _INI, arming IRQ\n");
 
-	/* Create multitouch input device for heatmap-to-touch pipeline */
-	shid->touch_input = input_allocate_device();
-	if (shid->touch_input) {
-		shid->touch_input->name = "MSHW0231 Touchscreen";
-		shid->touch_input->phys = "spi-hid/input1";
-		shid->touch_input->id.bustype = BUS_SPI;
-		shid->touch_input->id.vendor = 0x045E;
-		shid->touch_input->id.product = 0x0C19;
-		set_bit(EV_ABS, shid->touch_input->evbit);
-		set_bit(EV_KEY, shid->touch_input->evbit);
-		set_bit(BTN_TOUCH, shid->touch_input->keybit);
-		input_set_abs_params(shid->touch_input, ABS_MT_POSITION_X, 0, 32767, 0, 0);
-		input_set_abs_params(shid->touch_input, ABS_MT_POSITION_Y, 0, 32767, 0, 0);
-		input_mt_init_slots(shid->touch_input, HEATMAP_MAX_SLOTS, 0);
-		if (input_register_device(shid->touch_input)) {
-			dev_warn(dev, "HEATMAP: failed to register touch input device\n");
-			input_free_device(shid->touch_input);
-			shid->touch_input = NULL;
-		} else {
-			dev_info(dev, "HEATMAP: multitouch input device registered\n");
+	/* Create multitouch input device for heatmap-to-touch pipeline.
+	 * Bug fix (2026-07-08 review): this used to be created unconditionally,
+	 * even in the default raw_mode=0 configuration where it never receives
+	 * a single event (only heatmap_process_frame() feeds it, and that's
+	 * only called when raw_mode is set) — exposing a second, permanently
+	 * dead "MSHW0231 Touchscreen" input device alongside the real
+	 * hid-core one and risking userspace picking the wrong one. Switching
+	 * raw_mode 0->1 always goes through a fresh probe (module
+	 * reload/rebind), so gating creation on raw_mode here loses no
+	 * capability. */
+	if (raw_mode) {
+		shid->touch_input = input_allocate_device();
+		if (shid->touch_input) {
+			shid->touch_input->name = "MSHW0231 Touchscreen";
+			shid->touch_input->phys = "spi-hid/input1";
+			shid->touch_input->id.bustype = BUS_SPI;
+			shid->touch_input->id.vendor = 0x045E;
+			shid->touch_input->id.product = 0x0C19;
+			set_bit(EV_ABS, shid->touch_input->evbit);
+			set_bit(EV_KEY, shid->touch_input->evbit);
+			set_bit(BTN_TOUCH, shid->touch_input->keybit);
+			input_set_abs_params(shid->touch_input, ABS_MT_POSITION_X, 0, 32767, 0, 0);
+			input_set_abs_params(shid->touch_input, ABS_MT_POSITION_Y, 0, 32767, 0, 0);
+			input_mt_init_slots(shid->touch_input, HEATMAP_MAX_SLOTS, 0);
+			if (input_register_device(shid->touch_input)) {
+				dev_warn(dev, "HEATMAP: failed to register touch input device\n");
+				input_free_device(shid->touch_input);
+				shid->touch_input = NULL;
+			} else {
+				dev_info(dev, "HEATMAP: multitouch input device registered\n");
+			}
 		}
 	}
 	shid->heatmap_active = true;
-	heatmap_have_baseline = false;
-	heatmap_baseline_cells = 0;
+	heatmap_reset_baseline();
 
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
 				   irqflags, dev_name(&spi->dev), shid);
@@ -2738,6 +2876,13 @@ static int spi_hid_probe(struct spi_device *spi)
 	return 0;
 
 err1:
+	/* Bug fix (2026-07-08 review): touch_input was allocated/registered
+	 * above but never torn down on this error path, leaking a live,
+	 * orphaned input device if request_threaded_irq() fails. */
+	if (shid->touch_input) {
+		input_unregister_device(shid->touch_input);
+		shid->touch_input = NULL;
+	}
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 
 err0:
@@ -2751,6 +2896,7 @@ static void spi_hid_remove(struct spi_device *spi)
 
 	dev_info(dev, "%s: REMOVING\n", __func__);
 
+	cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
 	spi_hid_power_down(shid);
 	free_irq(shid->irq, shid);
 	if (shid->touch_input) {

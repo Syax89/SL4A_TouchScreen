@@ -2156,6 +2156,80 @@ resets at ~109ms before ever getting the chance to send us a single `type=1` int
 Closing the remaining RPT_DESC/GET_FEAT_RESP content gap (§18.3) is now the clearest path to
 finally seeing this loop ourselves.
 
+### 18.6 raw_mode reliability investigation (2026-07-08, post-standard-HID): ~4.6ms Windows
+delay before SET_FEATURE found and tried, inconclusive
+
+With standard HID mode now working (§19) and `raw_mode=1` re-enabling the GET_FEATURE/
+SET_FEATURE path for multitouch, live testing showed the handshake succeeds only
+intermittently (~1 in 4-6 attempts actually starts streaming `content_id=0x0C` frames after
+`SET_FEATURE`; the rest go completely silent — zero further GPIO interrupts at all, not even
+a `RESET_RSP` notification, so the existing self-healing retry in `case 4`/`case 5`
+(resend DESCREQ on `type==3`) never gets a chance to run).
+
+Parsed `traces/surface_boot_auto.csv` with `tools/parse_spi.py`'s `parse_boot_trace()` to
+measure the real timing Windows uses between reading the `GET_FEAT_RESP` body and sending
+`SET_FEATURE`: **Windows waits ~4.58ms** (clock delta `230827844 - 230781999` in 100ns units
+= 45845 → 4584.5us), whereas our driver sent `SET_FEATURE` essentially instantly (same IRQ
+thread invocation, sub-microsecond gap). Added a matching `usleep_range(4500, 5500)` before
+the `SET_FEATURE` write in `spi_hid_seq_thread()`'s `case 5` (`driver/spi-hid-core.c`).
+
+**Tested live across several insmod/rmmod cycles (including a fresh ACPI GPIO power-cycle
+via the new `tools/reset_touch.sh` right before an attempt): no clear improvement observed**
+(failures continued at a similar rate). Sample size is small (a handful of trials either
+side), so this doesn't rule out the delay being part of the real fix, but it's not
+sufficient alone. The failure mode (total interrupt silence, not a detectable reset) suggests
+whatever mechanism I'm missing is either a different timing window, a different piece of
+device state, or genuinely non-deterministic hardware behavior that even Windows may not
+always avoid (it just isn't visible in a single-session trace). Not chased further this
+session — see `docs/NEXT_STEPS.md` for the proposed next step (a software watchdog that
+auto-retries the whole DESCREQ sequence if `SET_FEATURE` produces no `type=1` traffic within
+a bounded window, sidestepping the root cause entirely).
+
+`tools/reset_touch.sh` (new): standalone script that power-cycles just the touchscreen via
+the same ACPI `\M010` GPIO method used in `test.sh`'s inline `gpio_cycle` module, without
+touching `spi-amd`/`spi-hid` or requiring a full system reboot. Confirmed working
+(`gpio_reset: done — touchscreen power-cycled`). Useful as a recovery tool regardless of the
+raw_mode reliability question, since it's much faster than a reboot when the device needs a
+real power-cycle (e.g., after `raw_mode=1` leaves it stuck raw — see §19 note on cold reboot).
+
+### 18.7 How Windows actually handles this: decompiled `HidSpiCx.sys` reveals a formal
+retry/timeout state machine — Windows almost certainly hits the same intermittent failures
+and silently retries
+
+Ran the local Ghidra headless pipeline (`tools/ghidra/`, see its README) directly against
+`~/windrivers/HidSpiCx.sys` (132KB, decompiles in ~10s) — the first time this specific
+question ("how does Windows's own request-completion path handle GET_FEATURE/SET_FEATURE
+reliability") was actually decompiled rather than inferred from wire traces. Findings:
+
+- `HidSpiCx.sys` implements its device state machine using Microsoft's **SmFx (State Machine
+  Framework)** — a real WDF extension with explicit per-state entry functions, not just an
+  ad-hoc sequence. Relevant functions (all in the 251-function decompile dump): `HidGetFeature`
+  @ 0x14000f508 (sets request type=2), `HidSetFeature` @ 0x14000f9b4 (sets request type=3),
+  `CompleteTransferIfDoneOrStartResponseTimer` @ 0x14000a38c, `EvtTimerFired` @ 0x14000b7b0,
+  `CheckingResetRetryCountEntry` @ 0x140009ba0.
+- **`CompleteTransferIfDoneOrStartResponseTimer`**: for request types 1-3 (report descriptor,
+  GET_FEATURE, SET_FEATURE) and conditionally 4/5, it arms a **2000ms response timer**
+  (`Timer::Start(this+0x18, 2000)`) and waits for the actual SPI transfer to complete before
+  declaring the HID request done — both GET_FEATURE *and* SET_FEATURE are real, awaited,
+  timed operations, not fire-and-forget. Other, unlisted request types complete immediately
+  with no device wait at all.
+- **`EvtTimerFired`**: if that 2000ms timer expires with no completion, it enqueues state
+  machine event `0xd` (timeout) — this is not a crash/abort path, it's a normal, expected
+  transition into the reset/retry machinery.
+- **`CheckingResetRetryCountEntry`**: decrements a per-device retry counter and, while it's
+  still nonzero, returns event `8` (retry the reset/recovery sequence again); only once the
+  counter hits zero does it give up permanently (event `7`, failure reason `0xc`). The
+  **retry counter is initialized to `3`** (`*(undefined4 *)(this + 0x70) = 3;`, found right
+  after the device's low-level state buffer is allocated during init).
+
+**Conclusion: Windows does not get SET_FEATURE right on the first try more reliably than we
+do — it just automatically retries up to 3 times, with a 2-second timeout per attempt,
+completely invisibly to the user.** This directly validates the watchdog/auto-retry approach
+proposed in §18.6/NEXT_STEPS.md §D.0, with concrete matched parameters to try: a per-attempt
+timeout around 2000ms (not the ~4.6ms pre-SET_FEATURE pacing gap, which — in light of this —
+was likely just incidental I/O-stack latency, not a deliberate protocol delay) and up to 3
+automatic retries of the whole DESCREQ→...→SET_FEATURE sequence before surfacing failure.
+
 ---
 
 ## 19. BREAKTHROUGH: Standard HID mode (2026-07-08)
