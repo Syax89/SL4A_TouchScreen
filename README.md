@@ -3,6 +3,7 @@
 > Linux HID-over-SPI driver for the Microsoft Surface Laptop 4 (AMD) touchscreen
 
 [![Status](https://img.shields.io/badge/status-functional-brightgreen)](https://github.com/Syax89/SL4A_TouchScreen)
+[![Release](https://img.shields.io/badge/release-0.1.0--beta1-yellow)](VERSION)
 [![Hardware](https://img.shields.io/badge/device-surface%20laptop%204%20amd-blue)](#hardware)
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%7C%20BSD--3-orange)](LICENSE)
 
@@ -113,45 +114,68 @@ Body:   [content_length LE] [content_id] [payload...]
 
 ---
 
-## Building
+## Installing (beta testers)
 
 ```bash
-make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
+git clone https://github.com/Syax89/SL4A_TouchScreen.git
+cd SL4A_TouchScreen
+sudo ./tools/install.sh
 ```
 
-### Loading
+This builds the driver via **DKMS**, so it's automatically rebuilt for every kernel you
+install afterward (no manual rebuild needed after a kernel update — a real concern for an
+out-of-tree module like this one), and installs a systemd service that loads it in the
+stable configuration (`raw_mode=0`, standard mode) on every boot. It's interactive the first
+time (asks for confirmation if it can't find the `MSHW0231` ACPI device) and safe to re-run.
 
-Manually:
+To remove everything it installed:
 
 ```bash
-sudo rmmod spi_hid spi_amd 2>/dev/null
-sudo insmod driver/spi-amd.ko
-sudo insmod driver/spi-hid.ko
+sudo ./tools/uninstall.sh
 ```
 
-Or install `driver/sl4a-touch.service` as a systemd unit for auto-load at every boot
-(standard mode, `raw_mode=0`):
+This is beta software: single-touch + pen are stable, multi-touch is experimental (see
+above). It taints the kernel (unsigned out-of-tree module) — if Secure Boot is enforced in a
+way that rejects unsigned/DKMS-signed modules, loading will fail; see your distro's DKMS
+Secure Boot / MOK enrollment documentation.
 
-```bash
-sudo cp driver/sl4a-touch.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now sl4a-touch.service
-```
-
-After pulling driver changes or after a kernel update, use `tools/rebuild_and_install.sh` to
-rebuild and reload in one step (see [Tools](#tools)).
-
-### After loading
+### After installing
 
 The touchscreen appears as:
 - `/dev/input/eventN` — `spi 045E:0C19` (ABS_X, ABS_Y, BTN_TOUCH) for touch
 - `/dev/input/eventN` — `spi 045E:0C19 Stylus` for pen
 
-### Debug
+Debug: `sudo dmesg -w | grep "SEQ\|spi-hid"`
+
+---
+
+## Building from source (developers)
+
+If you're working on the driver itself rather than just using it, building/reloading
+directly from the working tree (no DKMS involved) is faster to iterate on:
 
 ```bash
-sudo dmesg -w | grep "SEQ\|spi-hid"
+make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
+sudo rmmod spi_hid spi_amd 2>/dev/null
+sudo insmod driver/spi-amd.ko
+sudo insmod driver/spi-hid.ko
 ```
+
+`driver/sl4a-touch.service` (a systemd unit that `insmod`s straight from this checkout,
+absolute path, no DKMS) plus `tools/rebuild_and_install.sh` (rebuild + reload in one step,
+see [Tools](#tools)) automate this loop:
+
+```bash
+sudo cp driver/sl4a-touch.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sl4a-touch.service
+# after editing driver/ code:
+./tools/rebuild_and_install.sh
+```
+
+Note this dev-loop service and the beta installer's service share the same unit name
+(`sl4a-touch.service`) but are **not** the same file — installing one overwrites the other.
+Pick one workflow per machine (DKMS for daily use, direct-checkout for active development).
 
 ---
 
@@ -179,12 +203,14 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 
 | Tool | Path | Description |
 |------|------|-------------|
+| `install.sh` | `tools/install.sh` | **Beta installer** — builds via DKMS, installs the systemd auto-load service |
+| `uninstall.sh` | `tools/uninstall.sh` | Removes everything `install.sh` installed |
+| `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Developer loop: rebuild in-place and reload via `driver/sl4a-touch.service` (no DKMS) |
+| `reset_touch.sh` | `tools/reset_touch.sh` | Power-cycle just the touchscreen via ACPI `\M010`, no reboot needed |
 | `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (2384 transactions, timing, GPIO) |
 | `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
 | `decode_hidspi.py` | `tools/decode_hidspi.py` | HID-over-SPI protocol decoder |
 | `extract_companion.py` | `tools/extract_companion.py` | Companion device sequence extractor |
-| `reset_touch.sh` | `tools/reset_touch.sh` | Power-cycle just the touchscreen via ACPI `\M010`, no reboot needed |
-| `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Rebuild the driver and reload it via the `sl4a-touch` systemd service (use after pulling changes or after a kernel update) |
 | `test_coldboot.sh` | `tools/test_coldboot.sh` | Virgin-boot test harness |
 | `ghidra/` | `tools/ghidra/` | Headless decompilation scripts |
 
