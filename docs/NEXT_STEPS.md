@@ -152,8 +152,11 @@ This requires reverse-engineering the `TouchPenProcessor0C19.dll` to extract:
       GET_FEAT_RESP hex-dump-style `DIFFCHECK:` logs are harmless but verbose; not gated
       behind a debug flag yet)
 - [ ] Proper sysfs interface for diagnostics
-- [ ] Systemd service for auto-load at boot (a `driver/sl4a-touch.service` unit already
-      exists — needs wiring up/testing as an actual boot-time default)
+- [x] Systemd service for auto-load at boot — done 2026-07-08: cleaned up
+      `driver/sl4a-touch.service` (removed two stale `setpci` lines left over from the
+      long-closed PCI 0xB4/0xB8 investigation, fixed `ExecStop` module names), installed to
+      `/etc/systemd/system/`, enabled + started. Loads `raw_mode=0` (standard, stable mode)
+      on every boot.
 - [ ] Kernel module signing for Secure Boot
 
 ---
