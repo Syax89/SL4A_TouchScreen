@@ -957,6 +957,43 @@ it's either in the bytes of a transaction we still can't distinguish from Window
 physical/electrical, which brings this back to needing a logic analyzer or a live WinDbg
 capture, same as the 15.10 conclusion.
 
+### 15.15 Triage of All ~35 Published Surface Driver Packages (2026-07-08)
+
+Ran `06_triage_all_surface_drivers.cmd`/`.ps1` (result archived in
+`docs/windows_mmio_dumps/triage_surface_drivers_2026-07-08.txt`) instead of decompiling
+blindly. For each published `Surface*.inf`, checked `Class`/`ClassGuid`, hardware-ID match
+lines, and whether the package actually ships a `.sys`/`.dll`.
+
+Result: almost all are either `Class=Firmware`/`Extension` with **no binary** (pure AddReg/
+CFU-metadata packages — dock/pen/TCON/UEFI/TPM/thunderbolt firmware update stubs), or have a
+real binary but target a completely different hardware ID (battery=`MSHW0028`,
+button=`MSHW0040`, hinge=`MSHW0153`, light sensor=`MSHW0184`, thermal=`MSHW0187`,
+telemetry=`MSHW0213`, storage=`MSHW0051`, RTC filter=`ACPI000E&SUBSYS_MSHW0214`, SAM/SSH=
+`MSHW0084`/`MSHW0110`, keyboard-over-SAM=`MSHW0096`, TCON=`MSHW0124`/`MSHW0125`). SAM/SSH
+(`surfaceserialhubdriver.inf`, `surfaceintegrationdriver.inf`) do have real `.sys` binaries
+and are plausible in principle, but are deprioritized: the WPP/ETW captures (15.x, earlier
+sessions) already show the touchscreen answering DESCREQ *before* any SAM/companion
+activity occurs, making SAM gating unlikely.
+
+**Two packages pass all three filters — target `MSHW0231` specifically AND ship real
+code**:
+
+1. **`surfacetouchpenprocessorupdate.inf` → `TouchPenProcessor0C19.dll`** — targets
+   `HID\MSHW0231&Col02` (the "Touch Pen Processor" collection). "0C19" matches our device's
+   USB-style product ID already seen in the device descriptor (`0x045E`/`0x0C19`). Likely a
+   vendor-silicon companion module (CFU/firmware-update helper) for the exact touch
+   controller chip — may contain register maps or protocol fragments relevant to the
+   vendor init sequence, even though its stated purpose is pen-processor firmware update.
+   Path: `C:\Windows\System32\DriverStore\FileRepository\surfacetouchpenprocessorupdate.inf_amd64_2f7c805dc6a4f0fa\TouchPenProcessor0C19.dll`
+
+2. **`surfacevirtualfunctionenum.inf` → `SurfaceVirtualFunctionEnum.sys`** — `Class=HIDClass`,
+   handles `HID\MSHW0231&COL04` ("Virtual Function Enum Device"). Real kernel driver, exact
+   hardware-ID match.
+   Path: `C:\Windows\System32\DriverStore\FileRepository\surfacevirtualfunctionenum.inf_amd64_666fa342ae6ad765\SurfaceVirtualFunctionEnum.sys`
+
+**Next step (given to the user, not yet done)**: copy both files off Windows and decompile
+them the same way as `hidspi.sys`/`amdspi.sys`.
+
 ---
 
 ## 14. References

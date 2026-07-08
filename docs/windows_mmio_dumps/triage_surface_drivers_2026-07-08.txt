@@ -1,0 +1,410 @@
+==================================================================
+PACKAGE: surfacebattery.inf
+  DriverStore dir: surfacebattery.inf_amd64_1028dadb684c3ca6
+  Class=Battery
+  ClassGuid={72631e54-78a4-11d0-bcf7-00aa00b7b32a}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfaceBattery.sys
+
+==================================================================
+PACKAGE: surfacebutton.inf
+  DriverStore dir: surfacebutton.inf_amd64_27cfe56af94da210
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    %SurfaceButton.DeviceDesc%=SurfaceButton_Device, ACPI\MSHW0028
+    %SurfaceButton.DeviceDesc%=SurfaceButton_Device, ACPI\MSHW0040
+  Binaries in package: SurfaceButton.sys
+
+==================================================================
+PACKAGE: surfacecfuoverhid.inf
+  DriverStore dir: surfacecfuoverhid.inf_amd64_d7e0945c170fabd4
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfaceCFUOverHid.dll
+
+==================================================================
+PACKAGE: surfacedock2fwupdate.inf
+  DriverStore dir: surfacedock2fwupdate.inf_amd64_50f3c8f297f422d4
+  Class = Extension
+  ClassGuid = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacehidfriendlynames.inf
+  DriverStore dir: surfacehidfriendlynames.inf_amd64_171a255a8d97f94f
+  Class=Extension
+  ClassGuid={e2f84ce7-8efa-411c-aa69-97454ca4cb57} 
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacehidminidriver.inf
+  DriverStore dir: surfacehidminidriver.inf_amd64_9d11d7611c0502db
+  Class=HIDClass
+  ClassGuid={745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+  Hardware-ID / bus lines:
+    %SurfaceHidMini%=SurfaceHidMini.Inst, ACPI\MSHW0096                                                         ; Sam - Keyboard Category - Legacy
+  Binaries in package: SurfaceHidMiniDriver.sys
+
+==================================================================
+PACKAGE: surfacehotplug.inf
+  DriverStore dir: surfacehotplug.inf_amd64_6663c41ad8659601
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    %SurfaceHotPlug.DeviceDescKIP%=SurfaceHotPlug_Device, ACPI\MSHW0153                                                            ; Kip Device
+  Binaries in package: SurfaceHotPlug.sys
+
+==================================================================
+PACKAGE: surfaceintegrationdriver.inf
+  DriverStore dir: surfaceintegrationdriver.inf_amd64_025953784b1585f5
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    %SurfaceIntegrationDriver.DeviceDesc%=SurfaceIntegrationDriver_Device_19H2, ACPI\MSHW0110
+    %SurfaceIntegrationDriver.DeviceDesc%=SurfaceIntegrationDriver_Device, ACPI\MSHW0110
+  Binaries in package: SurfaceIntegrationDriver.sys
+
+==================================================================
+PACKAGE: surfacekip.inf
+  DriverStore dir: surfacekip.inf_amd64_2a142500a9bfc78d
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacelightsensor.inf
+  DriverStore dir: surfacelightsensor.inf_amd64_2e1054954bf6a237
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    %SurfaceLightSensor%=SurfaceLightSensor.Inst, ACPI\MSHW0184
+  Binaries in package: SurfaceLightSensor.sys
+
+==================================================================
+PACKAGE: surfacepd.inf
+  DriverStore dir: surfacepd.inf_amd64_418e7c44be2f2fa2
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacepen0953cfuoverblelcextnpackage.inf
+  DriverStore dir: surfacepen0953cfuoverblelcextnpackage.inf_amd64_66b59e046a6a640b
+  Class = Extension
+  ClassGuid = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacepen0953firmwareupdate.inf
+  DriverStore dir: surfacepen0953firmwareupdate.inf_amd64_a67fa51100bbe487
+  Class = Extension
+  ClassGuid = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacepen217fwupdate.inf
+  DriverStore dir: surfacepen217fwupdate.inf_amd64_a58351917e1f68c4
+  Class=System
+  ClassGUID={4d36e97d-e325-11ce-bfc1-08002be10318}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfacePen217FwUpdate.dll
+
+==================================================================
+PACKAGE: surfacepen217integration.inf
+  DriverStore dir: surfacepen217integration.inf_amd64_a1b7214a80a85570
+  Class=HIDClass
+  ClassGuid={745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfacePen217Integration.sys
+
+==================================================================
+PACKAGE: surfacepenblelcaddradaptationdriver.inf
+  DriverStore dir: surfacepenblelcaddradaptationdriver.inf_amd64_b7510067685a29a5
+  Class=HIDClass
+  ClassGUID={745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfacePenBleLcAddrAdaptationDriver.sys
+
+==================================================================
+PACKAGE: surfacepencfuoverblelc.inf
+  DriverStore dir: surfacepencfuoverblelc.inf_amd64_fd6ddc8aadcd3cfe
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfacePenCfuOverBleLc.dll
+
+==================================================================
+PACKAGE: surfacepowertrackercore.inf
+  DriverStore dir: surfacepowertrackercore.inf_amd64_67dd5d449d73f2d7
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfacePowerTrackerCore.sys
+
+==================================================================
+PACKAGE: surfacesam.inf
+  DriverStore dir: surfacesam.inf_amd64_0eaf9c0307874042
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfaceserialhubdriver.inf
+  DriverStore dir: surfaceserialhubdriver.inf_amd64_3ce61918f28f6bdc
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    %SurfaceSerialHubDriver.DeviceDesc%=SurfaceSerialHubDriver_Device, ACPI\MSHW0084
+  Binaries in package: SurfaceSerialHubDriver.sys
+
+==================================================================
+PACKAGE: surfaceservicenulldriver.inf
+  DriverStore dir: surfaceservicenulldriver.inf_amd64_86cbe4f3673ea99e
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    %DeviceName%=SurfaceIntegrationServiceDriver, ACPI\MSHW0094
+  Binaries in package: SurfaceBtleLcPenTelemetry.dll, SurfaceDriversTelemetryConsentSettings.dll, SurfaceServiceSensors.dll
+
+==================================================================
+PACKAGE: surfacesmf.inf
+  DriverStore dir: surfacesmf.inf_amd64_c844a85045a9924a
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacesmfclient.inf
+  DriverStore dir: surfacesmfclient.inf_amd64_1a2e12cf5c9b5b35
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    %SurfaceTmpSensor%=SurfaceSmfClient.Inst,  ACPI\VEN_MSHW&DEV_0188
+  Binaries in package: SurfaceSmfClient.sys
+
+==================================================================
+PACKAGE: surfacesmfdisplayclient.inf
+  DriverStore dir: surfacesmfdisplayclient.inf_amd64_a3bd5dcd17bf04fa
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfaceSmfDisplayClient.sys
+
+==================================================================
+PACKAGE: surfacesmf_13in.inf
+  DriverStore dir: surfacesmf_13in.inf_amd64_c8612bd47e13afaf
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacestoragefwupdate.inf
+  DriverStore dir: surfacestoragefwupdate.inf_amd64_b15422fa9cc15976
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  Hardware-ID / bus lines:
+    %SurfaceStorageFwUpdate.DeviceDesc%=SurfaceStorageFwUpdate_Device, ACPI\MSHW0051
+  Binaries in package: SurfaceStorageFwUpdate.sys
+
+==================================================================
+PACKAGE: surfacesystemmanagementframeworkdriver.inf
+  DriverStore dir: surfacesystemmanagementframeworkdriver.inf_amd64_90148da077105512
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfaceSystemManagementFrameworkDriver.sys
+
+==================================================================
+PACKAGE: surfacesystemtelemetrydriver.inf
+  DriverStore dir: surfacesystemtelemetrydriver.inf_amd64_039e6d3c808fc7b3
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    ; Load on ACPI node MSHW0213 or be loaded by SID dynamically
+    %SurfaceSystemTelemetry%=SurfaceSystemTelemetry.Inst, ACPI\MSHW0213
+  Binaries in package: SurfaceSystemTelemetryDriver.sys
+
+==================================================================
+PACKAGE: surfacetcon13.inf
+  DriverStore dir: surfacetcon13.inf_amd64_7c6e9990dfa94fbb
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacetcon13b.inf
+  DriverStore dir: surfacetcon13b.inf_amd64_c73c61e2c1105e8a
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacetcon13c.inf
+  DriverStore dir: surfacetcon13c.inf_amd64_4ea751cb084b1620
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacetcon13d.inf
+  DriverStore dir: surfacetcon13d.inf_amd64_7a21c15ecafab734
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacetcon15.inf
+  DriverStore dir: surfacetcon15.inf_amd64_fef894b3cb9651fc
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacetcon15b.inf
+  DriverStore dir: surfacetcon15b.inf_amd64_111284cf01a906ba
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacetcondriver.inf
+  DriverStore dir: surfacetcondriver.inf_amd64_6bb7c632ccfe811f
+  Class=HIDClass
+  ClassGuid={745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+  Hardware-ID / bus lines:
+    SurfaceTconMSHW0124.bin = 1
+    SurfaceTconMSHW0125.bin = 1
+    %SurfaceTconDriver.DeviceDesc% = SurfaceTconDriver_Install_0124, ACPI\MSHW0124
+    %SurfaceTconDriver.DeviceDesc% = SurfaceTconDriver_Install_0125, ACPI\MSHW0125
+    SurfaceTconMSHW0124.bin
+    SurfaceTconMSHW0125.bin
+  Binaries in package: SurfaceTconDriver.sys
+
+==================================================================
+PACKAGE: surfacethermalpolicy.inf
+  DriverStore dir: surfacethermalpolicy.inf_amd64_3233ca9ac635aec2
+  Class=System
+  ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+  Hardware-ID / bus lines:
+    %SurfaceThermalPolicy%=SurfaceThermalPolicy.Inst, ACPI\MSHW0187
+  Binaries in package: SurfaceThermalPolicy.sys
+
+==================================================================
+PACKAGE: surfacethunderbolt4dockfwupdate.inf
+  DriverStore dir: surfacethunderbolt4dockfwupdate.inf_amd64_b7a8d33ea057063b
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacetimealarmacpifilter.inf
+  DriverStore dir: surfacetimealarmacpifilter.inf_amd64_1ae9d0e2039a57b6
+  Class       = Extension
+  ClassGuid   = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+  Hardware-ID / bus lines:
+    %ACPI000E.DeviceDesc% = Extension_Install,ACPI\VEN_ACPI&DEV_000E&SUBSYS_MSHW0214
+  Binaries in package: SurfaceTimeAlarmAcpiFilter.sys
+
+==================================================================
+PACKAGE: surfacetouchfw.inf
+  DriverStore dir: surfacetouchfw.inf_amd64_49d9166ce7393f77
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacetouchpenprocessorupdate.inf
+  DriverStore dir: surfacetouchpenprocessorupdate.inf_amd64_2f7c805dc6a4f0fa
+  Class = Extension
+  ClassGuid = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+  Hardware-ID / bus lines:
+    %SurfaceTouchPenProcessorUpdate.DeviceDesc%=SurfaceTouchPenProcessorUpdate, HID\MSHW0231&Col02
+  Binaries in package: TouchPenProcessor0C19.dll
+
+==================================================================
+PACKAGE: surfacetrackpad.inf
+  DriverStore dir: surfacetrackpad.inf_amd64_ed820ba23ceb8c00
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfaceucmucsihidclient.inf
+  DriverStore dir: surfaceucmucsihidclient.inf_amd64_cdfab76487704d11
+  Class = UCM
+  ClassGuid = {e6f1aa1c-7f3b-4473-b2e8-c97d8ac71d53}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfaceUcmUcsiHidClient.sys
+
+==================================================================
+PACKAGE: surfaceuefi.inf
+  DriverStore dir: surfaceuefi.inf_amd64_cb647957f4dd5da8
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfaceusb4dockfwupdate.inf
+  DriverStore dir: surfaceusb4dockfwupdate.inf_amd64_a585cc68866c0042
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfacevirtualfunctionenum.inf
+  DriverStore dir: surfacevirtualfunctionenum.inf_amd64_666fa342ae6ad765
+  Class=HIDClass
+  ClassGuid={745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: SurfaceVirtualFunctionEnum.sys
+
+==================================================================
+PACKAGE: surface_tpm.inf
+  DriverStore dir: surface_tpm.inf_amd64_7ed7e6bfee948c7c
+  Class=Firmware
+  ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: NONE (AddReg/co-installer package only)
+
+==================================================================
+PACKAGE: surfaceoempanel.inf
+  DriverStore dir: surfaceoempanel.inf_amd64_9a627d8b0b8cbddd
+  Class=Monitor
+  ClassGuid={4d36e96e-e325-11ce-bfc1-08002be10318}
+  (no MSHW/ACPI/PNP0/SPB/GPIO lines found)
+  Binaries in package: ColorCalibrationComputation.dll, SurfaceOemPanel.dll
+
+==================================================================
+PACKAGE: surfacepowermeter.inf
+  DriverStore dir: surfacepowermeter.inf_amd64_10e6b047e7ca4cb8
+  Class=Sensor
+  ClassGuid={5175d334-c371-4806-b3ba-71fd53c9258d}
+  Hardware-ID / bus lines:
+    HKR,DeviceSettings,BusType,0x00010001,1 ; BusTypeSpb
+  Binaries in package: SurfacePowerMeter.sys
+
+==================================================================
+DONE. Look for: Class != Extension AND has a .sys/.dll AND mentions
+MSHW0231/SPB/GPIO -- those are the only candidates worth decompiling.
