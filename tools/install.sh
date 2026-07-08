@@ -19,7 +19,7 @@ set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="sl4a-touch"
-PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "0.1.0-beta1")"
+PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0-beta1")"
 SRC_DEST="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 SERVICE_PATH="/etc/systemd/system/sl4a-touch.service"
 
