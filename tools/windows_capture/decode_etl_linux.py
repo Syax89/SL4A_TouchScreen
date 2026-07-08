@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Decodifica un ETL Windows SU LINUX (niente Windows/tracerpt).
-Estrae conteggi per provider e i payload grezzi (hex) dei provider di interesse
-per l'indagine touch MSHW0231. I byte grezzi bastano: il protocollo lo conosciamo.
+Decode a Windows ETL file ON LINUX (no Windows/tracerpt needed).
+Extracts per-provider counts and the raw (hex) payloads of the providers relevant
+to the MSHW0231 touch investigation. Raw bytes are enough: we already know the protocol.
 
 Setup:
     python3 -m venv etlvenv
     ./etlvenv/bin/pip install etl-parser construct
-Uso:
+Usage:
     ./etlvenv/bin/python decode_etl_linux.py touch_runtime.etl
     ./etlvenv/bin/python decode_etl_linux.py touch_runtime.etl --dump SurfaceSerialHub,SmfClient,ACPI-MethodTrace
 
-NB: la libreria etl-parser ha un bug (accede pid.data1 invece di pid.inner.data1);
-qui aggiriamo leggendo l'header grezzo, quindi non usiamo parse_etw().
+NB: the etl-parser library has a bug (accesses pid.data1 instead of pid.inner.data1);
+we work around it here by reading the raw header, so we don't use parse_etw().
 """
 import sys, argparse
 from collections import Counter, defaultdict
@@ -47,7 +47,7 @@ def fmt_guid(pid):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("etl")
-    ap.add_argument("--dump", default="", help="lista provider (nomi o guid) di cui stampare i payload hex")
+    ap.add_argument("--dump", default="", help="list of providers (names or GUIDs) whose hex payloads to print")
     args = ap.parse_args()
 
     data = open(args.etl, "rb").read()
@@ -86,7 +86,7 @@ def main():
         print("%6d  %s" % (c, k))
 
     for name, evs in payloads.items():
-        print("\n=== PAYLOADS: %s (%d eventi) ===" % (name, len(evs)))
+        print("\n=== PAYLOADS: %s (%d events) ===" % (name, len(evs)))
         for eid, ts, ud in evs:
             print("  eid=%-4d ts=%s len=%d  %s" % (eid, ts, len(ud), ud.hex()))
 

@@ -47,3 +47,4 @@ tools/diagnostics/**/modules.order
 tools/ghidra/project/
 tools/ghidra/*.gpr
 tools/ghidra/*.rep/
+__pycache__/

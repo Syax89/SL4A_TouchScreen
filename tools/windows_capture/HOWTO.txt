@@ -1,0 +1,115 @@
+================================================================
+  SL4A TOUCHSCREEN - WINDOWS LOG CAPTURE
+  What to do, step by step. Folder: Desktop\SL4A_capture\
+================================================================
+
+GOAL
+  Find out whether some Windows component other than the touch
+  driver itself (ACPI / power / Surface Aggregator "SAM") puts the
+  touchscreen into a receptive state before or during
+  initialization. The logs we already have (SPB+GPIO) do NOT show
+  this: this wider capture is needed, taken at BOOT (that's when
+  the touch initializes).
+
+
+------------------------------------------------
+STEP 1  -  Enumerate the providers (quick, NO reboot)
+------------------------------------------------
+  1. Open Command Prompt AS ADMINISTRATOR
+     (Start -> type cmd -> right-click -> "Run as administrator")
+
+  2. Paste these two commands:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       00_enumerate.cmd > providers.txt
+
+  3. Send me the file:  Desktop\SL4A_capture\providers.txt
+
+  >>> STOP HERE and send me providers.txt. <<<
+  I need it to put this machine's EXACT Surface/SAM GUIDs into the
+  profile before the real boot trace. Then I'll give you the go-ahead
+  for step 2.
+
+
+================================================================
+  UPDATE 2: found _SB.SPI1.HSPI._PS0/_PS3 guarded by a FLAG.
+  The disable/enable (capture_runtime.cmd) does call _PS0, but with
+  FLAG=0 -> the "no-op" branch (46us, nothing touched). A real _PS3
+  is needed first (a full sleep), so that _PS0 runs the REAL branch
+  (GPIO power-on + 300ms sleep). New method below — it's the most
+  important one right now.
+================================================================
+
+------------------------------------------------
+MOST IMPORTANT STEP RIGHT NOW  -  Capture SLEEP/RESUME (a real _PS3->_PS0)
+------------------------------------------------
+  Prompt AS ADMINISTRATOR:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       capture_sleep_resume.cmd
+
+  The script walks you through it: 1) Start->Power->Sleep (do NOT
+  close the lid, use the menu) 2) wait for the screen to turn off
+  3) wake it up 4) wait 15s 5) come back and press a key to stop
+  the capture.
+
+  Creates:  Desktop\SL4A_capture\touch_sleep_resume.etl
+  Copy it to Linux ( ~/Scrivania/SL4A_capture/ ). I'll decode it.
+
+
+------------------------------------------------
+STEP (already done once)  -  Capture RUNTIME (disable/enable)
+------------------------------------------------
+  Forces the touch to re-init (disable+enable the ACPI device) while
+  recording ACPI/SAM/Panel/SPB. Prompt AS ADMINISTRATOR:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       capture_runtime.cmd
+
+  Creates:  Desktop\SL4A_capture\touch_runtime.etl
+  Copy it to Linux (or send it to me). I'll decode it on Linux.
+  NOTE: the touch disappears for ~10s and comes back. If it doesn't
+  come back, a reboot restores it (no permanent damage).
+  ALREADY DONE ONCE: it confirmed that _PS0 does get called, but with
+  FLAG=0 (a no-op) -> the SLEEP/RESUME step above is needed for the
+  real branch.
+
+
+------------------------------------------------
+STEP 2 (old)  -  Boot trace  [only if the real cold-init is needed]
+------------------------------------------------
+  1. Command Prompt AS ADMINISTRATOR:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       wpr -boottrace -addboot touch_boot.wprp
+
+  2. Reboot:
+
+       shutdown /r /t 0
+
+  3. After rebooting, LOG IN and WAIT ~30 seconds (so the touch
+     finishes initializing), then open Command Prompt AS
+     ADMINISTRATOR again and paste:
+
+       wpr -boottrace -stopboot %SystemDrive%\touch_boot.etl
+
+  4. Export to text:
+
+       cd /d "%USERPROFILE%\Desktop\SL4A_capture"
+       02_export.cmd
+
+  5. Send me:  C:\touch_boot.csv   (and C:\touch_boot.etl too if you can)
+
+
+------------------------------------------------
+NOTES
+------------------------------------------------
+ - All commands must be run AS ADMINISTRATOR, otherwise wpr and
+   logman fail with "Access denied".
+ - If "wpr -boottrace -addboot" says a boot trace is already
+   active, cancel it with:   wpr -boottrace -cancelboot
+   and try again.
+ - The touch does NOT re-initialize via disable/enable in Device
+   Manager (that only triggers a resume). A real reboot is needed.
+ - Full details and explanation: README.md in this folder.
+================================================================

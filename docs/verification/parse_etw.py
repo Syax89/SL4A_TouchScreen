@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Parser riutilizzabile per dump CSV ETW (SPB-ClassExtension + GPIO-ClassExtension).
+"""Reusable parser for ETW CSV dumps (SPB-ClassExtension + GPIO-ClassExtension).
 
-Estrae le transazioni SPI (SpbCx) come oggetti Txn con TD (transfer descriptor)
-ToDevice/FromDevice e i byte esatti, piu' gli eventi GPIO interrupt interlacciati.
+Extracts SPI transactions (SpbCx) as Txn objects with their ToDevice/FromDevice
+TDs (transfer descriptors) and exact bytes, plus interleaved GPIO interrupt events.
 
-Uso:
+Usage:
   python3 parse_etw.py <file.csv> [--n N] [--all-writes] [--approvals] [--b0]
 """
 import csv, sys, re
@@ -23,12 +23,12 @@ class TD:
 class Txn:
     idx: int
     line_start: int
-    time_start: int      # Clock-Time della Start (1010)
-    time_complete: int   # Clock-Time IoComplete
+    time_start: int      # Clock-Time of Start (1010)
+    time_complete: int   # Clock-Time of IoComplete
     activity: str
     tds: list = field(default_factory=list)
     status: str = ""
-    info: str = ""       # user data della Start
+    info: str = ""       # user data from Start
 
     @property
     def kind(self):
@@ -49,7 +49,7 @@ class GpioEv:
     data: str
 
 def parse(path):
-    """Ritorna (txns, gpio_events) in ordine cronologico di apparizione."""
+    """Returns (txns, gpio_events) in chronological order of appearance."""
     txns = []
     gpio = []
     open_act = {}   # activity id -> Txn
@@ -63,8 +63,8 @@ def parse(path):
             if name == SPB:
                 typ = row[1].strip()
                 act = row[14].strip()
-                # Clock-Time e' la colonna 16 (0-based), ma righe con campi extra:
-                # il layout e' fisso fino a col 16; User Data da col 19 in poi.
+                # Clock-Time is column 16 (0-based), but rows have extra fields:
+                # the layout is fixed up to col 16; User Data starts at col 19.
                 t = int(row[16].strip())
                 ud = [c.strip() for c in row[19:]]
                 if typ == "Start":
@@ -109,7 +109,7 @@ def fmt_time(t, t0):
     return f"+{(t - t0)/10000.0:12.3f}ms"
 
 def dump_first(txns, gpio, n, t0):
-    """Stampa le prime n txn con gli eventi GPIO ISR interlacciati."""
+    """Prints the first n txns with the interleaved GPIO ISR events."""
     isr = [g for g in gpio if g.typ in ("InterruptInvokeDeviceIsrStart", "InterruptPinState")]
     events = [("TXN", t.time_start, t) for t in txns[:n]] + \
              [("GPIO", g.time, g) for g in isr if not txns or g.time <= txns[min(n, len(txns))-1].time_complete + 50000]
@@ -132,7 +132,7 @@ if __name__ == "__main__":
             n = int(sys.argv[i+1])
     txns, gpio = parse(path)
     t0 = txns[0].time_start if txns else 0
-    print(f"# {len(txns)} transazioni SPB, {len(gpio)} eventi GPIO")
+    print(f"# {len(txns)} SPB transactions, {len(gpio)} GPIO events")
 
     if "--b0" in sys.argv:
         from collections import Counter

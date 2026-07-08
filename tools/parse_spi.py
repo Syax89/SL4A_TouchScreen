@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Parser completo dei CSV ETW Windows per Surface Laptop 4 AMD (MSHW0231).
-Estrae: transazioni SPI byte-by-byte, timing, GPIO IRQ, e sequenze di init.
+Full parser for Windows ETW CSVs from the Surface Laptop 4 AMD (MSHW0231).
+Extracts: byte-by-byte SPI transactions, timing, GPIO IRQs, and init sequences.
 """
 import csv, re, os, sys
 from struct import unpack_from

@@ -1,8 +1,9 @@
 # HID-over-SPI Protocol — MSHW0231 Touchscreen
 
-> **ATTENZIONE**: Corretto 2026-07-06 sulla base dei report di verifica indipendenti.
-> Molte affermazioni precedenti (ACK, approval bytes, vendor init per touchscreen, TX+RX combinati)
-> sono state **smentite** dal decomp Windows e dall'analisi ETW. Vedi `docs/verification/`.
+> **WARNING**: Corrected 2026-07-06 based on independent verification reports.
+> Several earlier claims (ACK, approval bytes, vendor init for the touchscreen, combined
+> TX+RX) have been **disproven** by the Windows decompilation and ETW analysis. See
+> `docs/verification/`.
 
 ## Overview
 

@@ -1,7 +1,7 @@
 # amdspi.sys — Windows AMD SPI Driver (Decompiled)
 
-> **UPDATE 2026-07-06**: Corretto sulla base di `verification/amdspi-decomp-report.md`.
-> Le descrizioni errate delle funzioni e alcuni dettagli della sequenza sono stati fixati.
+> **UPDATE 2026-07-06**: Corrected based on `verification/amdspi-decomp-report.md`.
+> Incorrect function descriptions and some sequence details have been fixed.
 
 Windows driver for the AMD FCH SPI controller. Responsible for low-level SPI communication.
 

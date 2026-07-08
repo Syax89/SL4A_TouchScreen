@@ -2,9 +2,9 @@
 
 Extracted from `surface_boot_auto.csv` — ETW trace of a Windows boot on the Surface Laptop 4 AMD.
 
-> **UPDATE 2026-07-06**: Corretto sulla base di `verification/csv-verification-report.md`.
-> Il concetto di "ACK", l'auto-cambiamento di stato del device, gli "approval bytes"
-> come campi di protocollo e il vendor ID sbagliato sono stati fixati.
+> **UPDATE 2026-07-06**: Corrected based on `verification/csv-verification-report.md`.
+> The "ACK" concept, the device's own auto state-change, treating "approval bytes" as
+> protocol fields, and the wrong vendor ID have all been fixed.
 
 ## Summary Statistics
 

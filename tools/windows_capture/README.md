@@ -1,75 +1,80 @@
-# Windows capture kit — "chi mette il touchscreen in stato ricettivo?"
+# Windows capture kit — "what puts the touchscreen into a receptive state?"
 
-## Ipotesi da testare
-Il touchscreen MSHW0231 su Linux riceve una DESCREQ byte-perfect ma non risponde e resta
-in reset-loop perpetuo; su Windows risponde alla prima. La transazione SPI è stata replicata
-e falsificata come causa. Sospetto: **un componente Windows diverso da `hidspi.sys`**
-(ACPI power method, Surface Aggregator/SAM via Surface Serial Hub, gestione power/PnP) mette
-il device in stato ricettivo prima/durante l'init. I trace che abbiamo (`traces/*.csv`)
-catturano SOLO SPB + GPIO-interrupt + HIDCLASS → NON possono mostrare ACPI/SAM/power.
+## Hypothesis to test
+The MSHW0231 touchscreen on Linux receives a byte-perfect DESCREQ but doesn't respond and
+stays in a perpetual reset loop; on Windows it responds on the first try. The SPI transaction
+itself has been replicated and ruled out as the cause. Suspicion: **some Windows component
+other than `hidspi.sys`** (an ACPI power method, Surface Aggregator/SAM via the Surface
+Serial Hub, power/PnP management) puts the device into a receptive state before/during init.
+The traces we have (`traces/*.csv`) only capture SPB + GPIO-interrupt + HIDCLASS → they
+CANNOT show ACPI/SAM/power activity.
 
-## Cosa cattura questo kit (che i vecchi trace NON avevano)
-- **ACPI** (metodi power, _PS0/_INI/_RST, i 2 AcpiEventMethod visti prima dell'init touch)
-- **Kernel-Power** (transizioni Dx del device: chi porta il touch a D0 e quando)
-- **Kernel-PnP** (ordine di start dei device: cosa parte prima del touch)
-- **Surface/SAM** (richieste Surface Aggregator: se Windows manda un comando SAM per il touch)
+## What this kit captures (that the old traces did NOT)
+- **ACPI** (power methods, _PS0/_INI/_RST, the 2 `AcpiEventMethod`s seen before touch init)
+- **Kernel-Power** (the device's Dx transitions: who brings the touch to D0, and when)
+- **Kernel-PnP** (device start order: what starts before the touch)
+- **Surface/SAM** (Surface Aggregator requests: whether Windows sends a SAM command for the
+  touch)
 
-Il touch si inizializza a COLD BOOT (non basta disable/enable in Gestione Dispositivi, che
-fa solo un resume D2→D0). Perciò si usa un **boot trace**.
+The touch initializes at COLD BOOT (a disable/enable in Device Manager isn't enough — that
+only triggers a D2→D0 resume). So a **boot trace** is used.
 
-## Passi (da eseguire su Windows, prompt come Amministratore)
+## Steps (run on Windows, in an Administrator prompt)
 
-### 1. Trova i provider Surface/SAM esatti di questa macchina
+### 1. Find this machine's exact Surface/SAM providers
 ```
 00_enumerate.cmd > providers.txt
 ```
-Mandami `providers.txt`. Cerco i GUID Surface/Aggregator/ACPI e li aggiungo al profilo se
-mancano. (Il profilo include già ACPI/Power/PnP per nome.)
+Send me `providers.txt`. I'll look for the Surface/Aggregator/ACPI GUIDs and add them to the
+profile if they're missing. (The profile already includes ACPI/Power/PnP by name.)
 
-### 2. Avvia il boot trace, riavvia, ferma
+### 2. Start the boot trace, reboot, stop
 ```
 wpr -boottrace -addboot touch_boot.wprp
 shutdown /r /t 0
 ```
-Dopo il riavvio e il login, aspetta ~30 secondi (così il touch ha finito l'init), poi:
+After rebooting and logging in, wait ~30 seconds (so the touch has finished initializing),
+then:
 ```
 wpr -boottrace -stopboot %SystemDrive%\touch_boot.etl
 ```
 
-### 3. Esporta in testo e mandami il risultato
+### 3. Export to text and send me the result
 ```
 02_export.cmd
 ```
-Produce `touch_boot.csv` (+ eventuale `touch_boot.txt`). Mandami quello.
+Produces `touch_boot.csv` (+ possibly `touch_boot.txt`). Send me that.
 
-## Cosa cercherò nel log
-- Un evento SAM/Surface Serial Hub attorno al power-up del touch (TC/comando specifico).
-- Quale metodo ACPI sono i 2 `AcpiEventMethod` e se un _PS0/M009/M010 precede il primo
-  RESET_RSP.
-- L'ordine PnP: se un device companion/SAM parte e abilita qualcosa prima del touch.
-- Transizioni D0/Dx del touch e di eventuali device correlati.
+## What I'll look for in the log
+- A SAM/Surface Serial Hub event around the touch's power-up (a specific TC/command).
+- Which ACPI method the 2 `AcpiEventMethod`s are, and whether a _PS0/M009/M010 precedes the
+  first RESET_RSP.
+- PnP ordering: whether a companion/SAM device starts and enables something before the touch.
+- D0/Dx transitions of the touch and any related devices.
 
-## In parallelo (facoltativo, lato Linux)
-Se il tuo kernel ha gli eventi ftrace `ssam_*`, possiamo loggare cosa fa SAM su Linux e
-confrontarlo. Su questo boot non erano compilati; se ti interessa lo verifichiamo.
+## In parallel (optional, Linux side)
+If your kernel has the `ssam_*` ftrace events, we can log what SAM does on Linux and compare.
+They weren't compiled in on this boot; happy to check if you're interested.
 
 ---
 
-## AGGIORNAMENTO dopo providers.txt (07/2026)
+## UPDATE after providers.txt (07/2026)
 
-`providers.txt` ha rivelato l'architettura reale del touch su Windows e conferma il sospetto
-"un componente non-hidspi abilita il touch". Il profilo `touch_boot.wprp` ora usa i GUID VERI
-di questa macchina. Cosa cercare nel log:
+`providers.txt` revealed the real architecture of touch on Windows and confirms the
+suspicion that "some non-hidspi component enables the touch". The `touch_boot.wprp` profile
+now uses this machine's REAL GUIDs. What to look for in the log:
 
-- **`ACPI\MSHW0231\A` = "Surface Digitizer HidSpi Extn Package"** — NON e' hidspi.sys puro:
-  c'e' un **pacchetto di estensione vendor** del digitizer. E' il primo candidato a fare
-  l'init speciale che a noi manca.
-- Il touch e' HID multi-collezione: **COL01 "Touch Communications"** (canale di CONTROLLO,
-  distinto dal touch dati), COL06 "Touch Screen Device", + pen/digitizer/VHF enum.
-- **Surface Serial Hub (MSHW0084)** + **SMF Core/Client** + **SMF Display Client**: lo stack
-  SAM che potrebbe alimentare/abilitare il pannello prima del touch.
-- **"ACPI Driver Trace Provider"** (GUID DAB01D4D...) traccia l'esecuzione dei metodi ACPI —
-  cioe' potra' finalmente dirci COSA sono i 2 `AcpiEventMethod` visti prima dell'init touch.
+- **`ACPI\MSHW0231\A` = "Surface Digitizer HidSpi Extn Package"** — this is NOT plain
+  hidspi.sys: there's a **vendor extension package** for the digitizer. It's the prime
+  candidate for whatever special init we're missing.
+  (Later determined to be a registry-only cosmetic/power-management overlay, not a
+  separate binary — see `docs/GROUND_TRUTH.md` §15.13/§15.14.)
+- The touch is a multi-collection HID device: **COL01 "Touch Communications"** (a CONTROL
+  channel, distinct from touch data), COL06 "Touch Screen Device", + pen/digitizer/VHF enum.
+- **Surface Serial Hub (MSHW0084)** + **SMF Core/Client** + **SMF Display Client**: the SAM
+  stack that might power/enable the panel before the touch.
+- **"ACPI Driver Trace Provider"** (GUID DAB01D4D...) traces ACPI method execution — i.e. it
+  should finally tell us WHAT the 2 `AcpiEventMethod`s seen before touch init actually are.
 
-Il profilo cattura tutto questo + SPB/GPIO/HIDCLASS sulla stessa timeline, cosi' posso
-correlare "richiesta SAM / metodo ACPI  ->  primo RESET_RSP del touch".
+The profile captures all of this plus SPB/GPIO/HIDCLASS on the same timeline, so I can
+correlate "SAM request / ACPI method → the touch's first RESET_RSP".
