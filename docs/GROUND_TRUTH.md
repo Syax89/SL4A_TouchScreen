@@ -1011,7 +1011,10 @@ git-ignored staging folder for proprietary Microsoft binaries — never commit t
 Windows machine. Working recipe (the two gotchas that cost time: `-postScript foo.py`
 fails with "Ghidra was not started with PyGhidra" — this Ghidra build's headless mode
 does not support Python scripts, use a `.java` GhidraScript instead; and `-scriptPath`
-must be an **absolute** path, `.` silently fails to resolve):
+must be an **absolute** path, `.` silently fails to resolve; a third one found later:
+`-import` and `-postScript` in the **same** invocation can fail to find the script even
+with a correct absolute `-scriptPath` — split it into two calls, `-import` alone first,
+then a second call with `-process <file> -noanalysis -scriptPath ... -postScript ...`):
 
 ```
 /opt/ghidra/support/analyzeHeadless <project_dir> <project_name> \
@@ -1043,6 +1046,113 @@ strings). Combined with 15.14 (Extn Package = registry only), this closes the en
 "maybe some other Windows driver does the missing init" investigation with much higher
 confidence than before — there is no more Windows-side code left to check. The physical/
 electrical avenue (logic analyzer) or a live WinDbg capture remain the only paths forward.
+
+### 15.17 The BIOS/UEFI Reference Implementation: Found, Decompiled, One Register Ruled Out (2026-07-08)
+
+**Premise-flipping question from the user**: instead of "what does Windows do that Linux
+doesn't", ask "what does Linux do that Windows doesn't" — and, decisively, the user
+confirmed the touchscreen **works in the BIOS/UEFI setup screens** on this exact machine
+(personally tested). This matters enormously: UEFI DXE drivers are simple, synchronous,
+no-OS-stack code. If UEFI can drive this chip successfully, whatever sequence is required
+is achievable with plain SPI+GPIO register access — no Windows-specific magic, no complex
+driver stack. This reframes the whole investigation: the reset-loop is much more likely a
+*Linux-side* mistake/omission than a missing exotic Windows trick.
+
+**The UEFI driver is available and was decompiled — no Windows machine needed.** The
+Surface driver MSI the user had already downloaded
+(`~/Scaricati/SurfaceLaptop4_AMD_Win11_22631_26.040.2105.0.msi`) contains
+`SurfaceUpdate/surfaceuefi/Surface_UEFI_4.391.140.0.bin` — the full system UEFI firmware
+image. `7z` (the modern 7-Zip, `pacman -S 7zip`) understands the UEFI firmware-volume
+format natively (`Type = UEFIf`) and lists every embedded DXE module by name. Extracted:
+
+- **`MsTouchUnlockDxe.efi`** — despite the name, decompilation showed this handles
+  **factory/manufacturing-mode flash lock/unlock** (via `gMsCalibrationServicingProtocol`),
+  not the runtime communication handshake. In normal (customer) boot mode it just calls a
+  "lock touch flash" routine. Not the answer, but confirms the naming is about flash
+  write-protection, not protocol unlock.
+- **`SurfaceTouchHidDxe.efi`** — **this is the real one**, the UEFI equivalent of
+  `hidspi.sys`. Strings alone confirm it: `ResetTouchController`, `ExecuteSpiXfr`,
+  `HID_SPI_INPUT_REPORT_HEADER->InputReportLength is invalid`.
+- Also present but not yet examined: `AmdSpiHcProtocolDxe.efi` (UEFI equivalent of
+  `amdspi.sys`), `UspHidDxe.efi`, `BoardSpiBusDxe.efi`, `SpiConfigDxe.efi`. The touch
+  controller's own flashable firmware blob is also in the MSI, unrelated to this UEFI
+  image: `SurfaceUpdate/surfacetouchfw_13(or 15)/SurfaceTouchFw_5.0.132.139.bin` (not
+  examined — different CPU architecture inside the chip, out of scope for Ghidra/x86).
+
+**Decompiling `SurfaceTouchHidDxe.efi` (44 functions) confirms our own reverse-engineered
+protocol understanding is exactly correct, from independent ground truth**:
+
+- `FUN_0000218c`: polls `MMIO32(0xFED81654) & 0x10000 == 0` — **the exact same pin85/
+  PIN_STS register and bit** our own tools use, 1ms steps, up to 1000 tries. This is the
+  "wait for IRQ" primitive (no real interrupts in UEFI — plain polling, consistent with the
+  premise that nothing exotic is required).
+- `FUN_000020fc` sends a 10-byte buffer `{2,0,0,1, 0x42,0, 0,3,0,0}` — **byte-identical to
+  our DESCREQ** (`02 00 00 01 42 00 00 03 00 00`) — then waits for the pin again and reads
+  0x48 (72) bytes.
+- `FUN_00001ec4` builds the 9-byte `0x0B` read-approval TX (`0B 00 00 00 FF`) and parses the
+  header with the identical `(byte>>4)&0xf` type / `(u16>>4)*4` body-length formulas we
+  already had.
+- The actual SPI bus access goes through a generic **`EFI_SPI_IO_PROTOCOL`**-style
+  interface (`FUN_00003198` calls a vtable function at offset 0x28 of a located protocol,
+  matching the standard EDK2 `SpiIo->Transfer()` shape) — the CTRL0/FIFO/TRIGGER-level
+  detail lives inside `AmdSpiHcProtocolDxe.efi`, not this file. Not yet decompiled;
+  candidate for a follow-up if more is needed, but our SPI framing is already independently
+  proven byte-perfect against Windows ETW captures, so this is lower priority.
+
+**The one genuinely new thing found — raw MMIO the touch driver itself does, outside any
+protocol abstraction**: `FUN_00002010` (`ResetTouchController`, the actual retry loop) is:
+
+```c
+for (attempt = 0; attempt < 3; attempt++) {
+    MMIO32(0xFED8120C) |= 0x400000;              // SET bit22 -- never done anywhere in our stack
+    if (wait_for_pin85(~1000ms)) {
+        read 9B header (opcode 0x0B);
+        if (type == 3 /* RESET_RSP */) {
+            send DESCREQ (10B, byte-identical to ours);
+            if (ok) break;                        // success, bit22 left SET
+        }
+    }
+    MMIO32(0xFED8120C) &= ~0x400000;              // CLEAR bit22 on any failure
+    delay(300ms);
+    // retry
+}
+```
+
+`0xFED8120C` is a different register from the per-pin status register (`0xFED81654`) —
+somewhere in the AMD GPIO controller's "master control" region, never touched by
+`spi-hid-core.c`, `spi-amd.c`, or any diagnostic tool in this project before today
+(confirmed by grep across the whole repo). This is the most concrete, ground-truth-sourced
+(decompiled from code proven to work on this exact hardware, not guessed) candidate the
+project has produced.
+
+**Tested directly** (`tools/diagnostics/uefi_gpio_replay_test.c`): replicated the loop
+verbatim — set/clear bit22 exactly as above, around our own already-proven `do_read`/
+`do_write` SPI helpers, verified with the correct edge-synced methodology (`wait_edge_us`,
+not a blind `msleep`, learned the hard way in 15.9). Ran on real hardware, 3 attempts as in
+the original loop:
+
+```
+attempt 0: master SET=0x00c40000, pin85 edge caught, header type=3 (RESET_RSP),
+           DESCREQ sent, post-DESCREQ edge=-1us (none in 200ms), master CLEARED
+attempt 1: identical
+attempt 2: identical
+VERDICT: all 3 attempts failed — type=7 (DEVICE_DESC) never appeared.
+```
+
+**This specific register/bit is ruled out** — toggling it exactly as UEFI does, around an
+already-byte-perfect DESCREQ, produces the identical reset-loop pathology as every prior
+test. Falsified with a clean, direct, ground-truth-motivated experiment, not a guess.
+
+**Where this leaves the investigation**: the premise-flip (BIOS works ⇒ no Windows-only
+magic needed) still stands and remains the strongest reason to believe a software fix is
+possible in principle. The concrete next steps this opens, not yet done: (1) decompile
+`AmdSpiHcProtocolDxe.efi` for the actual register-level SPI controller setup UEFI uses
+(may reveal a controller configuration difference our SPI framing analysis hasn't caught,
+since UEFI's implementation is likely far simpler/less legacy-laden than `amdspi.sys`);
+(2) decompile `BoardSpiBusDxe.efi`/`SpiConfigDxe.efi` for any board-level SPI init (clock
+enables, power sequencing) done before the touch driver ever runs; (3) look for other
+raw-MMIO pokes in `SurfaceTouchHidDxe.efi` beyond the ones read so far (only ~15 of its 44
+functions have been read in detail).
 
 ---
 
