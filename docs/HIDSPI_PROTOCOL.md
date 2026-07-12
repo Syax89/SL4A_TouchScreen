@@ -1,188 +1,373 @@
-# HID-over-SPI Protocol — MSHW0231 Touchscreen
+# HID-over-SPI V0 Protocol — Complete Reference
 
-> **WARNING**: Corrected 2026-07-06 based on independent verification reports.
-> Several earlier claims (ACK, approval bytes, vendor init for the touchscreen, combined
-> TX+RX) have been **disproven** by the Windows decompilation and ETW analysis. See
-> `docs/verification/`.
+> The MSHW0231 touchscreen on Surface Laptop 4 (AMD) uses the **pre-release V0 path**,
+> not the public v1.0 spec. This document is the definitive technical reference,
+> verified against both live SPI traces and decompilation of the Windows driver stack
+> (`hidspi.sys`, `HidSpiCx.sys`, `amdspi.sys`).
 
-## Overview
+## Discovery — How the Driver Chooses V0
 
-The Surface Laptop 4 AMD touchscreen uses the V0 (pre-release) HID-over-SPI path,
-NOT the spec v1.0 HidSpiCx path. The device is on SPB connection 0x0B, handle `0x7F74AA5D37F8`.
-
-Two SPB devices exist in the system:
-- **Device A** (touchscreen): conn 0x0B, opcodes 0x0B (read) and 0x02 (write) only
-- **Device B** (companion chip): conn 0x18/0x19/0x1A, opcodes 0x00/0x70/0xB0/B1/0x28/0x22/0x24/0x25/0x26
-
-The touchscreen does NOT receive firmware uploads, activation commands (0x00/0x70),
-or any vendor-specific opcodes beyond 0x0B and 0x02.
-
-## HID Header Format (V0 path, "version 2" wire format)
+The Windows driver probes ACPI `_DSM` in a two-pass approach (from
+`AcpiHelper::GetHidSpiAcpiDefinition` at `hidspi.sys+0x11060`):
 
 ```
-Byte 0: [TYPE 7:4 | VERSION 3:0]
-        version = 2 (HID-over-SPI V0)
-        report type:
-           1 = DATA (runtime input reports)
-           3 = RESET_RSP
-           4 = COMMAND_RESP (e.g. SET_POWER ON response)
-           5 = GET_FEATURE_RESP
-           7 = DEVICE_DESC
-           8 = RPT_DESC
-        Type 0 does NOT exist (ValidateResponse bitmask 0x1B2 = {1,3,4,5,7,8})
-
-Byte 1-2: u16 LE, bits 3:0 reserved (must be 0), bits 15:4 = body length in units of 4
-Byte 3: 0x5A (marker, mandatory)
-
-Body length = ((u16 >> 4) * 4)
-Body starts with 3-byte prefix: [len16 = content+3 LE][ContentID]
+Pass 1: _DSM(rev=3, func=0) → returns 0x7F → take v1.0 (HidSpiCx) path
+Pass 2: _DSM(rev=1, func=0) → returns != 0  → take V0 (HidSpiDeviceV0) path
 ```
 
-### Examples
-
-```
-RESET_RSP:  32 10 00 5A    type=3, body_len = ((0x0100>>4))*4 = 4
-  Body: 03 00 00 00        (len16=3, ContentID=0, 1 pad byte)
-
-DEVICE_DESC: 72 80 00 5A    type=7, body_len = ((0x8000>>4))*4 = 32
-RPT_DESC:   82 B0 0E 5A    type=8, body_len = ((0xEB00>>4))*4 = 940
-```
-
-**IMPORTANT**: `03 00 00 00` is the **body of the Reset Response** (len16=3 = 0 content + 3 overhead),
-NOT a separate "ACK" report type. The two initial 0x0B reads are header+body of a single RESET_RSP
-input report.
+The MSHW0231 _DSM only responds to `Arg1 == 1`. `func=0` returns `0x03` (three functions),
+which is `!= 0`, so the driver selects **HidSpiDeviceV0**. This is correct — AMD/x86
+platform use `SPI_HID_SUPPORTED_VERSION = 0x0100`, and Maximilian Luz of linux-surface
+independently confirmed this on LKML for AMD-based devices.
 
 ---
 
-## SPI Commands (Device A — touchscreen only)
-
-### 0x0B — Read Approval
+## Input Header (4 bytes, "version 2" wire)
 
 ```
-TX: [0x0B] [ADDR_H] [ADDR_M] [ADDR_L] [0xFF] [dummy] [dummy] [dummy] [dummy]
-      opcode  └──── register address (24bit big-endian) ──┘
+Byte 0:  [report_type:4 | version:4]
+           version = 2 (SPI_HID_INPUT_HEADER_VERSION)
 
-9 bytes total. The device responds with the HID input report on MISO.
-Bytes 5-8 of TX are dummy/placeholder — the device does not read them.
-What appears at "byte7" in CSV traces is residual buffer data from a previous write, NOT a protocol field.
+Byte 1-2: u16, little-endian, with two distinct subfields:
+           bits[3:0]  = length_reserved (MUST be 0 — no fragment support)
+           bits[15:4] = length_in_units_of_4
+
+Byte 3:   0x5A (mandatory sync byte)
 ```
 
-Register addresses (for touchscreen):
-  0x000000: input register (used before descriptor parse, and stays 0x000000 on this device)
-  After descriptor parse: `wInputRegister` comes from device descriptor offset 8 (word)
+Body length on wire: `body_len = ((u16 >> 4) * 4)`
 
-### 0x02 — Output Report Write (DESCREQ, SET_POWER, etc.)
+**Report type table** (validated by `ValidateResponse` bitmask `0x1B2`):
 
-```
-TX: [0x02] [addr_H] [addr_M] [addr_L] [len16 LE] [ContentID] [pad...]
-      opcode  └── register address (24bit BE) ──┘
+| Type | Name | Wire | Description |
+|------|------|------|-------------|
+| 1 | DATA | | Runtime input reports (pre-computed touch coordinates or raw heatmap) |
+| 3 | RESET_RSP | `32 10 00 5A` | Device reset acknowledgment (4-byte body) |
+| 4 | COMMAND_RESP | | Response to SET_POWER or other commands |
+| 5 | GET_FEATURE_RESP | | Response to GET_FEATURE |
+| 7 | DEVICE_DESC | `72 80 00 5A` | 28-byte I2C-like device descriptor |
+| 8 | RPT_DESC | `82 B0 0E 5A` | HID report descriptor |
 
-10 bytes total (for DESCREQ).
-This is a TX-only write — RX_COUNT=0 in the write handler (0x54d0).
-The response arrives via a SEPARATE 0x0B read, triggered by a GPIO interrupt.
-```
+Type 0 does **not** exist. Type 2, 6, and values >8 are invalid on V0.
 
-DESCREQ (Device Descriptor Request): register 0x000001
-DESCREQ2 (Report Descriptor Request): register 0x000002
+**Concrete headers from live captures**:
+
+| Header (hex) | Decoded | Body Length |
+|-------------|---------|-------------|
+| `12 60 03 5A` | DATA type=1 | ((0x360>>4))*4 = 216 bytes |
+| `12 40 43 5A` | DATA type=1 | ((0x4340>>4))*4 = 4304 bytes (raw heatmap) |
+| `32 10 00 5A` | RESET_RSP type=3 | ((0x0100>>4))*4 = 4 bytes |
+| `72 80 00 5A` | DEVICE_DESC type=7 | ((0x8000>>4))*4 = 32 bytes |
+| `82 B0 0E 5A` | RPT_DESC type=8 | ((0xEB00>>4))*4 = 940 bytes |
 
 ---
 
-## Complete Touchscreen Boot Sequence
-
-### Phase 1: Reset Response (2 reads, ~200 µs)
+## Input Body (after header, 3-byte prefix)
 
 ```
-GPIO IRQ arrives (pin 0x15 in ETW, 0x55 in DSDT)
-├─ 0x0B read 9B → header: 32 10 00 5A (RESET_RSP type=3, body_len=4)
-├─ 0x0B read 9B → body:  03 00 00 00 (len16=3, ContentID=0)
-│  These are header+body of the SAME input report — NOT "RESET_RSP then ACK."
-│  No command is sent between them; the second read is the body drain.
-└─ The device does NOT change state on its own.
+Byte 0-1: total_len_16, little-endian
+          = content_length + sizeof(total_len_16) + sizeof(content_id)
+          = content_length + 3
+Byte 2:   content_id
 ```
 
-### Phase 2: Device Discovery (~200-2000 µs)
+**Examples**:
 
 ```
-├─ DESCREQ 0x02 TX 10B (register 0x000001) → write-only, RX_COUNT=0
-│  MISO during write shows FF×5 + 03 00 00 00 00 (not captured by driver)
-├─ GPIO IRQ (~58 µs after DESCREQ IoComplete)
-├─ 0x0B read 9B → header: 72 80 00 5A (DEVICE_DESC type=7)
-├─ 0x0B read 37B → device descriptor body (28 bytes of descriptor at body+3)
-│  vendor=0x045E (Microsoft), product=0x0C19, version=0x0100
-│  wInputRegister=0x0000, wOutputRegister=0x0003, wReportDescRegister=0x0002
-├─ DESCREQ2 0x02 TX 10B (register 0x000002) → MISO all zeros (device busy)
-├─ GPIO IRQ (~727 µs after DESCREQ2 IoComplete)
-├─ 0x0B read 9B → header: 82 B0 0E 5A (RPT_DESC type=8)
-├─ 0x0B read 945B → 936-byte HID report descriptor (at body+3)
-└─ ~962ms gap (driver internal processing)
+RESET_RSP body:    03 00 00 00   (total=3, content_id=0, 0 data bytes, 1 pad)
+DEVICE_DESC body:   1F 00 00 1C... (total=31=28+3, content_id=0, 28 descriptor bytes)
+RPT_DESC body:      AB 03 00 ...  (total=0x3AB=939=936+3, content_id=0, 936 descriptor bytes)
 ```
 
-### Phase 3: Runtime Operation
+The real payload starts at byte 3 of the body and is `total_len_16 - 3` bytes long.
+
+---
+
+## Output Header (6 bytes, for writes)
 
 ```
-├─ Periodic GPIO IRQ (every ~110ms for resync)
-├─ 0x0B read 9B → header: type=1 (DATA, not type=7!)
-├─ 0x0B read N bytes → HID input report data
-├─ SET_FEATURE/GET_FEATURE writes (opcode 0x02, register 0x0003)
-└─ Continuous loop with type=1 data reports
+Byte 0:   0x02  (SPI_HID_PROTOCOL_WRITE_OPCODE — the SPI opcode for write)
+Byte 1-3: output_register address, 24-bit big-endian
+Byte 4:   version=0x02 | (output_length & 0x0f) << 4
+Byte 5:   output_length >> 4
+```
+
+### The "V2 body" magic: `0x42`
+
+For DESCREQ-pattern writes (content_type=COMMAND with no payload beyond content_id),
+byte 4 is the constant `0x42`. This encodes:
+
+```
+0x42 = (4 << 4) | 2
+       └─ protocol_type=4 ─┘ └─ version=2
+```
+
+This is a V0-specific constant not present in v1.0. It appears in every DESCREQ, DESCREQ2,
+and `SET_POWER` command. The Windows decomp confirms it at two independent call sites
+(`ConfigureTransfer` and `ConfiguringDescriptorTransferEntry`):
+
+```asm
+mov word [r8+4], 0x42    ; V2 body: type=4<<4 | version=2
+```
+
+## Output Body (after header)
+
+The output body immediately follows the 6-byte header and uses the same 3-byte
+content prefix as the input body, but with a **content_type** field in place of content_id:
+
+```
+Byte 0-1: total_len_16, LE
+          = content_length + sizeof(total_len_16) + sizeof(content_type)
+          = content_length + 3
+Byte 2:   content_type  (not content_id — different semantics on output)
+Bytes 3+: content payload
+```
+
+### Content type codes (output direction)
+
+| Constant | Value | Used in |
+|----------|-------|---------|
+| `CONTENT_TYPE_COMMAND` | `0x00` | DESCREQ, DESCREQ2, SET_POWER |
+| `CONTENT_TYPE_SET_FEATURE` | `0x03` | SET_FEATURE writes |
+| `CONTENT_TYPE_GET_FEATURE` | `0x04` | GET_FEATURE writes |
+| `CONTENT_TYPE_OUTPUT_REPORT` | `0x05` | HID output reports |
+
+---
+
+## Complete Wire Frames — Canonical Examples
+
+### DESCREQ (10 bytes on wire, 11 in driver internal buffer)
+
+```
+Canonical (wire):        02 00 00 01 42 00 00 03 00 00
+Driver internal:         02 02 00 00 01 42 00 03 00 00 00  (11 bytes, doubled opcode)
+
+│  │       │  │  │  │  │_______│
+│  │       │  │  │  │     │
+│  │       │  │  │  │     └─ content_id=0 (COMMAND), pad
+│  │       │  │  │  └─ total_len_16 LE = 0x0003 = 3
+│  │       │  │  └─ 0x00 (pad/alignment)
+│  │       │  └─ 0x42 = V2 body magic
+│  │       └─ output_register = 0x000001 (big-endian)
+│  └─ 0x02 = write opcode (Doubled in driver: first 0x02 consumed by amd_spi_exec_segment)
+└─ SPI opcode
+```
+
+Register addresses:
+- **DESCREQ** → register `0x000001` (from ACPI `_DSM func=1`)
+- **DESCREQ2** → register `0x000002` (from device descriptor `wReportDescRegister`)
+
+**The doubled-opcode quirk**: The driver's DESCREQ byte sequence has an extra leading `0x02`.
+This byte is consumed/stripped by `amd_spi_exec_segment()` before the wire frame is assembled.
+The actual SPI transaction is always 10 bytes. Raw MMIO tools that bypass the segment executor
+must NOT include the doubled byte.
+
+### Read Approval (9 bytes)
+
+```
+TX: 0B 00 00 00 FF 00 00 00 00
+RX: [4-byte HID input header][variable body]
+    │  │       │  │
+    │  │       │  └─ dummy/placeholder (ignored by device)
+    │  │       └─ 0xFF = SPI_HID_READ_APPROVAL_CONSTANT
+    │  └─ register address = 0x000000 (input register)
+    └─ 0x0B = read-approval opcode
+```
+
+The input register is always `0x000000` for this device. Unlike v1.0, it does not change
+after descriptor parsing. The `wInputRegister` field in the device descriptor is `0x0000`.
+
+### GET_FEATURE (requesting id=4 from Windows trace)
+
+```
+02 00 00 03 42 00 04 03 00 06
+│           │  │  │  │  │     │
+│           │  │  │  │  │     └─ total_len_16=6, content_type=GET_FEATURE
+│           │  │  │  └─ pad
+│           │  └─ V2 body magic
+│           └─ output_register = 0x0003
+└─ write opcode
+```
+
+### SET_FEATURE (id=4, value=1, from Windows trace)
+
+```
+02 00 00 03 82 00 03 04 00 05 01 00 00 00
+│           │  │  │  │  │  │     │        │
+│           │  │  │  │  │  │     │        └─ pad
+│           │  │  │  │  │  │     └─ value = 0x01 (enable raw mode)
+│           │  │  │  │  │  └─ content_id = 4
+│           │  │  │  │  └─ total_len_16 = 5
+│           │  │  │  └─ content_type = SET_FEATURE (0x03)
+│           │  │  └─ 0x00
+│           │  └─ 0x82 = V2 body with length encoded: (8<<4)|2 = 0x82
+│           └─ output_register = 0x0003
+└─ write opcode
+```
+
+### SET_POWER (V0-specific, D0 = Active)
+
+```
+02 00 00 04 82 00 00 04 00 01 02 00 00 00
+│           │  │  │  │  │  │  │  │
+│           │  │  │  │  │  │  │  └─ pad
+│           │  │  │  │  │  │  └─ param = 0x02
+│           │  │  │  │  │  └─ SET_POWER = 0x01
+│           │  │  │  │  └─ content_id = 0
+│           │  │  │  └─ total_len_16 = 4
+│           │  │  └─ content_type = COMMAND
+│           │  └─ 0x82
+│           └─ command_register = 0x0004
+└─ write opcode
+```
+
+Power states: D0=0x01 (Active), D2=0x02 (Sleep), D3=0x03 (Off).
+
+---
+
+## Device Descriptor (28 bytes, I2C-like)
+
+The V0 descriptor layout is closer to I2C-HID than the v1.0 spec:
+
+| Offset | Size | Field | Value (MSHW0231) |
+|--------|------|-------|------------------|
+| 0 | u16 | Device Desc Length | 0x001F (31) |
+| 2 | u16 | HID Version (BCD) | 0x0100 |
+| 4 | u16 | Report Desc Length | 0x03A8 (936) |
+| 6 | u16 | Report Desc Register | 0x0002 |
+| 8 | u16 | Input Register | 0x0000 |
+| 10 | u16 | Max Input Length | 0x10C9 (4297) |
+| 12 | u16 | Output Register | 0x0003 |
+| 14 | u16 | Max Output Length | 0x0000 |
+| 16 | u16 | Command Register | 0x0004 |
+| 18 | u16 | Vendor ID | 0x045E (Microsoft) |
+| 20 | u16 | Product ID | 0x0C19 |
+| 22 | u16 | Version ID | 0x0100 |
+| 24 | u16 | Flags | (device-specific) |
+| 26 | 4B | Reserved | 0x00000000 |
+
+---
+
+## V0 State Machine (62 states, Windows `hidspi.sys`)
+
+The Windows V0 driver implements a 62-state SM with these key transitions:
+
+```
+STATE_resettingSync        → GPIO reset (300ms), then STATE_resetting
+STATE_resetting             → drains RESET_RSP (header+body via 0x0B read)
+STATE_resettingComplete     → returns success to caller
+STATE_writingDescriptor1    → sends DESCREQ @0x01 (10B write)
+STATE_readingDescriptor1Hdr → 0x0B read → header parse (expects type=7)
+STATE_readingDescriptor1Bdy → 0x0B read → body (28B device descriptor)
+STATE_descriptor1Complete   → validates descriptor, transitions to DESCREQ2
+STATE_writingDescriptor2    → sends DESCREQ2 @0x02
+STATE_readingDescriptor2Hdr → 0x0B read → header parse (expects type=8)
+STATE_readingDescriptor2Bdy → 0x0B read → body (936B report descriptor)
+STATE_descriptor2Complete   → creates HID device, enables runtime
+STATE_ready                 → forwarding input reports, monitoring GPIO
+STATE_middleOfReceive*      → handling re-synchronisation on RESET_RSP
+```
+
+On RESET_RSP during runtime: device signals error → driver **restarts from DESCREQ**,
+NOT from a full GPIO reset.
+
+### Comparison with v1.0 HidSpiCx SmFx
+
+| Aspect | V0 (62 states) | v1.0 (SmFx) |
+|--------|----------------|-------------|
+| Control | Direct MMIO to SPI controller | WDF/SpbCx abstraction |
+| GPIO | Raw GPIO pin toggle (300ms pulse) | Managed by ACPI power resource |
+| Timer | Per-state WDFTIMER | WDFREQUEST-level timeout |
+| Reset on error | Restart from DESCREQ | CheckingResetRetryCountEntry (3 retries) |
+| Feature timeout | None explicit in SM | 2000ms response timer per feature op |
+| Companion device | Ignored (conn 0x0B only) | Handled via SpbBusWrapper |
+
+---
+
+## GPIO Timing and IRQ Flow
+
+The device uses **pin 0x55** on the AMD GPIO controller (AMDI0031 in DSDT, labelled 0x15
+in ETW traces due to remapping). Every read is IRQ-gated:
+
+```
+1. Host sends DESCREQ/SET_FEATURE/write via TX-only SPI transaction (RX_COUNT=0)
+2. Device processes the write (58-727µs)
+3. Device asserts GPIO interrupt
+4. GPIO controller delivers IRQ to driver
+5. Driver sends 0x0B read approval (9 bytes TX)
+6. Device responds with HID input packet (4-byte header on MISO)
+7. Driver loops reading body if needed
+8. Normal IRQ path: header+body in same 0x0B read if body fits in transfer
+   (RESET_RSP with 4-byte body → single 9-byte read approval)
+```
+
+**Cold boot special case**: On very first power-on, a 14-byte vendor init command
+is sent to register `0x000004` before any DESCREQ:
+
+```
+02 00 00 04 82 00 00 04 00 01 02 0C EE 5B
+```
+
+Testing proved this is optional — the device initializes without it on warm boot.
+
+---
+
+## What Does NOT Apply (v1.0 spec features absent from V0)
+
+| v1.0 Feature | V0 Status |
+|-------------|-----------|
+| `_DSM rev=3 func=0` returning `0x7F` | Does not happen (returns `0x03` via rev=1) |
+| Fragment ID in header byte 1 | Not supported (low nibble reserved = 0) |
+| LFF (Last Fragment Flag) bit 14 | Not present |
+| Content ID in header | Not in header (in body prefix) |
+| Combined TX+RX transfers | TX-only writes (separate 0x0B for response) |
+| SpbCx framework (SpbBusWrapper) | Not used (direct MMIO) |
+| 24-byte device descriptor | 28-byte V0 descriptor |
+
+---
+
+## Implementation Reference
+
+The portable protocol codec is in `driver/spi-hid-protocol.h`:
+
+```c
+// Decode an input header (4 raw bytes → struct)
+spi_hid_protocol_decode_header(raw, &header);
+
+// Encode an output header (register + length → 6 raw bytes)
+spi_hid_protocol_encode_output_header(raw, output_register, output_length);
+
+// Find a valid input header in an RX buffer (scans for sync byte 0x5A)
+ssize_t pos = spi_hid_protocol_find_header(buf, len, protocol_version);
+
+// Validate an input header (returns 0 on success)
+spi_hid_protocol_validate_header(header, protocol_version);
+```
+
+Key constants:
+```c
+#define SPI_HID_PROTOCOL_VERSION          2     // "version 2" wire format
+#define SPI_HID_PROTOCOL_SYNC_BYTE        0x5A  // mandatory at header[3]
+#define SPI_HID_PROTOCOL_READ_OPCODE      0x0B  // GPIO-gated read approval
+#define SPI_HID_PROTOCOL_WRITE_OPCODE     0x02  // TX-only write
+#define SPI_HID_PROTOCOL_READ_APPROVAL    0xFF  // dummy byte in read approval
+#define SPI_HID_PROTOCOL_DEFAULT_INPUT    0x000000  // input register
+#define SPI_HID_PROTOCOL_INPUT_HEADER_LEN 4     // header size (always 4)
+#define SPI_HID_PROTOCOL_INPUT_BODY_PFX   3     // body prefix (len16+content_id)
+#define SPI_HID_PROTOCOL_OUTPUT_HEADER_LEN 6    // output header size
+#define SPI_HID_PROTOCOL_DESCREQ_LEN      10    // DESCREQ wire frame size
 ```
 
 ---
 
-## Windows Driver Architecture (HidSpiDeviceV0)
+## Sources
 
-The touchscreen uses the **V0 path** (HidSpiDeviceV0 class), NOT the Cx (HidSpiCx) path.
-Key functions from decomp:
-
-- `ValidateResponseHeader` @0x140008900: validates header byte3=0x5A, low nibble of u16 must be 0
-- `ValidateResponse` @0x140008454: accepts types {1,3,4,5,7,8} (bitmask 0x1B2)
-- `VerifyAndCompleteTransfer` @0x140008ba8: runtime handler, main case type==1 (data)
-- `SendingWriteToBusEntry` @0x140008180: TX-only write (single transfer, length=10)
-- `ReadingResponseHeaderEntry` @0x140007da0: sends read approval (5 bytes), 9-byte total transaction
-
-### Key differences from spec v1.0 (HidSpiCx)
-
-| Aspect | V0 (this device) | v1.0 (HidSpiCx) |
-|--------|------------------|------------------|
-| Device descriptor | 28 bytes (I2C-like layout) | 24 bytes |
-| Header byte 0 | type:4|version:4 | type:4|version:4 |
-| Header byte 1-2 | u16 (low nibble must be 0) | u16 bits 13:0 = length, bit14 = LFF |
-| Input register | From descriptor offset 8 | From ACPI _DSM |
-| Output register | From descriptor offset 12 | From ACPI _DSM |
-| Descriptor body prefix | 3 bytes [len16|ContentID] | 2 bytes [len16|ContentID] |
-| Write is | TX-only (RX_COUNT=0) | TX-only |
-| Read-after-write | Separate 0x0B, GPIO-gated | Separate read approval, GPIO-gated |
-
----
-
-## What is CONFIRMED CORRECT
-
-| Aspect | Status |
-|--------|--------|
-| Header body_len formula: `(u16>>4)*4` | CONFIRMED (decomp validates this) |
-| Header sync byte 0x5A at position 3 | CONFIRMED |
-| Read approval format: 0x0B + 24-bit BE addr + 0xFF | CONFIRMED |
-| DESCREQ 10-byte format: 0x02 + addr + len16 + ContentID + pad | CONFIRMED |
-| DESCREQ register 0x000001, DESCREQ2 register 0x000002 | CONFIRMED |
-| GPIO interrupt before every read | CONFIRMED |
-| GPIO interrupt after write before reading response | CONFIRMED |
-| ~962ms gap between descriptors and next activity | CONFIRMED |
-
----
-
-## What has been FALSIFIED
-
-| Previous Claim | Reality |
-|---------------|---------|
-| "type 0 = ACK/Ready" | Does not exist. 03 00 00 00 = RESET_RSP body |
-| "Device changes state on its own" | Header+body of same report |
-| "Approval bytes (APPR7/APPR8) as protocol fields" | Buffer echo artifact |
-| "input_register = 0x001000 after descriptor" | Stays 0x000000 on this device |
-| "TX+RX same opcode 0x02 combined" | TX-only write + separate 0x0B read |
-| "Runtime data type=7" | type=1 (DATA) |
-| "Vendor=0x03A8, Product=0x0002" | 0x045E, 0x0C19 (0x03A8 = report desc length 936) |
-| "Activation/FW phases for touchscreen" | Belong to companion device B |
-| "Sync bytes (0xFF) from device" | Host TX placeholder on MOSI during read approval |
-| "Byte1 [LEN_LOW][FRAGMENT_ID]" | Low nibble reserved, must be 0 |
-| "Approval bytes set by ConfigureTransfer" | Not protocol; buffer reuse artifact |
-
+- `windrivers/hidspi.sys` — V0 state machine, decompiled (62-state FSM, direct MMIO)
+- `windrivers/HidSpiCx.sys` — v1.0 reference (SmFx FSM, SpbCx bus wrapper)
+- `windrivers/amdspi.sys` — AMD FCH SPI controller driver, V2 hardware
+- `traces/surface_boot_auto.csv` — 2384-transaction ETW capture (warm boot)
+- `traces/surface_init.csv` — 513-transaction capture (cold boot + vendor init)
+- `traces/surface_touch.csv` — runtime touch data with raw heatmap frames
+- `driver/spi-hid-protocol.h` — portable codec (header decode/encode, validation, search)
+- `tests/protocol_test.c` — 9 suites / 75067 assertions verifying the codec
+- `windrivers/HidSpiProtocolSpec.pdf` — Microsoft HID-over-SPI v1.0 public spec

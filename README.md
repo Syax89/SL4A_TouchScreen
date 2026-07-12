@@ -3,15 +3,17 @@
 > Linux HID-over-SPI driver for the Microsoft Surface Laptop 4 (AMD) touchscreen
 
 [![Status](https://img.shields.io/badge/status-functional-brightgreen)](https://github.com/Syax89/SL4A_TouchScreen)
-[![Release](https://img.shields.io/badge/release-1.0.0--beta1-yellow)](VERSION)
+[![Release](https://img.shields.io/badge/release-1.0.0--beta2-yellow)](VERSION)
 [![Hardware](https://img.shields.io/badge/device-surface%20laptop%204%20amd-blue)](#hardware)
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%7C%20BSD--3-orange)](LICENSE)
 
 ---
 
-## Status: FUNCTIONAL — Single-touch working
+## Status: FUNCTIONAL — Single-touch + Pen working
 
-The driver successfully initializes the MSHW0231 touchscreen on the Surface Laptop 4 AMD. **Single-touch works** via standard HID mode (Report ID 0x40). The KDE/Wayland desktop recognizes touches correctly — tap, drag, and single-finger gestures all work.
+The driver successfully initializes the MSHW0231 touchscreen on the Surface Laptop 4 AMD.
+**Single-touch and pen work** via standard HID mode (Report IDs 0x40 and 0x01).
+KDE/Wayland recognizes touches correctly — tap, drag, and single-finger gestures all work.
 
 | Feature | Status |
 |---------|--------|
@@ -19,12 +21,31 @@ The driver successfully initializes the MSHW0231 touchscreen on the Surface Lapt
 | HID report descriptor (936 bytes, 98.5% wire-read + 14-byte targeted patch) | Complete |
 | Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
 | BTN_TOUCH (tap/lift detection) | **Working** |
-| Stylus/Pen (Report ID 1) | **Working** |
-| Multi-touch (2+ fingers) | Experimental — see below |
+| Stylus/Pen (Report ID 0x01) | **Working** |
+| Multi-touch (raw heatmap pipeline) | Experimental |
+| Grid-to-screen calibration | In progress |
 
-Multi-touch requires processing the raw capacitive heatmap frames (content_id=0x0C, ~4302 bytes) through blob detection. The Windows `TouchPenProcessor0C19.dll` handles this with DFT processing on dual-frequency antenna data. This is a complex computer-vision task (see [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) §D).
+Multi-touch requires switching the device into raw heatmap mode (`SET_FEATURE(id=4)`)
+and processing the raw capacitive frames (~4302 bytes, 288×14 antenna grid) through
+connected-component labeling (CCL) to extract blob centroids. The Windows
+`TouchPenProcessor0C19.dll` (9.7 MB) handles this with dual-frequency DFT processing,
+8-connectivity CCL, eigenvalue decomposition, and Kalman tracking — all now fully
+mapped via static analysis.
 
-An experimental `raw_mode=1` module param exists (default `0`, off) that sends `GET_FEATURE`/`SET_FEATURE` to switch the device into raw heatmap streaming and runs a connected-component blob detector to emit real multitouch events. The blob detection and slot-tracking logic is confirmed correct (verified live with `evtest`), but the `SET_FEATURE` handshake itself only succeeds intermittently for reasons not yet root-caused (a software watchdog retries automatically — same 2000ms-timeout/3-retry pattern Windows's own driver uses, discovered by decompiling it — but doesn't fix the underlying cause). Not recommended for daily use; standard mode (`raw_mode=0`, the default) is what's stable.
+**The CCL pipeline is functional end-to-end**: the driver streams raw heatmap frames,
+computes EMA-smoothed baselines (eliminating thermal drift false positives),
+extracts blobs via 8-connectivity union-find, debounces, assigns slots, computes
+centroids with eigenvalue orientation (±89°), and emits `ABS_MT_POSITION_X/Y` events.
+Verified live with `evtest` — up to 6 concurrent touchpoints detected.
+
+**Current limitations**:
+- The raw-mode handshake (`SET_FEATURE`) succeeds only on a fresh cold boot —
+  repeated power-cycles degrade the device state. A software watchdog matches
+  Windows's own 2000ms-timeout/3-retry behavior but cannot fix the underlying cause.
+- Grid-to-screen coordinate mapping is being calibrated. The sensor has 288×14
+  antenna cells covering ~100% screen width × ~86% screen height. Two-point
+  linear calibration is implemented (`calib_scale_*`, `calib_offset_*` params).
+- Standard mode (`raw_mode=N`, the default) is what's stable for daily use.
 
 ---
 
@@ -99,31 +120,20 @@ data stream stops.
 ## Protocol
 
 The device uses the **HidSpiDeviceV0** path (pre-release protocol), not the public v1.0 spec.
+For the complete reference with wire frames, state machine, and decomp-confirmed details,
+see **[docs/HIDSPI_PROTOCOL.md](docs/HIDSPI_PROTOCOL.md)**.
 
-### Wire format (V0 "version 2")
+Key differences from spec v1.0:
 
-```
-Header: [TYPE:4|VERSION:4] [u16 LE report_length] [0x5A]
-        version = 2
-Body:   [content_length LE] [content_id] [payload...]
-```
-
-### Report types
-
-| Type | Name | Description |
-|------|------|-------------|
-| `1` | DATA | Runtime input reports |
-| `3` | RESET_RSP | Device reset signal |
-| `5` | GET_FEAT_RESP | Feature report response |
-| `7` | DEVICE_DESC | 28-byte device descriptor |
-| `8` | RPT_DESC | 936-byte HID report descriptor |
-
-### Active report IDs (standard HID mode)
-
-| Report ID | Usage | Fields |
-|-----------|-------|--------|
-| `0x40` (64) | TouchScreen | TipSwitch (1 bit), X (16-bit), Y (16-bit) |
-| `0x01` (1) | Pen/Stylus | InRange, TipSwitch, BarrelSwitch, Invert, Eraser, X, Y, TipPressure |
+| Aspect | V0 (MSHW0231) | v1.0 (HidSpiCx) |
+|--------|---------------|------------------|
+| Discovery | `_DSM rev=1 func=0` → `0x03` | `_DSM rev=3 func=0` → `0x7F` |
+| Device descriptor | 28 bytes (I2C-like layout) | 24 bytes |
+| Header v4 length | `((u16 >> 4) * 4)` units | bits[13:0] = length in bytes |
+| Fragment support | None (low nibble reserved = 0) | LFF bit in header |
+| Input register | From device descriptor offset 8 | From ACPI _DSM |
+| Write mechanism | TX-only (separate 0x0B read for response) | TX-only + separate read |
+| State machine | 62-state V0 FSM (direct MMIO) | SmFx FSM (SpbCx abstraction) |
 
 ---
 
@@ -136,10 +146,12 @@ sudo ./tools/install.sh
 ```
 
 This builds the driver via **DKMS**, so it's automatically rebuilt for every kernel you
-install afterward (no manual rebuild needed after a kernel update — a real concern for an
-out-of-tree module like this one), and installs a systemd service that loads it in the
-stable configuration (`raw_mode=0`, standard mode) on every boot. It's interactive the first
-time (asks for confirmation if it can't find the `MSHW0231` ACPI device) and safe to re-run.
+install afterward, and installs a systemd service that loads the driver in standard HID
+mode on every boot via `/etc/modprobe.d/spi-hid.conf` (`options spi_hid raw_mode=N`).
+
+**Multi-distro support** (auto-detected via `/etc/os-release`): Arch/CachyOS (pacman),
+Ubuntu/Debian (apt), Fedora (dnf), openSUSE (zypper). Missing dependencies are reported
+with distro-specific package names. Interactive on first run; safe to re-run.
 
 To remove everything it installed:
 
@@ -244,13 +256,15 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 
 | Tool | Path | Description |
 |------|------|-------------|
-| `install.sh` | `tools/install.sh` | **Beta installer** — builds via DKMS, installs the systemd auto-load service |
+| `install.sh` | `tools/install.sh` | **Multi-distro installer** (Arch/Debian/Fedora/openSUSE) — DKMS build + systemd service |
 | `uninstall.sh` | `tools/uninstall.sh` | Removes everything `install.sh` installed |
-| `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Developer loop: rebuild in-place and reload via `driver/sl4a-touch.service` (no DKMS) |
-| `cli_probe.py` | `tools/cli_probe.py` | Calibration CLI protocol probe against the touch controller |
+| `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Developer loop: rebuild in-place and reload (no DKMS) |
+| `calibrate.c` | `tools/calibrate.c` | 4-corner evdev calibration capture — builds binary `tools/calibrate` |
+| `cli_probe.py` | `tools/cli_probe.py` | Calibration CLI protocol probe (Report ID 0x1f) |
 | `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, GPIO) |
 | `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
-| `ghidra/` | `tools/ghidra/` | Headless decompilation scripts for TouchPenProcessor0C19.dll |
+| `ghidra/` | `tools/ghidra/` | Headless decompilation scripts for `TouchPenProcessor0C19.dll` |
+| `protocol_test` | `tests/protocol_test.c` | Portable V0 protocol codec test (9 suites, 75k assertions) |
 
 Windows-side capture utilities are in `tools/windows_capture/`.
 
@@ -298,9 +312,10 @@ Windows-side capture utilities are in `tools/windows_capture/`.
 
 ## Next Steps
 
-- **Multi-touch handshake reliability**: `raw_mode=1` (experimental, see `docs/NEXT_STEPS.md` §D) enables `SET_FEATURE`-based raw heatmap streaming with blob detection. The feature selector is firmware/device-state-specific: Windows traces use selector 4 while this Linux device has empirically streamed with selector 5. Do not scan selectors on a live device; the handshake can silence the controller and the underlying cause remains under investigation.
-- **Multi-touch coordinate mapping**: once connected, reverse-engineer the DFT antenna layout in `TouchPenProcessor0C19.dll` to correctly map blob centroids to screen coordinates
-- **Upstreaming**: split into proper Linux kernel patches (SPI controller + HID transport)
+- **Multi-touch handshake reliability**: `raw_mode=Y` (see `probe_raw_id`) sends `SET_FEATURE` to switch into raw heatmap streaming. The feature selector is device-state-specific (Windows uses `content_id=4`; confirmed working on first cold boot). The handshake degrades after repeated power-cycles; a watchdog retries automatically (2000ms timeout, 3 retries — matching Windows's own `CheckingResetRetryCountEntry` in `HidSpiCx.sys`) but cannot fix the underlying hardware state issue. **Workaround**: cold boot before raw-mode testing.
+- **Grid-to-screen calibration**: the driver computes blob centroids from the 288×14 heatmap grid and scales them to screen coordinates (0..32767). Calibration parameters (`calib_scale_x`, `calib_scale_y`, `calib_offset_x`, `calib_offset_y`) are extracted from `TouchPenProcessor0C19.dll` (X scale = `32767/287`, Y scale = 2730.78, derived from DLL's per-device context tables). The `tools/calibrate` utility supports empirical 4-corner capture. Resolution values match the HID descriptor (X=112 ppi, Y=198 ppi).
+- **Windows ETW trace**: capturing a fresh `TouchAndPen.Prod` trace on Windows would empirically confirm the `TouchBlobCoMX`/`TouchBlobCoMY` coordinate mapping, providing ground-truth calibration data without needing to fully reverse-engineer the DLL's DFT math.
+- **Upstreaming**: split into proper Linux kernel patches (SPI controller + HID transport).
 
 ---
 
