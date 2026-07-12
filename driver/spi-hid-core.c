@@ -63,7 +63,7 @@
 
 static int debug_level;
 static int probe_raw_id = 4;  /* Windows content_id for raw-mode handshake */
-static int getfeat_delay_ms = 5900;
+static int getfeat_delay_ms = 0;  /* 0=immediate, >0=delay before GET_FEATURE (Windows: 5900) */
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) dev_dbg(&(shid)->spi->dev, fmt, ##__VA_ARGS__); } while (0)
 
@@ -1266,14 +1266,18 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		goto out;
 	}
 
-	/* Don't interrupt an in-progress GET_FEATURE/SET_FEATURE handshake:
-	 * if we fire while state 5 is active, the device is likely mid-response
-	 * and a premature reset costs a retry for nothing. */
+	/* Don't interrupt an in-progress GET_FEATURE/SET_FEATURE handshake.
+	 * Defer up to 3 times (6 seconds total), then force retry. */
 	if (shid->seq_state == 5) {
-		seq_dbg(shid, 1, "SEQ: watchdog found state 5 active, deferring retry\n");
-		schedule_delayed_work(&shid->raw_handshake_watchdog,
-				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
-		goto out;
+		static int state5_defers;
+		state5_defers++;
+		seq_dbg(shid, 1, "SEQ: watchdog found state 5 active, defer #%d\n", state5_defers);
+		if (state5_defers <= 3) {
+			schedule_delayed_work(&shid->raw_handshake_watchdog,
+					      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+			goto out;
+		}
+		state5_defers = 0;
 	}
 	shid->raw_handshake_retries_left--;
 	dev_warn(dev, "SEQ: raw_mode handshake watchdog: no heatmap data after %dms, retrying (%d left)\n",
@@ -3514,11 +3518,19 @@ static int spi_hid_probe(struct spi_device *spi)
 		dev_info(dev, "GPIO dance: mask→reconf→clear done\n");
 	}
 
-	/* ACPI _INI already powered the device before probe() (GROUND_TRUTH §10.7).
-	 * Do NOT call _PS3/_PS0 or _RST — the device is already in D0 and
-	 * sending RESET_RSP. Windows's hidspi.sys never touches ACPI power
-	 * methods in probe; it just drains the RESET_RSP and starts DESCREQ.
-	 * Extra power cycles can degrade the device state. */
+	/* Force a clean electrical reset via ACPI _PS3 -> _PS0 power cycle.
+	 * The working cold boot (2026-07-12 session) had this — removing it
+	 * correlated with handshake failures. May be device-specific. */
+	{
+		acpi_handle h = ACPI_HANDLE(dev);
+		if (h) {
+			dev_info(dev, "SEQ: Power cycling device via ACPI _PS3 -> _PS0...\n");
+			acpi_evaluate_object(h, "_PS3", NULL, NULL);
+			msleep(50);
+			acpi_evaluate_object(h, "_PS0", NULL, NULL);
+			msleep(100);
+		}
+	}
 
 	shid->seq_enabled = true;
 	spi_hid_seq_set_state(shid, 0, SPI_HID_SEQ_PROBE);
@@ -3533,10 +3545,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	msleep(300);
 	shid->desc.input_register = 0x000000;
 
-	/* Windows vendor init: SET_POWER(D2→D0) before DESCREQ on every
-	 * cold boot / D3→D0 transition. The device goes straight to DATA
-	 * type=1 after this, skipping the normal DESCREQ flow. */
-	if (raw_mode) {
+	/* 2026-07-12: vendor init disabled — the working cold boot did not
+	 * have it. D2->D0 may confuse the controller after _PS3->_PS0. */
+	if (0 && raw_mode) {
 		dev_info(dev, "SEQ: sending vendor init (SET_POWER D2->D0)...\n");
 		spi_hid_vendor_init(shid);
 	}
