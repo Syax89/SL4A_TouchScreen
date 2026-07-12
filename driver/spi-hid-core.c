@@ -63,6 +63,7 @@
 
 static int debug_level;
 static int probe_raw_id;
+static int getfeat_delay_ms = 5900;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) dev_dbg(&(shid)->spi->dev, fmt, ##__VA_ARGS__); } while (0)
 
@@ -455,18 +456,28 @@ static const u8 seq_descreq[] = {
 /* Windows vendor init: SET_POWER (D2→D0) on command_register 0x0004.
  * Sent on every cold boot / D3→D0 transition before DESCREQ; the device
  * streams DATA type=1 immediately afterward (no DESCREQ needed).
- * Wire format: 02 00 00 04 82 00 00 04 00 01 02 0C EE 5B (D2).
- * We use the existing spi_hid_set_power() for transport-agnostic framing. */
+ * Wire format (from surface_init.csv TXN#267):
+ *   D2: 02 00 00 04 82 00 00 04 00 01 02 0C EE 5B
+ *   D0: 02 00 00 04 82 00 00 04 00 01 01 00 00 00
+ * Uses seq_write (doubled-opcode + V2 body magic 0x82), not spi_hid_set_power
+ * (which uses different internal opcode 0x08 encoding). */
 static int spi_hid_vendor_init(struct spi_hid *shid)
 {
+	static const u8 vd2[] = {
+		0x02, 0x02, 0x00, 0x00, 0x04, 0x82, 0x00,
+		0x00, 0x04, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00
+	};
+	static const u8 vd0[] = {
+		0x02, 0x02, 0x00, 0x00, 0x04, 0x82, 0x00,
+		0x00, 0x04, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00
+	};
 	int ret;
 
-	shid->desc.command_register = 0x0004;
-	ret = spi_hid_set_power(shid, 0x02); /* D2 = Sleep */
+	ret = spi_hid_seq_write(shid, vd2, sizeof(vd2), NULL, 0);
 	if (ret)
 		return ret;
 	msleep(100);
-	ret = spi_hid_set_power(shid, 0x01); /* D0 = Active */
+	ret = spi_hid_seq_write(shid, vd0, sizeof(vd0), NULL, 0);
 	msleep(100);
 	return ret;
 }
@@ -1256,16 +1267,22 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		 RAW_HANDSHAKE_TIMEOUT_MS, shid->raw_handshake_retries_left);
 	/* Windows-style recovery: SET_POWER(D2→D0) instead of _PS3→_PS0.
 	 * The D2→D0 cycle is a "soft" reset that doesn't cut physical power,
-	 * matching how Windows recovers from a failed feature handshake. */
-	{
-		spi_hid_vendor_init(shid);
-	}
+	 * matching how Windows recovers from a failed feature handshake.
+	 *
+	 * 2026-07-12: cancel any pending feat_delay_work (otherwise
+	 * feat_delay_work's 5900ms timer and our 2000ms watchdog timer race —
+	 * the watchdog always fires first, creating an infinite reset loop).
+	 * Re-arm the watchdog with a timeout longer than getfeat_delay_ms so
+	 * the next feat_delay_work always has time to fire before us. */
+	cancel_delayed_work(&shid->feat_delay_work);
+	shid->feat_delay_pending = false;
+	spi_hid_vendor_init(shid);
 	{
 		spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
 	}
 	spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_WATCHDOG);
 	schedule_delayed_work(&shid->raw_handshake_watchdog,
-			      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+			      msecs_to_jiffies(getfeat_delay_ms + RAW_HANDSHAKE_TIMEOUT_MS + 1000));
 out:
 	mutex_unlock(&shid->seq_lock);
 }
@@ -1280,7 +1297,6 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
 		0x00, 0x00, 0x03, 0x00, 0x06
 	};
-	struct device *dev = &shid->spi->dev;
 
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || !shid->feat_delay_pending)
@@ -1298,8 +1314,8 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		probe_raw_id);
 	spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0);
 	spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
-	schedule_delayed_work(&shid->raw_handshake_watchdog,
-			      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+	mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
+			 msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 out:
 	mutex_unlock(&shid->seq_lock);
 }
@@ -1504,7 +1520,6 @@ module_param(blob_max_distance, int, 0644);
 MODULE_PARM_DESC(blob_max_distance, "Max grid distance for slot re-assignment");
 
 /* ── Raw-mode handshake timing (EXPERIMENTAL) ───────────────────── */
-static int getfeat_delay_ms = 5900;  /* Windows idle gap: 0 = immediate, 5900 = match Windows */
 module_param(getfeat_delay_ms, int, 0644);
 MODULE_PARM_DESC(getfeat_delay_ms,
 	"Delay in ms between RPT_DESC and GET_FEATURE (0=immediate, Windows uses ~5900)");
