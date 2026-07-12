@@ -1528,7 +1528,7 @@ MODULE_PARM_DESC(getfeat_delay_ms,
  * RPT_DESC->GET_FEATURE gap.
  */
 
-static int stream_watchdog_ms = 2000;
+static int stream_watchdog_ms = 0;  /* disabled by default, too aggressive for raw mode */
 module_param(stream_watchdog_ms, int, 0644);
 MODULE_PARM_DESC(stream_watchdog_ms,
 	"Runtime streaming watchdog interval in ms (0=disable, Windows uses 2000)");
