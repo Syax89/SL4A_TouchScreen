@@ -62,6 +62,7 @@
 #define SPI_HID_MAX_RESET_ATTEMPTS 3
 
 static int debug_level;
+static int probe_raw_id;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) dev_dbg(&(shid)->spi->dev, fmt, ##__VA_ARGS__); } while (0)
 
@@ -450,6 +451,25 @@ static const u8 seq_descreq[] = {
 	0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
 	0x00, 0x00, 0x03, 0x00, 0x00
 };
+
+/* Windows vendor init: SET_POWER (D2→D0) on command_register 0x0004.
+ * Sent on every cold boot / D3→D0 transition before DESCREQ; the device
+ * streams DATA type=1 immediately afterward (no DESCREQ needed).
+ * Wire format: 02 00 00 04 82 00 00 04 00 01 02 0C EE 5B (D2).
+ * We use the existing spi_hid_set_power() for transport-agnostic framing. */
+static int spi_hid_vendor_init(struct spi_hid *shid)
+{
+	int ret;
+
+	shid->desc.command_register = 0x0004;
+	ret = spi_hid_set_power(shid, 0x02); /* D2 = Sleep */
+	if (ret)
+		return ret;
+	msleep(100);
+	ret = spi_hid_set_power(shid, 0x01); /* D0 = Active */
+	msleep(100);
+	return ret;
+}
 
 static void spi_hid_error_work(struct work_struct *work)
 {
@@ -1234,24 +1254,50 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	shid->raw_handshake_retries_left--;
 	dev_warn(dev, "SEQ: raw_mode handshake watchdog: no heatmap data after %dms, retrying (%d left)\n",
 		 RAW_HANDSHAKE_TIMEOUT_MS, shid->raw_handshake_retries_left);
-	/* 2026-07-08 (found live): a plain DESCREQ resend isn't always enough —
-	 * some failures leave the device deaf even to DESCREQ, needing the same
-	 * ACPI _PS3 -> _PS0 electrical power-cycle spi_hid_probe() does (the
-	 * only other place currently able to "unstick" the device). Replicate
-	 * that here so a watchdog retry is as strong as a fresh module reload. */
+	/* Windows-style recovery: SET_POWER(D2→D0) instead of _PS3→_PS0.
+	 * The D2→D0 cycle is a "soft" reset that doesn't cut physical power,
+	 * matching how Windows recovers from a failed feature handshake. */
 	{
-		acpi_handle h = ACPI_HANDLE(dev);
-		if (h) {
-			acpi_evaluate_object(h, "_PS3", NULL, NULL);
-			msleep(50);
-			acpi_evaluate_object(h, "_PS0", NULL, NULL);
-			msleep(100);
-		}
+		spi_hid_vendor_init(shid);
 	}
 	{
 		spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
 	}
 	spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_WATCHDOG);
+	schedule_delayed_work(&shid->raw_handshake_watchdog,
+			      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+out:
+	mutex_unlock(&shid->seq_lock);
+}
+
+/* GET_FEATURE delayed work (Windows: ~5900ms gap between RPT_DESC and GET_FEATURE).
+ * The device needs this idle period to stabilise before accepting feature commands.
+ * Running as a delayed work avoids holding seq_lock across a long msleep. */
+static void spi_hid_feat_delay_work(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(work, struct spi_hid, feat_delay_work.work);
+	u8 gf[11] = {
+		0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
+		0x00, 0x00, 0x03, 0x00, 0x06
+	};
+	struct device *dev = &shid->spi->dev;
+
+	mutex_lock(&shid->seq_lock);
+	if (READ_ONCE(shid->removing) || !shid->feat_delay_pending)
+		goto out;
+	shid->feat_delay_pending = false;
+
+	if (shid->seq_state != 2) {
+		seq_dbg(shid, 1, "SEQ: feat_delay_work: state changed to %d, skipping\n",
+			shid->seq_state);
+		goto out;
+	}
+
+	gf[7] = probe_raw_id & 0xFF;
+	seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE(id=%d) after delay, state 5\n",
+		probe_raw_id);
+	spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0);
+	spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
 	schedule_delayed_work(&shid->raw_handshake_watchdog,
 			      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 out:
@@ -1458,7 +1504,7 @@ module_param(blob_max_distance, int, 0644);
 MODULE_PARM_DESC(blob_max_distance, "Max grid distance for slot re-assignment");
 
 /* ── Raw-mode handshake timing (EXPERIMENTAL) ───────────────────── */
-static int getfeat_delay_ms = 0;  /* 0 = immediate, >0 = ms delay before GET_FEATURE */
+static int getfeat_delay_ms = 5900;  /* Windows idle gap: 0 = immediate, 5900 = match Windows */
 module_param(getfeat_delay_ms, int, 0644);
 MODULE_PARM_DESC(getfeat_delay_ms,
 	"Delay in ms between RPT_DESC and GET_FEATURE (0=immediate, Windows uses ~5900)");
@@ -2590,23 +2636,29 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 					0x56, 0xBD, 0x0C, 0xEE, 0x5B, 0x44, 0x4C, 0x00, 0x00
 				};
 				if (getfeat_delay_ms > 0) {
-					seq_dbg(shid, 1, "SEQ: waiting %dms before vendor init (Windows: ~5900ms)...\n",
+					/* Defer vendor init path too — same delayed-work
+					 * pattern: waits the configured delay then sends
+					 * vendor-init + SET_FEATURE inline. */
+					seq_dbg(shid, 1, "SEQ: scheduling vendor init after %dms...\n",
 						getfeat_delay_ms);
-					msleep(getfeat_delay_ms);
+					shid->feat_delay_pending = true;
+					schedule_delayed_work(&shid->feat_delay_work,
+							      msecs_to_jiffies(getfeat_delay_ms));
+				} else {
+					seq_dbg(shid, 1, "SEQ: vendor init (18B, TXN#267) +70ms delay...\n");
+					usleep_range(68000, 72000);
+					spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0);
+					usleep_range(36000, 39000);
+					{
+						u8 sf[15] = {
+							0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
+							0x03, probe_raw_id & 0xFF, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
+						};
+						seq_dbg(shid, 1, "SEQ: probe_id=%d SET_FEATURE -> state 4\n", probe_raw_id);
+						spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0);
+					}
+					spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 				}
-				seq_dbg(shid, 1, "SEQ: vendor init (18B, TXN#267) +70ms delay...\n");
-				usleep_range(68000, 72000);
-				spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0);
-				usleep_range(36000, 39000);
-				{
-					u8 sf[15] = {
-						0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-						0x03, probe_raw_id & 0xFF, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
-					};
-					seq_dbg(shid, 1, "SEQ: probe_id=%d SET_FEATURE -> state 4\n", probe_raw_id);
-					spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0);
-				}
-				spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 			} else {
 				u8 gf[11] = {
 					0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
@@ -2614,15 +2666,19 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				};
 				usleep_range(1400, 1800);
 				if (getfeat_delay_ms > 0) {
-					seq_dbg(shid, 1, "SEQ: waiting %dms before GET_FEATURE (Windows: ~5900ms)...\n",
+					seq_dbg(shid, 1, "SEQ: scheduling GET_FEATURE after %dms delay (Windows: ~5900ms)...\n",
 						getfeat_delay_ms);
-					msleep(getfeat_delay_ms);
+					shid->feat_delay_pending = true;
+					schedule_delayed_work(&shid->feat_delay_work,
+							      msecs_to_jiffies(getfeat_delay_ms));
+					/* Stay in state 2 until the delayed work fires */
+				} else {
+					seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE(id=%d), state 5\n", probe_raw_id);
+					spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0);
+					spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
+					schedule_delayed_work(&shid->raw_handshake_watchdog,
+							      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 				}
-				seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE(id=%d), state 5\n", probe_raw_id);
-				spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0);
-				spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
-				schedule_delayed_work(&shid->raw_handshake_watchdog,
-						      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 			}
 		} else {
 			spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
@@ -3244,6 +3300,7 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 	cancel_delayed_work_sync(&shid->descreq_work);
 	cancel_delayed_work_sync(&shid->poll_work);
 	cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
+	cancel_delayed_work_sync(&shid->feat_delay_work);
 	cancel_delayed_work_sync(&shid->stream_watchdog);
 	cancel_work_sync(&shid->reset_work);
 	cancel_work_sync(&shid->create_device_work);
@@ -3362,6 +3419,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_WORK(&shid->error_work, spi_hid_error_work);
 	INIT_DELAYED_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
 	INIT_DELAYED_WORK(&shid->raw_handshake_watchdog, spi_hid_raw_handshake_watchdog);
+	INIT_DELAYED_WORK(&shid->feat_delay_work, spi_hid_feat_delay_work);
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 
@@ -3437,6 +3495,15 @@ static int spi_hid_probe(struct spi_device *spi)
 	 * device until reboot (verified 2026-07-07, see GROUND_TRUTH §10.7). */
 	msleep(300);
 	shid->desc.input_register = 0x000000;
+
+	/* Windows vendor init: SET_POWER(D2→D0) before DESCREQ on every
+	 * cold boot / D3→D0 transition. The device goes straight to DATA
+	 * type=1 after this, skipping the normal DESCREQ flow. */
+	if (raw_mode) {
+		dev_info(dev, "SEQ: sending vendor init (SET_POWER D2->D0)...\n");
+		spi_hid_vendor_init(shid);
+	}
+
 	dev_info(dev, "SEQ: device powered by ACPI _INI, arming IRQ\n");
 
 	/* Create multitouch input device for heatmap-to-touch pipeline.

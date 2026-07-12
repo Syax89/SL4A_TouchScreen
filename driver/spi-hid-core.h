@@ -355,6 +355,9 @@ struct spi_hid {
 	int raw_handshake_retries_left;
 	bool raw_handshake_confirmed;
 
+	struct delayed_work feat_delay_work;	/* GET_FEATURE delay (Windows: ~5900ms) */
+	bool feat_delay_pending;
+
 	struct delayed_work stream_watchdog;
 	u32 stream_watchdog_data;
 	u32 stream_watchdog_misses;
