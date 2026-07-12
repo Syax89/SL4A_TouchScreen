@@ -3486,17 +3486,11 @@ static int spi_hid_probe(struct spi_device *spi)
 		dev_info(dev, "GPIO dance: mask→reconf→clear done\n");
 	}
 
-	/* Force a clean electrical reset via ACPI _PS3 -> _PS0 power cycle */
-	{
-		acpi_handle h = ACPI_HANDLE(dev);
-		if (h) {
-			dev_info(dev, "SEQ: Power cycling device via ACPI _PS3 -> _PS0...\n");
-			acpi_evaluate_object(h, "_PS3", NULL, NULL);
-			msleep(50);
-			acpi_evaluate_object(h, "_PS0", NULL, NULL);
-			msleep(100);
-		}
-	}
+	/* ACPI _INI already powered the device before probe() (GROUND_TRUTH §10.7).
+	 * Do NOT call _PS3/_PS0 or _RST — the device is already in D0 and
+	 * sending RESET_RSP. Windows's hidspi.sys never touches ACPI power
+	 * methods in probe; it just drains the RESET_RSP and starts DESCREQ.
+	 * Extra power cycles can degrade the device state. */
 
 	shid->seq_enabled = true;
 	spi_hid_seq_set_state(shid, 0, SPI_HID_SEQ_PROBE);
