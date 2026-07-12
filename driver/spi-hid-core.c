@@ -62,7 +62,7 @@
 #define SPI_HID_MAX_RESET_ATTEMPTS 3
 
 static int debug_level;
-static int probe_raw_id;
+static int probe_raw_id = 4;  /* Windows content_id for raw-mode handshake */
 static int getfeat_delay_ms = 5900;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) dev_dbg(&(shid)->spi->dev, fmt, ##__VA_ARGS__); } while (0)
@@ -1258,8 +1258,21 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		goto out;
 
 	if (shid->raw_handshake_retries_left <= 0) {
-		dev_err(dev, "SEQ: raw_mode handshake failed after %d retries, giving up (docs/GROUND_TRUTH.md #18.7)\n",
+		dev_err(dev, "SEQ: raw_mode handshake failed after %d retries, giving up\n",
 			RAW_HANDSHAKE_MAX_RETRIES);
+		/* Don't leave the state machine bricked at state 1 —
+		 * fall back to state 4 so standard HID data still flows. */
+		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_WATCHDOG);
+		goto out;
+	}
+
+	/* Don't interrupt an in-progress GET_FEATURE/SET_FEATURE handshake:
+	 * if we fire while state 5 is active, the device is likely mid-response
+	 * and a premature reset costs a retry for nothing. */
+	if (shid->seq_state == 5) {
+		seq_dbg(shid, 1, "SEQ: watchdog found state 5 active, deferring retry\n");
+		schedule_delayed_work(&shid->raw_handshake_watchdog,
+				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 		goto out;
 	}
 	shid->raw_handshake_retries_left--;
@@ -1439,7 +1452,7 @@ module_param(skip_getfeat, bool, 0644);
 MODULE_PARM_DESC(skip_getfeat,
 	"Skip GET_FEATURE, send SET_FEATURE directly after RPT_DESC");
 
-static int probe_raw_id = 5;
+static int probe_raw_id;
 module_param(probe_raw_id, int, 0644);
 MODULE_PARM_DESC(probe_raw_id,
 	"EXPERIMENTAL: SET_FEATURE content_id, device/firmware-specific (default 5)");
@@ -2523,12 +2536,27 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 
 		shid->stat_reset_rsp++;
 		spi_hid_seq_read(shid, body, sizeof(body));
-		seq_dbg(shid, 3, "SEQ[state0-clean]: RESET_RSP body-drain=[%*ph], sending TX-ONLY DESCREQ\n",
+		seq_dbg(shid, 3, "SEQ[state0]: RESET_RSP body-drain=[%*ph], sending DESCREQ\n",
 			 20, body);
 		spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
-		seq_dbg(shid, 1, "SEQ[state0-clean]: TX-only DESCREQ sent, waiting for DEVICE_DESC IRQ\n");
+		seq_dbg(shid, 1, "SEQ[state0]: DESCREQ sent, waiting for DEVICE_DESC IRQ\n");
 		*expect_fast = true;
 		spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_RESET_RESPONSE);
+	} else if (type == 7) {
+		seq_dbg(shid, 1, "SEQ[state0]: DEVICE_DESC without RESET_RSP, handing to desc handler\n");
+		seq_handle_desc(shid, type, blen);
+	} else if (type == 8) {
+		seq_dbg(shid, 1, "SEQ[state0]: RPT_DESC without RESET_RSP, handing to rpt handler\n");
+		seq_handle_rpt(shid, type, blen);
+	} else {
+		seq_dbg(shid, 1, "SEQ[state0]: unexpected type=%d in state 0, forcing DESCREQ\n",
+			type);
+		{
+			u8 body_drain[64];
+			spi_hid_seq_read(shid, body_drain, sizeof(body_drain));
+		}
+		spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
+		spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_FALLBACK);
 	}
 }
 
