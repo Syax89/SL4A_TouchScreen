@@ -1,6 +1,6 @@
 @echo off
-REM Cattura RUNTIME affidabile (niente riavvio). Il wpr registra; TU generi
-REM l'attivita' da catturare con due gesti che funzionano di sicuro.
+REM Cattura runtime senza riavvio. Il profilo include Microsoft.Surface.TouchAndPen.Prod,
+REM che emette TouchBlobCoMX/Y: mantieni ciascun tocco fermo nel punto richiesto.
 REM Esegui COME AMMINISTRATORE.
 
 setlocal
@@ -18,17 +18,14 @@ echo.
 echo ============================================================
 echo  TRACE ATTIVO. Fai ORA queste cose (nell'ordine):
 echo.
-echo   1^) TRASCINA UN DITO sullo schermo touch per ~5 secondi
-echo      (serve a confermare che la cattura SPB funziona).
+echo   1^) Tocca e mantieni fermo un dito per ~2 secondi in ognuno di questi punti:
+echo      alto-sinistra, alto-centro, alto-destra,
+echo      centro-sinistra, centro, centro-destra,
+echo      basso-sinistra, basso-centro, basso-destra.
+echo      Lascia ~1 secondo tra un punto e il successivo.
 echo.
-echo   2^) Apri GESTIONE DISPOSITIVI (tasto Win+X -^> Gestione dispositivi).
-echo      In "Human Interface Device" / "Dispositivi interfaccia utente"
-echo      trova una voce tipo:
-echo         - "Surface Touch Screen Device"   oppure
-echo         - "Surface Digitizer HidSpi Extn Package"
-echo      Tasto destro -^> DISABILITA. Aspetta 3 secondi.
-echo      Tasto destro -^> ABILITA.
-echo      (Lo schermo touch smette e riparte: e' normale.)
+echo   2^) Ripeti la stessa griglia con due dita distanti, se possibile.
+echo      Non disabilitare/riabilitare il dispositivo: qui servono solo centroidi runtime.
 echo.
 echo   3^) Torna qui e premi un tasto per FERMARE la cattura.
 echo ============================================================

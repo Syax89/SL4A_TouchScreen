@@ -1,50 +1,35 @@
 # Build artifacts
-module/*.o
-module/*.ko
-module/*.mod
-module/*.mod.c
-module/*.mod.o
-module/*.cmd
-module/.module*
-module/.spi*
-module/.trace*
-module/Module.symvers
-module/modules.order
-module/*.tmp
-module/*.bak
-
-# Large trace files (raw ETW)
-*.etl
-*.bin
-
-# Build artifacts (driver/)
 driver/*.o
 driver/*.ko
 driver/*.mod
 driver/*.mod.c
 driver/*.mod.o
+driver/*.mod.*
 driver/*.cmd
 driver/.*.cmd
 driver/.module*
 driver/Module.symvers
 driver/modules.order
+driver/..module*
 
-# Build artifacts (tools/diagnostics/ and tools/diagnostics/archive/ — many
-# one-off kernel modules; ** so it also matches the archive/ subdirectory)
-tools/diagnostics/**/*.o
-tools/diagnostics/**/*.ko
-tools/diagnostics/**/*.mod
-tools/diagnostics/**/*.mod.c
-tools/diagnostics/**/*.mod.o
-tools/diagnostics/**/*.cmd
-tools/diagnostics/**/.*.cmd
-tools/diagnostics/**/.module*
-tools/diagnostics/**/Module.symvers
-tools/diagnostics/**/modules.order
+# Tests
+tests/protocol_test
 
-# Ghidra project databases are regenerable (see tools/ghidra/README.md) — only the
-# decompiled .c output goes in docs/decomp/, never the binary .gpr/.rep project itself.
+# Calibration tool binary
+tools/calibrate
+
+# Python
+__pycache__/
+
+# Ghidra project binaries
 tools/ghidra/project/
 tools/ghidra/*.gpr
 tools/ghidra/*.rep/
-__pycache__/
+
+# Traces (too large for git)
+*.etl
+*.bin
+traces/*.csv
+
+# Diagnostics build artifacts
+tools/diagnostics/

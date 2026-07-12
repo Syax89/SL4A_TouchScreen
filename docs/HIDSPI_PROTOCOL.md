@@ -170,7 +170,7 @@ Key functions from decomp:
 
 ---
 
-## What has been SMENTITO (FALSIFIED)
+## What has been FALSIFIED
 
 | Previous Claim | Reality |
 |---------------|---------|

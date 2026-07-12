@@ -5,10 +5,10 @@ After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/insmod /home/simone/spi-hid/driver/spi-hid.ko
-ExecStart=/sbin/insmod /home/simone/spi-hid/driver/spi-amd.ko
-ExecStop=/sbin/rmmod spi_hid
-ExecStop=/sbin/rmmod spi_amd
+ExecStart=/sbin/modprobe spi-amd
+ExecStart=/sbin/modprobe spi-hid
+ExecStop=/sbin/modprobe -r spi-hid
+ExecStop=/sbin/modprobe -r spi-amd
 
 [Install]
 WantedBy=multi-user.target

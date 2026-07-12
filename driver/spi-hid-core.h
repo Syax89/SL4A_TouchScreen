@@ -118,6 +118,11 @@
 #define SPI_HID_INPUT_STAGE_IDLE	0
 #define SPI_HID_INPUT_STAGE_BODY	1
 
+/* Heatmap blob detection limits */
+#define HEATMAP_MAX_CELLS   4300
+#define HEATMAP_MAX_BLOBS   10
+#define HEATMAP_MAX_SLOTS   47   /* match Windows DLL blob slot count */
+
 struct spi_hid_device_desc_raw {
 	__le16 wDeviceDescLength;
 	__le16 bcdVersion;
@@ -182,6 +187,7 @@ struct spi_hid_input_header {
 	u8 version;
 	u8 report_type;
 	u8 fragment_id;
+	u8 length_reserved;
 	u16 report_length;
 	u8 sync_const;
 };
@@ -203,23 +209,18 @@ struct spi_hid {
 	struct hid_device	*hid;
 
 	struct spi_transfer	input_transfer[2];
-	struct spi_transfer	output_transfer;
 	struct spi_message	input_message;
-	struct spi_message	output_message;
 
 	struct spi_hid_device_descriptor desc;
 	struct spi_hid_output_buf output;
 	struct spi_hid_input_buf input;
 	struct spi_hid_input_buf response;
-	u8 input_big_buf[62]; /* FIFO 70 - TX_FIFO 8 = max RX 62 */
 
 	spinlock_t		input_lock;
 
 	u32 device_descriptor_register;
 	u32 input_transfer_pending;
 	u32 input_stage;
-	bool waiting_for_descriptor;
-	bool input_paused;
 
 	u16 hid_desc_addr;
 	u8 power_state;
@@ -238,6 +239,8 @@ struct spi_hid {
 	bool refresh_in_progress;
 
 	bool irq_enabled;
+	bool removing;
+	bool works_initialized;
 	int irq;
 	struct gpio_desc *gpiod;
 	struct delayed_work descreq_work;
@@ -249,11 +252,12 @@ struct spi_hid {
 	struct pinctrl_state *pinctrl_sleep;
 	struct work_struct reset_work;
 	struct work_struct create_device_work;
-	struct work_struct fw_work;
 	struct work_struct refresh_device_work;
 	struct work_struct error_work;
 
 	struct mutex lock;
+	/* Serializes sequencer SPI transfers and sequencer-owned state. */
+	struct mutex seq_lock;
 	struct mutex power_lock;
 	struct mutex output_lock;
 	struct completion output_done;
@@ -262,14 +266,8 @@ struct spi_hid {
 
 	u32 report_descriptor_crc32;
 
-	u32 regulator_error_count;
-	int regulator_last_error;
-
 	u32 bus_error_count;
 	int bus_last_error;
-
-	u32 logic_error_count;
-	int logic_last_error;
 
 	u32 dir_count;
 	u32 powered;
@@ -282,8 +280,6 @@ struct spi_hid {
 	 */
 	int seq_state;
 	bool seq_enabled;
-	unsigned long seq_start_jiffies;
-	unsigned long seq_last_log;
 
 	u64 interrupt_time_stamps[2];
 	struct latency_instance latencies[64];
@@ -310,7 +306,43 @@ struct spi_hid {
 	u32 heatmap_content_id;
 	u16 heatmap_grid_cols;    /* determined from frame analysis */
 	u16 heatmap_grid_rows;
-	bool heatmap_active;
+
+	/* Blob detection buffers (was static, now per-device) */
+	u8  heatmap_baseline[HEATMAP_MAX_CELLS];
+	u32 heatmap_baseline_cells;
+	bool heatmap_have_baseline;
+	u32 heatmap_baseline_frames;
+	u8  heatmap_touched[HEATMAP_MAX_CELLS];
+	u8  heatmap_expanded[HEATMAP_MAX_CELLS];
+	u16 heatmap_label[HEATMAP_MAX_CELLS];
+
+	/* Blob state (was static in heatmap_process_frame) */
+	u16 blob_x[HEATMAP_MAX_BLOBS];
+	u16 blob_y[HEATMAP_MAX_BLOBS];
+	u32 blob_wsum[HEATMAP_MAX_BLOBS];
+	u32 blob_xsum[HEATMAP_MAX_BLOBS];
+	u32 blob_ysum[HEATMAP_MAX_BLOBS];
+	bool blob_active[HEATMAP_MAX_BLOBS];
+	u16 label_equiv[256];
+
+	/* Extended blob tracking (GROUND_TRUTH §22.4):
+	 * 47 slots, each with state, duration, coordinate history. */
+	u8 blob_slot_state[HEATMAP_MAX_SLOTS];      /* 0=empty 1=new 2=claimed 3=lift */
+	u32 blob_slot_duration[HEATMAP_MAX_SLOTS];  /* frames in current state */
+	u16 blob_slot_gx[HEATMAP_MAX_SLOTS];        /* last grid X */
+	u16 blob_slot_gy[HEATMAP_MAX_SLOTS];        /* last grid Y */
+	u32 blob_slot_weight[HEATMAP_MAX_SLOTS];    /* last blob weight */
+	u32 blob_slot_missed[HEATMAP_MAX_SLOTS];    /* consecutive frames missed */
+
+	/* Eigenvalue/ellipsis tracking */
+	s32 eigmaj[HEATMAP_MAX_SLOTS];
+	s32 eigmin[HEATMAP_MAX_SLOTS];
+	s32 eigori[HEATMAP_MAX_SLOTS];	/* orientation in fixed-point degrees * 100 */
+
+	s16 c590_lut[256];	/* pre-computed c590 signal lookup table */
+
+	u8 *data_buf;              /* pre-allocated for seq_thread body reads */
+	u32 data_buf_len;
 
 	/* raw_mode handshake watchdog (2026-07-08, GROUND_TRUTH.md §18.7).
 	 * SET_FEATURE occasionally makes the device go completely silent (no
@@ -322,6 +354,25 @@ struct spi_hid {
 	struct delayed_work raw_handshake_watchdog;
 	int raw_handshake_retries_left;
 	bool raw_handshake_confirmed;
+
+	struct delayed_work stream_watchdog;
+	u32 stream_watchdog_data;
+	u32 stream_watchdog_misses;
+	u32 stream_watchdog_reinits;
+	bool stream_watchdog_active;
+
+	struct delayed_work poll_work;		/* active polling work */
+	bool poll_active;			/* whether polling loop is running */
+	u32 poll_interval_ms;			/* polling interval, default 10 */
+	u32 poll_missed;			/* consecutive empty polls */
+
+	u32 stat_reset_rsp;
+	u32 stat_device_desc;
+	u32 stat_rpt_desc;
+	u32 stat_data;
+	u32 stat_getfeat_resp;
+	u32 stat_frames_dropped;
+	u32 stat_irq_count;
 };
 
 #endif

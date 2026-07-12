@@ -192,6 +192,58 @@ DEFINE_EVENT(spi_hid, spi_hid_response_handler,
 	TP_ARGS(shid)
 );
 
+TRACE_EVENT(spi_hid_seq_state,
+	TP_PROTO(struct spi_hid *shid, int old_state, int new_state, int reason),
+	TP_ARGS(shid, old_state, new_state, reason),
+
+	TP_STRUCT__entry(
+		__field(int, bus_num)
+		__field(int, chip_select)
+		__field(int, old_state)
+		__field(int, new_state)
+		__field(int, reason)
+		__field(bool, ready)
+	),
+
+	TP_fast_assign(
+		__entry->bus_num = shid->spi->controller->bus_num;
+		__entry->chip_select = spi_get_chipselect(shid->spi, 0);
+		__entry->old_state = old_state;
+		__entry->new_state = new_state;
+		__entry->reason = reason;
+		__entry->ready = shid->ready;
+	),
+
+	TP_printk("spi%d.%d: state %d->%d reason=%d ready=%u",
+		__entry->bus_num, __entry->chip_select, __entry->old_state,
+		__entry->new_state, __entry->reason, __entry->ready)
+);
+
+TRACE_EVENT(spi_hid_lifecycle,
+	TP_PROTO(struct spi_hid *shid, int action, int ret),
+	TP_ARGS(shid, action, ret),
+
+	TP_STRUCT__entry(
+		__field(int, bus_num)
+		__field(int, chip_select)
+		__field(int, action)
+		__field(int, ret)
+		__field(bool, removing)
+	),
+
+	TP_fast_assign(
+		__entry->bus_num = shid->spi->controller->bus_num;
+		__entry->chip_select = spi_get_chipselect(shid->spi, 0);
+		__entry->action = action;
+		__entry->ret = ret;
+		__entry->removing = shid->removing;
+	),
+
+	TP_printk("spi%d.%d: action=%d ret=%d removing=%u",
+		__entry->bus_num, __entry->chip_select, __entry->action,
+		__entry->ret, __entry->removing)
+);
+
 #endif /* _SPI_HID_TRACE_H */
 
 #undef TRACE_INCLUDE_PATH

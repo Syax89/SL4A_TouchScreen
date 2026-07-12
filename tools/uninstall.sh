@@ -12,6 +12,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="sl4a-touch"
 PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SERVICE_PATH="/etc/systemd/system/sl4a-touch.service"
+MODPROBE_CONF="/etc/modprobe.d/spi-hid.conf"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info() { echo -e "${YELLOW}$1${NC}"; }
@@ -30,7 +31,8 @@ info "Stopping and disabling the systemd service..."
 systemctl disable --now sl4a-touch.service 2>/dev/null || true
 rm -f "$SERVICE_PATH"
 systemctl daemon-reload
-pass "Service removed"
+rm -f "$MODPROBE_CONF"
+pass "Service and modprobe config removed"
 
 info "Unloading modules (if still loaded)..."
 modprobe -r spi_hid 2>/dev/null || true

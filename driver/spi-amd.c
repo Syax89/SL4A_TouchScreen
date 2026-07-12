@@ -6,12 +6,8 @@
  */
 
 #include <linux/acpi.h>
-#include <linux/atomic.h>
 #include <linux/delay.h>
-#include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/iopoll.h>
-#include <linux/kthread.h>
-#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
@@ -39,6 +35,10 @@
 
 #define AMD_SPI_FIFO_SIZE	70
 
+static bool txcount_include_opcode = false;
+module_param(txcount_include_opcode, bool, 0644);
+MODULE_PARM_DESC(txcount_include_opcode, "Include opcode byte in TX_COUNT (off-by-one experiment)");
+
 /* SPI speed control registers (from upstream spi-amd) */
 #define AMD_SPI_ENA_REG		0x20
 #define AMD_SPI_ALT_SPD_SHIFT	20
@@ -48,6 +48,9 @@
 #define AMD_SPI_SPEED_REG	0x6C
 #define AMD_SPI_SPD7_SHIFT	8
 #define AMD_SPI_SPD7_MASK	GENMASK(13, AMD_SPI_SPD7_SHIFT)
+
+#define AMD_SPI_HOST_PREF_REG	0x2C
+#define AMD_SPI_HOST_PREF_WIN	0x8000D4C0  /* Windows value */
 
 /* Enum for speed register values */
 enum amd_spi_speed_val {
@@ -102,13 +105,6 @@ static inline u32 amd_spi_readreg32(struct amd_spi *amd_spi, int idx)
 static inline void amd_spi_writereg32(struct amd_spi *amd_spi, int idx, u32 val)
 {
 	writel(val, ((u8 __iomem *)amd_spi->io_remap_addr + idx));
-}
-
-static void amd_spi_setclear_reg8(struct amd_spi *amd_spi, int idx, u8 set, u8 clear)
-{
-	u8 tmp = amd_spi_readreg8(amd_spi, idx);
-	tmp = (tmp & ~clear) | set;
-	amd_spi_writereg8(amd_spi, idx, tmp);
 }
 
 static void amd_spi_setclear_reg32(struct amd_spi *amd_spi, int idx, u32 set, u32 clear)
@@ -258,7 +254,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	int i, ret;
 
 	if (DBG_VERBOSE || opcode != 0x0B)
-		pr_err("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
+		pr_debug("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
 
 	/* Windows fcn.0x6fc0: save SPI100_SPEED_CONFIG (0x22) before transfer */
 	saved_0x22 = readw(base + 0x22);
@@ -303,7 +299,8 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		pr_err("spi-amd: tx_len %u exceeds FIFO size %u\n", tx_len, AMD_SPI_FIFO_SIZE);
 		return -EINVAL;
 	}
-	writeb(tx_len, base + AMD_SPI_TX_COUNT_REG);
+	writeb(txcount_include_opcode ? tx_len + 1 : tx_len,
+	       base + AMD_SPI_TX_COUNT_REG);
 
 	for (i = 0; i < tx_len; i++)
 		writeb(tx_data[i], base + fifo_pos + i);
@@ -331,12 +328,12 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		u8 tr = amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG);
 		u32 ena = amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG);
 		u8 nib = (u8)(ena & 0xF);
-		pr_err("spi-amd: WRITE PRE-TRIG c0=0x%08x c1=0x%08x st=0x%02x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x ena=0x%08x nib=%u\n",
+		pr_debug("spi-amd: WRITE PRE-TRIG c0=0x%08x c1=0x%08x st=0x%02x al=0x%02x sp=0x%04x op45=0x%02x tr47=0x%02x ena=0x%08x nib=%u\n",
 			c0, c1, st, al, sp, op, tr, ena, nib);
 	}
 
 	ret = amd_spi_execute_opcode(amd_spi);
-	if (ret) { pr_err("spi-amd: execute_opcode failed %d\n", ret); writew(saved_0x22, base + 0x22); return ret; }
+	if (ret) { pr_debug("spi-amd: execute_opcode failed %d\n", ret); writew(saved_0x22, base + 0x22); return ret; }
 
 	/* execute_opcode already polls CTRL0 bit31 (real busy indicator).
 	 * STATUS (0x4C) is an 8-bit register, so bit31 is always 0 —
@@ -381,118 +378,6 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	return rx_len;
 }
 
-/*
- * Multi-opcode FIFO transfer: detects opcode changes between transfers
- * and executes them as separate CS-held segments.
- */
-static int amd_spi_fifo_xfer(struct amd_spi *amd_spi,
-			     struct spi_controller *host,
-			     struct spi_message *message)
-{
-	struct spi_transfer *xfer;
-	u8 *tx_bufs[16]; u32 tx_lens[16];
-	u8 *rx_bufs[16]; u32 rx_lens[16];
-	u8 opcodes[16];
-	int seg_count = 0;
-	int total_tx = 0, total_rx = 0;
-	int i, ret;
-
-	dev_info(&message->spi->dev, "spi-amd-multi: fifo_xfer ENTER\n");
-
-	/* Apply per-transfer speed if specified */
-	list_for_each_entry(xfer, &message->transfers, transfer_list) {
-		if (xfer->speed_hz) {
-			amd_set_spi_freq(amd_spi, xfer->speed_hz);
-			break;
-		}
-	}
-
-	/* Pass 1: collect segments by scanning transfers for opcode changes */
-	{
-		u8 current_opcode = 0;
-		bool has_opcode = false;
-
-		tx_bufs[0] = NULL; tx_lens[0] = 0;
-		rx_bufs[0] = NULL; rx_lens[0] = 0;
-
-		list_for_each_entry(xfer, &message->transfers, transfer_list) {
-			u8 *buf = (u8 *)xfer->tx_buf;
-			u32 len;
-
-			if (xfer->tx_buf && xfer->len > 0) {
-				/* Each TX transfer starts with its own opcode byte */
-				if (!has_opcode) {
-					current_opcode = buf[0];
-					has_opcode = true;
-				} else if (buf[0] != current_opcode) {
-					/* Opcode changed: start new segment */
-					seg_count++;
-					tx_bufs[seg_count] = NULL;
-					tx_lens[seg_count] = 0;
-					rx_bufs[seg_count] = NULL;
-					rx_lens[seg_count] = 0;
-					current_opcode = buf[0];
-				}
-
-				opcodes[seg_count] = current_opcode;
-				len = xfer->len - 1; /* strip opcode byte */
-				buf++;
-
-				if (!tx_bufs[seg_count])
-					tx_bufs[seg_count] = buf;
-				tx_lens[seg_count] += len;
-				total_tx += len;
-			}
-
-			if (xfer->rx_buf && xfer->len > 0) {
-				if (!rx_bufs[seg_count])
-					rx_bufs[seg_count] = (u8 *)xfer->rx_buf;
-				rx_lens[seg_count] += xfer->len;
-				total_rx += xfer->len;
-			}
-		}
-	}
-
-	if (seg_count < 0 && total_tx == 0 && total_rx == 0) {
-		dev_info(&message->spi->dev, "spi-amd-multi: no transfers to execute\n");
-		message->status = -EINVAL;
-		goto fin_msg;
-	}
-
-	dev_info(&message->spi->dev, "spi-amd-multi: %d segments detected (total_tx=%u total_rx=%u)\n",
-		 seg_count + 1, total_tx, total_rx);
-
-	/* Pass 2: execute each segment */
-	for (i = 0; i <= seg_count; i++) {
-		u8 opcode = opcodes[i];
-		u32 tx_len = tx_lens[i];
-		u32 rx_len = rx_lens[i];
-		u8 *tx_data = tx_bufs[i];
-		u8 *rx_data = rx_bufs[i];
-
-		dev_info(&message->spi->dev, "spi-amd-multi: seg[%d] op=0x%02x tx=%u rx=%u\n",
-			 i, opcode, tx_len, rx_len);
-
-		ret = amd_spi_exec_segment(amd_spi, opcode,
-					   tx_data, tx_len,
-					   rx_data, rx_len);
-		if (ret < 0) {
-			message->status = ret;
-			goto fin_msg;
-		}
-	}
-
-	message->actual_length = total_tx + total_rx + seg_count + 1;
-	message->status = 0;
-
-fin_msg:
-	if (amd_spi->version == AMD_SPI_V2)
-		amd_spi_clear_chip(amd_spi, spi_get_chipselect(message->spi, 0));
-
-	spi_finalize_current_message(host);
-	return message->status;
-}
-
 /* Priority 3 item 2 (docs/NEXT_STEPS.md, 2026-07-08): override the bus speed
  * used for the whole session, to test whether the ~508ms post-RPT_DESC reset
  * scales with SPI clock speed (bus-timing related) or stays fixed in
@@ -501,6 +386,12 @@ static uint debug_force_speed_hz;
 module_param(debug_force_speed_hz, uint, 0444);
 MODULE_PARM_DESC(debug_force_speed_hz, "Override SPI clock speed in Hz (0 = use ACPI default)");
 
+static bool force_host_pref = true;
+module_param(force_host_pref, bool, 0644);
+MODULE_PARM_DESC(force_host_pref, "Force HOST_PREF(0x2C) to Windows value 0x8000D4C0");
+
+
+
 static int amd_spi_host_setup(struct spi_device *spi)
 {
 	struct amd_spi *amd_spi = spi_controller_get_devdata(spi->controller);
@@ -508,7 +399,7 @@ static int amd_spi_host_setup(struct spi_device *spi)
 
 	amd_spi_clear_fifo_ptr(amd_spi);
 	amd_set_spi_freq(amd_spi, hz);
-	dev_info(&spi->dev, "spi-amd-v2-multi: set speed to %u Hz%s\n",
+	dev_dbg(&spi->dev, "spi-amd-v2-multi: set speed to %u Hz%s\n",
 		 amd_spi->speed_hz, debug_force_speed_hz ? " (forced override)" : "");
 	return 0;
 }
@@ -598,6 +489,10 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 						 * variant, which uses RX_COUNT+1 and reads at
 						 * FIFO+TX_COUNT+1 instead of FIFO+TX_COUNT (see
 						 * docs/verification/amdspi-decomp-report.md). */
+						if (tx_len >= sizeof(tx_pad)) {
+							msg->status = -EMSGSIZE;
+							goto out;
+						}
 						memcpy(tx_pad, tx_buf, tx_len);
 						tx_pad[tx_len] = 0x00;
 						ret = amd_spi_exec_segment(amd_spi, opcode,
@@ -646,92 +541,6 @@ out:
 static size_t amd_spi_max_transfer_size(struct spi_device *spi)
 {
 	return 65536; /* chunking handled internally in host_transfer */
-}
-
-/* Priority 3 investigation (docs/NEXT_STEPS.md, 2026-07-08) */
-static struct amd_spi *g_debug_amd_spi;
-static atomic_t g_dbgpoll_running = ATOMIC_INIT(0);
-static atomic_t g_dbgpoll_shutdown = ATOMIC_INIT(0);
-
-struct amd_spi_dbgpoll_arg {
-	struct amd_spi *amd_spi;
-	unsigned int duration_ms;
-};
-
-static int amd_spi_dbgpoll_thread(void *_arg)
-{
-	struct amd_spi_dbgpoll_arg *arg = _arg;
-	void __iomem *base = arg->amd_spi->io_remap_addr;
-	ktime_t t0 = ktime_get();
-	u32 last_c0 = ~0, last_st = ~0, last_ena = ~0;
-	bool first = true;
-
-	pr_info("spi-amd: dbgpoll: starting, duration=%ums\n", arg->duration_ms);
-
-	while (!kthread_should_stop() && !atomic_read(&g_dbgpoll_shutdown)) {
-		s64 elapsed_us = ktime_us_delta(ktime_get(), t0);
-		u32 c0, st, ena;
-
-		if (elapsed_us >= (s64)arg->duration_ms * 1000)
-			break;
-
-		c0 = readl(base + AMD_SPI_CTRL0_REG);
-		st = readl(base + AMD_SPI_STATUS_REG);
-		ena = readl(base + AMD_SPI_ENA_REG);
-
-		if (first || c0 != last_c0 || st != last_st || ena != last_ena) {
-			pr_info("spi-amd: dbgpoll: t=+%lldus CTRL0=0x%08x STATUS=0x%08x ENA=0x%08x%s\n",
-				elapsed_us, c0, st, ena,
-				first ? " (initial)" : " (CHANGED)");
-			last_c0 = c0; last_st = st; last_ena = ena;
-			first = false;
-		}
-
-		usleep_range(1800, 2200);
-	}
-
-	pr_info("spi-amd: dbgpoll: stopped at t=+%lldus\n",
-		ktime_us_delta(ktime_get(), t0));
-	kfree(arg);
-	atomic_dec(&g_dbgpoll_running);
-	return 0;
-}
-
-void amd_spi_debug_poll_start(unsigned int duration_ms)
-{
-	struct amd_spi_dbgpoll_arg *arg;
-	struct task_struct *t;
-
-	if (!g_debug_amd_spi || atomic_read(&g_dbgpoll_shutdown)) {
-		pr_warn("spi-amd: dbgpoll: no amd_spi instance registered (or shutting down), skipping\n");
-		return;
-	}
-
-	arg = kmalloc(sizeof(*arg), GFP_ATOMIC);
-	if (!arg)
-		return;
-	arg->amd_spi = g_debug_amd_spi;
-	arg->duration_ms = duration_ms;
-
-	atomic_inc(&g_dbgpoll_running);
-	t = kthread_run(amd_spi_dbgpoll_thread, arg, "amd_spi_dbgpoll");
-	if (IS_ERR(t)) {
-		pr_err("spi-amd: dbgpoll: failed to start kthread: %ld\n", PTR_ERR(t));
-		atomic_dec(&g_dbgpoll_running);
-		kfree(arg);
-	}
-}
-EXPORT_SYMBOL_GPL(amd_spi_debug_poll_start);
-
-/* Block until every in-flight dbgpoll thread has stopped touching MMIO,
- * called from amd_spi_remove() before devm ioremap teardown runs — without
- * this, a thread can race module unload and read unmapped memory. */
-static void amd_spi_debug_poll_shutdown(void)
-{
-	atomic_set(&g_dbgpoll_shutdown, 1);
-	while (atomic_read(&g_dbgpoll_running) > 0)
-		msleep(10);
-	g_debug_amd_spi = NULL;
 }
 
 int amd_spi_probe_common(struct device *dev, struct spi_controller *host)
@@ -789,6 +598,26 @@ static int amd_spi_probe(struct platform_device *pdev)
 		}
 	}
 
+	/* Read AMD SPI HOST_PREF register (0x2C) — Windows has 0x8000D4C0.
+	 * This register configures host prefetch and FIFO behavior.
+	 * We never touched it before; read it for diagnostic comparison. */
+	{
+		u32 host_pref = amd_spi_readreg32(amd_spi, AMD_SPI_HOST_PREF_REG);
+		dev_info(dev, "spi-amd: HOST_PREF(0x2C) = 0x%08X (Windows: 0x%08X)\n",
+			 host_pref, AMD_SPI_HOST_PREF_WIN);
+
+		if (force_host_pref && host_pref != AMD_SPI_HOST_PREF_WIN) {
+			dev_info(dev, "spi-amd: HOST_PREF differs from Windows (0x%08X vs 0x%08X), applying Windows value\n",
+				 host_pref, AMD_SPI_HOST_PREF_WIN);
+			amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG, AMD_SPI_HOST_PREF_WIN);
+			host_pref = amd_spi_readreg32(amd_spi, AMD_SPI_HOST_PREF_REG);
+			dev_info(dev, "spi-amd: HOST_PREF after write = 0x%08X\n", host_pref);
+		} else if (host_pref == AMD_SPI_HOST_PREF_WIN) {
+			dev_info(dev, "spi-amd: HOST_PREF already matches Windows (0x%08X)\n",
+				 AMD_SPI_HOST_PREF_WIN);
+		}
+	}
+
 	/* Dump initial CTRL0 value (BIOS/UEFI preset) */
 	{
 		u32 c0 = readl(amd_spi->io_remap_addr + 0x00);
@@ -811,8 +640,6 @@ static int amd_spi_probe(struct platform_device *pdev)
 	amd_spi->speed_cfg = ioread16(amd_spi->io_remap_addr + 0x22);
 	dev_info(dev, "SPI100_SPEED_CONFIG at MMIO+0x22 = 0x%04X\n", amd_spi->speed_cfg);
 
-	g_debug_amd_spi = amd_spi;
-
 	return amd_spi_probe_common(dev, host);
 }
 
@@ -828,7 +655,6 @@ MODULE_DEVICE_TABLE(acpi, spi_acpi_match);
 
 static void amd_spi_remove(struct platform_device *pdev)
 {
-	amd_spi_debug_poll_shutdown();
 }
 
 static struct platform_driver amd_spi_driver = {

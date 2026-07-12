@@ -188,7 +188,7 @@ The Cx files document the spec v1.0 behavior which does NOT apply to this device
 3. **Strobe 0x49/0x4A** — Windows never writes these registers (zero occurrences in amdspi.sys)
 4. **Extensive debug logging** on every SPI operation
 
-### Previously believed — NOW SMENTITO
+### Previously believed — NOW FALSIFIED
 
 | Wrong belief | Reality |
 |-------------|---------|

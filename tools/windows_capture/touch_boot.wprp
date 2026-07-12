@@ -43,6 +43,9 @@
     <EventProvider Id="GPIO-ClassExtension" Name="55ab77f6-fa04-43ef-af45-688fbf500482"/>
     <EventProvider Id="Input-HIDCLASS"      Name="6465da78-e7a0-4f39-b084-8f53c7c30dc6"/>
 
+    <!-- Windows touch-processing output: TouchBlobCoMX/Y per tracked finger. -->
+    <EventProvider Id="Surface-TouchAndPen-Prod" Name="3fa102e9-1a62-5490-7af8-6088c2f9e6be"/>
+
     <Profile Id="TouchInit.Verbose.File" Name="TouchInit" Description="Touch init boot trace"
              LoggingMode="File" DetailLevel="Verbose">
       <Collectors>
@@ -66,6 +69,7 @@
             <EventProviderId Value="SPB-ClassExtension"/>
             <EventProviderId Value="GPIO-ClassExtension"/>
             <EventProviderId Value="Input-HIDCLASS"/>
+            <EventProviderId Value="Surface-TouchAndPen-Prod"/>
           </EventProviders>
         </EventCollectorId>
       </Collectors>

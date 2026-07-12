@@ -1,0 +1,79 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef SPI_HID_PROTOCOL_H
+#define SPI_HID_PROTOCOL_H
+
+#ifdef __KERNEL__
+#include <linux/types.h>
+typedef u8 spi_hid_proto_u8;
+typedef u16 spi_hid_proto_u16;
+#else
+#include <stdint.h>
+typedef uint8_t spi_hid_proto_u8;
+typedef uint16_t spi_hid_proto_u16;
+#endif
+
+#define SPI_HID_PROTOCOL_VERSION 2
+#define SPI_HID_PROTOCOL_SYNC_BYTE 0x5a
+#define SPI_HID_PROTOCOL_READ_OPCODE 0x0b
+#define SPI_HID_PROTOCOL_WRITE_OPCODE 0x02
+
+struct spi_hid_protocol_header {
+	spi_hid_proto_u8 version;
+	spi_hid_proto_u8 report_type;
+	spi_hid_proto_u8 fragment_id;
+	spi_hid_proto_u8 length_reserved;
+	spi_hid_proto_u16 report_length;
+	spi_hid_proto_u8 sync_const;
+};
+
+static inline void spi_hid_protocol_decode_header(const spi_hid_proto_u8 raw[4],
+		struct spi_hid_protocol_header *header)
+{
+	header->version = raw[0] & 0x0f;
+	header->report_type = raw[0] >> 4;
+	header->fragment_id = 0; /* V0 protocol: no fragment on wire, reserved nibble */
+	header->length_reserved = raw[1] & 0x0f;
+	header->report_length = (((spi_hid_proto_u16)raw[1] >> 4) |
+		((spi_hid_proto_u16)raw[2] << 4)) * 4;
+	header->sync_const = raw[3];
+}
+
+static inline void spi_hid_protocol_encode_output_header(spi_hid_proto_u8 raw[6],
+		unsigned int output_register, spi_hid_proto_u16 output_length)
+{
+	raw[0] = SPI_HID_PROTOCOL_WRITE_OPCODE;
+	raw[1] = output_register >> 16;
+	raw[2] = output_register >> 8;
+	raw[3] = output_register;
+	raw[4] = SPI_HID_PROTOCOL_VERSION | ((output_length & 0x0f) << 4);
+	raw[5] = output_length >> 4;
+}
+
+static inline void spi_hid_protocol_encode_read_approval(spi_hid_proto_u8 raw[5],
+		unsigned int input_register)
+{
+	raw[0] = SPI_HID_PROTOCOL_READ_OPCODE;
+	raw[1] = input_register >> 16;
+	raw[2] = input_register >> 8;
+	raw[3] = input_register;
+	raw[4] = 0xff;
+}
+
+static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
+		int length, int *offset)
+{
+	int i;
+
+	for (i = 3; i < length; i++) {
+		if (raw[i] == SPI_HID_PROTOCOL_SYNC_BYTE &&
+		    (raw[i - 3] & 0x0f) == SPI_HID_PROTOCOL_VERSION) {
+			if (offset)
+				*offset = i - 3;
+			return raw[i - 3] >> 4;
+		}
+	}
+
+	return -1;
+}
+
+#endif /* SPI_HID_PROTOCOL_H */

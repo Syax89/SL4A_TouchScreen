@@ -52,7 +52,7 @@ An experimental `raw_mode=1` module param exists (default `0`, off) that sends `
 │  spi-hid.ko (driver/spi-hid-core.c)  │
 │  HID-over-SPI protocol state machine │
 │  · DESCREQ → DEVICE_DESC → RPT_DESC  │
-│  · IRQ-driven seq_thread (states 0-4)│
+│  · IRQ-driven seq_thread (states 0-5)│
 │  · Standard HID mode (Report 0x40)   │
 │  · Optional raw heatmap interception │
 └──────────────┬───────────────────────┘
@@ -76,8 +76,21 @@ The driver uses an **IRQ-driven sequencer** (`spi_hid_seq_thread`) that mirrors 
 State 0 (WAIT_RESET)  → drain RESET_RSP → DESCREQ → State 1
 State 1 (WAIT_DESC)   → read DEVICE_DESC → DESCREQ2 → State 2
 State 2 (WAIT_RPT)    → read RPT_DESC → create HID device → State 4
+State 5 (WAIT_FEATURE)→ optional raw-mode GET_FEATURE response → State 4
 State 4 (DONE)        → forward input reports via hid_input_report()
+State 3 (VENDOR_INIT) → vendor-init fallback path (hardcoded descriptors)
 ```
+
+State 3 is a recovery path reached when vendor-init mode does not produce
+a valid DATA report; it hardcodes the known descriptors and transitions
+to state 4. In practice the driver proceeds directly from state 2 to
+state 4 in standard mode.
+
+The driver also runs an **active polling loop** (`poll_interval` module
+param, default 10 ms) that reads data directly from the SPI controller
+alongside the IRQ thread. This recovers from intermittent IRQ silence,
+with a stream watchdog providing automatic re-initialisation when the
+data stream stops.
 
 **No GET_FEATURE/SET_FEATURE is sent** — the device stays in standard HID mode and sends proper Report ID 0x40 (TouchScreen) and Report ID 1 (Pen) reports with pre-computed X/Y coordinates.
 
@@ -145,7 +158,24 @@ The touchscreen appears as:
 - `/dev/input/eventN` — `spi 045E:0C19` (ABS_X, ABS_Y, BTN_TOUCH) for touch
 - `/dev/input/eventN` — `spi 045E:0C19 Stylus` for pen
 
-Debug: `sudo dmesg -w | grep "SEQ\|spi-hid"`
+Status is exposed through the device sysfs directory (`seq_state`,
+`protocol_stats`, and `lifecycle_status`). For verbose sequence diagnostics,
+set `debug_level=3` and enable the standard kernel dynamic-debug facility
+before reproducing an issue:
+
+```bash
+sudo sh -c "echo 'module spi_hid +p' > /sys/kernel/debug/dynamic_debug/control"
+sudo sh -c "echo 3 > /sys/module/spi_hid/parameters/debug_level"
+sudo dmesg -w
+```
+
+For sparse lifecycle diagnostics, use tracefs instead of per-packet logging:
+
+```bash
+sudo sh -c "echo 1 > /sys/kernel/tracing/events/spi_hid/spi_hid_seq_state/enable"
+sudo sh -c "echo 1 > /sys/kernel/tracing/events/spi_hid/spi_hid_lifecycle/enable"
+sudo cat /sys/kernel/tracing/trace_pipe
+```
 
 ---
 
@@ -161,9 +191,20 @@ sudo insmod driver/spi-amd.ko
 sudo insmod driver/spi-hid.ko
 ```
 
-`driver/sl4a-touch.service` (a systemd unit that `insmod`s straight from this checkout,
-absolute path, no DKMS) plus `tools/rebuild_and_install.sh` (rebuild + reload in one step,
-see [Tools](#tools)) automate this loop:
+### Offline Protocol Tests
+
+The byte-level protocol codec can be tested without root, hardware, or a loaded
+module:
+
+```bash
+make -C tests
+./tests/protocol_test
+```
+
+`driver/sl4a-touch.service` is a systemd unit that loads the driver via
+`modprobe` at boot or after a DKMS install. For development, use
+`tools/rebuild_and_install.sh` (rebuild + reload in one step,
+see [Tools](#tools)):
 
 ```bash
 sudo cp driver/sl4a-touch.service /etc/systemd/system/
@@ -206,18 +247,12 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 | `install.sh` | `tools/install.sh` | **Beta installer** — builds via DKMS, installs the systemd auto-load service |
 | `uninstall.sh` | `tools/uninstall.sh` | Removes everything `install.sh` installed |
 | `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Developer loop: rebuild in-place and reload via `driver/sl4a-touch.service` (no DKMS) |
-| `reset_touch.sh` | `tools/reset_touch.sh` | Power-cycle just the touchscreen via ACPI `\M010`, no reboot needed |
-| `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (2384 transactions, timing, GPIO) |
+| `cli_probe.py` | `tools/cli_probe.py` | Calibration CLI protocol probe against the touch controller |
+| `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, GPIO) |
 | `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
-| `decode_hidspi.py` | `tools/decode_hidspi.py` | HID-over-SPI protocol decoder |
-| `extract_companion.py` | `tools/extract_companion.py` | Companion device sequence extractor |
-| `test_coldboot.sh` | `tools/test_coldboot.sh` | Virgin-boot test harness |
-| `ghidra/` | `tools/ghidra/` | Headless decompilation scripts |
+| `ghidra/` | `tools/ghidra/` | Headless decompilation scripts for TouchPenProcessor0C19.dll |
 
-The early bring-up phase (proving DESCREQ/writes reach the device at all) used dozens of
-one-off raw-MMIO kernel modules and exploratory shell scripts; now that the driver works
-end-to-end, those are removed (still recoverable from git history) — only the tools still
-useful going forward are listed above.
+Windows-side capture utilities are in `tools/windows_capture/`.
 
 ---
 
@@ -225,28 +260,14 @@ useful going forward are listed above.
 
 | File | Contents |
 |------|----------|
-| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | **Canonical knowledge base** — cross-verified model (CSV × decomp × ACPI × PCI × tests), the full investigation journal |
-| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Roadmap: multi-touch handshake reliability + heatmap blob detection |
+| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | **Canonical knowledge base** — cross-verified model (CSV × decomp × ACPI × PCI × tests) |
+| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Roadmap: handshake reliability, heatmap blob detection, calibration |
+| [`docs/AMD_CONTROLLER_VALIDATION.md`](docs/AMD_CONTROLLER_VALIDATION.md) | AMD FCH SPI controller: verified boundaries and pending hardware validation |
 | [`docs/SPI_REGISTERS.md`](docs/SPI_REGISTERS.md) | AMD FCH SPI + PCI config register map |
 | [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol decoded |
 | [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md) | Annotated Windows boot SPI trace |
 | [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md) | `amdspi.sys` decompilation index |
-| [`docs/decomp/uefi/`](docs/decomp/uefi/) | Decompiled UEFI DXE drivers (SurfaceTouchHidDxe, AmdSpiHc, MsTouchUnlock) |
-| [`docs/decomp/clean/`](docs/decomp/clean/) | Clean `hidspi.sys` and `HidSpiCx.sys` decompilations |
-
-Earlier bring-up-phase docs (independent SPI-controller bug audit from before the driver
-worked, verification methodology, a stale mid-investigation session summary, an early
-hardware-identification analysis whose conclusions were later superseded by the working
-driver itself) have been removed now that the driver is functional — recoverable from git
-history if needed.
-
-### Verification reports
-
-| File | Verdict |
-|------|---------|
-| [`docs/verification/amdspi-decomp-report.md`](docs/verification/amdspi-decomp-report.md) | SPI controller register-level verification |
-| [`docs/verification/protocol-verification-report.md`](docs/verification/protocol-verification-report.md) | HID protocol verification (spec + decomp + CSV) |
-| [`docs/verification/csv-verification-report.md`](docs/verification/csv-verification-report.md) | CSV trace ground-truth verification |
+| [`docs/decomp/`](docs/decomp/) | `hidspi.sys` / `HidSpiCx.sys` / UEFI DXE decompilations |
 
 ---
 
@@ -277,7 +298,7 @@ history if needed.
 
 ## Next Steps
 
-- **Multi-touch handshake reliability**: `raw_mode=1` (experimental, see `docs/NEXT_STEPS.md` §D) enables `SET_FEATURE`-based raw heatmap streaming with blob detection, but the device only accepts `SET_FEATURE` intermittently for reasons not yet understood at the hardware/firmware level (a software watchdog retries automatically, matching Windows's own behavior, but doesn't fix the root cause)
+- **Multi-touch handshake reliability**: `raw_mode=1` (experimental, see `docs/NEXT_STEPS.md` §D) enables `SET_FEATURE`-based raw heatmap streaming with blob detection. The feature selector is firmware/device-state-specific: Windows traces use selector 4 while this Linux device has empirically streamed with selector 5. Do not scan selectors on a live device; the handshake can silence the controller and the underlying cause remains under investigation.
 - **Multi-touch coordinate mapping**: once connected, reverse-engineer the DFT antenna layout in `TouchPenProcessor0C19.dll` to correctly map blob centroids to screen coordinates
 - **Upstreaming**: split into proper Linux kernel patches (SPI controller + HID transport)
 

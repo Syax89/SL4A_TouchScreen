@@ -21,6 +21,30 @@ only triggers a D2→D0 resume). So a **boot trace** is used.
 
 ## Steps (run on Windows, in an Administrator prompt)
 
+### Runtime centroid capture for multi-touch mapping
+
+The shared `touch_boot.wprp` profile also enables `Microsoft.Surface.TouchAndPen.Prod`
+(`{3FA102E9-1A62-5490-7AF8-6088C2F9E6BE}`), the TraceLogging provider in
+`TouchPenProcessor0C19.dll`. Its event schema contains the Windows-computed
+`TouchBlobCoMX` and `TouchBlobCoMY` fields for each tracked finger.
+
+For coordinate calibration, copy `touch_boot.wprp` and `capture_runtime.cmd` to the
+Windows capture directory, run the latter as Administrator, and hold one finger at each
+point of the indicated 3x3 screen grid. Repeat with two separated fingers. Stop the trace
+and run `export_runtime.cmd`. Preserve the resulting ETL; it retains TraceLogging metadata and
+is preferable to CSV. Use `tracerpt` or WPA on Windows to export the decoded fields, then copy
+both the export and ETL back for correlation with physical grid coordinates. This is read-only and does not send
+experimental HID commands to the controller.
+
+### Capture the callback host
+
+After using the touchscreen in Windows, run `collect_touch_host.cmd` as Administrator from
+the same directory. It writes `touch_host/touch_host_modules.txt` with the process command
+line and loaded modules for the process that contains `TouchPenProcessor0C19.dll`, and copies
+its executable when Windows permits it. Copy the entire `touch_host/` directory back with the
+ETL. This identifies the binary owning the indirect callback that supplies raw heatmap frames
+to the processor DLL.
+
 ### 1. Find this machine's exact Surface/SAM providers
 ```
 00_enumerate.cmd > providers.txt

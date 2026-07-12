@@ -1,6 +1,6 @@
 # GROUND TRUTH — Model verified by cross-referencing ETW CSV × amdspi decomp × hidspi V0 decomp × spec PDF × HW tests
 
-> **Last updated: 2026-07-07 — work in progress.**
+> **Last updated: 2026-07-12 — CCL pipeline fully reverse-engineered.**
 > Sources: hidspi.sys decomp (PDB), amdspi.sys (no PDB, objdump), ETW CSV,
 > DSDT/SSDT ACPI, Linux tests on a Surface Laptop 4 AMD (Cezanne), kernel 7.1.2-3-cachyos,
 > Windows MMIO dump via RWEverything, Windows PCI config space dump via RWEverything
@@ -2381,6 +2381,551 @@ citable history), `docs/decomp/`, `docs/acpi/`, `docs/windows_mmio_dumps/`, `tra
 Updated `README.md`'s tool/doc tables and `docs/NEXT_STEPS.md` §E to match, and added a
 "What's still open" quick-summary block at the top of `NEXT_STEPS.md` naming the two real
 remaining threads: multi-touch handshake reliability (§18.8) and DFT coordinate mapping (§D).
+
+## 21. Multi-touch blob: TouchPenProcessor0C19.dll decompiled, ETW provider GUID recovered (2026-07-12)
+
+Follow-up to §D of `NEXT_STEPS.md` (DFT antenna grid mapping still unsolved). Goal: find, in
+whatever Windows-side information is available, the actual parameters needed to map the raw
+4297-byte DFT heatmap frame to physical screen coordinates.
+
+### 21.1 New Ghidra tooling for triaging huge stripped binaries
+
+`TouchPenProcessor0C19.dll` (9.7MB, in `~/windrivers/`, never before run through Ghidra — see
+§15.16, where it was skipped because `strings` alone looked unambiguous) has **no PDB and no
+exported/named functions** (confirmed again here), but is unusually rich in embedded
+human-readable debug/assert strings (C++ `assert(cond, "Field.Path")`-style literals). A full
+`DecompileAll.java` run would have produced tens of thousands of functions — impractical to
+review. Added two new reusable scripts to `tools/ghidra/`:
+
+- **`DecompileByKeyword.java`**: scans the *raw bytes* of every initialized memory block for
+  keyword substrings (does **not** rely on Ghidra's auto-analysis having already classified
+  the bytes as string Data — a first version that did rely on `DefinedData`/`hasStringValue()`
+  missed ~70% of real hits, because many debug strings in this binary were never auto-typed as
+  strings by Ghidra's analyzers even though the raw bytes are clearly ASCII). For every keyword
+  hit, walks back/forward to the null-terminator boundaries to recover the full string, then
+  uses `ReferenceManager.getReferencesTo()` on that exact address to find and decompile every
+  function that has a direct code xref to it. Good enough to jump straight to the ~20-30
+  functions that actually matter in a binary with tens of thousands of candidates.
+- **`ListGuidsNearEventRegister.java`** / **`DumpTlgProvider.java`** / **`DumpProviderCallers.java`**:
+  purpose-built to locate ETW/TraceLogging provider registration code and its associated GUID
+  (see §21.3). Kept in the repo as reusable scripts for the next binary that needs this.
+
+### 21.2 Antenna count corrected: 16 short + 16 long, not 9+9
+
+Keyword search (`RectAnt`, `TouchBlobCoM`, `TouchDetection`, `PenCenterOfMass`, `ShortAnt`,
+`LongAnt`, `ccpSection`, `PenDft`) found direct code references to `shortAntMaxMag0`..`15` and
+`longAntMaxMag0`..`15` (32 distinct fields, each with its own dedicated logging call site) —
+**16 short-window and 16 long-window antenna magnitude values, not the "9 Short + 9 Long"
+figure previously recorded** in `NEXT_STEPS.md`/memory (that number was an assumption, never
+independently confirmed). Worth re-attempting the grid-shape calibration in §D with 16+16 as
+the antenna count.
+
+`RectAnt.ShortAntsStart/End`, `RectAnt.LongAntsStart/End`, and `ccpSectionPen*`/`PenDft*`
+strings do exist as raw bytes elsewhere in the binary but are **not** referenced by the ~25
+functions the keyword search reached — they're likely read through a level of indirection
+(an array-of-field-names table indexed at runtime, rather than inlined per-field logging calls
+like the AntMaxMag ones). Not yet chased further; would need one more hop (find what reads the
+pointer-table slot that points at these strings, rather than the string itself).
+
+### 21.3 `TouchBlobCoMX`/`TouchBlobCoMY` are ETW/TraceLogging event-schema field names
+
+The 12 near-identical 172-line functions found alongside the AntMaxMag hits are static
+initializers that register an **ETW/TraceLogging event schema** (a list of field-name string
+literals passed one-by-one to a schema-building helper, `FUN_1805d7ad0(buf, "FieldName", len)`).
+One full schema, decompiled, reads:
+
+```
+FrameNumber, ScreenRotation, UserHandedness, PenComX, PenComY, PenAzimuth, IsAzimuthValid,
+TouchBlobCoMX, TouchBlobCoMY, TouchRawAzimuth, TouchNormalizedAzimuth,
+NumberOfJunctionsInBlob, TrackIndex, StartAngleRadial, EndAngleRadial, OtfDiffLearnMean,
+IsBlockedByPenRadial, IsBlockedByBordersLogic
+```
+
+This means **Windows already computes and can log the touch blob's center-of-mass per
+finger track** (`TouchBlobCoMX`/`Y`, alongside the pen's own `PenComX`/`Y`) — if the right ETW
+provider is enabled during capture. This is a much more promising path than fully
+reverse-engineering the DFT antenna layout: capture `TouchBlobCoMX`/`Y` while touching known
+physical screen positions, and fit an empirical mapping, the same "trust the real trace over
+static analysis" method that already solved the SPI protocol (§0-§19).
+
+**Checked existing captures first**: `traces/surface_touch.csv` (19MB, already captured) only
+covers providers `Microsoft-Windows-GPIO-ClassExtension`, `Microsoft-Windows-Input-HIDCLASS`,
+`Microsoft-Windows-SPB-ClassExtension` — the low-level protocol layer we already understand.
+**It does not include whatever provider `TouchPenProcessor0C19.dll` registers**, so a fresh
+capture is required; the existing traces cannot answer this.
+
+### 21.4 Provider GUID recovered: `Microsoft.Surface.TouchAndPen.Prod` = `{3FA102E9-1A62-5490-7AF8-6088C2F9E6BE}`
+
+The DLL uses the **TraceLogging** API (not classic manifest-based ETW): `EventRegister()` is
+called with a `GUID*` argument that Ghidra did **not** recognize as GUID-typed data (only one
+all-zero `ActivityId` GUID was found via a full-binary GUID-datatype scan) — the actual
+provider GUID sits as raw, untyped bytes.
+
+Traced the call chain: `EventRegister` (raw import) ← `FUN_1800010a0` (thin wrapper: reads a
+16-byte GUID from `[metadata_ptr - 0x10]`, calls `EventRegister`, then `EventSetInformation`)
+← per-provider registration functions (e.g. `CreateHeatProcessor` @ `0x180676470`, a
+Ghidra-recovered RTTI name, for the sibling `Microsoft.Surface.HeatProcessor` provider; the
+`Microsoft.Surface.TouchAndPen.Prod` registration itself is likely called through a vtable —
+not found via direct xref — but its metadata blob is statically laid out identically).
+
+**Ground truth found directly in the raw file bytes** (`python3`, searching for
+`b"Microsoft\.Surface\.[A-Za-z0-9_.]*"` in `~/windrivers/TouchPenProcessor0C19.dll`, then
+reading the 16 bytes immediately preceding each name's 2-byte little-endian size-prefix — this
+is the TraceLogging provider metadata layout: `[16-byte GUID][u16 total size][... provider
+name, null-terminated ...]`):
+
+```
+Microsoft.Surface.HeatProcessor      @ file offset 8316339  -> GUID {4AE53EDA-2033-5DD2-8850-99823083A9E5}
+Microsoft.Surface.TouchAndPen.Prod   @ file offset 8316390  -> GUID {3FA102E9-1A62-5490-7AF8-6088C2F9E6BE}
+```
+
+Both GUIDs are UUID-v5-shaped (Data3's top nibble is `5` in both), consistent with
+TraceLogging's known "hash of provider name" GUID derivation — but the GUID was read directly
+from the binary here, not computed from a recalled hash algorithm (an initial attempt to
+independently compute it via the publicly-documented TraceLogging namespace-GUID/SHA1 scheme
+did **not** match these bytes, so don't trust that derivation without also checking the raw
+bytes — the namespace constant or encoding details recalled from memory were evidently wrong;
+reading the compiled bytes directly is the reliable method and is what's recorded here).
+
+**Not yet done (needs the user's Windows boot, not attempted this session)**: capture a fresh
+ETW/TraceLogging trace with provider `{3FA102E9-1A62-5490-7AF8-6088C2F9E6BE}` enabled (e.g.
+`logman start touchcap -p "{3FA102E9-1A62-5490-7AF8-6088C2F9E6BE}" 0xffffffffffffffff 0xff -ets`
+or via WPR/xperf with a custom provider GUID), touch known physical screen positions during
+capture, then correlate logged `TouchBlobCoMX`/`TouchBlobCoMY` values against those known
+positions to empirically derive the grid→screen mapping — without needing to fully reverse the
+DFT math.
+
+### 21.6 Tried the CLI channel live on Linux (Report ID 31): triggers a device reset, self-healed
+
+Wrote `tools/cli_probe.py` (uses `/dev/hidraw3`, the standard kernel HID interface — reaches
+our driver's already-implemented, report-ID-agnostic `spi_hid_ll_output_report()`/`raw_request()`
+hid_ll_driver callbacks, no driver changes needed) and sent a `GetVersion` (cmd id 0, no
+params, the simplest possible command in `GenericCliDescriptor.xml`) as a 60-byte Output report
+to Report ID 31.
+
+**Result**: no response within 2s; `dmesg` showed the device itself reset
+(`SEQ: Device reset detected in state 4. Re-initializing sequencer...`) immediately after our
+write, followed by a full, automatic DESCREQ→DEVICE_DESC→RPT_DESC re-init — the driver's
+existing self-healing logic handled it cleanly with **no crash, no hung state, no unbind**:
+confirmed afterward via `/proc/bus/input/devices` (all 8 input nodes incl. Stylus still
+present) and `dmesg` (no new errors after the re-init completed).
+
+Cross-checked the actual official `HidSpiProtocolSpec.pdf` (in `~/windrivers/`, `pdftotext`'d
+to confirm — never read this closely before): confirms the Output Report framing we used
+(content type `0x05` = "HID OUTPUT_REPORT content", Content ID = the HID report number) is the
+spec-correct way to write a numbered Output report. Separately, the spec's own "Commands"
+mechanism (content type `0x07`) is a **different, lower-level thing** — generic SPI-HID power
+management (Set Power ON/SLEEP/OFF) with reserved command-ID ranges, unrelated to the
+`GenericCliDescriptor.xml` CLI protocol which lives inside the numbered HID report itself. So
+the framing wasn't obviously wrong at the SPI-HID envelope level; the reset is most likely
+either (a) this exact firmware build/SKU not actually implementing the CLI channel, or (b) the
+same general command-triggered fragility already documented for raw_mode's `SET_FEATURE`
+(§18.6-§18.8) — this device resets on various unexpected traffic, not necessarily specific to
+a framing mistake here.
+
+**Deliberately did not retry with more guesses immediately after**: a single attempt already
+reproduced this device's known worst failure mode (unexplained reset/silence following an
+unusual command), and repeated blind trial-and-error risks landing in the *other* observed
+failure mode (device going completely silent, no IRQ at all — much harder to recover than a
+clean self-healing reset). Recommend: don't retry this without either (a) a stronger hypothesis
+for the correct payload framing first (e.g. from finding the actual generic CLI dispatcher in
+the DLL — not yet found, see §21.5), or (b) explicit user go-ahead per attempt, consistent with
+this project's established "verify carefully before repeating risky hardware operations"
+practice.
+
+### 21.7 Three more Linux-only static avenues tried, all dead ends (2026-07-12)
+
+In the same session, continuing to look for anything reachable without live hardware risk or a
+Windows boot:
+
+1. **2-hop indirect-reference chase for `RectAnt`/`ccpSection`/`PenDft`/`PenCenterOfMass`/
+   `TouchDetection`** (`DecompileByKeywordIndirect.java`, new script added to `tools/ghidra/`):
+   found the same 64 raw byte hits as before, but **zero references at all** — not even a
+   data-to-data pointer-table reference. These strings are either compiled-in dead data (never
+   actually called from this specific optimized build) or reached via addressing Ghidra's
+   static analysis can't resolve (e.g. computed offsets). Not pursued further — no path forward
+   found by this method.
+2. **Binary diff of `TouchPenProcessor0C18.dll` vs `.0C19.dll`** (same size, 313 differing
+   byte-regions, 8281 bytes total — previously guessed in §15.16 as "likely a different
+   pen-calibration table"). **That guess does not hold up under a closer look**: the
+   differences are concentrated in the PE CodeView/PDB debug directory (a `RSDS` signature +
+   per-build GUID + path — pure build-identity metadata) and a second cluster with a suspicious
+   ~39954-byte regular stride sitting right after the EXPORT/IMPORT directories, consistent
+   with per-function unwind/relocation metadata that differs trivially between two separate
+   compiler invocations, not calibration constants. **Correcting §15.16**: don't treat 0C18 vs
+   0C19 as an exploitable calibration-table diff without further evidence.
+3. **Broader geometry-keyword guess** (`PanelWidth`, `ScreenWidth`, `AntennaSpacing`,
+   `AntennaPitch`, `GridWidth`, `PhysicalSize`, `AntennaCount`, `NumAntennas`, `PanelSize`, …):
+   **zero raw byte hits** — none of these guessed names exist anywhere in the binary. The real
+   internal naming (whatever it is) doesn't match any of these natural guesses.
+
+**Net conclusion for this session**: static analysis of `TouchPenProcessor0C19.dll` on Linux
+has been pushed about as far as blind keyword-guessing can go; the remaining leads (§21.5's CLI
+protocol, §21.4's ETW provider) both require either live hardware risk or a Windows boot to
+progress further. A full manual/interactive Ghidra GUI session (rather than headless
+keyword-guessing) would likely be needed to find the *generic* CLI dispatcher or antenna
+geometry table structurally, if pursuing this without Windows/hardware access is still desired.
+
+### 21.8 Retried the CLI channel with a refined guess: 2 more resets out of 2 more attempts
+
+With explicit user go-ahead to try one more refinement: updated `tools/cli_probe.py` to accept
+a `--pad=XX` byte (this device's SPI reads are full of `0xff` padding bytes everywhere — a
+plausible guess that unused command parameter bytes should be `0xff`, not `0x00`) and to keep
+listening for up to 5s while filtering out the constant background `content_id=0x40` noise
+(the device streams idle/near-zero touch reports continuously at roughly 100Hz even with
+nothing touching it, which a short 2s unfiltered read had no way to distinguish from a real
+reply).
+
+- **Attempt with `--pad=ff`, 2s unfiltered read**: got back 6 bytes starting with `0x40` — just
+  one of the constant background reports, not a real reply, and this specific attempt did *not*
+  visibly trigger a reset in the few seconds immediately checked afterward.
+- **Same command repeated with the improved 5s/filtered listener**: **did** trigger the same
+  "Device reset detected in state 4" self-healing cycle again, this time a few seconds into the
+  listen window rather than immediately after the write — consistent with this being a
+  generally flaky/delayed firmware fault rather than a deterministic instant-parse-error
+  response to a specific bad byte.
+- In neither attempt did anything ever arrive on report ID `0x1f` itself (71 unrelated `0x40`
+  reports were filtered out with zero real matches in the 5s window).
+
+**Conclusion**: 2 resets out of 3 total live attempts on this channel (§21.6 + this section),
+each self-healed cleanly with no lasting damage, but **zero actual responses** obtained either
+time. This is consistent with the device's already-well-documented general command-fragility
+(§18.6-§18.8) rather than pointing at a specific fixable framing mistake. Given the
+risk/information ratio has flattened out — more attempts are unlikely to reveal much without a
+fundamentally different starting hypothesis — **stopped live hardware probing of this channel
+for now**. Revisit only with either (a) the actual generic CLI dispatcher found via deeper
+static analysis (not yet located — see §21.7), or (b) a stronger reason to believe a specific
+different framing would work.
+
+Tried one more thing toward (a): checked whether the embedded ZIP's own raw magic bytes
+(`PK\x03\x04`) have any code reference (as opposed to the decompressed string content already
+checked in §21.7) — same result, no genuine hit (the only 4 "PK" substring matches found were
+coincidental hits inside unrelated identifiers, and the one function that indirectly matched
+failed to decompile). **At this point every avenue reachable by headless, reference-chasing
+Ghidra scripting on this binary has been exhausted** for this specific question. Making further
+progress on the CLI dispatcher/antenna-geometry-table front would most likely need actual
+interactive Ghidra GUI analysis (manual listing/graph browsing, forcing re-analysis of specific
+regions, BSim/Function ID matching) rather than more automated keyword/reference scripts — a
+different mode of work than what's been done here so far.
+
+### 21.5 A live command channel, entirely Linux-reachable: `GenericCliDescriptor.xml` embedded ZIP + unused Report ID 31
+
+While looking for what else is findable **without needing a Windows boot at all**, found that
+`TouchPenProcessor0C19.dll` embeds a literal ZIP archive (raw `PK\x03\x04` local-file-header
+bytes sitting directly in `.rdata`, found via `strings` noticing `GenericCliDescriptor.xmlPK`
+— the "PK" was not a coincidence) containing one file, `GenericCliDescriptor.xml` (8939 bytes
+uncompressed; extracted with plain Python `zipfile` after carving from the first `PK\x03\x04`
+to the `PK\x05\x06` end-of-central-directory marker — no Ghidra needed for this part at all).
+Copied to `docs/decomp/GenericCliDescriptor.xml`.
+
+This XML is a **complete diagnostic/calibration CLI protocol descriptor**: 49 commands
+(id 0-48), each with a name, help text, and a typed input/output parameter list (`B`=byte,
+`H`=uint16, `L`=uint32, `f`=float32, `AB`=byte array). Directly relevant commands:
+
+- `GetDescriptorPointer` (id 5) / `GetDescriptorSize` (id 3) / `GetDescriptorHash` (id 4) /
+  `GetDescriptorBuffer` (id 2, `input=[Offset:L, Size:L]`, `output=[Payload:AB]`) — read an
+  arbitrary **calibration descriptor stored on the touch controller itself** (its help text:
+  "0 - in case not exist in device"). This is the actual calibration data (very plausibly
+  including antenna geometry) living in the device's own firmware/EEPROM, not hardcoded in the
+  DLL — readable live, if this channel can be driven from Linux.
+- `GetVirtualAntennaFactor`/`SetVirtualAntennaFactor` (id 15/16): factor per
+  (HoverHeight ∈ {low,medium,high}, Axis, Position ∈ {Start,End}) — a per-antenna correction
+  table.
+- `GetPanelAlignmentOffsetByRegion` (id 25): **"Get panel offset by region in mm"** — a
+  physical-unit calibration constant, exactly the kind of parameter needed for grid→screen
+  mapping.
+- Also present: pen-specific/hinge-specific commands (`GetHingeAngle`, `SetDisplayStateBitmap`)
+  that don't apply to this non-foldable device — confirms the descriptor is shared across the
+  whole Surface product line, not MSHW0231-specific.
+
+**Cross-checked against our own HID report descriptor** (`docs/mshw0231_report_descriptor.txt`)
+and found the transport: `ReportID 31 (0x1f)`, under `UsagePage(0xff0f)`/`Usage(0x50)`, has a
+**60-byte Input report (Usage 0x60) and a 60-byte Output report (Usage 0x61)** — a symmetric
+read/write pair on a vendor-defined usage page, currently **completely unused by our driver**
+(`grep` across `driver/` confirms zero references to report ID 31 or usage page 0xff0f). This
+is almost certainly the wire transport for the CLI protocol above: byte 0 = command id
+(matching the XML's `id=`), followed by the packed input parameters in the order/types the XML
+declares; response comes back the same way on the Input side.
+
+**Not yet confirmed**: the exact byte-for-byte framing (is there a status/error byte? is the
+command id echoed in the response? where does `Payload` start for `GetDescriptorBuffer`?) —
+a search for the generic XML-parsing/dispatch code that would confirm this turned up nothing
+(`DecompileByKeyword.java` searched for `GetDescriptorBuffer`, `GetVirtualAntennaFactor`,
+`GenericCliDescriptor`, `CliDescriptor`: 4 raw byte hits, **0 code references** — consistent
+with this being a *generic*, reflection/table-driven dispatcher that parses the embedded XML at
+runtime rather than having one hardcoded function per command name, so there's no per-command
+string to chase in the disassembly). Confirming the framing from here on would need either
+finding the generic dispatcher itself (harder, lower confidence) or testing empirically against
+the real hardware: send a `GetVersion` (id 0, no input params, simplest possible command) as a
+60-byte Output report to Report ID 31, and see what comes back on the Input report. **Entirely
+Linux-only** if it works — no Windows boot needed at all, unlike the ETW path in §21.4.
+
+## 22. CCL Pipeline — complete reverse engineering (2026-07-12)
+
+Full static analysis of `TouchPenProcessor0C19.dll` on Linux, zero Windows boots, zero
+hardware interaction. The entire touch-processing pipeline is now mapped from the IHeatDevice
+callback entry point all the way through connected-component labeling, blob property
+extraction, and coordinate computation.
+
+### 22.1 Input chain
+
+```
+CreateHeatProcessor (export #1)
+  └─ FUN_1806923e0 (init)
+       ├─ HeatAdaptorWindows::vftable (host callback bridge)
+       └─ FUN_18068bfc0 (per-device context init, ~0x109fc stride)
+
+Runtime (raw frame enters the DLL):
+  vtable #5  FUN_180694390  ← host IHeatDevice callback
+    └─ FUN_18068d620  (dispatch per device index)
+         ├─ pcVar20[0xb759] → gate flag for CCL
+         ├─ FUN_1805fe480  (frame converter)
+         ├─ FUN_180605cf0  (touch detection init)
+         └─ FUN_1806091c0  (CCL wrapper)
+              └─ FUN_1805ffd00  ★ CCL orchestrator
+```
+
+### 22.2 CCL orchestrator (`FUN_1805ffd00`, references `TouchDetectionCclLogic` string)
+
+| Step | Address | Function |
+|------|---------|----------|
+| Gate check | `1806003b0` | Decide whether to process frame |
+| Heatmap load | `180600820` | Select per-cycle gain, decompress raw frame |
+| Threshold+label | `180600c40` | Per-pixel threshold, connected component, moments |
+| Preparation | `180601690` | Cleanup previous state |
+| CCL core | `180606040` | Pixel→blob conversion, coordinate normalization |
+| Blob iteration | inline | 47 slots × 0x254 bytes, state machine 0→4 |
+| Blob process | `180606370` | Individual blob state transition |
+| State machine | `180608430` | 0=empty, 1=new, 2=claimed, 3/4=gesture |
+| Cleanup | `1806067d0` | Dead blob cleanup |
+| Post-process | `180601c10` | Per-blob property extraction, tracking |
+| Finalize | `180605470` | Finalize and send reports |
+
+### 22.3 Raw frame format
+
+- **288 columns per row** (stride `0x120`), variable rows at `param_1 + 0x1639e`
+- Each byte is an **index into a per-device float[256] lookup table** at `param_1 + 0xc590`
+- Frame arrives via host callback, not exposed as a DLL export
+- Frame dimensions from context: width at `0x1639c`, height at `0x1639e`
+- The lookup table is updated per-cycle based on gain selection
+
+### 22.4 Blob slot layout (stride 0x254 = 596 bytes, up to 47 slots)
+
+| Offset | Size | Field |
+|--------|------|-------|
+| `0x00-0x10` | — | Position/size properties |
+| `0x2c` | ushort | Pixel count (>1 = valid touch) |
+| `0x30` | ushort | First pixel index (refs per-pixel slot) |
+| `0x3c` | int | State (0=empty, 1=new, 2=claimed, 3/4=lift/gesture) |
+| `0x46` | byte | Flag |
+| `0x47` | byte | History flag |
+| `0x251` | byte | Last gesture type (index into history table) |
+
+### 22.5 Per-pixel slot layout (stride 0xb0 = 176 bytes)
+
+Used during threshold/CCL phase in `FUN_180600c40`:
+
+- `0x00-0x0b`: Raw signal + filtered values (float)
+- `0x0c-0x0d`: Row min/max (ushort)
+- `0x0e`: Pixel count (ushort)
+- `0x10`: Status (0=empty, 1=active, 2=claimed, 5=suppressed)
+- `0x11`: Border flags (bitfield)
+- `0x12`: Edge flag
+- `0x13`: Neighbor count (max 10)
+- `0x14-0x4e`: Neighbor list (6-byte entries: x, y, flag)
+- `0x41`: Label byte (for CCL flood-fill)
+- `0x4b`: Antenna index (for c590 table lookup)
+
+### 22.6 Eigenvalue decomposition (inside `FUN_180600c40`)
+
+For each pixel, the covariance of weighted positions is computed:
+- `Σx·I`, `Σy·I`, `Σx²·I`, `Σy²·I`, `Σxy·I` (moments weighted by signal)
+- Eigenvalues via `λ = (trace ± sqrt(trace² - 4·det)) / 2`
+- Orientation angle via `atanf((2·Σxy) / (Σy² - Σx²))`
+- Ellipticity ratio output at `pfVar12 + 0x23`
+
+### 22.7 Coordinate pipeline (blob → grid → screen)
+
+The DLL's internal pipeline operates entirely in **grid-pixel coordinates**:
+
+1. **`FUN_180602e60`** (centroid refinement): iterates the blob bounding box, computes weighted CoM
+   using the float lookup table `c590[raw_byte]`:
+   ```
+   X_center = Σ(x · signal) / Σ(signal)
+   Y_center = Σ(y · signal) / Σ(signal)
+   ```
+   Output: float coordinates in grid space (0..287 X, 0..N-1 Y).
+
+2. **`FUN_180602a90`** (report builder): stores centroids and metadata in per-finger reports
+   at stride 0x34 bytes. Two modes:
+   - Legacy mode (`param_8 == 0`): uses blob slot raw data at `lVar8 + 0x28/0x2a`
+   - New mode (`param_8 != 0`): uses float CoM from step 1
+
+   Per-finger report layout (0x34 bytes):
+   | Offset | Size | Field |
+   |--------|------|-------|
+   | `0x00` | float | X center (grid coords) |
+   | `0x04` | float | Y center (grid coords) |
+   | `0x0c` | byte | status flag |
+   | `0x10` | float | scale/gain factor |
+   | `0x14` | float | signal strength |
+   | `0x18` | short | X min |
+   | `0x1c` | short | X max |
+   | `0x20` | ushort | pixel count |
+   | `0x24` | ushort | duration counter |
+   | `0x28` | byte | source type flag |
+   | `0x2a` | byte | finger type (1=touch, 7=ghosted) |
+   | `0x2b` | byte | source id |
+   | `0x2d` | bool | peak flag |
+   | `0x2e` | byte | processing mode |
+   | `0x2f` | byte | blob index |
+   | `0x31` | byte | extra flag |
+   | `0x32` | byte | meta flag |
+
+3. **`FUN_1806025c0`** (ghost rejection): merges fingers closer than a distance threshold
+   (from `param_1 + 0xc570`). Pairs within threshold are flagged type 7 (ghosted).
+
+4. **`FUN_180602770`** (blob splitting): when a blob has multiple neighbors, computes
+   per-neighbor sub-centroids weighted by the signal of pixels closest to each neighbor.
+
+5. **`FUN_180605470`** (finalizer): marks the report buffer as ready and copies status codes.
+
+**Screen coordinate mapping is NOT done by this DLL.** The per-finger reports with grid
+coordinates are delivered to the Windows host through the `IHeatAdaptor` callback chain.
+The host applies the screen calibration transform. This is why `TouchBlobCoMX`/`TouchBlobCoMY`
+from the ETW TraceLogging provider contain coordinates in the host's coordinate system,
+not the raw grid coordinates.
+
+The calibration data (antenna geometry, scaling factors) that the host uses is initialized
+by `FUN_1805ff7e0` in the per-device context and may be extracted from the context tables.
+
+### 22.8 Calibration data layout (extracted from FUN_1805ff7e0 + FUN_18068bfc0)
+
+The per-device processing context (size `0x32bd` per device) contains all calibration
+coefficients. These are populated once at init and used during runtime processing.
+
+**Grid dimensions** (from frame descriptor):
+| Offset | Type | Field |
+|--------|------|-------|
+| `0x1639c` | ushort | Grid width (columns, typically 288) |
+| `0x1639e` | ushort | Grid height (rows) |
+| `0x163a0` | short | Sub-sampled width = ceil(width / sub_factor) |
+| `0x163a2` | short | Sub-sampled height = ceil(height / sub_factor) |
+| `0x163a6` | byte | Sub-sampling factor (log2 from config +0xe92) |
+
+**Signal lookup table** (`c590`, 256 floats):
+```
+c590[i] = DAT_180716340 - (i * DAT_1806c089c + DAT_1806cd848)
+```
+Linear ramp mapping raw frame bytes (0-255) to signal strength values.
+
+**Processing config** (from param_5 config table):
+| Offset | Type | Field |
+|--------|------|-------|
+| `0x16480` | ptr | Config table pointer |
+| `0x16490` | ptr | Frame data pointer |
+| `0x16488` | ptr | `config + 0xe9c` (per-cycle gain data) |
+| `0xc570` | ptr | Antenna table (`frame_data + 0x0c`) |
+| `0xc580` | float | Global gain = `antenna[8] * DAT_1806c08a4` |
+
+**Raw-data per-device context** (at `DAT_1809449e0[index]`, size 0x3010):
+| Offset | Type | Field |
+|--------|------|-------|
+| `0x2fe8` | float | X scale: `(pos_x * global) / (grid_w - 1)` |
+| `0x2fec` | float | Y scale: `(pos_y * global) / (grid_h - 1)` |
+| `0x2ff0` | float | X scaling factor: `extra_x / (extra2_x * global)` |
+| `0x2ff4` | float | Y scaling factor: `extra_y / (extra2_y * global)` |
+| `0x2ff8` | float | Aspect ratio: `(cfg1 - cfg2) / (cfg3 - cfg4)` |
+| `0x2fd8` | ptr | Config table pointer (`config + 0x1f8c`) |
+
+**Screen calibration** (indirect, via `lVar17 = DAT_1809449e0[i]`):
+The host uses these coefficients to map grid→screen. The formulas are:
+```
+screen_x = grid_x * lVar17[0x2fe8]     = grid_x * (phys_x * SCALE) / (grid_w - 1)
+screen_y = grid_y * lVar17[0x2fec]     = grid_y * (phys_y * SCALE) / (grid_h - 1)
+```
+Where `SCALE` = `DAT_1806c08a4` (global constant) and `phys_x/y` come from
+`FUN_1805fb520` processing of the frame descriptor.
+
+**Touch duration** (from config `+0xe68`/`+0xe64`):
+| Offset | Type | Field |
+|--------|------|-------|
+| `0x194aa` | ushort | Max active frames before lift (default 100) |
+
+**Antenna index map** (`c98c`, 18 entries):
+Maps raw antenna indices to processing group numbers. Two modes depending on
+`*param_6 & 0xfd` (one uses a 3D array, the other a flat 2D array).
+
+### 22.9 Pen vs touch separation
+
+- `PenPositionXgBoost` (vtable at `1806bc890`) — 20+28 node boosted tree for pen position
+- Pen azimuth/tilt via `FUN_1805ec650` (sin/cos/atan2 math with antenna calibration)
+- Pen pressure/hover via `FUN_1805f9ec0` → `FUN_1805f99f0` → XGBoost model
+- Touch path: `FUN_1805ffd00` (CCL) — entirely separate from pen
+- Dispatch selects based on `param_1 + 0x21400` (device index)
+
+### 22.10 Ghidra tooling added for this analysis
+
+| Script | Purpose |
+|--------|---------|
+| `DecompileByAddress.java` | Decompile known addresses (exports, vtable slots) |
+| `ListSymbols.java` | Filter symbols by substring |
+| `DumpPointerTable.java` | Extract vtable/function-pointer tables |
+| `DumpProviderCallers.java` | 2-hop call-graph tracing |
+| `ListFunctionsByScalar.java` | Find functions containing a specific constant |
+| `ListFunctionsByMnemonic.java` | Find functions by SIMD instruction prefix |
+| `LocateKeyword.java` | Raw-byte keyword search without Ghidra string typing |
+| `RefsNearAddress.java` | Find xrefs to a range around a known address |
+
+### 22.11 External callback boundary
+
+The DLL registers with the host via `IHeatAdaptor::vftable` and receives frames through
+`FUN_180694390` (vtable slot #5), which queries `IHeatDevice` for the raw frame. The host
+that owns this callback is NOT present in the local `windrivers/` binaries — it's a Windows
+user-mode process identified by `collect_touch_host.ps1`. Full static analysis of the DLL
+pipeline is feasible as demonstrated, but the raw frame delivery mechanism is a COM callback
+that cannot be statically resolved without the host binary.
+
+### 22.12 Windows capture kit
+
+| File | Purpose |
+|------|---------|
+| `touch_boot.wprp` | WPR profile (+ TouchAndPen.Prod provider) |
+| `capture_runtime.cmd` | Grid centroid capture guide |
+| `export_runtime.cmd` | tracerpt CSV export |
+| `collect_touch_host.cmd` | Identify host process with TouchPenProcessor0C19.dll |
+| `collect_touch_host.ps1` | PowerShell host identification script |
+| `decode_etl_linux.py` | Linux-side ETL decoder |
+
+## 23. Linux Driver CCL — corrected from reverse-engineered pipeline (2026-07-12)
+
+The `raw_mode=1` heatmap blob detector has been corrected based on DLL analysis.
+
+| Fix | Before | After |
+|-----|--------|-------|
+| Grid columns | 86 | **288** (decompiled stride 0x120) |
+| Grid rows | 50 (hardcoded) | Auto-detected from data size |
+| Signal interpretation | Raw byte | Byte → c590 lookup table |
+| Touch threshold | `diff > 15` | `signal * 10 < baseline_signal * 7` |
+| Blob weight | Raw byte diff | `(c590[base] - c590[curr]) * 100` |
+
+**c590 lookup** (corrected from DLL .rdata 2026-07-12):
+`signal[i] = 1.0 - (i * 0.00222035 + 0.6)`. Range: byte=0→0.4, byte=255→~0.
+Kernel fixed-point: `(s16)(signal * 10000)` gives range 4000..0.
+
+**Linux implementation status (experimental)**: the driver now contains a
+per-slot state machine, eigenvalue-based major/minor/orientation reporting, and
+distance-based ghost rejection. It is an approximation of the DLL pipeline;
+the DLL's gain adaptation and blob splitting are not yet reproduced.
+
+**Raw mode handshake, local observation (2026-07-12)**: the current Linux test
+device has been observed streaming raw frames with `probe_raw_id=5`
+(content_id=0x0C at ~98 Hz, 4302 bytes/frame), whereas the captured Windows
+trace uses selector 4 and selector 4 has silenced this device in later Linux
+tests. The difference is not root-caused: firmware identity, controller state,
+timing, and probe methodology have not been isolated. Treat selector 5 as a
+local empirical configuration, not a protocol rule. Do not scan selectors on a
+live device until safe recovery and a passive firmware-identity mapping exist.
 
 ## 14. References
 

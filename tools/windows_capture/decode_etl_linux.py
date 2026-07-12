@@ -32,6 +32,7 @@ NAMES = {
  "72cd9ff7-4af8-4b89-aede-5f26fda13567":"SPB-ClassExt",
  "55ab77f6-fa04-43ef-af45-688fbf500482":"GPIO-ClassExt",
  "6465da78-e7a0-4f39-b084-8f53c7c30dc6":"HIDCLASS",
+ "3fa102e9-1a62-5490-7af8-6088c2f9e6be":"SurfaceTouchAndPenProd",
  "c514638f-7723-485b-bcfc-96565d735d4a":"Kernel-Acpi",
  "dab01d4d-2d48-477d-b1c3-daad0ce6f06b":"ACPI-MethodTrace",
  "331c3b3a-2005-44c2-ac5e-77220c37d6b4":"Kernel-Power",
