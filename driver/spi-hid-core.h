@@ -314,6 +314,7 @@ struct spi_hid {
 	u32 heatmap_baseline_frames;
 	u8  heatmap_touched[HEATMAP_MAX_CELLS];
 	u8  heatmap_expanded[HEATMAP_MAX_CELLS];
+	u8  heatmap_frame_persistence[HEATMAP_MAX_CELLS];
 	u16 heatmap_label[HEATMAP_MAX_CELLS];
 
 	/* Blob state (was static in heatmap_process_frame) */

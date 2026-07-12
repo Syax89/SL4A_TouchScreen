@@ -1589,6 +1589,7 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	shid->heatmap_baseline_cells = 0;
 	shid->heatmap_baseline_frames = 0;
 	memset(shid->heatmap_baseline, 0, sizeof(shid->heatmap_baseline));
+	memset(shid->heatmap_frame_persistence, 0, sizeof(shid->heatmap_frame_persistence));
 	memset(shid->blob_slot_state, 0, sizeof(shid->blob_slot_state));
 	memset(shid->blob_slot_duration, 0, sizeof(shid->blob_slot_duration));
 	memset(shid->blob_slot_gx, 0, sizeof(shid->blob_slot_gx));
@@ -1905,37 +1906,73 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 	if (!shid->touch_input) return;
 
 	/* Step 1: mark touched cells using c590 signal lookup.
-	 * Touch DECREASES the raw byte index, which INCREASES the c590 value.
-	 * Detection mode selected by touch_signal_mode:
-	 *   0 = any change from baseline
-	 *   1 = rise only (signal > baseline, touch INCREASES c590)
-	 *   2 = percentage rise (signal > baseline * (100 + pct) / 100) */
+	 * Touch DECREASES the c590 value (raw byte increases, c590 drops).
+	 * Detection uses absolute signal drop from baseline:
+	 *   touched if (baseline_signal - signal) >= threshold
+	 * where threshold = c590_range * touch_threshold_pct / 100.
+	 *
+	 * Mode 2 (default): absolute drop across the resting-signal range.
+	 * This avoids the domain-mismatch bug where c590[baseline]≈0
+	 * multiplied by 1.6 still yields 0, making cells hyper-sensitive. */
 	memset(shid->heatmap_touched, 0, cell_count);
-	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-		u8 raw = data[dfa_data_offset + i];
-		u8 baseline_raw = shid->heatmap_baseline[i];
-		s16 baseline_signal = shid->c590_lut[baseline_raw];
-		s16 signal = shid->c590_lut[raw];
+	{
+		s32 c590_range = shid->c590_lut[0]; /* resting signal ≈ 4000 */
+		s32 threshold;
 
-		if (touch_signal_mode == 1) {
-			if (signal > baseline_signal)
-				shid->heatmap_touched[i] = 1;
-		} else if (touch_signal_mode == 2) {
-			if (signal > baseline_signal * (100 + touch_threshold_pct) / 100)
-				shid->heatmap_touched[i] = 1;
-		} else {
-			if (signal != baseline_signal)
-				shid->heatmap_touched[i] = 1;
+		if (touch_signal_mode == 2)
+			threshold = (c590_range * touch_threshold_pct) / 100;
+		else if (touch_signal_mode == 1)
+			threshold = (c590_range * 25) / 100; /* reasonable default */
+		else
+			threshold = 0; /* any change */
+
+		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
+			u8 raw = data[dfa_data_offset + i];
+			u8 baseline_raw = shid->heatmap_baseline[i];
+			s16 baseline_signal = shid->c590_lut[baseline_raw];
+			s16 signal = shid->c590_lut[raw];
+			s32 drop = (s32)baseline_signal - (s32)signal;
+
+			if (touch_signal_mode == 2) {
+				/* Percentage drop across resting range */
+				if (drop >= threshold)
+					shid->heatmap_touched[i] = 1;
+			} else if (touch_signal_mode == 1) {
+				/* Absolute rise */
+				if (drop >= threshold)
+					shid->heatmap_touched[i] = 1;
+			} else {
+				/* Any change */
+				if (drop > 0)
+					shid->heatmap_touched[i] = 1;
+			}
 		}
 	}
 
-	/* Morphological dilation: expand touched region by 1 cell to merge
-	 * nearby clusters into a single blob. */
+	/* Temporal consistency: cells must be active for 2+ consecutive frames
+	 * to be considered stable touches. Single-frame spikes are suppressed. */
+	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
+		if (shid->heatmap_touched[i]) {
+			if (shid->heatmap_frame_persistence[i] < 255)
+				shid->heatmap_frame_persistence[i]++;
+		} else {
+			shid->heatmap_frame_persistence[i] = 0;
+		}
+		/* Only promote cells that have persisted for 2+ frames */
+		if (shid->heatmap_frame_persistence[i] < 2)
+			shid->heatmap_touched[i] = 0;
+	}
+
+	/* Morphological dilation: expand high-confidence touched region by 1 cell
+	 * to merge nearby clusters. Only applied to cells with persistence >= 3
+	 * (strong confidence) to avoid amplifying noise. */
 	{
 		u8 *expanded = shid->heatmap_expanded;
 		memcpy(expanded, shid->heatmap_touched, cell_count);
 		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-			if (!shid->heatmap_touched[i]) continue;
+			/* Only dilate cells with strong persistence */
+			if (!shid->heatmap_touched[i] || shid->heatmap_frame_persistence[i] < 3)
+				continue;
 			u16 col = i % ncols, row = i / ncols;
 			if (col > 0 && i > 0) expanded[i - 1] = 1;
 			if (col + 1 < ncols && i + 1 < cell_count && i + 1 < HEATMAP_MAX_CELLS) expanded[i + 1] = 1;
