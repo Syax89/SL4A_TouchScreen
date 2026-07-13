@@ -3,7 +3,7 @@
 > Linux HID-over-SPI driver for the Microsoft Surface Laptop 4 (AMD) touchscreen
 
 [![Status](https://img.shields.io/badge/status-functional-brightgreen)](https://github.com/Syax89/SL4A_TouchScreen)
-[![Release](https://img.shields.io/badge/release-1.0.0--beta2-yellow)](VERSION)
+[![Release](https://img.shields.io/badge/release-1.0.0-brightgreen)](VERSION)
 [![Hardware](https://img.shields.io/badge/device-surface%20laptop%204%20amd-blue)](#hardware)
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%7C%20BSD--3-orange)](LICENSE)
 
