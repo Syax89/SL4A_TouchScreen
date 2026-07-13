@@ -225,26 +225,29 @@ Power states: D0=0x01 (Active), D2=0x02 (Sleep), D3=0x03 (Off).
 
 ---
 
-## Device Descriptor (28 bytes, I2C-like)
+## Device Descriptor (28 bytes observed, I2C-like)
 
 The V0 descriptor layout is closer to I2C-HID than the v1.0 spec:
 
 | Offset | Size | Field | Value (MSHW0231) |
 |--------|------|-------|------------------|
-| 0 | u16 | Device Desc Length | 0x001F (31) |
+| 0 | u16 | Device Desc Length | 0x001C (28) |
 | 2 | u16 | HID Version (BCD) | 0x0100 |
 | 4 | u16 | Report Desc Length | 0x03A8 (936) |
 | 6 | u16 | Report Desc Register | 0x0002 |
 | 8 | u16 | Input Register | 0x0000 |
-| 10 | u16 | Max Input Length | 0x10C9 (4297) |
+| 10 | u16 | Max Input Length | 0x0020 (32) |
 | 12 | u16 | Output Register | 0x0003 |
-| 14 | u16 | Max Output Length | 0x0000 |
+| 14 | u16 | Max Output Length | 0x0002 |
 | 16 | u16 | Command Register | 0x0004 |
 | 18 | u16 | Vendor ID | 0x045E (Microsoft) |
 | 20 | u16 | Product ID | 0x0C19 |
 | 22 | u16 | Version ID | 0x0100 |
-| 24 | u16 | Flags | (device-specific) |
-| 26 | 4B | Reserved | 0x00000000 |
+| 24 | u32 | Flags | 0x00000081 |
+
+The observed V0 reply ends after the 28-byte descriptor. The driver accepts the
+mandatory fields through `wFlags`; do not infer optional trailing fields from
+generic I2C-HID layouts.
 
 ---
 

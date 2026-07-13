@@ -2,8 +2,10 @@
 
 **Date**: 2026-07-03 evening — decomp with real PDB symbols (`idp hidspi.pdb`)
 **Updated**: 2026-07-07 (work in progress)
-**Status**: the code has been verified and the Linux driver replicates
-the MMIO sequence. Investigation of the write path continues.
+> **Historical snapshot.** This file records the state of the investigation on
+> 2026-07-07. Its write-path conclusion was superseded by standard-HID mode;
+> the current driver status and supported workflow are in `README.md` and
+> `docs/GROUND_TRUTH.md` section 19 and later.
 
 ---
 

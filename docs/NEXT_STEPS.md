@@ -62,8 +62,7 @@ as a universal protocol constant. Raw mode sends content_id=0x0C frames (~4302 b
 GPIO interrupts — not even a `RESET_RSP`). Found that real Windows waits ~4.6ms between
 reading `GET_FEAT_RESP` and sending `SET_FEATURE` (we sent it instantly); added a matching
 `usleep_range(4500, 5500)` in `driver/spi-hid-core.c` `case 5`, but live testing across
-several attempts (including a fresh power-cycle via the new `tools/reset_touch.sh`) showed no
-clear improvement (see GROUND_TRUTH.md §18.6). Blob detection / CCL / slot-tracking logic
+several attempts showed no clear improvement (see GROUND_TRUTH.md §18.6). Blob detection / CCL / slot-tracking logic
 fixes are confirmed working live in the one session where the handshake did succeed, but
 further calibration work (mapping grid position to physical screen position) needs a
 reliably-connectable device to do efficiently.
@@ -90,11 +89,12 @@ repeated forever instead of counting down; fixed by initializing the counter onl
 device really won't cooperate; confirms and cancels itself cleanly on first-try success with
 no spurious re-firing; zero crashes across several load/unload cycles; standard mode
 (`raw_mode=0`, default) confirmed completely unaffected (new fields are simply never touched
-when raw_mode is off).
+when raw_mode is off). This is a historical experiment: the current stream
+watchdog is disabled by default, and direct ACPI GPIO recovery is unsupported.
 
-**Do not use `tools/reset_touch.sh` as a general recovery path.** It invokes direct ACPI
-`\M010` GPIO methods. The canonical investigation log records such direct calls as capable
-of leaving the controller silent until cold boot. Recovery experiments must use the ACPI power
+The historical `tools/reset_touch.sh` is intentionally absent. Do not recreate it
+as a general recovery path: direct ACPI `\M010` GPIO calls can leave the
+controller silent until cold boot. Recovery experiments must use the ACPI power
 state machine and collect lifecycle trace data.
 
 ### What we know
@@ -179,8 +179,8 @@ reversing the DFT math — same "trust the real trace" method that solved the SP
 - [x] Repo-wide cleanup 2026-07-08 — removed the entire bring-up-phase scaffolding now that
       the driver works end-to-end: `tools/diagnostics/` (dozens of one-off raw-MMIO kernel
       modules answering "does DESCREQ even reach the device" — long since answered yes),
-      `tools/raw-mmio-test/`, root-level `test_raw.sh`/`test_seq.sh`, `tools/gpio_test.c`
-      (superseded by `tools/reset_touch.sh`), unused companion-chip firmware blob data
+       `tools/raw-mmio-test/`, root-level `test_raw.sh`/`test_seq.sh`, `tools/gpio_test.c`
+       (direct GPIO recovery is unsupported), unused companion-chip firmware blob data
       (`module/b0_blocks.h`, confirmed unreferenced anywhere in `driver/`), stale/superseded
       docs (`docs/analisi_MSHW0231.md` — pre-breakthrough analysis whose "no mode-change
       command exists" conclusion is now known wrong; `docs/SESSION_2026-07-06.md` — explicitly

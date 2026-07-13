@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================================
 # uninstall.sh — Removes everything tools/install.sh installed:
-# the systemd service, the loaded modules, and the DKMS-registered source
-# tree (for every kernel it was built against).
+# the systemd service and the DKMS-registered source tree (for every kernel it
+# was built against). Loaded modules are left intact until reboot.
 #
 # Usage: sudo ./tools/uninstall.sh
 # ============================================================================
@@ -34,10 +34,8 @@ systemctl daemon-reload
 rm -f "$MODPROBE_CONF"
 pass "Service and modprobe config removed"
 
-info "Unloading modules (if still loaded)..."
-modprobe -r spi_hid 2>/dev/null || true
-modprobe -r spi_amd 2>/dev/null || true
-pass "Modules unloaded"
+info "Leaving active modules untouched..."
+pass "Reboot is required to stop the active driver safely"
 
 info "Removing DKMS registration ($PKG_NAME/$PKG_VERSION, all kernels)..."
 dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all 2>/dev/null || true
@@ -62,5 +60,6 @@ pass "DKMS source tree removed"
 
 echo ""
 echo "============================================"
-echo -e "${GREEN}Uninstall complete.${NC} The git repo itself was not touched."
+echo -e "${GREEN}Uninstall complete.${NC} Reboot to unload the active driver."
+echo "The git repo itself was not touched."
 echo "============================================"

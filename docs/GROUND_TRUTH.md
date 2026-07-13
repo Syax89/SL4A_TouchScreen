@@ -5,6 +5,11 @@
 > DSDT/SSDT ACPI, Linux tests on a Surface Laptop 4 AMD (Cezanne), kernel 7.1.2-3-cachyos,
 > Windows MMIO dump via RWEverything, Windows PCI config space dump via RWEverything
 > (11 devices), WPP tracing internal to hidspi.sys (tracepdb/traceview/tracefmt).
+>
+> **Research journal, not an operating guide.** Entries are chronological and
+> may record hypotheses later disproved. For installation and supported behavior,
+> use `README.md`; for active work, use `docs/NEXT_STEPS.md`. Later dated entries
+> supersede earlier entries when they conflict.
 
 ---
 
@@ -2173,8 +2178,8 @@ measure the real timing Windows uses between reading the `GET_FEAT_RESP` body an
 thread invocation, sub-microsecond gap). Added a matching `usleep_range(4500, 5500)` before
 the `SET_FEATURE` write in `spi_hid_seq_thread()`'s `case 5` (`driver/spi-hid-core.c`).
 
-**Tested live across several insmod/rmmod cycles (including a fresh ACPI GPIO power-cycle
-via the new `tools/reset_touch.sh` right before an attempt): no clear improvement observed**
+**Tested live across several insmod/rmmod cycles (including a fresh direct ACPI GPIO
+power-cycle right before an attempt): no clear improvement observed**
 (failures continued at a similar rate). Sample size is small (a handful of trials either
 side), so this doesn't rule out the delay being part of the real fix, but it's not
 sufficient alone. The failure mode (total interrupt silence, not a detectable reset) suggests
@@ -2185,12 +2190,9 @@ session — see `docs/NEXT_STEPS.md` for the proposed next step (a software watc
 auto-retries the whole DESCREQ sequence if `SET_FEATURE` produces no `type=1` traffic within
 a bounded window, sidestepping the root cause entirely).
 
-`tools/reset_touch.sh` (new): standalone script that power-cycles just the touchscreen via
-the same ACPI `\M010` GPIO method used in `test.sh`'s inline `gpio_cycle` module, without
-touching `spi-amd`/`spi-hid` or requiring a full system reboot. Confirmed working
-(`gpio_reset: done — touchscreen power-cycled`). Useful as a recovery tool regardless of the
-raw_mode reliability question, since it's much faster than a reboot when the device needs a
-real power-cycle (e.g., after `raw_mode=1` leaves it stuck raw — see §19 note on cold reboot).
+An experimental direct-ACPI GPIO recovery tool was created at this point in the
+investigation. It has since been removed: later testing showed such calls can
+leave the controller silent until cold boot. It is not a supported recovery path.
 
 ### 18.7 How Windows actually handles this: decompiled `HidSpiCx.sys` reveals a formal
 retry/timeout state machine — Windows almost certainly hits the same intermittent failures
@@ -2242,7 +2244,7 @@ genuine successes, one confirmed live via `evtest` showing correct 2-slot tracki
 that earlier estimate was too optimistic (small sample), or something about the device's
 state right now (possibly related to how many power-cycles it has been through today) makes
 it worse. Neither the ACPI `_PS3`/`_PS0` power-cycle nor the ACPI `\M010` GPIO power-cycle
-(`tools/reset_touch.sh`) un-stuck it, including immediately after the reboot.
+(the later-removed direct GPIO recovery tool) un-stuck it, including immediately after the reboot.
 
 Since `HidSpiCx.sys`'s dispatch path treats GET_FEATURE and SET_FEATURE identically (§18.7 —
 same generic `ConfigureTransfer`/`Dispatch`/timer/retry machinery, differing only by a request
@@ -2302,7 +2304,7 @@ These are pre-computed coordinates from the touch controller firmware — no blo
 
 In raw mode, the device sends content_id=0x0C frames (~4302 bytes):
 - The 4297-byte payload is NOT a simple capacitance grid
-- It is DFT antenna data with dual-frequency processing (9 Short + 9 Long antennas,
+- It is DFT antenna data with dual-frequency processing (16 Short + 16 Long antennas,
   real/imaginary components)
 - 4297 is a prime number — cannot be a rectangular grid colsxrows
 - Windows processes through `TouchPenProcessor0C19.dll` (9.7MB):
@@ -2350,7 +2352,7 @@ open investigation threads): `tools/diagnostics/` (dozens of one-off raw-MMIO ke
 that answered "does DESCREQ reach the device at all" — solved long ago), `tools/raw-mmio-test/`,
 root-level `test_raw.sh`/`test_seq.sh` (same category — early hypothesis-testing scripts for
 the pre-breakthrough SPI write problem), `tools/gpio_test.c` (superseded by the new, cleaner
-`tools/reset_touch.sh`), `module/b0_blocks.h` + the now-empty `module/`/`firmware/`
+the unsupported direct-GPIO recovery tool), `module/b0_blocks.h` + the now-empty `module/`/`firmware/`
 directories (companion-chip firmware block data — confirmed via grep to be referenced nowhere
 in `driver/`, consistent with the project's own "companion chip not needed" finding), three
 small ETW-snippet scratch files in `tools/` (`BOOT_SEQUENCE_ETW.txt`, `COMPANION_1a_firmware.txt`,
@@ -2935,7 +2937,7 @@ live device until safe recovery and a passive firmware-identity mapping exist.
 | Linux HID driver | `driver/spi-hid-core.c` |
 | Windows ETW CSVs | `traces/surface_*.csv` |
 | hidspi.sys decomp | `docs/decomp/clean/` |
-| amdspi.sys decomp | `docs/decomp/amdspi/` |
+| amdspi.sys decomp excerpts | `docs/decomp/clean/amdspi_*` |
 | Windows MMIO dump | `docs/windows_mmio_dumps/` |
 | Windows PCI dump | Windows-side, `Desktop\windrivers\` |
 | ACPI Linux | `docs/acpi/linux/` |

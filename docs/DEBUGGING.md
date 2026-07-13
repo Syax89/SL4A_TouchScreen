@@ -6,9 +6,13 @@ not alter the SPI protocol or power sequence.
 Create `/etc/modprobe.d/sl4a-touch-debug.conf` with:
 
 ```conf
-options spi_amd debug_trace=2
-options spi_hid raw_mode=0 debug_level=2 acpi_probe_power_cycle=1
+options spi_amd debug_trace=1
+options spi_hid raw_mode=0 debug_level=1 acpi_probe_power_cycle=1
 ```
+
+Start with `debug_trace=1` and `debug_level=1`. Use level 2 only for a short,
+reproducible boot test: it logs each SPI message and sequencer request and can
+rapidly grow the journal during normal input.
 
 `debug_trace=1` records controller setup and lifecycle. `debug_trace=2` also
 records every SPI message and segment. `debug_level=1` records HID state
@@ -24,5 +28,6 @@ journalctl -b -1 -k -o short-monotonic | grep -E 'TRACE\[(amd|hid)'
 journalctl -b -1 -k -o short-monotonic | grep -E 'spi-amd: TRACE busy timeout|spi_hid|spi_amd'
 ```
 
-The last `TRACE[...]` record identifies the operation that did not return.
+The last `TRACE[...]` record narrows down the operation that did not return; it
+does not by itself prove root cause.
 Leave `raw_mode=0` while investigating controller or boot stability.

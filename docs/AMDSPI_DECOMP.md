@@ -1,17 +1,23 @@
 # amdspi.sys — Windows AMD SPI Driver (Decompiled)
 
-> **UPDATE 2026-07-06**: Corrected based on `verification/amdspi-decomp-report.md`.
-> Incorrect function descriptions and some sequence details have been fixed.
+> **Historical research note (2026-07-06).** The original verification report
+> and per-function `docs/decomp/amdspi/` export are not tracked in this tree.
+> Treat this document as an index of the analysis rather than current driver
+> behavior; use `docs/AMD_CONTROLLER_VALIDATION.md` for supported changes.
 
 Windows driver for the AMD FCH SPI controller. Responsible for low-level SPI communication.
 
 ## Source Files
 
-All files in `docs/decomp/amdspi/` are functions decompiled from `amdspi.sys` (x64).
+The tracked `docs/decomp/clean/amdspi_*` files are the available cleaned excerpts
+from `amdspi.sys` (x64).
 
 ---
 
-## Function Index
+## Original Function Index
+
+The file names below are from the untracked original export; only selected
+cleaned excerpts are present in this repository.
 
 | Address | File Name | Description |
 |-----------|-----------|-------------|
@@ -198,4 +204,3 @@ The Cx files document the spec v1.0 behavior which does NOT apply to this device
 | "Busy poll = read32(CTRL0)" | read8(0x4C), effectively no-op |
 | "TX+RX with same opcode in single operation" | Separate WDF requests (write 0x02 + read 0x0B) |
 | "FIFO clear requires toggle" | Windows does single set |
-

@@ -33,7 +33,7 @@ verify them.
 
 ## Required Hardware Trace
 
-Capture a cold boot and one standard-mode reload with these records:
+Capture a cold boot and a subsequent reboot with the driver in standard mode:
 
 1. SPI-core chip-select and ALT_CS register before every transfer.
 2. CTRL0, STATUS, TX/RX count and FIFO bytes immediately before trigger and

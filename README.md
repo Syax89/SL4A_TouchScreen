@@ -5,14 +5,13 @@
 [![Status](https://img.shields.io/badge/status-functional-brightgreen)](https://github.com/Syax89/SL4A_TouchScreen)
 [![Release](https://img.shields.io/badge/release-1.0.0-brightgreen)](VERSION)
 [![Hardware](https://img.shields.io/badge/device-surface%20laptop%204%20amd-blue)](#hardware)
-[![License](https://img.shields.io/badge/license-GPL--2.0%20%7C%20BSD--3-orange)](LICENSE)
 
 > [!WARNING]
 > **This is beta software.** It is an experimental, reverse-engineered kernel driver and may cause touchscreen failures, system instability, data loss, or hardware behavior not yet understood. Use it entirely at your own risk. It is provided "as is", without warranty of any kind; the authors and contributors accept no responsibility or liability for damages or problems resulting from its use.
 
 ---
 
-## Status: FUNCTIONAL — Single-touch + Pen working
+## Status: beta — standard HID works
 
 The driver successfully initializes the MSHW0231 touchscreen on the Surface Laptop 4 AMD.
 **Single-touch and pen work** via standard HID mode (Report IDs 0x40 and 0x01).
@@ -28,27 +27,9 @@ KDE/Wayland recognizes touches correctly — tap, drag, and single-finger gestur
 | Multi-touch (raw heatmap pipeline) | Experimental |
 | Grid-to-screen calibration | In progress |
 
-Multi-touch requires switching the device into raw heatmap mode (`SET_FEATURE(id=4)`)
-and processing the raw capacitive frames (~4302 bytes, 72×48 cell grid plus metadata) through
-connected-component labeling (CCL) to extract blob centroids. The Windows
-`TouchPenProcessor0C19.dll` (9.7 MB) handles this with dual-frequency DFT processing,
-8-connectivity CCL, eigenvalue decomposition, and Kalman tracking — all now fully
-mapped via static analysis.
-
-**The CCL pipeline is functional end-to-end**: the driver streams raw heatmap frames,
-computes EMA-smoothed baselines (eliminating thermal drift false positives),
-extracts blobs via 8-connectivity union-find, debounces, assigns slots, computes
-centroids with eigenvalue orientation (±89°), and emits `ABS_MT_POSITION_X/Y` events.
-Verified live with `evtest` — up to 6 concurrent touchpoints detected.
-
-**Current limitations**:
-- The raw-mode handshake (`SET_FEATURE`) succeeds only on a fresh cold boot —
-  repeated power-cycles degrade the device state. A software watchdog matches
-  Windows's own 2000ms-timeout/3-retry behavior but cannot fix the underlying cause.
-- Grid-to-screen coordinate mapping is being calibrated. The 72×48 cell field
-  covers the active panel. Linear calibration is implemented through
-  `calib_scale_*` and `calib_offset_*` module parameters.
-- Standard mode (`raw_mode=N`, the default) is what's stable for daily use.
+Multi-touch requires experimental `raw_mode=1`. Its frames are DFT antenna data,
+not a rectangular capacitive grid, and the raw-mode handshake and coordinate
+calibration are not reliable. Keep the default `raw_mode=0` for daily use.
 
 ---
 
@@ -110,11 +91,8 @@ a valid DATA report; it hardcodes the known descriptors and transitions
 to state 4. In practice the driver proceeds directly from state 2 to
 state 4 in standard mode.
 
-The driver also runs an **active polling loop** (`poll_interval` module
-param, default 10 ms) that reads data directly from the SPI controller
-alongside the IRQ thread. This recovers from intermittent IRQ silence,
-with a stream watchdog providing automatic re-initialisation when the
-data stream stops.
+Input is IRQ-driven. `poll_interval` is deprecated and ignored; the runtime
+stream watchdog is disabled by default.
 
 **No GET_FEATURE/SET_FEATURE is sent** — the device stays in standard HID mode and sends proper Report ID 0x40 (TouchScreen) and Report ID 1 (Pen) reports with pre-computed X/Y coordinates.
 
@@ -140,17 +118,20 @@ Key differences from spec v1.0:
 
 ---
 
-## Installing (beta testers)
+## Installing
 
 ```bash
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
 sudo ./tools/install.sh
+sudo reboot
 ```
 
 This builds the driver via **DKMS**, so it's automatically rebuilt for every kernel you
 install afterward, and installs a systemd service that loads the driver in standard HID
 mode on every boot via `/etc/modprobe.d/spi-hid.conf` (`options spi_hid raw_mode=N`).
+The installer deliberately does not replace loaded modules: reboot is required after
+an install or update to load a new `spi-amd` controller module.
 
 **Multi-distro support** (auto-detected via `/etc/os-release`): Arch/CachyOS (pacman),
 Ubuntu/Debian (apt), Fedora (dnf), openSUSE (zypper). Missing dependencies are reported
@@ -160,12 +141,16 @@ To remove everything it installed:
 
 ```bash
 sudo ./tools/uninstall.sh
+sudo reboot
 ```
 
+The uninstaller removes the service and DKMS installation but leaves active
+modules untouched; reboot to stop the driver safely.
+
 This is beta software: single-touch + pen are stable, multi-touch is experimental (see
-above). It taints the kernel (unsigned out-of-tree module) — if Secure Boot is enforced in a
-way that rejects unsigned/DKMS-signed modules, loading will fail; see your distro's DKMS
-Secure Boot / MOK enrollment documentation.
+above). The out-of-tree module taints the kernel. Secure Boot support depends on your
+distribution's DKMS signing setup; enroll its signing key through your distribution's
+documented MOK process if the module is rejected after reboot.
 
 ### After installing
 
@@ -173,37 +158,20 @@ The touchscreen appears as:
 - `/dev/input/eventN` — `spi 045E:0C19` (ABS_X, ABS_Y, BTN_TOUCH) for touch
 - `/dev/input/eventN` — `spi 045E:0C19 Stylus` for pen
 
-Status is exposed through the device sysfs directory (`seq_state`,
-`protocol_stats`, and `lifecycle_status`). For verbose sequence diagnostics,
-set `debug_level=3` and enable the standard kernel dynamic-debug facility
-before reproducing an issue:
-
-```bash
-sudo sh -c "echo 'module spi_hid +p' > /sys/kernel/debug/dynamic_debug/control"
-sudo sh -c "echo 3 > /sys/module/spi_hid/parameters/debug_level"
-sudo dmesg -w
-```
-
-For sparse lifecycle diagnostics, use tracefs instead of per-packet logging:
-
-```bash
-sudo sh -c "echo 1 > /sys/kernel/tracing/events/spi_hid/spi_hid_seq_state/enable"
-sudo sh -c "echo 1 > /sys/kernel/tracing/events/spi_hid/spi_hid_lifecycle/enable"
-sudo cat /sys/kernel/tracing/trace_pipe
-```
+For a boot freeze or initialization failure, use the opt-in trace procedure in
+[docs/DEBUGGING.md](docs/DEBUGGING.md). Do not reload `spi_amd` on a live system.
 
 ---
 
 ## Building from source (developers)
 
-If you're working on the driver itself rather than just using it, building/reloading
-directly from the working tree (no DKMS involved) is faster to iterate on:
+If you're working on the driver itself, build locally for a quick compile check.
+To test modified code, install the working tree through DKMS and then reboot:
 
 ```bash
 make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
-sudo rmmod spi_hid spi_amd 2>/dev/null
-sudo insmod driver/spi-amd.ko
-sudo insmod driver/spi-hid.ko
+sudo ./tools/install.sh
+sudo reboot
 ```
 
 ### Offline Protocol Tests
@@ -216,22 +184,16 @@ make -C tests
 ./tests/protocol_test
 ```
 
-`driver/sl4a-touch.service` is a systemd unit that loads the driver via
-`modprobe` at boot or after a DKMS install. For development, use
-`tools/rebuild_and_install.sh` (rebuild + reload in one step,
-see [Tools](#tools)):
+`driver/sl4a-touch.service` loads the driver via `modprobe` at boot.
+`tools/rebuild_and_install.sh` is a compile check that synchronizes the unit
+file if needed; it does not install or reload a module:
 
 ```bash
-sudo cp driver/sl4a-touch.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now sl4a-touch.service
-# after editing driver/ code:
 ./tools/rebuild_and_install.sh
 ```
 
-Note this dev-loop service and the beta installer's service share the same unit name
-(`sl4a-touch.service`) but are **not** the same file — installing one overwrites the other.
-Pick one workflow per machine (DKMS for daily use, direct-checkout for active development).
+The installer and developer workflow use the same versioned
+`driver/sl4a-touch.service` file.
 
 ---
 
@@ -261,8 +223,9 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 |------|------|-------------|
 | `install.sh` | `tools/install.sh` | **Multi-distro installer** (Arch/Debian/Fedora/openSUSE) — DKMS build + systemd service |
 | `uninstall.sh` | `tools/uninstall.sh` | Removes everything `install.sh` installed |
-| `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Developer loop: rebuild in-place and reload (no DKMS) |
-| `calibrate.c` | `tools/calibrate.c` | 4-corner evdev calibration capture — builds binary `tools/calibrate` |
+| `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Developer compile check and service sync; does not install or reload a module |
+| `calibrate_axes.py` | `tools/calibrate_axes.py` | Experimental raw-mode, four-corner axis calibration helper |
+| `touchtest` / `touchviz` | `tools/touchtest*`, `tools/touchviz*` | evdev input inspection utilities |
 | `cli_probe.py` | `tools/cli_probe.py` | Calibration CLI protocol probe (Report ID 0x1f) |
 | `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, GPIO) |
 | `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
@@ -277,28 +240,27 @@ Windows-side capture utilities are in `tools/windows_capture/`.
 
 | File | Contents |
 |------|----------|
-| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | **Canonical knowledge base** — cross-verified model (CSV × decomp × ACPI × PCI × tests) |
-| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Roadmap: handshake reliability, heatmap blob detection, calibration |
-| [`docs/AMD_CONTROLLER_VALIDATION.md`](docs/AMD_CONTROLLER_VALIDATION.md) | AMD FCH SPI controller: verified boundaries and pending hardware validation |
-| [`docs/SPI_REGISTERS.md`](docs/SPI_REGISTERS.md) | AMD FCH SPI + PCI config register map |
-| [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol decoded |
-| [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md) | Annotated Windows boot SPI trace |
-| [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md) | `amdspi.sys` decompilation index |
-| [`docs/decomp/`](docs/decomp/) | `hidspi.sys` / `HidSpiCx.sys` / UEFI DXE decompilations |
+| [`docs/DEBUGGING.md`](docs/DEBUGGING.md) | Boot-freeze trace collection |
+| [`docs/TESTING.md`](docs/TESTING.md) | Portable protocol tests and kernel-test scope |
+| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Current raw-mode and calibration roadmap |
+| [`docs/AMD_CONTROLLER_VALIDATION.md`](docs/AMD_CONTROLLER_VALIDATION.md) | AMD FCH SPI controller validation boundary |
+| [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol reference |
+| [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | Dated research journal; later sections supersede earlier entries |
+| [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md), [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md), [`docs/decomp/`](docs/decomp/) | Historical Windows-trace and decompilation research |
 
 ---
 
-## Traces
+## Research Inputs
 
 | File | Size | Description |
 |------|------|-------------|
-| `traces/surface_boot_auto.csv` | 29.3 MB | Warm boot, 2384 SPI transactions |
-| `traces/surface_init.csv` | 9.1 MB | Cold boot vendor init sequence |
-| `traces/surface_touch.csv` | 19.5 MB | Runtime touch data capture |
+| `traces/*.csv` | Local, untracked | Windows SPI and GPIO captures referenced by research documents |
 
 ---
 
 ## UEFI / Windows Binaries
+
+These are local, untracked research inputs. They are not distributed by this repository.
 
 | File | Size | Description |
 |------|------|-------------|
@@ -315,13 +277,12 @@ Windows-side capture utilities are in `tools/windows_capture/`.
 
 ## Next Steps
 
-- **Multi-touch handshake reliability**: `raw_mode=Y` (see `probe_raw_id`) sends `SET_FEATURE` to switch into raw heatmap streaming. The feature selector is device-state-specific (Windows uses `content_id=4`; confirmed working on first cold boot). The handshake degrades after repeated power-cycles; a watchdog retries automatically (2000ms timeout, 3 retries — matching Windows's own `CheckingResetRetryCountEntry` in `HidSpiCx.sys`) but cannot fix the underlying hardware state issue. **Workaround**: cold boot before raw-mode testing.
-- **Grid-to-screen calibration**: the driver computes blob centroids from the 72×48 heatmap grid and maps them to logical coordinates 0..32767. With automatic scales (`calib_scale_x=0 calib_scale_y=0`), the endpoints map from grid `0..71` and `0..47` respectively. `tools/calibrate` supports empirical four-corner capture and prints the corresponding scale/offset parameters. If `swap_xy=1`, scales and offsets still refer to final screen X/Y axes. Resolution values match the HID descriptor (X=112 ppi, Y=198 ppi).
-- **Windows ETW trace**: capturing a fresh `TouchAndPen.Prod` trace on Windows would empirically confirm the `TouchBlobCoMX`/`TouchBlobCoMY` coordinate mapping, providing ground-truth calibration data without needing to fully reverse-engineer the DLL's DFT math.
-- **Upstreaming**: split into proper Linux kernel patches (SPI controller + HID transport).
+See [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md). The open work is raw-mode handshake
+reliability, raw-data calibration, and upstream-quality patch preparation.
 
 ---
 
-## License
+## Licensing
 
-Dual **GPL-2.0** / **BSD-3-Clause**. See source file headers.
+Licensing is specified in each source-file header. A repository-wide license file is
+not currently supplied.

@@ -2,9 +2,9 @@
 
 Extracted from `surface_boot_auto.csv` — ETW trace of a Windows boot on the Surface Laptop 4 AMD.
 
-> **UPDATE 2026-07-06**: Corrected based on `verification/csv-verification-report.md`.
-> The "ACK" concept, the device's own auto state-change, treating "approval bytes" as
-> protocol fields, and the wrong vendor ID have all been fixed.
+> **Historical trace analysis (2026-07-06).** The original verification report
+> is not tracked in this tree. Later discoveries may supersede this chronology;
+> use `docs/HIDSPI_PROTOCOL.md` for the concise protocol reference.
 
 ## Summary Statistics
 
@@ -149,7 +149,7 @@ PayloadStart: total=18, transfers=2
 │ TYPE=0x72 → (7<<4)|2 = DEVICE_DESC type=7           │
 │ body_length = 0x8000>>4 = 0x800 → *4 = 32 bytes     │
 └─────────────────────────────────────────────────────┘
-⏱ Gap from GPIO IRQ: ~112 µs (actually ~10 µs — see csv-verification-report)
+⏱ Gap from GPIO IRQ: ~10 µs in the reviewed capture
 ⏱ Duration: ~5.4 µs
 ```
 
@@ -353,4 +353,3 @@ values from the previous write — hence byte7=0x03 after DESCREQ.
 
 The observed values (0x00 before write, 0x03 after, 0x0A at runtime) are
 explained by buffer reuse, NOT by an intentional "approval" protocol mechanism.
-
