@@ -133,14 +133,23 @@ if [ "$MISSING" -ne 0 ]; then
 fi
 pass "All build dependencies present"
 
-info "Step 3: Creating modprobe.d config (standard HID mode)..."
+info "Step 3: Stopping and unloading any existing driver..."
+systemctl stop sl4a-touch.service 2>/dev/null || true
+modprobe -r spi-hid 2>/dev/null || true
+modprobe -r spi-amd 2>/dev/null || true
+if lsmod | grep -qE '^spi_(hid|amd) '; then
+	fail "Existing spi-hid/spi-amd modules are still active; unload their users before reinstalling"
+fi
+pass "No active driver modules remain"
+
+info "Step 4: Creating modprobe.d config (standard HID mode)..."
 cat > "$MODPROBE_CONF" <<'EOF'
 # SL4A_TouchScreen — standard HID mode (single-touch + pen, stable)
 options spi_hid raw_mode=N
 EOF
 pass "Created $MODPROBE_CONF"
 
-info "Step 4: Installing driver sources via DKMS ($SRC_DEST)..."
+info "Step 5: Installing driver sources via DKMS ($SRC_DEST)..."
 dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all >/dev/null 2>&1 || true
 rm -rf "$SRC_DEST"
 for stale in /usr/src/${PKG_NAME}-*; do
@@ -164,7 +173,7 @@ dkms build -m "$PKG_NAME" -v "$PKG_VERSION"
 dkms install -m "$PKG_NAME" -v "$PKG_VERSION"
 pass "spi-amd.ko + spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
 
-info "Step 5: Installing systemd service (auto-load at boot)..."
+info "Step 6: Installing systemd service (auto-load at boot)..."
 cat > "$SERVICE_PATH" <<'EOF'
 [Unit]
 Description=Surface Laptop 4 Touchscreen Driver (spi-amd + spi-hid, standard HID mode)
@@ -184,8 +193,7 @@ EOF
 systemctl daemon-reload
 pass "Service installed at $SERVICE_PATH"
 
-info "Step 6: Loading now..."
-systemctl stop sl4a-touch.service 2>/dev/null || true
+info "Step 7: Loading now..."
 depmod -a
 systemctl enable --now sl4a-touch.service
 sleep 2
