@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================================
 # rebuild_and_install.sh — Rebuild spi-amd.ko/spi-hid.ko against the running
-# kernel and reload them via the sl4a-touch systemd service.
+# kernel. The controller module is never reloaded while the system is running.
 #
 # Use this after pulling driver changes, or after a kernel update (out-of-tree
 # modules are built against a specific kernel version and won't load anymore
@@ -48,46 +48,14 @@ else
 	pass "Service file unchanged"
 fi
 
-info "Step 3: Reloading the driver via systemd (stop -> start)..."
-sudo systemctl stop sl4a-touch.service 2>/dev/null || true
-sleep 1
-
 if [ -n "$EXTRA_PARAMS" ]; then
-	# Manual one-off load with extra module params, bypassing the service
-	# (the service itself never takes parameters, so this only affects
-	# this run — reboot or a plain `systemctl start` reverts to raw_mode=0).
-	# Load spi-hid.ko BEFORE spi-amd.ko: once install.sh (DKMS) has run on this
-	# machine, spi_hid is also registered as a kernel module alias pointing at
-	# the DKMS-installed copy. spi-amd.ko is what creates the SPI child device
-	# (spi-MSHW0231:00) on insertion — if that happens while our own spi_hid
-	# isn't loaded yet, the kernel's alias-based autoload wins the race and
-	# pulls in the DKMS copy first, so our insmod then fails with "File exists".
-	# Loading spi-hid.ko first means our driver is already registered before
-	# the device exists, so there's nothing left for autoload to fill in.
-	info "Loading manually with extra params: $EXTRA_PARAMS"
-	sudo insmod "$DRIVER_DIR/spi-hid.ko" $EXTRA_PARAMS
-	sleep 1
-	sudo insmod "$DRIVER_DIR/spi-amd.ko"
-else
-	sudo systemctl start sl4a-touch.service
-fi
-sleep 2
-
-info "Step 4: Verifying..."
-if lsmod | grep -q '^spi_hid ' && lsmod | grep -q '^spi_amd '; then
-	pass "Both modules loaded"
-else
-	fail "Modules did not load — check: sudo dmesg | tail -40"
+	fail "Extra module parameters require a cold reboot; configure them in /etc/modprobe.d first"
 fi
 
-if sudo dmesg | tail -30 | grep -qE "hid-generic.*SPI HID"; then
-	pass "hid-generic bound — touch should be working"
-else
-	info "hid-generic bind not seen in the last 30 dmesg lines yet — check manually: sudo dmesg | tail -40"
-fi
+info "Step 3: Leaving the active driver untouched..."
+pass "Build complete; reboot to load the new controller module"
 
 echo ""
 echo "============================================"
-echo " Done. Recent kernel log:"
+echo " Reboot required before the rebuilt modules are loaded."
 echo "============================================"
-sudo dmesg | tail -15

@@ -133,14 +133,10 @@ if [ "$MISSING" -ne 0 ]; then
 fi
 pass "All build dependencies present"
 
-info "Step 3: Stopping and unloading any existing driver..."
-systemctl stop sl4a-touch.service 2>/dev/null || true
-modprobe -r spi-hid 2>/dev/null || true
-modprobe -r spi-amd 2>/dev/null || true
-if lsmod | grep -qE '^spi_(hid|amd) '; then
-	fail "Existing spi-hid/spi-amd modules are still active; unload their users before reinstalling"
-fi
-pass "No active driver modules remain"
+info "Step 3: Leaving active modules untouched..."
+# Replacing a live controller module is unsafe. DKMS installs the new modules
+# for the next boot while the currently loaded pair continues to run.
+pass "Active modules left untouched; reboot will load the new modules"
 
 info "Step 4: Creating modprobe.d config (standard HID mode)..."
 cat > "$MODPROBE_CONF" <<'EOF'
@@ -174,35 +170,14 @@ dkms install -m "$PKG_NAME" -v "$PKG_VERSION"
 pass "spi-amd.ko + spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
 
 info "Step 6: Installing systemd service (auto-load at boot)..."
-cat > "$SERVICE_PATH" <<'EOF'
-[Unit]
-Description=Surface Laptop 4 Touchscreen Driver (spi-amd + spi-hid, standard HID mode)
-After=local-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/sbin/modprobe spi-hid
-ExecStart=/sbin/modprobe spi-amd
-ExecStop=/sbin/modprobe -r spi-hid
-ExecStop=/sbin/modprobe -r spi-amd
-
-[Install]
-WantedBy=multi-user.target
-EOF
+install -Dm644 "$REPO_DIR/driver/sl4a-touch.service" "$SERVICE_PATH"
 systemctl daemon-reload
 pass "Service installed at $SERVICE_PATH"
 
-info "Step 7: Loading now..."
+info "Step 7: Enabling the driver for the next boot..."
 depmod -a
-systemctl enable --now sl4a-touch.service
-sleep 2
-
-if lsmod | grep -q '^spi_hid ' && lsmod | grep -q '^spi_amd '; then
-	pass "Both modules loaded"
-else
-	fail "Modules did not load — check: journalctl -u sl4a-touch -b ; dmesg | tail -40"
-fi
+systemctl enable sl4a-touch.service
+pass "The new modules will load at the next boot"
 
 # Warn about Secure Boot if enforced
 if [ -d /sys/firmware/efi ] && mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
@@ -215,12 +190,8 @@ fi
 
 echo ""
 echo "============================================"
-if dmesg | tail -40 | grep -qE "spi_hid.*input.*Touch" 2>/dev/null; then
-	echo -e "${GREEN}Install complete — touch and pen should be working now.${NC}"
-else
-	echo -e "${YELLOW}Install complete. Check touch functionality with evtest:${NC}"
-	echo "  sudo evtest /dev/input/event16"
-fi
+echo -e "${GREEN}Install complete. Reboot before using the touchscreen.${NC}"
 echo " The driver auto-loads on every boot via systemd."
+echo " Reboot before using a newly installed spi-amd module."
 echo " To remove: sudo ./tools/uninstall.sh"
 echo "============================================"

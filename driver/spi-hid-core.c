@@ -65,7 +65,8 @@ static int debug_level;
 static int probe_raw_id = 4;  /* Windows content_id for raw-mode handshake */
 static int getfeat_delay_ms = 5900;  /* Windows-observed RPT_DESC -> GET_FEATURE settle time */
 #define seq_dbg(shid, level, fmt, ...) \
-	do { if (debug_level >= (level)) dev_dbg(&(shid)->spi->dev, fmt, ##__VA_ARGS__); } while (0)
+	do { if (debug_level >= (level)) \
+		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
 
 enum spi_hid_seq_reason {
 	SPI_HID_SEQ_PROBE,
@@ -1220,7 +1221,10 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 	memset(rx,0,rx_len); memset(xf,0,sizeof(xf));
 	xf[0].tx_buf=tx; xf[0].len=5; xf[1].rx_buf=rx; xf[1].len=rx_len;
 	spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
+	seq_dbg(shid, 2, "read begin reg=0x%06x len=%d state=%d\n",
+		reg, rx_len, shid->seq_state);
 	ret = spi_sync(shid->spi, &msg);
+	seq_dbg(shid, 2, "read complete reg=0x%06x ret=%d\n", reg, ret);
 	seq_dbg(shid, 3, "SEQ: read reg=0x%06x len=%d ret=%d raw=[%*ph]\n",
 		 reg, rx_len, ret, min(rx_len, 16), rx);
 	return ret;
@@ -1253,7 +1257,14 @@ static int spi_hid_seq_write_speed(struct spi_hid *shid, const u8 *buf, int len,
 		spi_message_add_tail(&xf[1], &msg);
 	}
 
-	return spi_sync(shid->spi, &msg);
+	seq_dbg(shid, 2, "write begin op=0x%02x len=%d rx=%d speed=%u state=%d\n",
+		buf[0], len, rx_len, speed_hz, shid->seq_state);
+	{
+		int ret = spi_sync(shid->spi, &msg);
+
+		seq_dbg(shid, 2, "write complete op=0x%02x ret=%d\n", buf[0], ret);
+		return ret;
+	}
 }
 
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len)
@@ -3603,7 +3614,8 @@ static int spi_hid_probe(struct spi_device *spi)
 	unsigned long irqflags;
 	int ret;
 
-	dev_dbg(dev, "probe entered\n");
+	dev_info(dev, "TRACE[hid] probe begin irq=%d raw_mode=%u acpi_power_cycle=%u\n",
+		 spi->irq, raw_mode, acpi_probe_power_cycle);
 
 	if (dev->of_node && spi->irq <= 0) {
 		dev_err(dev, "Missing IRQ\n");
@@ -3638,6 +3650,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err1;
 	}
 	dev_info(dev, "HID desc reg = 0x%08x\n", shid->device_descriptor_register);
+	seq_dbg(shid, 1, "probe descriptor address obtained\n");
 
 	/*
 	* input_register is used for read approval. Set to default value here.
@@ -3722,7 +3735,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->poll_missed = 0;
 	shid->works_initialized = true;
 
-	dev_dbg(dev, "probe configuring IRQ\n");
+	seq_dbg(shid, 1, "probe configuring IRQ\n");
 	if (dev->of_node) {
 		shid->irq = spi->irq;
 	} else {
@@ -3746,6 +3759,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		struct irq_data *id = irq_get_irq_data(irq);
 
 		dev_info(dev, "GPIO dance: irq=%d\n", irq);
+		seq_dbg(shid, 1, "GPIO dance begin\n");
 
 		/* Mask IRQ */
 		irq_set_irqchip_state(irq, IRQCHIP_STATE_MASKED, 1);
@@ -3759,6 +3773,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		irq_set_irqchip_state(irq, IRQCHIP_STATE_PENDING, 0);
 
 		dev_info(dev, "GPIO dance: mask→reconf→clear done\n");
+		seq_dbg(shid, 1, "GPIO dance complete\n");
 	}
 
 	/* This is a device-specific legacy experiment, not generic SPI-HID power
@@ -3770,18 +3785,23 @@ static int spi_hid_probe(struct spi_device *spi)
 			acpi_status status;
 
 			dev_info(dev, "SEQ: Power cycling device via ACPI _PS3 -> _PS0...\n");
+			seq_dbg(shid, 1, "ACPI _PS3 begin\n");
 			status = acpi_evaluate_object(h, "_PS3", NULL, NULL);
 			if (ACPI_FAILURE(status)) {
 				dev_warn(dev, "SEQ: ACPI _PS3 failed: %s\n",
 					 acpi_format_exception(status));
 			} else {
+				seq_dbg(shid, 1, "ACPI _PS3 complete\n");
 				msleep(50);
+				seq_dbg(shid, 1, "ACPI _PS0 begin\n");
 				status = acpi_evaluate_object(h, "_PS0", NULL, NULL);
 				if (ACPI_FAILURE(status))
 					dev_warn(dev, "SEQ: ACPI _PS0 failed: %s\n",
 						 acpi_format_exception(status));
-				else
+				else {
+					seq_dbg(shid, 1, "ACPI _PS0 complete\n");
 					msleep(100);
+				}
 			}
 		}
 	}
@@ -3796,7 +3816,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	 * GPIO power sequencing. The device is already powered and sending
 	 * RESET_RSP. Do NOT call _RST/M009/M010 — power cycle kills the
 	 * device until reboot (verified 2026-07-07, see GROUND_TRUTH §10.7). */
+	seq_dbg(shid, 1, "probe settling delay begin\n");
 	msleep(300);
+	seq_dbg(shid, 1, "probe settling delay complete\n");
 	shid->desc.input_register = 0x000000;
 
 	/* 2026-07-12: vendor init disabled — the working cold boot did not
@@ -3869,15 +3891,18 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err1;
 	}
 
+	seq_dbg(shid, 1, "request IRQ begin flags=0x%lx\n", irqflags);
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,
 				   irqflags, dev_name(&spi->dev), shid);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "TRACE[hid] request IRQ failed: %d\n", ret);
 		goto err1;
+	}
 	shid->irq_enabled = true;
 	dev_info(dev, "SEQ: IRQ armed (state=WAIT_RESET, zero touch)\n");
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_IRQ_ARMED, 0);
-	dev_err(dev, "%s: d3 -> %s\n", __func__,
-			spi_hid_power_mode_string(shid->power_state));
+	dev_info(dev, "TRACE[hid] probe complete: d3 -> %s\n",
+		spi_hid_power_mode_string(shid->power_state));
 	return 0;
 
 	err1_touch:
@@ -3890,6 +3915,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	return ret;
 
 err1:
+	dev_err(dev, "TRACE[hid] probe failed ret=%d\n", ret);
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_PROBE_FAILED, ret);
 	mutex_lock(&shid->seq_lock);
 	WRITE_ONCE(shid->removing, true);
@@ -3924,6 +3950,8 @@ static void spi_hid_remove(struct spi_device *spi)
 	struct device *dev = &spi->dev;
 
 	dev_info(dev, "removing driver instance\n");
+	seq_dbg(shid, 1, "remove begin irq_enabled=%u ready=%u state=%d\n",
+		shid->irq_enabled, shid->ready, shid->seq_state);
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_REMOVE, 0);
 	mutex_lock(&shid->seq_lock);
 	WRITE_ONCE(shid->removing, true);
@@ -3948,6 +3976,7 @@ static void spi_hid_remove(struct spi_device *spi)
 	if (shid->gpiod)
 		gpiod_put(shid->gpiod);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
+	dev_info(dev, "TRACE[hid] remove complete\n");
 }
 
 static const struct spi_device_id spi_hid_id_table[] = {

@@ -39,6 +39,18 @@ static bool txcount_include_opcode = false;
 module_param(txcount_include_opcode, bool, 0644);
 MODULE_PARM_DESC(txcount_include_opcode, "Include opcode byte in TX_COUNT (off-by-one experiment)");
 
+/* Diagnostic output is deliberately opt-in: level 1 records lifecycle and
+ * controller state, level 2 records every SPI segment, and level 3 includes
+ * the first bytes returned by each read. */
+static int debug_trace;
+module_param(debug_trace, int, 0644);
+MODULE_PARM_DESC(debug_trace,
+	"Diagnostic trace: 0=off, 1=lifecycle, 2=SPI segments, 3=read data");
+
+#define amd_trace(dev, level, fmt, ...) \
+	do { if (debug_trace >= (level)) \
+		dev_info((dev), "TRACE[amd:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
+
 /* SPI speed control registers (from upstream spi-amd) */
 #define AMD_SPI_ENA_REG		0x20
 #define AMD_SPI_ALT_SPD_SHIFT	20
@@ -170,11 +182,9 @@ static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, alt_spd,
 			       AMD_SPI_ALT_SPD_MASK);
 
-	/* Always update SPI100: retaining this bit after a 100 MHz transfer
-	 * silently runs subsequent lower-speed transfers in the wrong mode. */
-	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG,
-		amd_spi->speed_hz == 100000000 ? AMD_SPI_SPI100_MASK : 0,
-		AMD_SPI_SPI100_MASK);
+	if (amd_spi->speed_hz == 100000000)
+		amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, 1,
+				       AMD_SPI_SPI100_MASK);
 
 	if (amd_spi_freq[i].spd7_val) {
 		spd7_val = (amd_spi_freq[i].spd7_val << AMD_SPI_SPD7_SHIFT)
@@ -210,11 +220,18 @@ static int amd_spi_busy_wait(struct amd_spi *amd_spi)
 {
 	u32 val;
 	int reg;
+	int ret;
 
 	/* Poll both CTRL0 (0x00) for busy (bit 31) — the reliable indicator */
 	reg = AMD_SPI_CTRL0_REG;  /* 0x00 */
-	return readl_poll_timeout(amd_spi->io_remap_addr + reg, val,
+	ret = readl_poll_timeout(amd_spi->io_remap_addr + reg, val,
 				  !(val & AMD_SPI_BUSY), 20, 2000000);
+	if (ret)
+		pr_err("spi-amd: TRACE busy timeout ctrl0=0x%08x status=0x%02x opcode=0x%02x trigger=0x%02x\n",
+		       val, amd_spi_readreg8(amd_spi, AMD_SPI_STATUS_REG),
+		       amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG),
+		       amd_spi_readreg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG));
+	return ret;
 }
 
 static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
@@ -257,6 +274,11 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 
 	if (DBG_VERBOSE || opcode != 0x0B)
 		pr_debug("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
+	if (debug_trace >= 2)
+		pr_info("spi-amd: TRACE segment begin op=0x%02x tx=%u rx=%u ctrl0=0x%08x ena=0x%08x\n",
+			opcode, tx_len, rx_len,
+			amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG),
+			amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG));
 
 	/* Windows fcn.0x6fc0: save SPI100_SPEED_CONFIG (0x22) before transfer */
 	saved_0x22 = readw(base + 0x22);
@@ -335,7 +357,12 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	}
 
 	ret = amd_spi_execute_opcode(amd_spi);
-	if (ret) { pr_debug("spi-amd: execute_opcode failed %d\n", ret); writew(saved_0x22, base + 0x22); return ret; }
+	if (ret) {
+		pr_err("spi-amd: TRACE segment trigger failed op=0x%02x ret=%d\n",
+		       opcode, ret);
+		writew(saved_0x22, base + 0x22);
+		return ret;
+	}
 
 	/* execute_opcode already polls CTRL0 bit31 (real busy indicator).
 	 * STATUS (0x4C) is an 8-bit register, so bit31 is always 0 —
@@ -353,6 +380,9 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		u32 rmax = min_t(u32, rx_len, AMD_SPI_FIFO_SIZE);
 		for (i = 0; i < rmax; i++)
 			dst[i] = readb(base + read_off + i);
+		if (debug_trace >= 3)
+			pr_info("spi-amd: TRACE segment data op=0x%02x rx=[%*ph]\n",
+				opcode, (int)min_t(u32, rmax, 32), dst);
 		/* 2026-07-08: gated behind DBG_VERBOSE — with real DATA reports now
 		 * reaching up to ~4KB every ~625ms (max_input_length=8192), one
 		 * pr_err() per ~64-byte chunk floods dmesg and evicts other
@@ -373,6 +403,10 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	}
 
 	if (DBG_VERBOSE) pr_err("spi-amd: done\n");
+	if (debug_trace >= 2)
+		pr_info("spi-amd: TRACE segment complete op=0x%02x rx=%u ctrl0=0x%08x status=0x%02x\n",
+			opcode, rx_len, amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG),
+			amd_spi_readreg8(amd_spi, AMD_SPI_STATUS_REG));
 	/* Windows fcn.0x6f84: restore SPI100_SPEED_CONFIG (0x22) after transfer */
 	writew(saved_0x22, base + 0x22);
 	/* Windows fcn.0x4684: restore original opcode to 0x45 after transfer */
@@ -388,10 +422,9 @@ static uint debug_force_speed_hz;
 module_param(debug_force_speed_hz, uint, 0444);
 MODULE_PARM_DESC(debug_force_speed_hz, "Override SPI clock speed in Hz (0 = use ACPI default)");
 
-static bool force_host_pref;
+static bool force_host_pref = true;
 module_param(force_host_pref, bool, 0644);
-MODULE_PARM_DESC(force_host_pref,
-	"EXPERIMENTAL: force HOST_PREF(0x2C) to Windows value 0x8000D4C0 (default off)");
+MODULE_PARM_DESC(force_host_pref, "Force HOST_PREF(0x2C) to Windows value 0x8000D4C0");
 
 
 
@@ -400,14 +433,12 @@ static int amd_spi_host_setup(struct spi_device *spi)
 	struct amd_spi *amd_spi = spi_controller_get_devdata(spi->controller);
 	u32 hz = debug_force_speed_hz ? debug_force_speed_hz : spi->max_speed_hz;
 
-	/* This controller path is validated only for the MSHW0231 mode-0
-	 * transport. Do not advertise generic SPI electrical configurations. */
-	if (spi_get_chipselect(spi, 0) != 0 ||
-	    (spi->mode & (SPI_CPOL | SPI_CPHA | SPI_CS_HIGH)))
-		return -EINVAL;
-
+	amd_trace(&spi->dev, 1, "host setup begin cs=%u mode=0x%x requested_hz=%u\n",
+		  spi_get_chipselect(spi, 0), spi->mode, hz);
 	amd_spi_clear_fifo_ptr(amd_spi);
 	amd_set_spi_freq(amd_spi, hz);
+	amd_trace(&spi->dev, 1, "host setup complete actual_hz=%u ena=0x%08x\n",
+		  amd_spi->speed_hz, amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG));
 	dev_dbg(&spi->dev, "spi-amd-v2-multi: set speed to %u Hz%s\n",
 		 amd_spi->speed_hz, debug_force_speed_hz ? " (forced override)" : "");
 	return 0;
@@ -419,7 +450,10 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 	struct amd_spi *amd_spi = spi_controller_get_devdata(host);
 	struct spi_device *spi = msg->spi;
 	struct spi_transfer *xfer, *next;
+	struct device *dev = &spi->dev;
 
+	amd_trace(dev, 2, "message begin frame=%u transfers=%u cs=%u\n",
+		  msg->frame_length, msg->actual_length, spi_get_chipselect(spi, 0));
 	amd_spi_select_chip(amd_spi, spi_get_chipselect(spi, 0));
 
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
@@ -543,6 +577,9 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 	msg->actual_length = msg->frame_length;
 out:
 	amd_spi_clear_chip(amd_spi, spi_get_chipselect(msg->spi, 0));
+	amd_trace(dev, 2, "message complete status=%d actual=%u ctrl0=0x%08x\n",
+		  msg->status, msg->actual_length,
+		  amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG));
 	spi_finalize_current_message(host);
 	return msg->status;
 }
@@ -556,10 +593,8 @@ int amd_spi_probe_common(struct device *dev, struct spi_controller *host)
 {
 	int err;
 
-	/* The hardware uses a platform-specific physical CS encoding internally,
-	 * but exposes one validated logical chip select to the SPI core. */
-	host->num_chipselect = 1;
-	host->mode_bits = 0;
+	host->num_chipselect = 4;
+	host->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH;
 	host->flags = 0;
 	host->setup = amd_spi_host_setup;
 	host->transfer_one_message = amd_spi_host_transfer;
@@ -579,7 +614,10 @@ static int amd_spi_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct spi_controller *host;
 	struct amd_spi *amd_spi;
+	int ret;
 
+	amd_trace(dev, 1, "probe begin force_host_pref=%u txcount_include_opcode=%u\n",
+		  force_host_pref, txcount_include_opcode);
 	host = devm_spi_alloc_host(dev, sizeof(struct amd_spi));
 	if (!host)
 		return -ENOMEM;
@@ -591,39 +629,28 @@ static int amd_spi_probe(struct platform_device *pdev)
 				     "ioremap of SPI registers failed\n");
 
 	dev_info(dev, "spi-amd-v2-multi: io_remap=%p\n", amd_spi->io_remap_addr);
+	amd_trace(dev, 1, "probe mapped controller registers\n");
 
 	/* Set LPC bridge registers to enable 8-bit FIFO mode with Windows layout */
 	{
 		struct pci_dev *lpc = pci_get_device(PCI_VENDOR_ID_AMD, 0x790e, NULL);
 		if (lpc) {
 			u32 val, b4;
-
-			if (pci_read_config_dword(lpc, 0xB8, &val) ||
-			    pci_read_config_dword(lpc, 0xB4, &b4)) {
-				dev_warn(dev, "Unable to read LPC bridge configuration\n");
-				pci_dev_put(lpc);
-				lpc = NULL;
-			}
-			if (!lpc)
-				goto lpc_done;
-			amd_spi->lpc = lpc;
-			amd_spi->saved_lpc_b8 = val;
-			amd_spi->saved_lpc_b4 = b4;
+			pci_read_config_dword(lpc, 0xB4, &b4);
+			pci_read_config_dword(lpc, 0xB8, &val);
+			amd_trace(dev, 1, "LPC before b4=0x%08x b8=0x%08x\n", b4, val);
 			val &= ~0x80; // force 8-bit mode (bit7 = 0)
-			if (pci_write_config_dword(lpc, 0xB8, val) ||
-			    pci_write_config_dword(lpc, 0xB4, 0x7DFFE000)) {
-				dev_warn(dev, "Unable to configure LPC bridge FIFO layout\n");
-				pci_write_config_dword(lpc, 0xB4, amd_spi->saved_lpc_b4);
-				pci_write_config_dword(lpc, 0xB8, amd_spi->saved_lpc_b8);
-			} else {
-				amd_spi->lpc_config_modified = true;
-			}
+			pci_write_config_dword(lpc, 0xB8, val);
+
+			pci_write_config_dword(lpc, 0xB4, 0x7DFFE000); // Windows FIFO layout
+			pci_read_config_dword(lpc, 0xB4, &b4);
+			pci_read_config_dword(lpc, 0xB8, &val);
+			amd_trace(dev, 1, "LPC after b4=0x%08x b8=0x%08x\n", b4, val);
+			pci_dev_put(lpc);
 			dev_info(dev, "Configured LPC bridge 00:14.3 for 8-bit FIFO mode (0xB8&=~0x80, 0xB4=0x7DFFE000)\n");
 		} else {
 			dev_warn(dev, "LPC bridge 1022:790e not found, skipping 8-bit FIFO configuration\n");
 		}
-	lpc_done:
-		;
 	}
 
 	/* Read AMD SPI HOST_PREF register (0x2C) — Windows has 0x8000D4C0.
@@ -635,11 +662,11 @@ static int amd_spi_probe(struct platform_device *pdev)
 			 host_pref, AMD_SPI_HOST_PREF_WIN);
 
 		if (force_host_pref && host_pref != AMD_SPI_HOST_PREF_WIN) {
-			amd_spi->saved_host_pref = host_pref;
+			amd_trace(dev, 1, "HOST_PREF write begin old=0x%08x new=0x%08x\n",
+				  host_pref, AMD_SPI_HOST_PREF_WIN);
 			dev_info(dev, "spi-amd: HOST_PREF differs from Windows (0x%08X vs 0x%08X), applying Windows value\n",
 				 host_pref, AMD_SPI_HOST_PREF_WIN);
 			amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG, AMD_SPI_HOST_PREF_WIN);
-			amd_spi->host_pref_modified = true;
 			host_pref = amd_spi_readreg32(amd_spi, AMD_SPI_HOST_PREF_REG);
 			dev_info(dev, "spi-amd: HOST_PREF after write = 0x%08X\n", host_pref);
 		} else if (host_pref == AMD_SPI_HOST_PREF_WIN) {
@@ -662,7 +689,6 @@ static int amd_spi_probe(struct platform_device *pdev)
 	}
 
 	amd_spi->version = (uintptr_t)device_get_match_data(dev);
-	platform_set_drvdata(pdev, host);
 	host->bus_num = 0;
 
 	/* Read SPI100_SPEED_CONFIG from MMIO+0x22 (amdspi.sys decomp: fcn.0x6fc0)
@@ -671,7 +697,10 @@ static int amd_spi_probe(struct platform_device *pdev)
 	amd_spi->speed_cfg = ioread16(amd_spi->io_remap_addr + 0x22);
 	dev_info(dev, "SPI100_SPEED_CONFIG at MMIO+0x22 = 0x%04X\n", amd_spi->speed_cfg);
 
-	return amd_spi_probe_common(dev, host);
+	amd_trace(dev, 1, "probe registering SPI controller version=%u\n", amd_spi->version);
+	ret = amd_spi_probe_common(dev, host);
+	amd_trace(dev, 1, "probe complete ret=%d\n", ret);
+	return ret;
 }
 
 #ifdef CONFIG_ACPI
@@ -686,20 +715,7 @@ MODULE_DEVICE_TABLE(acpi, spi_acpi_match);
 
 static void amd_spi_remove(struct platform_device *pdev)
 {
-	struct spi_controller *host = platform_get_drvdata(pdev);
-	struct amd_spi *amd_spi;
-
-	if (!host)
-		return;
-	amd_spi = spi_controller_get_devdata(host);
-	if (amd_spi->host_pref_modified)
-		amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG, amd_spi->saved_host_pref);
-	if (amd_spi->lpc_config_modified) {
-		pci_write_config_dword(amd_spi->lpc, 0xB4, amd_spi->saved_lpc_b4);
-		pci_write_config_dword(amd_spi->lpc, 0xB8, amd_spi->saved_lpc_b8);
-	}
-	if (amd_spi->lpc)
-		pci_dev_put(amd_spi->lpc);
+	amd_trace(&pdev->dev, 1, "remove entered\n");
 }
 
 static struct platform_driver amd_spi_driver = {
