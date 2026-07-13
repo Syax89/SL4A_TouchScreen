@@ -1,13 +1,11 @@
-# Windows capture kit — "what puts the touchscreen into a receptive state?"
+# Windows capture kit — historical power-sequence research
 
-## Hypothesis to test
-The MSHW0231 touchscreen on Linux receives a byte-perfect DESCREQ but doesn't respond and
-stays in a perpetual reset loop; on Windows it responds on the first try. The SPI transaction
-itself has been replicated and ruled out as the cause. Suspicion: **some Windows component
-other than `hidspi.sys`** (an ACPI power method, Surface Aggregator/SAM via the Surface
-Serial Hub, power/PnP management) puts the device into a receptive state before/during init.
-The traces we have (`traces/*.csv`) only capture SPB + GPIO-interrupt + HIDCLASS → they
-CANNOT show ACPI/SAM/power activity.
+## Purpose
+Standard HID initialization now works on Linux. This kit remains useful for raw-mode
+calibration and for comparing Windows ACPI, power, PnP, and Surface/SAM activity.
+It does not establish that an external Windows component is required for standard
+HID initialization. The existing SPI traces cover SPB, GPIO-interrupt, and HIDCLASS,
+but not ACPI/SAM/power activity.
 
 ## What this kit captures (that the old traces did NOT)
 - **ACPI** (power methods, _PS0/_INI/_RST, the 2 `AcpiEventMethod`s seen before touch init)
@@ -84,15 +82,14 @@ They weren't compiled in on this boot; happy to check if you're interested.
 
 ## UPDATE after providers.txt (07/2026)
 
-`providers.txt` revealed the real architecture of touch on Windows and confirms the
-suspicion that "some non-hidspi component enables the touch". The `touch_boot.wprp` profile
-now uses this machine's REAL GUIDs. What to look for in the log:
+`providers.txt` revealed the Windows touch stack. The `touch_boot.wprp` profile
+now uses this machine's real GUIDs. The extension-package hypothesis below was
+later falsified: it is a registry-only overlay, not a separate initializer.
+What to look for in the log:
 
-- **`ACPI\MSHW0231\A` = "Surface Digitizer HidSpi Extn Package"** — this is NOT plain
-  hidspi.sys: there's a **vendor extension package** for the digitizer. It's the prime
-  candidate for whatever special init we're missing.
-  (Later determined to be a registry-only cosmetic/power-management overlay, not a
-  separate binary — see `docs/GROUND_TRUTH.md` §15.13/§15.14.)
+- **`ACPI\MSHW0231\A` = "Surface Digitizer HidSpi Extn Package"** — a
+  registry-only cosmetic/power-management overlay, not a separate binary or
+  proven initializer (see `docs/GROUND_TRUTH.md` section 15.13/15.14).
 - The touch is a multi-collection HID device: **COL01 "Touch Communications"** (a CONTROL
   channel, distinct from touch data), COL06 "Touch Screen Device", + pen/digitizer/VHF enum.
 - **Surface Serial Hub (MSHW0084)** + **SMF Core/Client** + **SMF Display Client**: the SAM
