@@ -26,7 +26,7 @@ KDE/Wayland recognizes touches correctly — tap, drag, and single-finger gestur
 | Grid-to-screen calibration | In progress |
 
 Multi-touch requires switching the device into raw heatmap mode (`SET_FEATURE(id=4)`)
-and processing the raw capacitive frames (~4302 bytes, 288×14 antenna grid) through
+and processing the raw capacitive frames (~4302 bytes, 72×48 cell grid plus metadata) through
 connected-component labeling (CCL) to extract blob centroids. The Windows
 `TouchPenProcessor0C19.dll` (9.7 MB) handles this with dual-frequency DFT processing,
 8-connectivity CCL, eigenvalue decomposition, and Kalman tracking — all now fully
@@ -42,9 +42,9 @@ Verified live with `evtest` — up to 6 concurrent touchpoints detected.
 - The raw-mode handshake (`SET_FEATURE`) succeeds only on a fresh cold boot —
   repeated power-cycles degrade the device state. A software watchdog matches
   Windows's own 2000ms-timeout/3-retry behavior but cannot fix the underlying cause.
-- Grid-to-screen coordinate mapping is being calibrated. The sensor has 288×14
-  antenna cells covering ~100% screen width × ~86% screen height. Two-point
-  linear calibration is implemented (`calib_scale_*`, `calib_offset_*` params).
+- Grid-to-screen coordinate mapping is being calibrated. The 72×48 cell field
+  covers the active panel. Linear calibration is implemented through
+  `calib_scale_*` and `calib_offset_*` module parameters.
 - Standard mode (`raw_mode=N`, the default) is what's stable for daily use.
 
 ---
@@ -313,7 +313,7 @@ Windows-side capture utilities are in `tools/windows_capture/`.
 ## Next Steps
 
 - **Multi-touch handshake reliability**: `raw_mode=Y` (see `probe_raw_id`) sends `SET_FEATURE` to switch into raw heatmap streaming. The feature selector is device-state-specific (Windows uses `content_id=4`; confirmed working on first cold boot). The handshake degrades after repeated power-cycles; a watchdog retries automatically (2000ms timeout, 3 retries — matching Windows's own `CheckingResetRetryCountEntry` in `HidSpiCx.sys`) but cannot fix the underlying hardware state issue. **Workaround**: cold boot before raw-mode testing.
-- **Grid-to-screen calibration**: the driver computes blob centroids from the 288×14 heatmap grid and scales them to screen coordinates (0..32767). Calibration parameters (`calib_scale_x`, `calib_scale_y`, `calib_offset_x`, `calib_offset_y`) are extracted from `TouchPenProcessor0C19.dll` (X scale = `32767/287`, Y scale = 2730.78, derived from DLL's per-device context tables). The `tools/calibrate` utility supports empirical 4-corner capture. Resolution values match the HID descriptor (X=112 ppi, Y=198 ppi).
+- **Grid-to-screen calibration**: the driver computes blob centroids from the 72×48 heatmap grid and maps them to logical coordinates 0..32767. With automatic scales (`calib_scale_x=0 calib_scale_y=0`), the endpoints map from grid `0..71` and `0..47` respectively. `tools/calibrate` supports empirical four-corner capture and prints the corresponding scale/offset parameters. If `swap_xy=1`, scales and offsets still refer to final screen X/Y axes. Resolution values match the HID descriptor (X=112 ppi, Y=198 ppi).
 - **Windows ETW trace**: capturing a fresh `TouchAndPen.Prod` trace on Windows would empirically confirm the `TouchBlobCoMX`/`TouchBlobCoMY` coordinate mapping, providing ground-truth calibration data without needing to fully reverse-engineer the DLL's DFT math.
 - **Upstreaming**: split into proper Linux kernel patches (SPI controller + HID transport).
 

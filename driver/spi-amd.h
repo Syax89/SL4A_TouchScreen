@@ -12,6 +12,8 @@
 
 #include <linux/spi/spi.h>
 
+struct pci_dev;
+
 enum amd_spi_versions {
 	AMD_SPI_V1 = 1,	/* AMDI0061 */
 	AMD_SPI_V2,	/* AMDI0062 */
@@ -35,6 +37,12 @@ struct amd_spi {
 	u16 speed_cfg;		/* SPI100_SPEED_CONFIG at MMIO+0x22 (4 speed tiers) */
 	u32 txmode_saved_ctrl0;	/* CTRL0 before TXMODE set, restored after segment */
 	u8 speed_hz_index;	/* 0=F_66_66MHz, 1=F_33_33MHz, etc. */
+	struct pci_dev *lpc;
+	u32 saved_lpc_b4;
+	u32 saved_lpc_b8;
+	u32 saved_host_pref;
+	bool lpc_config_modified;
+	bool host_pref_modified;
 };
 
 int amd_spi_probe_common(struct device *dev, struct spi_controller *host);

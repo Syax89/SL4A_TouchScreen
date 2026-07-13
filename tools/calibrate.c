@@ -1,7 +1,7 @@
 /*
  * calibrate.c — Touchscreen grid→screen calibration
  *
- * Sets calib_scale_*=1000 so screen coords == grid coords.
+ * Temporarily sets calib_scale_*=1000 so screen coords == grid coords.
  * Captures 2 seconds of touches per corner, averages them.
  *
  * Usage: sudo ./calibrate [device]
@@ -121,9 +121,10 @@ int main(int argc, char **argv)
 
 	close(fd);
 
-	/* Restore DLL calibration */
+	/* Restore automatic calibration for the current grid.  The historic
+	 * 288x14 scale does not apply to the 72x48 frame layout. */
 	set_param("calib_scale_x", 0);
-	set_param("calib_scale_y", 2730780);
+	set_param("calib_scale_y", 0);
 	set_param("calib_offset_x", 0);
 	set_param("calib_offset_y", 0);
 

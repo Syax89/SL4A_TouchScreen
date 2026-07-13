@@ -64,6 +64,9 @@ static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
 {
 	int i;
 
+	if (!raw || length < 4)
+		return -1;
+
 	for (i = 3; i < length; i++) {
 		if (raw[i] == SPI_HID_PROTOCOL_SYNC_BYTE &&
 		    (raw[i - 3] & 0x0f) == SPI_HID_PROTOCOL_VERSION) {

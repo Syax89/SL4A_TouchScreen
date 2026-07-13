@@ -173,8 +173,8 @@ After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/modprobe spi-amd
 ExecStart=/sbin/modprobe spi-hid
+ExecStart=/sbin/modprobe spi-amd
 ExecStop=/sbin/modprobe -r spi-hid
 ExecStop=/sbin/modprobe -r spi-amd
 

@@ -236,6 +236,45 @@ static void test_find_header_too_short(void)
 	CHECK(spi_hid_protocol_find_header(empty, 0, NULL) == -1, "short: empty");
 	CHECK(spi_hid_protocol_find_header(two, 2, NULL) == -1, "short: 2 bytes");
 	CHECK(spi_hid_protocol_find_header(three, 3, NULL) == -1, "short: 3 bytes");
+	CHECK(spi_hid_protocol_find_header(NULL, 4, NULL) == -1, "null buffer rejected");
+}
+
+/* ── Exhaustive V0 wire boundaries ─────────────────────────────── */
+
+static void test_output_length_boundaries(void)
+{
+	spi_hid_proto_u8 raw[6];
+
+	/* The V0 output header has a 12-bit length field. Exercise every
+	 * encodable value so a bit-position regression cannot hide in fuzzing. */
+	for (unsigned int len = 0; len <= 0xfff; len++) {
+		unsigned int decoded;
+
+		spi_hid_protocol_encode_output_header(raw, 0x123456, len);
+		decoded = ((unsigned int)(raw[4] >> 4) & 0xf) |
+			((unsigned int)raw[5] << 4);
+		CHECK(decoded == len, "output length: all 12-bit values round-trip");
+		CHECK((raw[4] & 0xf) == SPI_HID_PROTOCOL_VERSION,
+		      "output length: version nibble preserved");
+	}
+}
+
+static void test_header_offsets(void)
+{
+	spi_hid_proto_u8 raw[16];
+
+	for (int off = 0; off <= 12; off++) {
+		int found = -1;
+
+		memset(raw, 0xff, sizeof(raw));
+		raw[off] = 0x12;
+		raw[off + 1] = 0x10;
+		raw[off + 2] = 0x00;
+		raw[off + 3] = 0x5a;
+		CHECK(spi_hid_protocol_find_header(raw, sizeof(raw), &found) == 1,
+		      "header offset: report type found");
+		CHECK(found == off, "header offset: exact position reported");
+	}
 }
 
 int main(void)
@@ -249,6 +288,8 @@ int main(void)
 	test_find_header();
 	test_find_header_null_offset();
 	test_find_header_too_short();
+	test_output_length_boundaries();
+	test_header_offsets();
 	test_fuzz_roundtrip();
 	test_fuzz_output_roundtrip();
 

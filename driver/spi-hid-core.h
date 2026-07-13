@@ -13,6 +13,7 @@
 #define SPI_HID_CORE_H
 
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/completion.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/spi/spi.h>
@@ -301,6 +302,7 @@ struct spi_hid {
 	 * hid_input_report(), run blob detection, and emit multitouch events
 	 * on a dedicated input_dev. */
 	struct input_dev *touch_input;
+	bool raw_mode_active;
 	u8 *heatmap_buf;          /* last captured frame buffer, kmalloc'd */
 	u32 heatmap_len;
 	u32 heatmap_content_id;
@@ -354,6 +356,7 @@ struct spi_hid {
 	 * retry (2000ms timeout, 3 retries) — this mirrors that exactly. */
 	struct delayed_work raw_handshake_watchdog;
 	int raw_handshake_retries_left;
+	u8 raw_handshake_state5_defers;
 	bool raw_handshake_confirmed;
 
 	struct delayed_work feat_delay_work;	/* GET_FEATURE delay (Windows: ~5900ms) */
@@ -377,6 +380,9 @@ struct spi_hid {
 	u32 stat_getfeat_resp;
 	u32 stat_frames_dropped;
 	u32 stat_irq_count;
+	ktime_t seq_dbg_last_irq;
+	int seq_dbg_last_state;
+	bool seq_dbg_expect_fast;
 };
 
 #endif
