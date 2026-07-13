@@ -7,6 +7,9 @@
 [![Hardware](https://img.shields.io/badge/device-surface%20laptop%204%20amd-blue)](#hardware)
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%7C%20BSD--3-orange)](LICENSE)
 
+> [!WARNING]
+> **This is beta software.** It is an experimental, reverse-engineered kernel driver and may cause touchscreen failures, system instability, data loss, or hardware behavior not yet understood. Use it entirely at your own risk. It is provided "as is", without warranty of any kind; the authors and contributors accept no responsibility or liability for damages or problems resulting from its use.
+
 ---
 
 ## Status: FUNCTIONAL — Single-touch + Pen working
