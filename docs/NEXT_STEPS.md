@@ -41,7 +41,7 @@ and done — see DONE below.
 ## DONE
 
 - [x] Device init: DESCREQ → DEVICE_DESC → DESCREQ2 → RPT_DESC
-- [x] HID report descriptor: 936B, 98.5% wire + 14B targeted patch
+- [x] HID report descriptor: 936B read directly from the device; no repair or fallback
 - [x] Standard HID mode: Report ID 0x40 (TouchScreen) + 0x01 (Pen)
 - [x] Small report buffer overflow fix (rl - 2)
 - [x] BTN_TOUCH tap/lift detection

@@ -20,7 +20,7 @@ KDE/Wayland recognizes touches correctly — tap, drag, and single-finger gestur
 | Feature | Status |
 |---------|--------|
 | Device initialization (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
-| HID report descriptor (936 bytes, 98.5% wire-read + 14-byte targeted patch) | Complete |
+| HID report descriptor (936 bytes, read from device) | Complete |
 | Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
 | BTN_TOUCH (tap/lift detection) | **Working** |
 | Stylus/Pen (Report ID 0x01) | **Working** |
@@ -66,8 +66,8 @@ calibration are not reliable. Keep the default `raw_mode=0` for daily use.
 │  spi-amd.ko (driver/spi-amd.c)       │
 │  AMD FCH SPI controller driver (V2)  │
 │  · TX/RX FIFO management             │
-│  · Chunked reads (>70B = DMA quanta) │
-│  · PIO remainder path                │
+│  · Windows-shaped chunked PIO reads  │
+│  · 64-byte descriptor continuations  │
 └──────────────┬───────────────────────┘
                │ MMIO
 ┌──────────────┴───────────────────────┐
@@ -83,13 +83,13 @@ State 1 (WAIT_DESC)   → read DEVICE_DESC → DESCREQ2 → State 2
 State 2 (WAIT_RPT)    → read RPT_DESC → create HID device → State 4
 State 5 (WAIT_FEATURE)→ optional raw-mode GET_FEATURE response → State 4
 State 4 (DONE)        → forward input reports via hid_input_report()
-State 3 (VENDOR_INIT) → vendor-init fallback path (hardcoded descriptors)
+State 3 (VENDOR_INIT) → restart descriptor discovery on RESET_RSP
 ```
 
-State 3 is a recovery path reached when vendor-init mode does not produce
-a valid DATA report; it hardcodes the known descriptors and transitions
-to state 4. In practice the driver proceeds directly from state 2 to
-state 4 in standard mode.
+State 3 is a recovery path. A RESET_RSP there restarts standard descriptor
+discovery; it never fabricates a device descriptor or substitutes a report
+descriptor. In practice the driver proceeds directly from state 2 to state 4
+in standard mode.
 
 Input is IRQ-driven. `poll_interval` is deprecated and ignored; the runtime
 stream watchdog is disabled by default.
@@ -127,11 +127,12 @@ sudo ./tools/install.sh
 sudo reboot
 ```
 
-This builds the driver via **DKMS**, so it's automatically rebuilt for every kernel you
-install afterward, and installs a systemd service that loads the driver in standard HID
-mode on every boot via `/etc/modprobe.d/spi-hid.conf` (`options spi_hid raw_mode=N`).
-The installer deliberately does not replace loaded modules: reboot is required after
-an install or update to load a new `spi-amd` controller module.
+This builds the driver via **DKMS** for every installed kernel with an available build
+tree, removes obsolete `sl4a-touch` DKMS versions, and installs a systemd service that
+loads the driver in standard HID mode on every boot via `/etc/modprobe.d/spi-hid.conf`
+(`options spi_hid raw_mode=N`). The installer deliberately does not replace loaded
+modules: reboot is required after an install or update to load a new `spi-amd`
+controller module.
 
 **Multi-distro support** (auto-detected via `/etc/os-release`): Arch/CachyOS (pacman),
 Ubuntu/Debian (apt), Fedora (dnf), openSUSE (zypper). Missing dependencies are reported
@@ -199,9 +200,15 @@ The installer and developer workflow use the same versioned
 
 ## Key Technical Decisions
 
-### HID Report Descriptor (98.5% wire-read + 14-byte patch)
+### HID Report Descriptor (device-read, no repair or fallback)
 
-The 936-byte report descriptor is read live from the device. 14 specific byte positions (at offsets n·64+55 from descriptor start) are corrupted to `0xFF` by a characterized hardware defect in the device's 64-byte page structure. These bytes are patched from a hardcoded ground-truth copy. The remaining 922 bytes (98.5%) come from the live wire read every boot — meaning firmware updates or different SKUs would be picked up.
+The 936-byte report descriptor is read live from the device and parsed directly. The
+earlier apparent `0xFF` corruption was caused by the host controller driver adding a
+trailing dummy byte to each continuation: that changed the AMD FCH transaction from
+`TX_COUNT=3`/FIFO `0x84` to `TX_COUNT=4`/FIFO `0x85`. The Windows-shaped continuation
+keeps the three address bytes, `TX_COUNT=3`, `RX_COUNT=65`, and FIFO `0x84`. No bytes are
+patched and no captured descriptor is embedded as a fallback; a parse failure is reported
+instead of registering a guessed device.
 
 ### No vendor init (Himax, 0x04 register)
 
@@ -245,6 +252,7 @@ Windows-side capture utilities are in `tools/windows_capture/`.
 | [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Current raw-mode and calibration roadmap |
 | [`docs/AMD_CONTROLLER_VALIDATION.md`](docs/AMD_CONTROLLER_VALIDATION.md) | AMD FCH SPI controller validation boundary |
 | [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol reference |
+| [`docs/STANDARD_BOOT_EVIDENCE.md`](docs/STANDARD_BOOT_EVIDENCE.md) | Evidence boundary for supported standard boot behavior |
 | [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | Dated research journal; later sections supersede earlier entries |
 | [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md), [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md), [`docs/decomp/`](docs/decomp/) | Historical Windows-trace and decompilation research |
 

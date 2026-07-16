@@ -56,8 +56,6 @@
 #include "spi-hid-core.h"
 #include "spi-hid-protocol.h"
 #include "spi-hid_trace.h"
-/* Hardcoded HID Report Descriptor from Windows dump (936 bytes) */
-#include "hardcoded_rd.h"
 
 #define SPI_HID_MAX_RESET_ATTEMPTS 3
 
@@ -895,16 +893,7 @@ static int spi_hid_create_device(struct spi_hid *shid)
 	shid->hid = hid;
 
 	ret = hid_add_device(hid);
-	/* 2026-07-08: hid_add_device() only reports whether the device was
-	 * registered on the bus, not whether any driver actually bound to it
-	 * — a corrupted wire-read descriptor can make hid_parse_report()
-	 * return success (its own per-item validation is lenient, e.g.
-	 * "unexpected long global item" is only a warning there) while the
-	 * matched driver's own probe (hid-generic in our case) fails
-	 * synchronously inside this same call, leaving hid->driver NULL.
-	 * That's the actual reliable "this descriptor wasn't good enough"
-	 * signal (see docs/NEXT_STEPS.md §C), not hid_parse_report()'s return
-	 * code or hid_add_device()'s return code. */
+	/* hid_add_device() can succeed without a driver binding the parsed device. */
 	if (!ret && !hid->driver) {
 		dev_warn(dev, "SEQ: hid_add_device succeeded but no driver bound to it\n");
 		ret = -ENODEV;
@@ -919,12 +908,6 @@ static int spi_hid_create_device(struct spi_hid *shid)
 		if (hid)
 			hid_destroy_device(hid);
 
-		if (shid->wire_report_descriptor_len > 0 &&
-		    !shid->wire_report_descriptor_rejected) {
-			dev_warn(dev, "SEQ: forcing hardcoded report descriptor fallback and retrying once\n");
-			shid->wire_report_descriptor_rejected = true;
-			return spi_hid_create_device(shid);
-		}
 		return ret;
 	}
 
@@ -1424,7 +1407,7 @@ out:
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
-	u8 hdr[10];
+	u8 hdr[9];
 	int type, hdr_off;
 
 	mutex_lock(&shid->seq_lock);
@@ -1438,35 +1421,20 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && hdr_off != 6) {
+	if (type >= 0 && hdr_off != 5) {
 		seq_dbg(shid, 1, "SEQ: poll-work: header at unexpected offset %d\n", hdr_off);
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 		goto out;
 	}
-	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 10, hdr);
+	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 9, hdr);
 	if (type == 7) {
 		shid->stat_device_desc++;
 		seq_dbg(shid, 1, "SEQ: poll-work: GOT DEVICE_DESC!\n");
 		/* Re-trigger the IRQ thread to handle it */
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
-		seq_dbg(shid, 1, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FALLBACK);
-		shid->ready = true;
-		shid->keep_powered = true;
-		/* Hardcode and create device */
-		shid->desc.hid_version = 0x0100;
-		shid->desc.report_descriptor_length = 936;
-		shid->desc.report_descriptor_register = 0x0002;
-		shid->desc.input_register = 0x0000;
-		shid->desc.max_input_length = 0x1000;
-		shid->desc.output_register = 0x0003;
-		shid->desc.max_output_length = 0x0100;
-		shid->desc.command_register = 0x0004;
-		shid->desc.vendor_id = 0x045E;
-		shid->desc.product_id = 0x0C19;
-		shid->desc.version_id = 0x0100;
-		if (!shid->hid) spi_hid_create_device(shid);
+		seq_dbg(shid, 1, "SEQ: poll-work: RESET_RSP, restarting discovery\n");
+		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	} else {
 		seq_dbg(shid, 1, "SEQ: poll-work: unexpected type=%d, retrying...\n", type);
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
@@ -1524,12 +1492,12 @@ MODULE_PARM_DESC(raw_mode,
 	"0 = standard HID mode (single-touch, Report ID 0x40); "
 	"1 = raw DFT heatmap mode (send GET_FEATURE/SET_FEATURE, multi-touch blob detection)");
 
-/* Kept enabled for compatibility with the currently validated boot path.
- * Disable only for a controlled trace comparison against ACPI _INI startup. */
-static bool acpi_probe_power_cycle = true;
+/* Standard discovery consumes the ACPI-provided reset response without
+ * changing the device power state. */
+static bool acpi_probe_power_cycle;
 module_param(acpi_probe_power_cycle, bool, 0644);
 MODULE_PARM_DESC(acpi_probe_power_cycle,
-	"Power-cycle ACPI _PS3->_PS0 at probe (legacy default; experimental to disable)");
+	"Power-cycle ACPI _PS3->_PS0 at probe (disabled by default; experimental)");
 
 /* 2026-07-08 (handshake reliability experiments, GROUND_TRUTH.md §18.7): SET_FEATURE
  * always writes fine at the driver level but the device silently stops responding
@@ -1823,7 +1791,7 @@ out:
 static void spi_hid_poll_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, poll_work);
-	u8 hdr[10];
+	u8 hdr[9];
 	int type, ret, hdr_off;
 	u16 blen;
 
@@ -1840,7 +1808,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 		goto resched;
 
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && hdr_off != 6) {
+	if (type >= 0 && hdr_off != 5) {
 		seq_dbg(shid, 1, "SEQ: poller header at unexpected offset %d\n", hdr_off);
 		shid->poll_missed++;
 		goto resched;
@@ -1850,11 +1818,11 @@ static void spi_hid_poll_work(struct work_struct *work)
 		u32 cap = shid->desc.max_input_length ?
 			  shid->desc.max_input_length : 0x1000;
 
-		blen = (((hdr[7] >> 4) & 0xF) << 0) | (hdr[8] << 4);
+		blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
 		blen *= 4;
 
 		{
-			u32 rblen = (blen + 6) < cap ? (blen + 6) : cap;
+			u32 rblen = (blen + 5) < cap ? (blen + 5) : cap;
 			u32 avail;
 			u16 rl;
 
@@ -1867,20 +1835,20 @@ static void spi_hid_poll_work(struct work_struct *work)
 
 			if (rblen < 9)
 				goto resched;
-			rl = shid->data_buf[6] | (shid->data_buf[7] << 8);
+			rl = shid->data_buf[5] | (shid->data_buf[6] << 8);
 
 			shid->stat_data++;
 			seq_dbg(shid, 2, "SEQ: poller cid=0x%02x len=%u\n",
-				 shid->data_buf[8], rl);
+				 shid->data_buf[7], rl);
 
-			if (shid->raw_mode_active && shid->data_buf[8] == 0x0C &&
+			if (shid->raw_mode_active && shid->data_buf[7] == 0x0C &&
 			    shid->touch_input) {
 				u32 clen = (rl > 2) ? (rl - 2) : 0;
 
 				if (clen > avail)
 					clen = avail;
 				heatmap_process_frame(shid, &shid->data_buf[8],
-						      clen, shid->data_buf[8]);
+						      clen, shid->data_buf[7]);
 			} else if (rl > 2 && rl - 2 <= avail) {
 				if (shid->hid) {
 					int hret = hid_input_report(shid->hid,
@@ -2655,7 +2623,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[10]; int type; u16 blen = 0;
+	u8 hdr[9]; int type; u16 blen = 0;
 	int hdr_off;
 	s64 dbg_dt_us;
 	irqreturn_t result = IRQ_HANDLED;
@@ -2684,15 +2652,14 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		ktime_us_delta(ktime_get(), shid->seq_dbg_last_irq) : -1;
 	shid->seq_dbg_last_irq = ktime_get();
 
-	/* Windows reads response header first: 5 sync bytes + 4-byte header = 9 bytes.
-	 * AMD controller with TX_COUNT=3 sees 6 sync bytes; try 10 to capture full header. */
+	/* Windows reads response header first: 5 sync bytes plus a 4-byte header. */
 	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
 		dev_dbg(dev, "sequencer header read failed\n");
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
 	seq_dbg(shid, 2, "SEQ[state=%d] type=%d hdr=[%*ph] dt=%lld us%s\n",
-		 shid->seq_state, type, 4, &hdr[6], dbg_dt_us,
+		 shid->seq_state, type, 4, &hdr[5], dbg_dt_us,
 		 shid->seq_dbg_expect_fast ? (dbg_dt_us >= 0 && dbg_dt_us < 5000 ?
 		 " <<< FAST IRQ AFTER DESCREQ: WRITE REACHED DEVICE" :
 		 " <<< slow IRQ: DESCREQ ignored (device just re-reset)") : "");
@@ -2711,14 +2678,14 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		}
 		goto out;
 	}
-	if (hdr_off != 6) {
+	if (hdr_off != 5) {
 		dev_warn_ratelimited(dev,
 			"SEQ: input header at unexpected offset %d, dropping frame\n", hdr_off);
 		shid->stat_frames_dropped++;
 		goto out;
 	}
 
-	blen = (((hdr[7] >> 4) & 0xF) << 0) | (hdr[8] << 4);
+	blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
 	blen *= 4;
 	if (blen > sizeof(shid->input.content))
 		blen = sizeof(shid->input.content);
@@ -2774,7 +2741,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 7) {
 		u8 body[64] = {};
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_device_desc++;
 		seq_dbg(shid, 1, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
@@ -2827,7 +2794,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		spi_hid_seq_set_state(shid, 2, SPI_HID_SEQ_DEVICE_DESCRIPTOR);
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
@@ -2844,7 +2811,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 8) {
 		u8 body[1024] = {};
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_rpt_desc++;
 		seq_dbg(shid, 1, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
@@ -2872,19 +2839,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			len = min_t(u32, shid->desc.report_descriptor_length,
 				    sizeof(shid->wire_report_descriptor));
 			if (off < rblen && len > 0 && off + len <= rblen) {
-				u32 k;
-
 				memcpy(shid->wire_report_descriptor, body + off, len);
-				for (k = 55; k < len; k += 64) {
-					if (shid->wire_report_descriptor[k] == 0xFF &&
-					    k < HARDCODED_RD_SIZE &&
-					    hardcoded_report_descriptor[k] != 0xFF) {
-						seq_dbg(shid, 1, "SEQ: patching known-corrupt wire descriptor byte at offset %u (0xff -> 0x%02x)\n",
-							 k, hardcoded_report_descriptor[k]);
-						shid->wire_report_descriptor[k] =
-							hardcoded_report_descriptor[k];
-					}
-				}
 				shid->wire_report_descriptor_len = len;
 			} else {
 				shid->wire_report_descriptor_len = 0;
@@ -2963,7 +2918,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		}
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
@@ -2978,7 +2933,7 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 5) {
 		u8 body[256] = {};
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 		u32 off;
 
 		shid->stat_getfeat_resp++;
@@ -3020,7 +2975,7 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
@@ -3043,25 +2998,8 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		seq_handle_data(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
-		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: got RESET_RSP, vendor init ignored. Hardcoding descriptors...\n");
-		shid->desc.hid_version = 0x0100;
-		shid->desc.report_descriptor_length = 936;
-		shid->desc.report_descriptor_register = 0x0002;
-		shid->desc.input_register = 0x0000;
-		shid->desc.max_input_length = 0x1000;
-		shid->desc.output_register = 0x0003;
-		shid->desc.max_output_length = 0x0100;
-		shid->desc.command_register = 0x0004;
-		shid->desc.vendor_id = 0x045E;
-		shid->desc.product_id = 0x0C19;
-		shid->desc.version_id = 0x0100;
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FALLBACK);
-		shid->ready = true;
-		shid->keep_powered = true;
-		if (!shid->hid) {
-			seq_dbg(shid, 1, "SEQ: creating HID device with hardcoded descriptors...\n");
-			spi_hid_create_device(shid);
-		}
+		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: RESET_RSP, restarting discovery\n");
+		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
 }
 
@@ -3089,7 +3027,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 	{
 		u32 cap = shid->desc.max_input_length ?
 			  shid->desc.max_input_length : 0x1000;
-		u32 rblen = min_t(u32, blen + 6, cap);
+		u32 rblen = min_t(u32, blen + 5, cap);
 		u32 avail;
 		u16 rl;
 		u8 *body;
@@ -3107,11 +3045,11 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			shid->stat_frames_dropped++;
 			return;
 		}
-		rl = body[6] | (body[7] << 8);
-		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[8], rl);
+		rl = body[5] | (body[6] << 8);
+		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[7], rl);
 
-		if (shid->raw_mode_active && body[8] == 0x0C && shid->touch_input) {
-			u32 clen = (rl > 2) ? (rl - 2) : 0;
+		if (shid->raw_mode_active && body[7] == 0x0C && shid->touch_input) {
+			u32 clen = (rl > 3) ? (rl - 3) : 0;
 
 			if (clen > avail) clen = avail;
 			if (!shid->raw_handshake_confirmed) {
@@ -3133,25 +3071,25 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 						"SEQ: poll_interval is ignored; IRQ owns input reads\n");
 			}
 			heatmap_process_frame(shid, &body[8], clen, body[8]);
-		} else if (rl > 2 && rl - 2 <= avail) {
-			if (shid->raw_mode_active && body[8] == 0x40 && rl - 2 >= 6) {
+		} else if (rl >= 3 && rl - 3 <= avail) {
+			if (shid->raw_mode_active && body[8] == 0x40 && rl - 3 >= 6) {
 				u16 hx = body[9] | (body[10] << 8);
 				u16 hy = body[11] | (body[12] << 8);
 				seq_dbg(shid, 2, "CALIB_REF: hid=(%u,%u)\n", hx, hy);
 			}
 			if (shid->hid) {
 				int hret = hid_input_report(shid->hid, HID_INPUT_REPORT,
-							    &body[8], rl - 2, 1);
+						    &body[7], rl - 2, 1);
 				if (hret)
 					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x)\n",
 						 hret, body[8]);
 			}
-		} else if (rl > 2 && rl - 2 > avail) {
+		} else if (rl >= 3 && rl - 3 > avail) {
 			dev_warn(dev, "SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
 				 rl, avail);
-		} else if (rl <= 2) {
+		} else {
 			dev_warn(dev, "SEQ: DATA report too short to contain a report ID (len=%u), dropped\n",
-				 rl);
+					 rl);
 		}
 	}
 }
@@ -3219,43 +3157,23 @@ static int spi_hid_ll_parse(struct hid_device *hid)
 
 	mutex_lock(&shid->lock);
 
-	/* 2026-07-08: prefer the descriptor actually read off the wire
-	 * (docs/NEXT_STEPS.md §C) — a real driver shouldn't permanently rely on
-	 * a descriptor hardcoded from one past capture, which can't track
-	 * firmware revisions or other SKUs of the same VID/PID. Trust
-	 * hid_parse_report()'s own structural validation as the sanity check:
-	 * if the wire-read bytes don't parse, fall back to the hardcoded copy
-	 * exactly as before. */
-	if (shid->wire_report_descriptor_len > 0 && !shid->wire_report_descriptor_rejected) {
-		seq_dbg(shid, 1, "SEQ: ll_parse — trying device-read report descriptor (%u bytes)\n",
-			 shid->wire_report_descriptor_len);
-		ret = hid_parse_report(hid, shid->wire_report_descriptor,
-					shid->wire_report_descriptor_len);
-		if (!ret) {
-			shid->report_descriptor_crc32 = crc32_le(0,
-				shid->wire_report_descriptor,
-				shid->wire_report_descriptor_len);
-			mutex_unlock(&shid->lock);
-			return 0;
-		}
-		dev_warn(dev, "SEQ: device-read report descriptor failed to parse (%d), falling back to hardcoded\n",
-			 ret);
+	if (!shid->wire_report_descriptor_len) {
+		ret = -EINVAL;
+		goto out;
 	}
 
-	seq_dbg(shid, 1, "SEQ: ll_parse — using HARDCODED report descriptor (%d bytes)\n",
-		 HARDCODED_RD_SIZE);
-
-	/* Copy hardcoded descriptor into response buffer */
-	memcpy(shid->response.content, hardcoded_report_descriptor, HARDCODED_RD_SIZE);
-
-	ret = hid_parse_report(hid, (__u8 *) shid->response.content, HARDCODED_RD_SIZE);
+	seq_dbg(shid, 1, "SEQ: ll_parse: device-read report descriptor (%u bytes)\n",
+		 shid->wire_report_descriptor_len);
+	ret = hid_parse_report(hid, shid->wire_report_descriptor,
+				shid->wire_report_descriptor_len);
 	if (ret)
-		dev_err(dev, "failed parsing report: %d\n", ret);
+		dev_err(dev, "device-read report descriptor failed to parse: %d\n", ret);
 	else
 		shid->report_descriptor_crc32 = crc32_le(0,
-			(unsigned char const *) shid->response.content,
-			HARDCODED_RD_SIZE);
+			shid->wire_report_descriptor,
+			shid->wire_report_descriptor_len);
 
+out:
 	mutex_unlock(&shid->lock);
 	return ret;
 }

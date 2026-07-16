@@ -11,7 +11,6 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
-#include <linux/pci.h>
 
 #include "spi-amd.h"
 
@@ -35,10 +34,6 @@
 
 #define AMD_SPI_FIFO_SIZE	70
 
-static bool txcount_include_opcode = false;
-module_param(txcount_include_opcode, bool, 0644);
-MODULE_PARM_DESC(txcount_include_opcode, "Include opcode byte in TX_COUNT (off-by-one experiment)");
-
 /* Diagnostic output is deliberately opt-in: level 1 records lifecycle and
  * controller state, level 2 records every SPI segment, and level 3 includes
  * the first bytes returned by each read. */
@@ -60,9 +55,6 @@ MODULE_PARM_DESC(debug_trace,
 #define AMD_SPI_SPEED_REG	0x6C
 #define AMD_SPI_SPD7_SHIFT	8
 #define AMD_SPI_SPD7_MASK	GENMASK(13, AMD_SPI_SPD7_SHIFT)
-
-#define AMD_SPI_HOST_PREF_REG	0x2C
-#define AMD_SPI_HOST_PREF_WIN	0x8000D4C0  /* Windows value */
 
 /* Enum for speed register values */
 enum amd_spi_speed_val {
@@ -140,15 +132,6 @@ static inline void amd_spi_clear_chip(struct amd_spi *amd_spi, u8 cs)
 	u8 tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
 	tmp &= ~AMD_SPI_ALT_CS_MASK;
 	amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, tmp);
-}
-
-static void amd_spi_clear_fifo_ptr(struct amd_spi *amd_spi)
-{
-	u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
-	ctrl0 &= ~AMD_SPI_FIFO_CLEAR;
-	amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
-	ctrl0 |= AMD_SPI_FIFO_CLEAR;
-	amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 }
 
 static const struct amd_spi_freq amd_spi_freq[] = {
@@ -303,14 +286,15 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (amd_spi->version == AMD_SPI_V2)
 		amd_spi_setup_v2_regs(amd_spi);
 
-	/* V2: 0x44 dance — only for writes (opcode 0x02), as Windows does.
+	/* V2: 0x44 speed/opcode sequence used by both supported V2 opcodes.
 	 * Windows fcn.0x4bac decomps:
 	 *   r44 = read16(0x44)
 	 *   r44 = (r44 & 0xF0FF) | (nibble << 8)
 	 *   r44 = (r44 & 0x0FFF) | (nibble << 12)
 	 *   write16(0x44, r44)
 	 * Each write16 clobbers 0x45 — re-write opcode after. */
-	if (amd_spi->version == AMD_SPI_V2 && opcode == 0x02) {
+	if (amd_spi->version == AMD_SPI_V2 &&
+	    (opcode == 0x02 || opcode == 0x0B)) {
 		u16 w = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 speed_nibble = amd_spi_readreg8(amd_spi, AMD_SPI_ENA_REG) & 0xF;
 		w = (w & 0xF0FF) | ((u16)speed_nibble << 8);
@@ -323,8 +307,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		pr_err("spi-amd: tx_len %u exceeds FIFO size %u\n", tx_len, AMD_SPI_FIFO_SIZE);
 		return -EINVAL;
 	}
-	writeb(txcount_include_opcode ? tx_len + 1 : tx_len,
-	       base + AMD_SPI_TX_COUNT_REG);
+	writeb(tx_len, base + AMD_SPI_TX_COUNT_REG);
 
 	for (i = 0; i < tx_len; i++)
 		writeb(tx_data[i], base + fifo_pos + i);
@@ -333,11 +316,13 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	 * The response arrives via a separate 0x0B read after GPIO IRQ.
 	 * For read operations (0x0B), rx_len is set by the caller. */
 
-	writeb(rx_len, base + AMD_SPI_RX_COUNT_REG);
+	writeb(opcode == 0x0B ? rx_len + 1 : rx_len,
+	       base + AMD_SPI_RX_COUNT_REG);
 
 	/* Windows decomp 0x4bac: re-write opcode after RX_COUNT, just before trigger.
 	 * (Needed because the 0x44 speed config writes 16 bits, clobbering 0x45.) */
-	if (amd_spi->version == AMD_SPI_V2 && opcode == 0x02)
+	if (amd_spi->version == AMD_SPI_V2 &&
+	    (opcode == 0x02 || opcode == 0x0B))
 		amd_spi_set_opcode(amd_spi, opcode);
 
 	wmb();
@@ -372,7 +357,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		u32 read_off;
 
 		if (opcode == 0x0B)
-			read_off = fifo_pos + tx_len;
+			read_off = fifo_pos + tx_len + 1;
 		else
 			read_off = fifo_pos + 4;
 		u8 scratch[80];
@@ -409,38 +394,21 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 			amd_spi_readreg8(amd_spi, AMD_SPI_STATUS_REG));
 	/* Windows fcn.0x6f84: restore SPI100_SPEED_CONFIG (0x22) after transfer */
 	writew(saved_0x22, base + 0x22);
-	/* Windows fcn.0x4684: restore original opcode to 0x45 after transfer */
-	writeb(0x0B, base + AMD_SPI_OPCODE_REG);
 	return rx_len;
 }
-
-/* Priority 3 item 2 (docs/NEXT_STEPS.md, 2026-07-08): override the bus speed
- * used for the whole session, to test whether the ~508ms post-RPT_DESC reset
- * scales with SPI clock speed (bus-timing related) or stays fixed in
- * wall-clock terms (device-internal timer). 0 = use ACPI-provided speed. */
-static uint debug_force_speed_hz;
-module_param(debug_force_speed_hz, uint, 0444);
-MODULE_PARM_DESC(debug_force_speed_hz, "Override SPI clock speed in Hz (0 = use ACPI default)");
-
-static bool force_host_pref = true;
-module_param(force_host_pref, bool, 0644);
-MODULE_PARM_DESC(force_host_pref, "Force HOST_PREF(0x2C) to Windows value 0x8000D4C0");
-
-
 
 static int amd_spi_host_setup(struct spi_device *spi)
 {
 	struct amd_spi *amd_spi = spi_controller_get_devdata(spi->controller);
-	u32 hz = debug_force_speed_hz ? debug_force_speed_hz : spi->max_speed_hz;
+	u32 hz = spi->max_speed_hz;
 
 	amd_trace(&spi->dev, 1, "host setup begin cs=%u mode=0x%x requested_hz=%u\n",
 		  spi_get_chipselect(spi, 0), spi->mode, hz);
-	amd_spi_clear_fifo_ptr(amd_spi);
 	amd_set_spi_freq(amd_spi, hz);
 	amd_trace(&spi->dev, 1, "host setup complete actual_hz=%u ena=0x%08x\n",
 		  amd_spi->speed_hz, amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG));
-	dev_dbg(&spi->dev, "spi-amd-v2-multi: set speed to %u Hz%s\n",
-		 amd_spi->speed_hz, debug_force_speed_hz ? " (forced override)" : "");
+	dev_dbg(&spi->dev, "spi-amd-v2-multi: set speed to %u Hz\n",
+		 amd_spi->speed_hz);
 	return 0;
 }
 
@@ -520,26 +488,10 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 
 					while (rx_remaining > 0) {
 						u32 chunk = min_t(u32, rx_remaining, 64);
-						u8 tx_pad[8];
-						/* 2026-07-08 attempt 3: re-send the address bytes plus
-						 * ONE extra trailing dummy byte (tx_len+1, read_off
-						 * shifts by +1) for continuation chunks. Attempt 2
-						 * (re-send address, no extra dummy) advanced through
-						 * genuinely new content but lost exactly 1 real byte
-						 * at every chunk boundary (verified byte-for-byte
-						 * against traces/surface_boot_auto.csv's RPT_DESC
-						 * capture) — matches amdspi.sys's own 0x4bac read
-						 * variant, which uses RX_COUNT+1 and reads at
-						 * FIFO+TX_COUNT+1 instead of FIFO+TX_COUNT (see
-						 * docs/verification/amdspi-decomp-report.md). */
-						if (tx_len >= sizeof(tx_pad)) {
-							msg->status = -EMSGSIZE;
-							goto out;
-						}
-						memcpy(tx_pad, tx_buf, tx_len);
-						tx_pad[tx_len] = 0x00;
+						/* Keep each 64-byte PIO continuation in the same
+						 * TX_COUNT=3/FIFO+0x84 shape as Windows 0x4bac. */
 						ret = amd_spi_exec_segment(amd_spi, opcode,
-							tx_pad, tx_len + 1, rx_ptr, chunk);
+							tx_buf, tx_len, rx_ptr, chunk);
 						if (ret < 0) { msg->status = ret; goto out; }
 						rx_ptr += chunk;
 						rx_remaining -= chunk;
@@ -563,8 +515,7 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 		} else if (xfer->rx_buf && xfer->len > 0) {
 			u8 *rx_ptr = (u8 *)xfer->rx_buf;
 			for (remaining = xfer->len; remaining > 0; ) {
-				u32 chunk = remaining > AMD_SPI_FIFO_SIZE ?
-					    AMD_SPI_FIFO_SIZE : remaining;
+				u32 chunk = min_t(u32, remaining, 64);
 				ret = amd_spi_exec_segment(amd_spi, 0x0B,
 					NULL, 0, rx_ptr, chunk);
 				if (ret < 0) { msg->status = ret; goto out; }
@@ -616,8 +567,7 @@ static int amd_spi_probe(struct platform_device *pdev)
 	struct amd_spi *amd_spi;
 	int ret;
 
-	amd_trace(dev, 1, "probe begin force_host_pref=%u txcount_include_opcode=%u\n",
-		  force_host_pref, txcount_include_opcode);
+	amd_trace(dev, 1, "probe begin\n");
 	host = devm_spi_alloc_host(dev, sizeof(struct amd_spi));
 	if (!host)
 		return -ENOMEM;
@@ -632,6 +582,7 @@ static int amd_spi_probe(struct platform_device *pdev)
 	amd_trace(dev, 1, "probe mapped controller registers\n");
 
 	/* Set LPC bridge registers to enable 8-bit FIFO mode with Windows layout */
+#if 0 /* Unproven persistent controller state; excluded from standard boot. */
 	{
 		struct pci_dev *lpc = pci_get_device(PCI_VENDOR_ID_AMD, 0x790e, NULL);
 		if (lpc) {
@@ -675,6 +626,7 @@ static int amd_spi_probe(struct platform_device *pdev)
 		}
 	}
 
+#endif
 	/* Dump initial CTRL0 value (BIOS/UEFI preset) */
 	{
 		u32 c0 = readl(amd_spi->io_remap_addr + 0x00);

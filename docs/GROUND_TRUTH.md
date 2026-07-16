@@ -2070,6 +2070,36 @@ SET_FEATURE, descriptor parsing, and sustained real-time streaming — is now st
 the real device wherever possible.** The only remaining substantial work is §D: turning the
 raw heat-map frames into touch coordinates.
 
+### 18.10.1 Correction: Windows-shaped PIO continuation eliminates the descriptor corruption
+
+The previous conclusion that the offset-58 defect was a device page quirk was
+incorrect. The standard5 controlled boot changed only continuation framing:
+each 64-byte continuation resent the three address bytes, retained
+`TX_COUNT=3`, `RX_COUNT=65`, and read from FIFO `0x84`. It removed the prior
+extra trailing dummy byte, which had changed the continuation to `TX_COUNT=4`
+and FIFO `0x85`.
+
+The resulting 945-byte report-descriptor body matched the Windows descriptor
+without any `0xff` repair, `hid-generic` bound directly to `045E:0C19`, and no
+hardcoded-descriptor fallback was logged. This matches the repeated PIO shape
+in Windows `0x4bac`.
+
+### 18.10.2 Final correction: no descriptor repair or hardcoded recovery
+
+Two subsequent clean `standard5` boots repeated the direct bind and working
+touch result with no repair or fallback. The standard6 source therefore removes
+the 14-byte repair loop, the captured `hardcoded_rd.h` descriptor, and every
+recovery path that fabricated a `045E:0C19` device descriptor. Standard mode now
+accepts only the descriptor read from the device; if it cannot be parsed, the
+driver reports the failure instead of concealing it with captured data.
+
+The root cause was host framing, not a device page defect: a continuation must
+re-send exactly three address bytes (`TX_COUNT=3`) and collect 65 bytes from
+FIFO `0x84`. Adding a dummy byte selected `TX_COUNT=4` and FIFO `0x85`, whose
+unwritten slot reads as `0xff`. The older §18.3, §18.6, §18.9, and §18.10 repair
+discussion is retained as historical investigation and is superseded by this
+finding.
+
 ### 18.6 The offset-58 glitch: ruled out timing and signal integrity, still unexplained
 
 Two clean, cheap experiments on real hardware, both negative (no change whatsoever):
@@ -2326,7 +2356,7 @@ check `rl - 2 <= avail`.
 | Feature | Status |
 |---------|--------|
 | Device init (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
-| HID report descriptor (936B, 98.5% wire + 14B patch) | Complete |
+| HID report descriptor (936B read directly from the device) | Complete |
 | Single-touch (Report ID 0x40) | Working |
 | BTN_TOUCH tap/lift | Working |
 | Pen/Stylus (Report ID 0x01) | Working |

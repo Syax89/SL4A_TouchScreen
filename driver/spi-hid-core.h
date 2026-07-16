@@ -288,13 +288,9 @@ struct spi_hid {
 	u8 perf_mode;
 	u16 touch_signature_index;
 
-	/* 2026-07-08: report descriptor as actually read off the wire (§18.3),
-	 * populated by spi_hid_seq_thread()'s RPT_DESC handling. Preferred by
-	 * spi_hid_ll_parse() over hardcoded_report_descriptor when it parses
-	 * successfully — see docs/NEXT_STEPS.md §C. */
+	/* Report descriptor read from the device during standard discovery. */
 	u8 wire_report_descriptor[1024];
 	u32 wire_report_descriptor_len;
-	bool wire_report_descriptor_rejected;
 
 	/* Heatmap-to-touch pipeline (2026-07-08 §D).
 	 * Raw sensor frames (content_id=0x0C, ~4302 bytes) are capacitive
