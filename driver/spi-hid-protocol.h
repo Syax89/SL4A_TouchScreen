@@ -26,6 +26,14 @@ struct spi_hid_protocol_header {
 	spi_hid_proto_u8 sync_const;
 };
 
+/* A V0 body begins with its unpadded semantic length and content ID. */
+struct spi_hid_protocol_content {
+	spi_hid_proto_u16 total_length;
+	spi_hid_proto_u8 content_id;
+	const spi_hid_proto_u8 *data;
+	spi_hid_proto_u16 data_length;
+};
+
 static inline void spi_hid_protocol_decode_header(const spi_hid_proto_u8 raw[4],
 		struct spi_hid_protocol_header *header)
 {
@@ -57,6 +65,25 @@ static inline void spi_hid_protocol_encode_read_approval(spi_hid_proto_u8 raw[5]
 	raw[2] = input_register >> 8;
 	raw[3] = input_register;
 	raw[4] = 0xff;
+}
+
+static inline int spi_hid_protocol_parse_content(const spi_hid_proto_u8 *body,
+		unsigned int body_length, struct spi_hid_protocol_content *content)
+{
+	spi_hid_proto_u16 total_length;
+
+	if (!body || !content || body_length < 3)
+		return -1;
+
+	total_length = body[0] | ((spi_hid_proto_u16)body[1] << 8);
+	if (total_length < 3 || total_length > body_length)
+		return -1;
+
+	content->total_length = total_length;
+	content->content_id = body[2];
+	content->data = body + 3;
+	content->data_length = total_length - 3;
+	return 0;
 }
 
 static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,

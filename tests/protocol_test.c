@@ -114,6 +114,72 @@ static void test_encode_read(void)
 	CHECK(raw[1] == 0x00 && raw[2] == 0x00 && raw[3] == 0x02, "encode_read: RPT_DESC register");
 }
 
+/* ── V0 body envelope ──────────────────────────────────────────── */
+
+static void test_parse_content(void)
+{
+	struct spi_hid_protocol_content content;
+	spi_hid_proto_u8 raw_body[4304] = { 0xce, 0x10, 0x0c, 0x32, 0x48 };
+	const spi_hid_proto_u8 short_body[] = { 0x03, 0x00 };
+	const spi_hid_proto_u8 too_short[] = { 0x02, 0x00, 0x0c };
+	const spi_hid_proto_u8 truncated[] = { 0x08, 0x00, 0x0c, 0x01 };
+
+	raw_body[4301] = 0x7e;
+	raw_body[4302] = 0xa5;
+	raw_body[4303] = 0x5a;
+
+	CHECK(!spi_hid_protocol_parse_content(raw_body, sizeof(raw_body), &content),
+	      "content: raw frame parses");
+	CHECK(content.total_length == 4302, "content: preserves total length");
+	CHECK(content.content_id == 0x0c, "content: preserves raw content ID");
+	CHECK(content.data_length == 4299, "content: excludes V0 envelope");
+	CHECK(content.data == raw_body + 3, "content: begins after length and ID");
+	CHECK(content.data + content.data_length == raw_body + 4302,
+	      "content: excludes aligned tail");
+	CHECK(content.data[0] == 0x32 && content.data[1] == 0x48,
+	      "content: preserves first opaque raw bytes");
+	CHECK(content.data[4298] == 0x7e && raw_body[4302] == 0xa5 &&
+	      raw_body[4303] == 0x5a, "content: leaves aligned tail untouched");
+
+	CHECK(spi_hid_protocol_parse_content(short_body, sizeof(short_body), &content) < 0,
+	      "content: rejects missing ID");
+	CHECK(spi_hid_protocol_parse_content(too_short, sizeof(too_short), &content) < 0,
+	      "content: rejects total length below envelope");
+	CHECK(spi_hid_protocol_parse_content(truncated, sizeof(truncated), &content) < 0,
+	      "content: rejects truncated body");
+	CHECK(spi_hid_protocol_parse_content(NULL, sizeof(raw_body), &content) < 0,
+	      "content: rejects null body");
+}
+
+/* ── Frozen Windows feature vectors ────────────────────────────── */
+
+static void test_feature_vectors(void)
+{
+	spi_hid_proto_u8 get[10];
+	spi_hid_proto_u8 set[14];
+	const spi_hid_proto_u8 expected_get[] =
+		{ 0x02, 0x00, 0x00, 0x03, 0x42, 0x00, 0x04, 0x03, 0x00, 0x06 };
+	const spi_hid_proto_u8 expected_set[] =
+		{ 0x02, 0x00, 0x00, 0x03, 0x82, 0x00, 0x03, 0x04, 0x00,
+		  0x05, 0x01, 0x00, 0x00, 0x00 };
+
+	spi_hid_protocol_encode_output_header(get, 3, 4);
+	get[6] = 0x04;
+	get[7] = 0x03;
+	get[8] = 0x00;
+	get[9] = 0x06;
+	CHECK(!memcmp(get, expected_get, sizeof(get)), "feature: frozen GET wire vector");
+
+	spi_hid_protocol_encode_output_header(set, 3, 8);
+	set[6] = 0x03;
+	set[7] = 0x04;
+	set[8] = 0x00;
+	set[9] = 0x05;
+	set[10] = 0x01;
+	memset(set + 11, 0, 3);
+	CHECK(!memcmp(set, expected_set, sizeof(set)), "feature: frozen SET wire vector");
+}
+
 /* ── Header search ─────────────────────────────────────────────── */
 
 static void test_find_header(void)
@@ -285,6 +351,8 @@ int main(void)
 	test_decode_boundary();
 	test_encode_output();
 	test_encode_read();
+	test_parse_content();
+	test_feature_vectors();
 	test_find_header();
 	test_find_header_null_offset();
 	test_find_header_too_short();
