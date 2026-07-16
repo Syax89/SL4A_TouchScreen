@@ -7,7 +7,7 @@ Create `/etc/modprobe.d/sl4a-touch-debug.conf` with:
 
 ```conf
 options spi_amd debug_trace=1
-options spi_hid raw_mode=0 debug_level=1 acpi_probe_power_cycle=1
+options spi_hid raw_mode=0 debug_level=1
 ```
 
 Start with `debug_trace=1` and `debug_level=1`. Use level 2 only for a short,
@@ -31,3 +31,5 @@ journalctl -b -1 -k -o short-monotonic | grep -E 'spi-amd: TRACE busy timeout|sp
 The last `TRACE[...]` record narrows down the operation that did not return; it
 does not by itself prove root cause.
 Leave `raw_mode=0` while investigating controller or boot stability.
+`acpi_probe_power_cycle` is an explicitly authorized experiment, not a standard
+diagnostic option.

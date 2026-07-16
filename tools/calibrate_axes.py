@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-calibrate_axes.py — on-device axis/orientation calibration for the
-MSHW0231 raw-mode touchscreen (spi-hid, raw_mode=1).
+"""Archived raw-mode calibration prototype.
 
 The raw 72x48 heatmap grid is mapped linearly to 0..32767, but the *physical*
 orientation of the grid (which corner is the origin, and which way X/Y grow) is
@@ -12,11 +10,9 @@ recommended module parameters:
     swap_xy, invert_x, invert_y   (orientation)
     calib_offset_x/y, calib_scale_x/y (optional, to stretch the usable range)
 
-Usage:
-    sudo python3 calibrate_axes.py [/dev/input/eventN]
-
-If no device is given it is auto-detected by input name ("MSHW0231" / "Touchscreen").
-Run with the orientation params at their defaults (all 0); the tool warns if not.
+No supported live raw stream exists. Do not use this tool to initiate or validate
+on-device calibration; retained captures and offline analysis are the supported
+calibration research path.
 """
 import os, sys, glob, struct, time
 

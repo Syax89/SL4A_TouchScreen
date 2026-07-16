@@ -17,6 +17,13 @@ typedef uint16_t spi_hid_proto_u16;
 #define SPI_HID_PROTOCOL_READ_OPCODE 0x0b
 #define SPI_HID_PROTOCOL_WRITE_OPCODE 0x02
 
+/* The only raw frame shape accepted by the passive capture path. */
+#define SPI_HID_RAW_CAPTURE_CONTENT_ID 0x0c
+#ifndef SPI_HID_RAW_CAPTURE_BODY_LENGTH
+#define SPI_HID_RAW_CAPTURE_BODY_LENGTH 4304
+#endif
+#define SPI_HID_RAW_CAPTURE_TOTAL_LENGTH 4302
+
 struct spi_hid_protocol_header {
 	spi_hid_proto_u8 version;
 	spi_hid_proto_u8 report_type;
@@ -84,6 +91,19 @@ static inline int spi_hid_protocol_parse_content(const spi_hid_proto_u8 *body,
 	content->data = body + 3;
 	content->data_length = total_length - 3;
 	return 0;
+}
+
+static inline int spi_hid_protocol_validate_raw_capture(
+		const spi_hid_proto_u8 *body, unsigned int body_length,
+		struct spi_hid_protocol_content *content)
+{
+	if (body_length != SPI_HID_RAW_CAPTURE_BODY_LENGTH ||
+	    spi_hid_protocol_parse_content(body, body_length, content))
+		return -1;
+
+	return content->total_length == SPI_HID_RAW_CAPTURE_TOTAL_LENGTH &&
+		content->content_id == SPI_HID_RAW_CAPTURE_CONTENT_ID &&
+		content->data_length == SPI_HID_RAW_CAPTURE_TOTAL_LENGTH - 3 ? 0 : -1;
 }
 
 static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,

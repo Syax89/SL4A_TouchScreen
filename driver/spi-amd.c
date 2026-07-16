@@ -368,11 +368,6 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		if (debug_trace >= 3)
 			pr_info("spi-amd: TRACE segment data op=0x%02x rx=[%*ph]\n",
 				opcode, (int)min_t(u32, rmax, 32), dst);
-		/* 2026-07-08: gated behind DBG_VERBOSE — with real DATA reports now
-		 * reaching up to ~4KB every ~625ms (max_input_length=8192), one
-		 * pr_err() per ~64-byte chunk floods dmesg and evicts other
-		 * messages (confirmed live: the hid-generic bind line got rotated
-		 * out of the ring buffer during a single large report). */
 		if (DBG_VERBOSE) {
 			if (opcode == 0x02)
 				pr_err("spi-amd: WRITE MISO rx_len=%u raw=[%*ph]\n",
@@ -447,39 +442,10 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 				if (next->rx_buf && next->len > 0 && !next->tx_buf) {
 					u8 *rx_ptr = (u8 *)next->rx_buf;
 					u32 rx_remaining = next->len;
-					/* 2026-07-08 attempt 5: align chunk size to 64 bytes,
-					 * matching amdspi.sys's own DMA quantum ("chunk 64" in
-					 * docs/decomp/amdspi/DECOMP-INDEX.md) instead of the
-					 * FIFO's raw 70-byte ceiling — the residual ~22%
-					 * mismatch from attempt 3 recurred at ~64-byte intervals
-					 * (offsets ~59, ~123, ~187, ~251 in a captured RPT_DESC),
-					 * suggesting the device's own internal buffering (not
-					 * just our controller's FIFO) works in 64-byte pages. */
-					/* 2026-07-08 night: tested first_chunk=60 (vs. the
-					 * device's real 64-byte page size) — corruption widened
-					 * from 1 byte to 5, but stayed anchored to the SAME
-					 * absolute content offsets (n*64+58), proving the
-					 * defect is tied to the device's own page-relative
-					 * position, not to our chunk/segment boundaries.
-					 * 64-byte-aligned chunks remain the best known fetch
-					 * strategy (minimizes the damage to 1 byte/page). See
-					 * GROUND_TRUTH.md §18.6. */
+					/* Keep descriptor reads aligned to 64-byte chunks. */
 					u32 first_chunk = min_t(u32, rx_remaining, 64);
 
-					/* 2026-07-08: amd_spi_exec_segment() caps its RX read at
-					 * AMD_SPI_FIFO_SIZE (70) regardless of the requested
-					 * rx_len, silently truncating any larger single-segment
-					 * read while still reporting success — this is how every
-					 * RPT_DESC read (940B) ended up delivering only its first
-					 * ~67 real bytes, zero-padded, and calling it complete
-					 * (see docs/GROUND_TRUTH.md §18). amdspi.sys never hits
-					 * this case: bulk reads >64B go over a separate DMA path
-					 * we don't have, so Windows's PIO code only ever serves
-					 * the <64B remainder. Emulate the missing bulk path by
-					 * chunking: first segment carries the address bytes,
-					 * subsequent segments re-trigger with no TX (matching the
-					 * already-working plain-RX-only chunking loop below) to
-					 * continue draining the same pending response. */
+					/* Drain large responses as continuation segments. */
 					ret = amd_spi_exec_segment(amd_spi, opcode,
 						tx_buf, tx_len, rx_ptr, first_chunk);
 					if (ret < 0) { msg->status = ret; goto out; }

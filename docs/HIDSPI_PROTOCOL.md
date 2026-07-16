@@ -4,6 +4,10 @@
 > not the public v1.0 spec. This document is the definitive technical reference,
 > verified against both live SPI traces and decompilation of the Windows driver stack
 > (`hidspi.sys`, `HidSpiCx.sys`, `amdspi.sys`).
+>
+> Runtime boundary: Linux supports standard HID operation. Raw feature vectors
+> below are captured Windows evidence; Linux's exact one-shot GET receives no
+> response and does not provide a live raw stream.
 
 ## Discovery — How the Driver Chooses V0
 
@@ -41,7 +45,7 @@ Body length on wire: `body_len = ((u16 >> 4) * 4)`
 
 | Type | Name | Wire | Description |
 |------|------|------|-------------|
-| 1 | DATA | | Runtime input reports (pre-computed touch coordinates or raw heatmap) |
+| 1 | DATA | | Runtime input reports; some Windows captures contain raw `0x0c` bodies |
 | 3 | RESET_RSP | `32 10 00 5A` | Device reset acknowledgment (4-byte body) |
 | 4 | COMMAND_RESP | | Response to SET_POWER or other commands |
 | 5 | GET_FEATURE_RESP | | Response to GET_FEATURE |
@@ -55,7 +59,7 @@ Type 0 does **not** exist. Type 2, 6, and values >8 are invalid on V0.
 | Header (hex) | Decoded | Body Length |
 |-------------|---------|-------------|
 | `12 60 03 5A` | DATA type=1 | ((0x360>>4))*4 = 216 bytes |
-| `12 40 43 5A` | DATA type=1 | ((0x4340>>4))*4 = 4304 bytes (raw heatmap) |
+| `12 40 43 5A` | DATA type=1 | ((0x4340>>4))*4 = 4304 bytes (captured raw `0x0c` body) |
 | `32 10 00 5A` | RESET_RSP type=3 | ((0x0100>>4))*4 = 4 bytes |
 | `72 80 00 5A` | DEVICE_DESC type=7 | ((0x8000>>4))*4 = 32 bytes |
 | `82 B0 0E 5A` | RPT_DESC type=8 | ((0xEB00>>4))*4 = 940 bytes |
@@ -136,11 +140,10 @@ Bytes 3+: content payload
 
 ## Complete Wire Frames — Canonical Examples
 
-### DESCREQ (10 bytes on wire, 11 in driver internal buffer)
+### DESCREQ
 
 ```
-Canonical (wire):        02 00 00 01 42 00 00 03 00 00
-Driver internal:         02 02 00 00 01 42 00 03 00 00 00  (11 bytes, doubled opcode)
+02 00 00 01 42 00 00 03 00 00
 
 │  │       │  │  │  │  │_______│
 │  │       │  │  │  │     │
@@ -149,18 +152,13 @@ Driver internal:         02 02 00 00 01 42 00 03 00 00 00  (11 bytes, doubled op
 │  │       │  │  └─ 0x00 (pad/alignment)
 │  │       │  └─ 0x42 = V2 body magic
 │  │       └─ output_register = 0x000001 (big-endian)
-│  └─ 0x02 = write opcode (Doubled in driver: first 0x02 consumed by amd_spi_exec_segment)
+│  └─ 0x02 = write opcode
 └─ SPI opcode
 ```
 
 Register addresses:
 - **DESCREQ** → register `0x000001` (from ACPI `_DSM func=1`)
 - **DESCREQ2** → register `0x000002` (from device descriptor `wReportDescRegister`)
-
-**The doubled-opcode quirk**: The driver's DESCREQ byte sequence has an extra leading `0x02`.
-This byte is consumed/stripped by `amd_spi_exec_segment()` before the wire frame is assembled.
-The actual SPI transaction is always 10 bytes. Raw MMIO tools that bypass the segment executor
-must NOT include the doubled byte.
 
 ### Read Approval (9 bytes)
 
@@ -177,7 +175,7 @@ RX: [4-byte HID input header][variable body]
 The input register is always `0x000000` for this device. Unlike v1.0, it does not change
 after descriptor parsing. The `wInputRegister` field in the device descriptor is `0x0000`.
 
-### GET_FEATURE (requesting id=4 from Windows trace)
+### GET_FEATURE (Windows trace only)
 
 ```
 02 00 00 03 42 00 04 03 00 06
@@ -189,7 +187,7 @@ after descriptor parsing. The `wInputRegister` field in the device descriptor is
 └─ write opcode
 ```
 
-### SET_FEATURE (id=4, value=1, from Windows trace)
+### SET_FEATURE (Windows trace only)
 
 ```
 02 00 00 03 82 00 03 04 00 05 01 00 00 00

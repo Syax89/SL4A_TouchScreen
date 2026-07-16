@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""Probe the vendor CLI command channel (Report ID 31 / 0x1f) found embedded
-in TouchPenProcessor0C19.dll's GenericCliDescriptor.xml (docs/decomp/).
-See docs/GROUND_TRUTH.md §21.5 for the discovery writeup.
+"""Archived vendor CLI experiment.
 
-Sends a single command as a 60-byte Output report, then does a short,
-bounded read for any Input report that comes back. Read-only commands only
-(GetVersion/GetDescriptorSize/etc.) -- never send a Set* command with this
-script.
-
-Usage: sudo python3 tools/cli_probe.py /dev/hidraw3 <cmd_id> [param_bytes_hex] [--pad=00|ff]
+No CLI command is supported for runtime use. Even nominal read commands may
+reset the controller, so this script is retained as forensic source only.
 """
 import sys
 import os

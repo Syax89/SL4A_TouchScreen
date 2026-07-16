@@ -3,6 +3,10 @@
 This document freezes the offline evidence and test boundary for raw-mode work.
 It does not authorize a raw-mode hardware experiment.
 
+`raw_capture_only=1` is the sole supported raw-related mode. It can preserve a
+complete `0x0c` body that independently arrives, but it cannot send the feature
+vectors below or cause the device to emit raw data. See `RAW_CAPTURE_ONLY.md`.
+
 ## Baseline
 
 - Driver commit: `483520f51afb8687a5bcf4c350d2aaa5428c926b`
@@ -41,6 +45,17 @@ Two independent payload analyses agree that a full `0x0c` frame has:
 The first two content bytes are preserved as opaque data. They must not be
 interpreted as a scan counter or discarded without new independent evidence.
 
+The captured report descriptor independently contains Report ID `0x0c` with
+exactly 4299 report-data bytes and Report ID `0x08` with exactly 211 report-data
+bytes. Those sizes exactly match the V0 content spans in the paired 4304-byte
+and 216-byte DATA bodies. This proves descriptor/framing compatibility; it does
+not assign a meaning to either report payload or prove a raw-mode transition.
+
+For `0x0c`, the descriptor classifies the first two report-data bytes as a
+16-bit Digitizers `Usage 0x56` Data field and the remaining 4297 bytes as a
+Digitizers `Usage 0x61` Constant field. HID Constant classification is metadata,
+not an explanation of the bytes; both spans remain uninterpreted here.
+
 ## Offline Contract
 
 `spi_hid_protocol_parse_content()` is a pure bounded parser. It accepts only a
@@ -58,9 +73,11 @@ the commands live.
 - Feature selector semantics: traces contain fixed bytes, but selector naming
   and the historical 4-versus-5 observation conflict. No selector scan is allowed.
 - Descriptor-to-GET and GET-to-SET timing: observed traces differ by lifecycle.
-- Raw geometry: 72x48 heuristic conflicts with 288-stride static analysis.
-- Cell start, footer, c590 gain selection, calibration, mapping, and blob logic.
+- Screen orientation, calibration, contact extraction thresholds, slot tracking,
+  and the final grid-to-screen transform. The decoded CapImg raster itself is a
+  48-row by 72-column single RLV run; the processor's 288-byte stride is an
+  internal representation, not a competing wire layout.
 
-No runtime raw feature template, raw parser, geometry, or coordinate behavior
+No runtime raw feature template, geometry, coordinate behavior, or transition
 may change until a new contract resolves the relevant uncertainty with two
 independent analyses and fixture coverage.

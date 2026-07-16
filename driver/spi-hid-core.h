@@ -124,6 +124,10 @@
 #define HEATMAP_MAX_BLOBS   10
 #define HEATMAP_MAX_SLOTS   47   /* match Windows DLL blob slot count */
 
+/* Eight fixed-size V0 bodies keep capture bounded to roughly 34 KiB. */
+#define SPI_HID_RAW_CAPTURE_SLOTS 8
+#define SPI_HID_RAW_CAPTURE_BODY_LENGTH 4304
+
 struct spi_hid_device_desc_raw {
 	__le16 wDeviceDescLength;
 	__le16 bcdVersion;
@@ -261,6 +265,7 @@ struct spi_hid {
 	struct mutex seq_lock;
 	struct mutex power_lock;
 	struct mutex output_lock;
+	struct mutex raw_capture_lock;
 	struct completion output_done;
 
 	__u8 read_approval[SPI_HID_READ_APPROVAL_MAX];
@@ -292,11 +297,7 @@ struct spi_hid {
 	u8 wire_report_descriptor[1024];
 	u32 wire_report_descriptor_len;
 
-	/* Heatmap-to-touch pipeline (2026-07-08 §D).
-	 * Raw sensor frames (content_id=0x0C, ~4302 bytes) are capacitive
-	 * heatmaps — not standard HID input reports. We intercept them before
-	 * hid_input_report(), run blob detection, and emit multitouch events
-	 * on a dedicated input_dev. */
+	/* Optional input state for validated passive CapImg frames. */
 	struct input_dev *touch_input;
 	bool raw_mode_active;
 	u8 *heatmap_buf;          /* last captured frame buffer, kmalloc'd */
@@ -305,7 +306,7 @@ struct spi_hid {
 	u16 heatmap_grid_cols;    /* determined from frame analysis */
 	u16 heatmap_grid_rows;
 
-	/* Blob detection buffers (was static, now per-device) */
+	/* Per-device blob detection buffers. */
 	u8  heatmap_baseline[HEATMAP_MAX_CELLS];
 	u32 heatmap_baseline_cells;
 	bool heatmap_have_baseline;
@@ -315,7 +316,7 @@ struct spi_hid {
 	u8  heatmap_frame_persistence[HEATMAP_MAX_CELLS];
 	u16 heatmap_label[HEATMAP_MAX_CELLS];
 
-	/* Blob state (was static in heatmap_process_frame) */
+	/* Blob state. */
 	u16 blob_x[HEATMAP_MAX_BLOBS];
 	u16 blob_y[HEATMAP_MAX_BLOBS];
 	u32 blob_wsum[HEATMAP_MAX_BLOBS];
@@ -324,8 +325,7 @@ struct spi_hid {
 	bool blob_active[HEATMAP_MAX_BLOBS];
 	u16 label_equiv[256];
 
-	/* Extended blob tracking (GROUND_TRUTH §22.4):
-	 * 47 slots, each with state, duration, coordinate history. */
+	/* Slot state, duration, and coordinate history. */
 	u8 blob_slot_state[HEATMAP_MAX_SLOTS];      /* 0=empty 1=new 2=claimed 3=lift */
 	u32 blob_slot_duration[HEATMAP_MAX_SLOTS];  /* frames in current state */
 	u16 blob_slot_gx[HEATMAP_MAX_SLOTS];        /* last grid X */
@@ -343,13 +343,26 @@ struct spi_hid {
 	u8 *data_buf;              /* pre-allocated for seq_thread body reads */
 	u32 data_buf_len;
 
-	/* raw_mode handshake watchdog (2026-07-08, GROUND_TRUTH.md §18.7).
-	 * SET_FEATURE occasionally makes the device go completely silent (no
-	 * further IRQ at all, not even a RESET_RSP), so the existing
-	 * IRQ-triggered retry in spi_hid_seq_thread() never gets a chance to
-	 * run. Decompiling HidSpiCx.sys showed Windows hits the same
-	 * intermittent failure and papers over it with a bounded, timer-based
-	 * retry (2000ms timeout, 3 retries) — this mirrors that exactly. */
+	/* Passive raw capture: never changes device state or interprets payloads. */
+	u8 raw_capture_frames[SPI_HID_RAW_CAPTURE_SLOTS]
+		[SPI_HID_RAW_CAPTURE_BODY_LENGTH];
+	u64 raw_capture_sequence[SPI_HID_RAW_CAPTURE_SLOTS];
+	u64 raw_capture_timestamp_ns[SPI_HID_RAW_CAPTURE_SLOTS];
+	u64 raw_capture_count;
+	u32 raw_capture_next;
+	u32 raw_capture_invalid;
+	u32 raw_input_invalid;
+	bool raw_transition_attempted;
+	u32 raw_transition_scheduled;
+	u32 raw_transition_get_sent;
+	u32 raw_transition_get_write_failed;
+	u32 raw_transition_get_response;
+	u32 raw_transition_set_sent;
+	u32 raw_transition_set_write_failed;
+	u32 raw_transition_state_skipped;
+	u32 raw_transition_reset_before_response;
+
+	/* Retained legacy raw-handshake state; raw_mode remains disabled. */
 	struct delayed_work raw_handshake_watchdog;
 	int raw_handshake_retries_left;
 	u8 raw_handshake_state5_defers;

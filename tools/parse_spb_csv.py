@@ -9,10 +9,18 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from decode_hidspi import describe
-
-
 HEX_RE = re.compile(r"0x([0-9a-fA-F]+)")
+
+
+def describe(data: bytes) -> str:
+    """Return a conservative description of a V0 response header."""
+    for offset in range(max(0, len(data) - 3)):
+        if data[offset + 3] != 0x5A or (data[offset] & 0x0F) != 2:
+            continue
+        report_type = data[offset] >> 4
+        body_length = ((data[offset + 1] >> 4) | (data[offset + 2] << 4)) * 4
+        return f"v0 type=0x{report_type:X} body={body_length}B header={offset}"
+    return "no V0 header"
 
 
 @dataclass

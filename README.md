@@ -11,7 +11,7 @@
 
 ---
 
-## Status: beta — standard HID works
+## Status
 
 The driver successfully initializes the MSHW0231 touchscreen on the Surface Laptop 4 AMD.
 **Single-touch and pen work** via standard HID mode (Report IDs 0x40 and 0x01).
@@ -24,12 +24,12 @@ KDE/Wayland recognizes touches correctly — tap, drag, and single-finger gestur
 | Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
 | BTN_TOUCH (tap/lift detection) | **Working** |
 | Stylus/Pen (Report ID 0x01) | **Working** |
-| Multi-touch (raw heatmap pipeline) | Experimental |
-| Grid-to-screen calibration | In progress |
+| Passive CapImg decoder | Conditional: only processes independently arriving `0x0c` frames |
+| Multitouch input | Not available: no live raw stream after normal Linux startup |
 
-Multi-touch requires experimental `raw_mode=1`. Its frames are DFT antenna data,
-not a rectangular capacitive grid, and the raw-mode handshake and coordinate
-calibration are not reliable. Keep the default `raw_mode=0` for daily use.
+`raw_mode=1` is deprecated and inert. `raw_capture_only=1` remains passive.
+`raw_input_beta=1` decodes only independently arriving validated CapImg `0x0c`
+frames and can create a second input device; it is not a usable multitouch mode.
 
 ---
 
@@ -59,7 +59,7 @@ calibration are not reliable. Keep the default `raw_mode=0` for daily use.
 │  · DESCREQ → DEVICE_DESC → RPT_DESC  │
 │  · IRQ-driven seq_thread (states 0-5)│
 │  · Standard HID mode (Report 0x40)   │
-│  · Optional raw heatmap interception │
+│  · Passive raw-frame capture          │
 └──────────────┬───────────────────────┘
                │ Linux SPI framework
 ┌──────────────┴───────────────────────┐
@@ -81,7 +81,7 @@ The driver uses an **IRQ-driven sequencer** (`spi_hid_seq_thread`) that mirrors 
 State 0 (WAIT_RESET)  → drain RESET_RSP → DESCREQ → State 1
 State 1 (WAIT_DESC)   → read DEVICE_DESC → DESCREQ2 → State 2
 State 2 (WAIT_RPT)    → read RPT_DESC → create HID device → State 4
-State 5 (WAIT_FEATURE)→ optional raw-mode GET_FEATURE response → State 4
+State 5 (WAIT_FEATURE)→ diagnostic feature response handling
 State 4 (DONE)        → forward input reports via hid_input_report()
 State 3 (VENDOR_INIT) → restart descriptor discovery on RESET_RSP
 ```
@@ -94,7 +94,10 @@ in standard mode.
 Input is IRQ-driven. `poll_interval` is deprecated and ignored; the runtime
 stream watchdog is disabled by default.
 
-**No GET_FEATURE/SET_FEATURE is sent** — the device stays in standard HID mode and sends proper Report ID 0x40 (TouchScreen) and Report ID 1 (Pen) reports with pre-computed X/Y coordinates.
+**No feature command is sent in supported operation.** The device stays in
+standard HID mode and sends Report ID `0x40` touch and Report ID `0x01` pen
+reports. `raw_capture_only=1` can retain an already-arriving complete `0x0c` V0
+body but cannot request raw mode. See [`docs/RAW_CAPTURE_ONLY.md`](docs/RAW_CAPTURE_ONLY.md).
 
 ---
 
@@ -214,9 +217,10 @@ instead of registering a guessed device.
 
 Windows cold-boot traces show a 14-byte vendor init write to register 0x04. Testing proved this is optional — the device initializes without it. Sending it may corrupt state.
 
-### Standard HID mode (no raw heatmap)
+### Standard HID mode
 
-By NOT sending `SET_FEATURE(id=4)`, the device stays in standard HID mode and sends Report ID 0x40 with pre-computed touch coordinates. This avoids the complex blob detection on raw heatmap data that Windows handles via `TouchPenProcessor0C19.dll` (9.7 MB, DFT processing, CCL, Kalman tracking).
+The supported driver does not send feature commands and receives Report ID `0x40`
+touch coordinates plus Report ID `0x01` pen input through the normal HID path.
 
 ### Companion chip (0x18/0x19/0x1A) not needed
 
@@ -231,9 +235,7 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 | `install.sh` | `tools/install.sh` | **Multi-distro installer** (Arch/Debian/Fedora/openSUSE) — DKMS build + systemd service |
 | `uninstall.sh` | `tools/uninstall.sh` | Removes everything `install.sh` installed |
 | `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Developer compile check and service sync; does not install or reload a module |
-| `calibrate_axes.py` | `tools/calibrate_axes.py` | Experimental raw-mode, four-corner axis calibration helper |
 | `touchtest` / `touchviz` | `tools/touchtest*`, `tools/touchviz*` | evdev input inspection utilities |
-| `cli_probe.py` | `tools/cli_probe.py` | Calibration CLI protocol probe (Report ID 0x1f) |
 | `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, GPIO) |
 | `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
 | `ghidra/` | `tools/ghidra/` | Headless decompilation scripts for `TouchPenProcessor0C19.dll` |
@@ -285,8 +287,7 @@ These are local, untracked research inputs. They are not distributed by this rep
 
 ## Next Steps
 
-See [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md). The open work is raw-mode handshake
-reliability, raw-data calibration, and upstream-quality patch preparation.
+See [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
 
 ---
 

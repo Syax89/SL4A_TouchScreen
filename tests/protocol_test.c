@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "../driver/spi-hid-protocol.h"
 
@@ -149,6 +148,53 @@ static void test_parse_content(void)
 	      "content: rejects truncated body");
 	CHECK(spi_hid_protocol_parse_content(NULL, sizeof(raw_body), &content) < 0,
 	      "content: rejects null body");
+	CHECK(!spi_hid_protocol_validate_raw_capture(raw_body, sizeof(raw_body), &content),
+	      "raw capture: accepts only the frozen full raw envelope");
+	raw_body[2] = 0x08;
+	CHECK(spi_hid_protocol_validate_raw_capture(raw_body, sizeof(raw_body), &content) < 0,
+	      "raw capture: rejects a non-raw report ID");
+	raw_body[2] = 0x0c;
+	raw_body[0] = 0xcd;
+	CHECK(spi_hid_protocol_validate_raw_capture(raw_body, sizeof(raw_body), &content) < 0,
+	      "raw capture: rejects a different semantic length");
+	raw_body[0] = 0xce;
+	CHECK(spi_hid_protocol_validate_raw_capture(raw_body, sizeof(raw_body) - 1, &content) < 0,
+	      "raw capture: rejects a missing aligned tail byte");
+}
+
+static void test_parse_content_boundaries(void)
+{
+	spi_hid_proto_u8 body[128] = { 0 };
+	struct spi_hid_protocol_content content;
+
+	/* Check every envelope length around each available body boundary. */
+	for (unsigned int body_length = 0; body_length <= sizeof(body); body_length++) {
+		for (unsigned int total_length = 0; total_length <= sizeof(body) + 1;
+		     total_length++) {
+			int valid = body_length >= 3 && total_length >= 3 &&
+				total_length <= body_length;
+			int result;
+
+			body[0] = (spi_hid_proto_u8)total_length;
+			body[1] = (spi_hid_proto_u8)(total_length >> 8);
+			body[2] = 0xa5;
+			result = spi_hid_protocol_parse_content(body, body_length, &content);
+			CHECK((result == 0) == valid,
+			      "content boundaries: accept only complete V0 envelopes");
+			if (valid) {
+				CHECK(content.total_length == total_length,
+				      "content boundaries: total length preserved");
+				CHECK(content.content_id == 0xa5,
+				      "content boundaries: content ID preserved");
+				CHECK(content.data == body + 3 &&
+				      content.data_length == total_length - 3,
+				      "content boundaries: data span is bounded");
+			}
+		}
+	}
+
+	CHECK(spi_hid_protocol_parse_content(body, sizeof(body), NULL) < 0,
+	      "content boundaries: rejects null result");
 }
 
 /* ── Frozen Windows feature vectors ────────────────────────────── */
@@ -222,15 +268,18 @@ static void test_find_header(void)
 
 static void test_fuzz_roundtrip(void)
 {
-	srand((unsigned int)time(NULL));
+	unsigned int state = 0x4a1d3e7b;
 
 	for (int i = 0; i < 5000; i++) {
 		spi_hid_proto_u8 raw[4];
 		struct spi_hid_protocol_header h;
 
-		raw[0] = (spi_hid_proto_u8)((rand() & 0xf0) | 0x02); /* force version=2 */
-		raw[1] = (spi_hid_proto_u8)(rand() & 0xf0);           /* reserved nibble = 0 */
-		raw[2] = (spi_hid_proto_u8)(rand() & 0xff);
+		state = state * 1103515245u + 12345u;
+		raw[0] = (spi_hid_proto_u8)((state & 0xf0) | 0x02); /* force version=2 */
+		state = state * 1103515245u + 12345u;
+		raw[1] = (spi_hid_proto_u8)(state & 0xf0);           /* reserved nibble = 0 */
+		state = state * 1103515245u + 12345u;
+		raw[2] = (spi_hid_proto_u8)(state & 0xff);
 		raw[3] = 0x5a;
 
 		spi_hid_protocol_decode_header(raw, &h);
@@ -260,13 +309,18 @@ static void test_fuzz_roundtrip(void)
 
 static void test_fuzz_output_roundtrip(void)
 {
-	srand((unsigned int)time(NULL) ^ 0xdead);
+	unsigned int state = 0x9d3c7a51;
 
 	for (int i = 0; i < 5000; i++) {
 		spi_hid_proto_u8 raw[6];
-		spi_hid_proto_u16 reg = (spi_hid_proto_u16)(rand() & 0xFFFFFF);
+		unsigned int reg;
 		/* Max encodable real bytes: 12 bits → 0xFFF = 4095 */
-		spi_hid_proto_u16 outlen = (spi_hid_proto_u16)(rand() & 0xFFF);
+		spi_hid_proto_u16 outlen;
+
+		state = state * 1103515245u + 12345u;
+		reg = state & 0xffffff;
+		state = state * 1103515245u + 12345u;
+		outlen = (spi_hid_proto_u16)(state & 0xfff);
 
 		spi_hid_protocol_encode_output_header(raw, reg, outlen);
 
@@ -352,6 +406,7 @@ int main(void)
 	test_encode_output();
 	test_encode_read();
 	test_parse_content();
+	test_parse_content_boundaries();
 	test_feature_vectors();
 	test_find_header();
 	test_find_header_null_offset();
