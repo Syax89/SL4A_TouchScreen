@@ -2277,7 +2277,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			col = i % ncols; row = i / ncols;
 			if (row >= nrows) break;
 			rise = shid->heatmap_signal[i];
-			if (rise < 350) continue;
+			if (rise < 400) continue;
 
 			/* Cross-shaped: check ±5 in N,S,E,W directions only */
 			{
@@ -2623,6 +2623,18 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					bool was_claimed = (shid->blob_slot_state[s] >= 2);
 					u8 blob_idx = sorted[bi].idx;
 
+					/* Sanity: reject jumps beyond 5 grid cells for
+					 * claimed slots — noise blobs can't steal
+					 * existing finger assignments (3-finger). */
+					if (was_claimed) {
+						s32 jdx = (s32)gx - (s32)shid->blob_slot_gx[s];
+						s32 jdy = (s32)gy - (s32)shid->blob_slot_gy[s];
+						if (jdx < 0) jdx = -jdx;
+						if (jdy < 0) jdy = -jdy;
+						if (jdx > 500 || jdy > 500)
+							goto slot_unassigned;
+					}
+
 					/* Copy per-blob eigenvalues to the assigned slot. */
 					if (blob_idx < HEATMAP_MAX_BLOBS &&
 					    shid->eigmaj[blob_idx] > 0) {
@@ -2714,7 +2726,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						}
 					}
 				} else {
-					switch (shid->blob_slot_state[s]) {
+slot_unassigned:				switch (shid->blob_slot_state[s]) {
 					case 1:
 						shid->blob_slot_state[s] = 0;
 						shid->blob_slot_duration[s] = 0;
