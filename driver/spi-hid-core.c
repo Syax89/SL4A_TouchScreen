@@ -3104,23 +3104,9 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			len = min_t(u32, shid->desc.report_descriptor_length,
 				    sizeof(shid->wire_report_descriptor));
 			if (off < rblen && len > 0 && off + len <= rblen) {
-				u32 k;
-
 				memcpy(shid->wire_report_descriptor, body + off, len);
-				for (k = 55; k < len; k += 64) {
-					if (shid->wire_report_descriptor[k] == 0xFF &&
-					    k < HARDCODED_RD_SIZE &&
-					    hardcoded_report_descriptor[k] != 0xFF) {
-						shid->stat_wire_patches++;
-						seq_dbg(shid, 1, "SEQ: patching known-corrupt wire descriptor byte at offset %u (0xff -> 0x%02x)\n",
-							 k, hardcoded_report_descriptor[k]);
-						shid->wire_report_descriptor[k] =
-							hardcoded_report_descriptor[k];
-					}
-				}
 				shid->wire_report_descriptor_len = len;
-				dev_info(&shid->spi->dev, "SEQ: report descriptor %u bytes read from wire, %u bytes patched (target: 0)\n",
-					 len, shid->stat_wire_patches);
+				dev_info(&shid->spi->dev, "SEQ: report descriptor %u bytes read from wire\n", len);
 			} else {
 				shid->wire_report_descriptor_len = 0;
 			}
@@ -3476,13 +3462,10 @@ static int spi_hid_ll_parse(struct hid_device *hid)
 
 	mutex_lock(&shid->lock);
 
-	/* 2026-07-08: prefer the descriptor actually read off the wire
-	 * (docs/NEXT_STEPS.md §C) — a real driver shouldn't permanently rely on
-	 * a descriptor hardcoded from one past capture, which can't track
-	 * firmware revisions or other SKUs of the same VID/PID. Trust
-	 * hid_parse_report()'s own structural validation as the sanity check:
-	 * if the wire-read bytes don't parse, fall back to the hardcoded copy
-	 * exactly as before. */
+	/* 100% wire-read report descriptor: the PIO TX_COUNT=3 fix
+	 * eliminated the old n*64+55 byte corruption.  hid_parse_report()
+	 * serves as the only validation — if the wire bytes don't parse,
+	 * fall back to the hardcoded copy. */
 	if (shid->wire_report_descriptor_len > 0 && !shid->wire_report_descriptor_rejected) {
 		seq_dbg(shid, 1, "SEQ: ll_parse — trying device-read report descriptor (%u bytes)\n",
 			 shid->wire_report_descriptor_len);

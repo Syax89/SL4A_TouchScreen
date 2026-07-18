@@ -22,7 +22,7 @@ handshake if needed.
 | Feature | Status |
 |---------|--------|
 | Device initialization (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
-| HID report descriptor (936 bytes, 98.5% wire-read + 14-byte patch) | Complete |
+| HID report descriptor (936 bytes, 100% wire-read) | Complete |
 | Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
 | BTN_TOUCH (tap/lift detection) | **Working** |
 | Stylus/Pen (Report ID 0x01) | **Working** |
@@ -195,9 +195,14 @@ make -C tests
 
 ## Key Technical Decisions
 
-### HID Report Descriptor (98.5% wire-read + 14-byte patch)
+### HID Report Descriptor (100% wire-read)
 
-The 936-byte report descriptor is read live from the device. 14 specific byte positions (at offsets n·64+55 from descriptor start) are corrupted to `0xFF` by a characterized hardware defect in the device's 64-byte page structure. These bytes are patched from a hardcoded ground-truth copy. The remaining 922 bytes (98.5%) come from the live wire read every boot — meaning firmware updates or different SKUs would be picked up.
+The 936-byte report descriptor is read live from the device every boot.
+A historical PIO TX_COUNT bug caused corruption in the continuation path
+(byte `n*64+55` shifting), fixed by matching the Windows `0x4bac` TX_COUNT=3
+convention. The hardcoded descriptor remains as an emergency fallback in case
+`hid_parse_report()` rejects the wire bytes — any firmware revision or
+different SKU would be picked up correctly.
 
 ### Raw Mode Activation
 
