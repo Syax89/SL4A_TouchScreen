@@ -2756,8 +2756,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						 * Raw peak centroids are coherent but have
 						 * pixel-level jitter from 5×5 window edges. */
 						if (was_claimed && shid->blob_slot_state[s] == 2) {
-							u16 old_gx = shid->blob_slot_gx[s];
-							u16 old_gy = shid->blob_slot_gy[s];
+							u32 old_gx = shid->blob_slot_gx[s];
+							u32 old_gy = shid->blob_slot_gy[s];
 							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
 							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
 						} else {
@@ -2766,6 +2766,16 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						}
 						shid->blob_slot_gx[s] = new_gx[s];
 						shid->blob_slot_gy[s] = new_gy[s];
+
+						/* Push to history ring for lift lookback. */
+						{
+							u8 hp = shid->blob_slot_hpos[s];
+							shid->blob_slot_hx[s][hp] = new_gx[s];
+							shid->blob_slot_hy[s][hp] = new_gy[s];
+							shid->blob_slot_hpos[s] = (hp + 1) % SLOT_HISTORY_DEPTH;
+							if (shid->blob_slot_hcount[s] < SLOT_HISTORY_DEPTH)
+								shid->blob_slot_hcount[s]++;
+						}
 					}
 				} else {
 					switch (shid->blob_slot_state[s]) {
@@ -2776,6 +2786,15 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					case 2:
 						shid->blob_slot_missed[s]++;
 						if (shid->blob_slot_missed[s] >= (u32)blob_lift_frames) {
+							/* Lift lookback: use position from 2 frames
+							 * ago (when the finger was still fully down). */
+							u8 hc = shid->blob_slot_hcount[s];
+							if (hc >= 2) {
+								u8 hp = shid->blob_slot_hpos[s];
+								u8 back = (hp + SLOT_HISTORY_DEPTH - 2) % SLOT_HISTORY_DEPTH;
+								shid->blob_slot_gx[s] = shid->blob_slot_hx[s][back];
+								shid->blob_slot_gy[s] = shid->blob_slot_hy[s][back];
+							}
 							shid->blob_slot_state[s] = 3;
 							shid->blob_slot_missed[s] = 0;
 						}
