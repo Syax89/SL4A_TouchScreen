@@ -2221,195 +2221,115 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 	if (!shid->touch_input) return;
 
-	/* Step 1: mark touched cells using c590 signal lookup.
-	 *
-	 * Empirical hardware behaviour (surface_touch.csv, 2026-07-13): every
-	 * cell rests at raw byte 0xB4 (=180) and a finger *lowers* the raw byte
-	 * (down to ~0x7C). Through the c590 LUT (c590[i]=4000-22i) this means the
-	 * touch SIGNAL RISES: c590[resting 180]≈40 → c590[touch 124]≈1272. So the
-	 * touch metric is a signal *rise* above the resting baseline:
-	 *   rise = c590[current] - c590[baseline]   (>0 on touch)
-	 *   touched if rise >= threshold
-	 * (The previous code subtracted in the opposite direction, so `drop` was
-	 * always <0 and no cell was ever detected — the digitizer produced zero
-	 * touches. This matches the Step-3 weight, which already uses `rise`.)
-	 *
-	 * threshold = c590_range * touch_threshold_pct / 100, with c590_range =
-	 * c590[0] = 4000. Observed touch peaks reach a rise of ~2300, so the
-	 * default 10% (=400) sits well inside the dynamic range. */
+	/* Step 1: compute signal rise per cell. */
 	memset(shid->heatmap_touched, 0, cell_count);
-	{
-		s32 c590_range = shid->c590_lut[0]; /* full-scale signal = 4000 */
-		s32 threshold;
-
-		if (touch_signal_mode == 2)
-			threshold = (c590_range * touch_threshold_pct) / 100;
-		else if (touch_signal_mode == 1)
-			threshold = (c590_range * 10) / 100; /* reasonable default */
-		else
-			threshold = 0; /* any change */
-
-		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-			u8 raw = data[data_offset + i];
-			u8 baseline_raw = shid->heatmap_baseline[i];
-			s16 baseline_signal = shid->c590_lut[baseline_raw];
-			s16 signal = shid->c590_lut[raw];
-			s32 rise = (s32)signal - (s32)baseline_signal;
-
-			if (touch_signal_mode == 0) {
-				if (rise > 0)
-					shid->heatmap_touched[i] = 1;
-			} else {
-				if (rise >= threshold)
-					shid->heatmap_touched[i] = 1;
-			}
-		}
-	}
-
-	/* Temporal consistency: cells must be active for 2+ consecutive frames
-	 * to be considered stable touches. Single-frame spikes are suppressed. */
 	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-		if (shid->heatmap_touched[i]) {
-			if (shid->heatmap_frame_persistence[i] < 255)
-				shid->heatmap_frame_persistence[i]++;
-		} else {
-			shid->heatmap_frame_persistence[i] = 0;
-		}
-		/* Only promote cells that have persisted for 2+ frames */
-		if (shid->heatmap_frame_persistence[i] < 2)
-			shid->heatmap_touched[i] = 0;
+		s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
+		s16 curr = shid->c590_lut[data[data_offset + i]];
+		s16 rise = curr - base;
+		shid->heatmap_touched[i] = (rise >= 400) ? 1 : 0;
 	}
 
-	/* Morphological dilation: expand high-confidence touched region by 1 cell
-	 * to merge nearby clusters. Only applied to cells with persistence >= 3
-	 * (strong confidence) to avoid amplifying noise. */
-	{
-		u8 *expanded = shid->heatmap_expanded;
-		memcpy(expanded, shid->heatmap_touched, cell_count);
-		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-			/* Only dilate cells with strong persistence */
-			if (!shid->heatmap_touched[i] || shid->heatmap_frame_persistence[i] < 3)
-				continue;
-			u16 col = i % ncols, row = i / ncols;
-			if (col > 0 && i > 0) expanded[i - 1] = 1;
-			if (col + 1 < ncols && i + 1 < cell_count && i + 1 < HEATMAP_MAX_CELLS) expanded[i + 1] = 1;
-			if (row > 0 && i >= ncols) {
-				expanded[i - ncols] = 1;
-				if (col > 0) expanded[i - ncols - 1] = 1;
-				if (col + 1 < ncols && i - ncols + 1 < cell_count) expanded[i - ncols + 1] = 1;
-			}
-			if (row + 1 < nrows) {
-				u32 idx = i + ncols;
-				if (idx < cell_count && idx < HEATMAP_MAX_CELLS) {
-					expanded[idx] = 1;
-					if (col > 0 && idx > 0) expanded[idx - 1] = 1;
-					if (col + 1 < ncols && idx + 1 < cell_count) expanded[idx + 1] = 1;
-				}
-			}
-		}
-		memcpy(shid->heatmap_touched, expanded, cell_count);
-	}
-
-	/* Step 2: two-pass connected-component labeling (8-way) */
-	memset(shid->heatmap_label, 0xFF, cell_count * 2);
-	memset(shid->label_equiv, 0, sizeof(shid->label_equiv));
-	nlabels = 0;
-
-	for (i = 0; i < cell_count; i++) {
-		u16 col, row, new_label;
-		u16 neighbors[4];
-		int n_neigh = 0;
-
-		if (!shid->heatmap_touched[i]) continue;
-		col = i % ncols;
-		row = i / ncols;
-		if (row >= nrows) break;
-
-		new_label = 0xFFFF;
-		if (col > 0 && shid->heatmap_touched[i - 1])
-			neighbors[n_neigh++] = shid->heatmap_label[i - 1];
-		if (row > 0) {
-			if (col > 0 && shid->heatmap_touched[i - ncols - 1])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols - 1];
-			if (shid->heatmap_touched[i - ncols])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols];
-			if (col + 1 < ncols && shid->heatmap_touched[i - ncols + 1])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols + 1];
-		}
-
-		if (n_neigh > 0) {
-			new_label = neighbors[0];
-			for (int j = 0; j < n_neigh; j++) {
-				u16 min_label = new_label, nj = neighbors[j];
-				u16 a = min_label < nj ? min_label : nj;
-				u16 b = a == min_label ? nj : min_label;
-				if (a < 256 && b < 256) {
-					while (shid->label_equiv[a]) a = shid->label_equiv[a];
-					while (shid->label_equiv[b]) b = shid->label_equiv[b];
-					if (a != b) shid->label_equiv[b] = a;
-				}
-			}
-		} else {
-			new_label = nlabels++;
-			if (nlabels >= 256) new_label = 255;
-		}
-		shid->heatmap_label[i] = new_label;
-	}
-
-	/* Resolve label equivalence */
-	for (i = 0; i < nlabels && i < 256; i++) {
-		u16 r = shid->label_equiv[i];
-		while (r && r < 256 && shid->label_equiv[r]) r = shid->label_equiv[r];
-		shid->label_equiv[i] = r;
-	}
-
-	/* Step 3: accumulate blob sums + track peak per blob. */
+	/* Step 2: peak detection — cross-shaped 5-cell check
+	 * (matching Python oracle / Windows FUN_1805fba00).
+	 * A cell is a peak if no neighbor at ±5 in N/S/E/W has a
+	 * HIGHER signal rise. Min rise = 500. Max 16 peaks. */
 	memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
 	memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
 	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
 	memset(shid->blob_active, 0, sizeof(shid->blob_active));
-	memset(shid->blob_peak_rise, 0, sizeof(shid->blob_peak_rise));
+	nlabels = 0;
 
-	for (i = 0; i < cell_count; i++) {
-		u16 label, col, row;
-		u32 weight;
+	{
+		struct { u16 col; u16 row; u16 rise; } peaks[16];
+		s16 npeaks = 0, pi, ci;
 
-		if (!shid->heatmap_touched[i]) continue;
-		label = shid->heatmap_label[i];
-		while (label < 256 && shid->label_equiv[label]) label = shid->label_equiv[label];
-		if (label >= HEATMAP_MAX_BLOBS) continue;
+		for (i = 0; i < cell_count && npeaks < 16; i++) {
+			u16 col, row;
+			s16 rise;
 
-		col = i % ncols;
-		row = i / ncols;
-		if (row >= nrows) break;
+			if (!shid->heatmap_touched[i]) continue;
+			col = i % ncols; row = i / ncols;
+			if (row >= nrows) break;
+			{
+				s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
+				s16 curr = shid->c590_lut[data[data_offset + i]];
+				rise = curr - base;
+			}
+			if (rise < 500) continue;
 
-		{
-			s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
-			s16 curr = shid->c590_lut[data[data_offset + i]];
-			s16 rise = curr - base;
-			weight = rise > 0 ? (u32)rise : 0;
+			/* Cross-shaped: check ±5 in N,S,E,W directions only */
+			{
+				int k; bool ok = true;
+				s16 nb[4] = { -9999, -9999, -9999, -9999 };
+				if (col >= 5 && shid->heatmap_touched[i - 5])
+					nb[0] = (s16)shid->c590_lut[data[data_offset + i - 5]] -
+						shid->c590_lut[shid->heatmap_baseline[i - 5]];
+				if (col + 5 < ncols && shid->heatmap_touched[i + 5])
+					nb[1] = (s16)shid->c590_lut[data[data_offset + i + 5]] -
+						shid->c590_lut[shid->heatmap_baseline[i + 5]];
+				if (row >= 5 && shid->heatmap_touched[i - 5 * ncols])
+					nb[2] = (s16)shid->c590_lut[data[data_offset + i - 5 * ncols]] -
+						shid->c590_lut[shid->heatmap_baseline[i - 5 * ncols]];
+				if (row + 5 < nrows && shid->heatmap_touched[i + 5 * ncols])
+					nb[3] = (s16)shid->c590_lut[data[data_offset + i + 5 * ncols]] -
+						shid->c590_lut[shid->heatmap_baseline[i + 5 * ncols]];
+				for (k = 0; k < 4; k++) {
+					if (nb[k] > rise) { ok = false; break; }
+				}
+				if (!ok) continue;
+			}
+
+			peaks[npeaks].col = col;
+			peaks[npeaks].row = row;
+			peaks[npeaks].rise = rise;
+			npeaks++;
 		}
-		shid->blob_xsum[label] += (u32)col * weight;
-		shid->blob_ysum[label] += (u32)row * weight;
-		shid->blob_wsum[label] += weight;
-		shid->blob_active[label] = true;
 
-		if (weight > shid->blob_peak_rise[label]) {
-			shid->blob_peak_rise[label] = weight;
-			shid->blob_peak_x[label] = col;
-			shid->blob_peak_y[label] = row;
+		/* Sort by signal strength (strongest first). */
+		for (pi = 0; pi + 1 < npeaks; pi++)
+			for (ci = pi + 1; ci < npeaks; ci++)
+				if (peaks[ci].rise > peaks[pi].rise) {
+					typeof(peaks[0]) t = peaks[pi];
+					peaks[pi] = peaks[ci]; peaks[ci] = t;
+				}
+
+		/* Step 3: 5×5 local centroid around each peak
+		 * (matching Python oracle _centroid function).
+		 * Only cells within ±2 of the peak contribute to
+		 * the weighted centroid. */
+		for (pi = 0; pi < npeaks; pi++) {
+			s64 sx = 0, sy = 0, sw = 0;
+			s32 pr, pc, r, c;
+
+			pc = peaks[pi].col;
+			pr = peaks[pi].row;
+			for (r = max(0, pr - 2); r <= min((s32)nrows - 1, pr + 2); r++) {
+				for (c = max(0, pc - 2); c <= min((s32)ncols - 1, pc + 2); c++) {
+					u32 idx = (u32)r * ncols + (u32)c;
+					s16 w;
+
+					if (idx >= cell_count || !shid->heatmap_touched[idx]) continue;
+					{
+						s16 base = shid->c590_lut[shid->heatmap_baseline[idx]];
+						s16 curr = shid->c590_lut[data[data_offset + idx]];
+						w = curr - base;
+					}
+					if (w <= 0) continue;
+					sx += (s64)c * w;
+					sy += (s64)r * w;
+					sw += w;
+				}
+			}
+			if (sw >= blob_min_weight) {
+				shid->blob_x[pi] = (u16)(sx / sw);
+				shid->blob_y[pi] = (u16)(sy / sw);
+				shid->blob_wsum[pi] = (u32)sw;
+				shid->blob_active[pi] = true;
+				nlabels++;
+				touched_count++;
+			}
 		}
-		touched_count++;
-	}
-
-	/* Step 4: centroids — 50% signal-weighted + 50% peak for max stability. */
-	for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
-		if (!shid->blob_active[i] || shid->blob_wsum[i] < blob_min_weight)
-			continue;
-		shid->blob_x[i] = (u16)(shid->blob_xsum[i] / shid->blob_wsum[i]);
-		shid->blob_y[i] = (u16)(shid->blob_ysum[i] / shid->blob_wsum[i]);
-		shid->blob_x[i] = (u16)((shid->blob_x[i] + shid->blob_peak_x[i]) / 2);
-		shid->blob_y[i] = (u16)((shid->blob_y[i] + shid->blob_peak_y[i]) / 2);
 	}
 
 	/* Eigenvalue decomposition for the heaviest blob (GROUND_TRUTH.md §22.6) */
