@@ -1,5 +1,5 @@
 # Kbuild for both modules: spi-amd (controller) + spi-hid (HID-over-SPI)
-CFLAGS_trace.o = -I$(src)
+ccflags-y := -I$(src)
 
 obj-m += spi-amd.o
 

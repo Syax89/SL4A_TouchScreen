@@ -93,7 +93,7 @@ static inline int spi_hid_protocol_parse_content(const spi_hid_proto_u8 *body,
 		return -1;
 
 	total_length = body[0] | ((spi_hid_proto_u16)body[1] << 8);
-	if (total_length < 3 || total_length > body_length)
+	if (total_length < 3 || total_length > body_length || total_length > 8192)
 		return -1;
 
 	content->total_length = total_length;
@@ -124,7 +124,10 @@ static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
 	if (!raw || length < 4)
 		return -1;
 
-	for (i = 3; i < length; i++) {
+	/* Start scan from offset 0 for robustness; the sync byte (0x5A)
+	 * typically appears at offset 5-7.
+	 */
+	for (i = 0; i < length; i++) {
 		if (raw[i] == SPI_HID_PROTOCOL_SYNC_BYTE &&
 		    (raw[i - 3] & 0x0f) == SPI_HID_PROTOCOL_VERSION) {
 			if (offset)

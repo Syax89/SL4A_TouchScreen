@@ -35,12 +35,10 @@ struct amd_spi {
 	u16 speed_cfg;		/* SPI100_SPEED_CONFIG at MMIO+0x22 (4 speed tiers) */
 	u32 txmode_saved_ctrl0;	/* CTRL0 before TXMODE set, restored after segment */
 	u8 speed_hz_index;	/* 0=F_66_66MHz, 1=F_33_33MHz, etc. */
-	struct pci_dev *lpc;
-	u32 lpc_b4;
-	u32 lpc_b8;
-	u32 host_pref;
-	bool lpc_configured;
-	bool host_pref_overridden;
+	struct pci_dev *lpc;		/* Future: LPC bridge for 8-bit FIFO config */
+	u32 lpc_b4;			/* Saved LPC 0xB4 config (future use) */
+	u32 lpc_b8;			/* Saved LPC 0xB8 config (future use) */
+	bool lpc_configured;		/* Future: true if LPC bridge was reconfigured */
 };
 
 int amd_spi_probe_common(struct device *dev, struct spi_controller *host);

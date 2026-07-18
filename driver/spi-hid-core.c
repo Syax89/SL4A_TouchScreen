@@ -59,6 +59,9 @@
 /* Hardcoded HID Report Descriptor from Windows dump (936 bytes) */
 #include "hardcoded_rd.h"
 
+_Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
+	       "hardcoded RD size mismatch");
+
 #define SPI_HID_MAX_RESET_ATTEMPTS 3
 /* V0 has a 12-bit body field, but spi-amd only guarantees one atomic 70-byte
  * PIO segment. The six-byte V0 header leaves 64 bytes for its padded body. */
@@ -244,6 +247,12 @@ static int spi_hid_output(struct spi_hid *shid, void *buf, u16 length)
 	if (!tx_buf)
 		return -ENOMEM;
 
+	/*
+	 * NOTE: This prepends a second 0x02 opcode byte. The caller's header
+	 * already encodes the output opcode. This doubled-opcode behavior
+	 * matches the observed Linux workaround but differs from Windows
+	 * canonical 10-byte DESCREQ. Review for v1.0 protocol compliance.
+	 */
 	tx_buf[0] = 0x02; /* Prepend write register opcode 0x02 */
 	memcpy(&tx_buf[1], buf, length);
 
@@ -609,6 +618,10 @@ static int spi_hid_input_report_handler(struct spi_hid *shid,
 		r.content[0] = shid->touch_signature_index++;
 	}
 
+	/*
+	 * content points into buf->content which is offset within a larger
+	 * struct — the -1 pointer arithmetic to prepend report ID is valid.
+	 */
 	ret = hid_input_report(shid->hid, HID_INPUT_REPORT,
 			r.content - 1,
 			r.content_length + 1, 1);
@@ -738,6 +751,11 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 		return ret;
 	}
 
+	/*
+	 * Release shid->lock before blocking on completion to allow the
+	 * IRQ thread to process the response. The caller (ll_raw_request)
+	 * expects this release/reacquire pattern.
+	 */
 	mutex_unlock(&shid->lock);
 	ret = wait_for_completion_interruptible_timeout(&shid->output_done,
 			msecs_to_jiffies(1000));
@@ -969,6 +987,12 @@ static int spi_hid_create_device(struct spi_hid *shid)
 
 		if (shid->wire_report_descriptor_len > 0 &&
 		    !shid->wire_report_descriptor_rejected) {
+			/*
+			 * Only one retry with hardcoded descriptor. If
+			 * hardcoded descriptor also fails, the device is left
+			 * without HID driver. Consider additional fallback
+			 * strategies.
+			 */
 			dev_warn(dev, "SEQ: forcing hardcoded report descriptor fallback and retrying once\n");
 			shid->wire_report_descriptor_rejected = true;
 			return spi_hid_create_device(shid);
@@ -1510,7 +1534,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && hdr_off != 6) {
+	if (type >= 0 && hdr_off != 5) {
 		seq_dbg(shid, 1, "SEQ: poll-work: header at unexpected offset %d\n", hdr_off);
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 		goto out;
@@ -1526,6 +1550,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		shid->keep_powered = true;
+		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
 		/* Hardcode and create device */
 		shid->desc.hid_version = 0x0100;
 		shid->desc.report_descriptor_length = 936;
@@ -1598,7 +1623,7 @@ MODULE_PARM_DESC(raw_mode,
 
 /* Kept enabled for compatibility with the currently validated boot path.
  * Disable only for a controlled trace comparison against ACPI _INI startup. */
-static bool acpi_probe_power_cycle = true;
+static bool acpi_probe_power_cycle = false;
 module_param(acpi_probe_power_cycle, bool, 0444);
 MODULE_PARM_DESC(acpi_probe_power_cycle,
 	"Power-cycle ACPI _PS3->_PS0 at probe (legacy default; experimental to disable)");
@@ -1633,10 +1658,10 @@ module_param(blob_min_weight, int, 0444);
 MODULE_PARM_DESC(blob_min_weight,
 	"Minimum c590 signal rise sum across blob to consider it valid");
 
-static int ema_alpha = 3;
+static int ema_alpha = 7;
 module_param(ema_alpha, int, 0444);
 MODULE_PARM_DESC(ema_alpha,
-	"EMA smoothing factor: (prev*alpha + new) / (alpha+1)");
+	"EMA smoothing: (prev*alpha + new)/(alpha+1). Surface uses alpha=7 (weight 1/8)");
 
 static int dfa_data_offset = 26;
 module_param(dfa_data_offset, int, 0444);
@@ -1658,9 +1683,10 @@ module_param(touch_threshold_pct, int, 0444);
 MODULE_PARM_DESC(touch_threshold_pct,
 	"Percentage of c590 full-scale (4000) used as the touch rise threshold when touch_signal_mode=2. Default 10% (=400); observed touch peaks reach a rise of ~2300");
 
-static int ghost_dist = 15;
+static int ghost_dist = 6;
 module_param(ghost_dist, int, 0444);
-MODULE_PARM_DESC(ghost_dist, "Ghost rejection distance threshold (grid cells)");
+MODULE_PARM_DESC(ghost_dist,
+	"Coalescence radius in grid cells (Surface: distance < 6 cells)");
 
 static int grid_cols = 0;  /* 0 = default 72 */
 module_param(grid_cols, int, 0444);
@@ -1694,9 +1720,10 @@ static int blob_lift_frames = 2;
 module_param(blob_lift_frames, int, 0444);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting");
 
-static int blob_max_distance = 50;
+static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0444);
-MODULE_PARM_DESC(blob_max_distance, "Max grid distance for slot re-assignment");
+MODULE_PARM_DESC(blob_max_distance,
+	"Max grid distance for slot re-assignment (Surface: 0.545 cells ≈ 3)");
 
 /* ── Raw-mode handshake timing (EXPERIMENTAL) ───────────────────── */
 module_param(getfeat_delay_ms, int, 0444);
@@ -1715,10 +1742,12 @@ MODULE_PARM_DESC(stream_watchdog_max_retries,
 	"Max re-init retries before giving up");
 
 /* ── Runtime recovery ──────────────────────────────────────────── */
+#if 0 /* deprecated: IRQ is the sole input-report consumer */
 static int poll_interval;
 module_param(poll_interval, int, 0444);
 MODULE_PARM_DESC(poll_interval,
 	"Deprecated and ignored: IRQ is the sole input-report consumer");
+#endif
 
 static void release_all_slots(struct input_dev *input, u8 *slot_state,
 		unsigned int max_slots)
@@ -1759,6 +1788,23 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	memset(shid->eigmaj, 0, sizeof(shid->eigmaj));
 	memset(shid->eigmin, 0, sizeof(shid->eigmin));
 	memset(shid->eigori, 0, sizeof(shid->eigori));
+	memset(shid->heatmap_touched, 0, sizeof(shid->heatmap_touched));
+	memset(shid->heatmap_expanded, 0, sizeof(shid->heatmap_expanded));
+	memset(shid->heatmap_label, 0, sizeof(shid->heatmap_label));
+	memset(shid->blob_slot_hx, 0, sizeof(shid->blob_slot_hx));
+	memset(shid->blob_slot_hy, 0, sizeof(shid->blob_slot_hy));
+	memset(shid->blob_slot_hpos, 0, sizeof(shid->blob_slot_hpos));
+	memset(shid->blob_slot_hcount, 0, sizeof(shid->blob_slot_hcount));
+	memset(shid->blob_slot_stationary, 0, sizeof(shid->blob_slot_stationary));
+	memset(shid->blob_slot_blob, 0, sizeof(shid->blob_slot_blob));
+	memset(shid->blob_x, 0, sizeof(shid->blob_x));
+	memset(shid->blob_y, 0, sizeof(shid->blob_y));
+	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
+	memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
+	memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
+	memset(shid->blob_active, 0, sizeof(shid->blob_active));
+	memset(shid->label_equiv, 0, sizeof(shid->label_equiv));
+	shid->heatmap_frame_id = 0;
 }
 
 /* Screen mapping: logical range 0..32767 for both X and Y.
@@ -1910,7 +1956,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 		goto resched;
 
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && (hdr_off != 6 || (hdr[7] & 0x0f))) {
+	if (type >= 0 && (hdr_off != 5 || (hdr[7] & 0x0f))) {
 		seq_dbg(shid, 1, "SEQ: poller header at unexpected offset %d\n", hdr_off);
 		shid->poll_missed++;
 		goto resched;
@@ -1924,7 +1970,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 		blen *= 4;
 
 		{
-			u32 wanted = blen + 6;
+			u32 wanted = blen + 5;
 			u32 rblen = min_t(u32, wanted, cap);
 			u32 avail;
 			u16 rl;
@@ -1966,12 +2012,12 @@ static void spi_hid_poll_work(struct work_struct *work)
 
 				heatmap_process_frame(shid, &shid->data_buf[8],
 						      clen, shid->data_buf[8]);
-			} else if (rl > 2 && rl - 2 <= avail) {
-				if (shid->hid) {
-					int hret = hid_input_report(shid->hid,
-						HID_INPUT_REPORT,
-						&shid->data_buf[8],
-						rl - 2, 1);
+		} else if (rl > 3 && rl - 3 <= avail) {
+			if (shid->hid) {
+				int hret = hid_input_report(shid->hid,
+					HID_INPUT_REPORT,
+					&shid->data_buf[8],
+					rl - 3, 1);
 					if (hret)
 						seq_dbg(shid, 1,
 							"SEQ: poller hid_input_report failed: %d\n",
@@ -2019,8 +2065,8 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 	if (ema_alpha < 0 || ema_alpha > 10000) ema_alpha = 3;
 	if (blob_debounce < 1) blob_debounce = 3;
 	if (blob_lift_frames < 1) blob_lift_frames = 2;
-	if (blob_max_distance < 1) blob_max_distance = 50;
-	if (ghost_dist < 1) ghost_dist = 15;
+	if (blob_max_distance < 1) blob_max_distance = 3;
+	if (ghost_dist < 1) ghost_dist = 6;
 	if (touch_threshold_pct < 0) touch_threshold_pct = 0;
 	if (touch_threshold_pct > 100) touch_threshold_pct = 100;
 	/* calib_offset_x/y may be negative: final clamp to [0,SCREEN_MAX]
@@ -2082,8 +2128,12 @@ static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, 
 
 	/* Store raw frame for sysfs debug */
 	if (!shid->heatmap_buf || shid->heatmap_len < data_len) {
-		kfree(shid->heatmap_buf);
+		u8 *old_buf = shid->heatmap_buf;
 		shid->heatmap_buf = kmalloc(data_len, GFP_KERNEL);
+		if (shid->heatmap_buf) {
+			kfree(old_buf);
+			shid->heatmap_len = data_len;
+		}
 	}
 	if (shid->heatmap_buf) {
 		memcpy(shid->heatmap_buf, data, data_len);
@@ -2747,6 +2797,17 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	if (READ_ONCE(shid->removing) || !READ_ONCE(shid->seq_enabled))
 		return IRQ_NONE;
+
+	if (shid->seq_storm_count > 100) {
+		unsigned long delta = jiffies - shid->seq_last_valid_jiffies;
+		if (delta < HZ) {
+			WRITE_ONCE(shid->seq_enabled, false);
+			shid->seq_storm_count = 0;
+			return IRQ_HANDLED;
+		}
+		shid->seq_storm_count = 0;
+	}
+
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || !READ_ONCE(shid->seq_enabled)) {
 		result = IRQ_NONE;
@@ -2773,6 +2834,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	 * AMD controller with TX_COUNT=3 sees 6 sync bytes; try 10 to capture full header. */
 	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
 		dev_dbg(dev, "sequencer header read failed\n");
+		shid->seq_storm_count++;
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
@@ -2796,12 +2858,16 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		}
 		goto out;
 	}
-	if (hdr_off != 6 || (hdr[7] & 0x0f)) {
+	if (hdr_off != 5 || (hdr[7] & 0x0f)) {
 		dev_warn_ratelimited(dev,
 			"SEQ: malformed input header at offset %d, dropping frame\n", hdr_off);
 		shid->stat_frames_dropped++;
+		shid->seq_storm_count++;
 		goto out;
 	}
+
+	shid->seq_last_valid_jiffies = jiffies;
+	shid->seq_storm_count = 0;
 
 	blen = (((hdr[7] >> 4) & 0xF) << 0) | (hdr[8] << 4);
 	blen *= 4;
@@ -2859,7 +2925,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 7) {
 		u8 body[64] = {};
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_device_desc++;
 		seq_dbg(shid, 1, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
@@ -2886,7 +2952,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 			seq_dbg(shid, 2, "SEQ: parsing at rx+%u\n", off);
 			memcpy(&raw, body + off,
 			       min_t(u32, sizeof(raw), rblen > off ? rblen - off : 0));
-			if (spi_hid_validate_dev_desc(&raw, rblen - off - 3)) {
+			if (spi_hid_validate_dev_desc(&raw, rblen - off)) {
 				dev_warn(&shid->spi->dev, "SEQ: invalid DEVICE_DESC\n");
 				return;
 			}
@@ -2916,7 +2982,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		spi_hid_seq_set_state(shid, 2, SPI_HID_SEQ_DEVICE_DESCRIPTOR);
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
@@ -2933,7 +2999,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 8) {
 		u8 body[1024] = {};
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_rpt_desc++;
 		seq_dbg(shid, 1, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
@@ -3058,7 +3124,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		}
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
@@ -3073,7 +3139,7 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 5) {
 		u8 body[256] = {};
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 		u32 off;
 
 		shid->stat_getfeat_resp++;
@@ -3115,7 +3181,7 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 6, sizeof(body));
+		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
@@ -3134,7 +3200,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		shid->ready = true;
 		shid->keep_powered = true;
 		if (!shid->hid)
-			spi_hid_create_device(shid);
+			schedule_work(&shid->create_device_work);
 		seq_handle_data(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
@@ -3155,7 +3221,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		shid->keep_powered = true;
 		if (!shid->hid) {
 			seq_dbg(shid, 1, "SEQ: creating HID device with hardcoded descriptors...\n");
-			spi_hid_create_device(shid);
+			schedule_work(&shid->create_device_work);
 		}
 	}
 }
@@ -3184,7 +3250,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 	{
 		u32 cap = shid->raw_mode_active ? shid->data_buf_len :
 			  (shid->desc.max_input_length ? shid->desc.max_input_length : 0x1000);
-		u32 rblen = min_t(u32, blen + 6, cap);
+		u32 rblen = min_t(u32, blen + 5, cap);
 		u32 avail;
 		u16 rl;
 		u8 *body;
@@ -3230,9 +3296,6 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 				}
 				/* The IRQ thread is the sole reader of input_register. Polling it
 				 * concurrently can consume a report before its IRQ is serviced. */
-				if (poll_interval > 0)
-					dev_warn_once(dev,
-						"SEQ: poll_interval is ignored; IRQ owns input reads\n");
 			}
 			heatmap_process_frame(shid, &body[8], clen, body[8]);
 		} else if (rl > 2 && rl - 2 <= avail) {
@@ -3406,6 +3469,13 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
 		}
 
 		{
+			/*
+			 * NOTE: Assumes the response was populated by the
+			 * IRQ thread before ll_raw_request reads it. The
+			 * spi_hid_get_request path ensures completion via
+			 * wait_for_completion, but no explicit response_valid
+			 * flag is checked here.
+			 */
 			u16 response_len = shid->response.body[0] |
 				(shid->response.body[1] << 8);
 
@@ -3737,6 +3807,8 @@ static int spi_hid_probe(struct spi_device *spi)
 	mutex_init(&shid->seq_lock);
 	mutex_init(&shid->power_lock);
 	mutex_init(&shid->output_lock);
+	mutex_init(&shid->raw_capture_lock);
+	spin_lock_init(&shid->input_lock);
 	spi_set_drvdata(spi, shid);
 
 	ret = sysfs_create_files(&dev->kobj, spi_hid_attributes);
@@ -3815,7 +3887,6 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	shid->hid_desc_addr = shid->device_descriptor_register;
 
-	spin_lock_init(&shid->input_lock);
 	INIT_WORK(&shid->reset_work, spi_hid_reset_work);
 	INIT_WORK(&shid->create_device_work, spi_hid_create_device_work);
 	INIT_WORK(&shid->refresh_device_work, spi_hid_refresh_device_work);
@@ -3825,7 +3896,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_DELAYED_WORK(&shid->feat_delay_work, spi_hid_feat_delay_work);
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
-	shid->raw_mode_active = raw_mode;
+	shid->raw_mode_active = raw_mode; /* false → heatmap/raw code dead; infrastructure stays zeroed for mode switch */
 	shid->seq_dbg_last_state = -1;
 
 	INIT_DELAYED_WORK(&shid->stream_watchdog, spi_hid_stream_watchdog_work);
@@ -3833,7 +3904,7 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	INIT_DELAYED_WORK(&shid->poll_work, spi_hid_poll_work);
 	shid->poll_active = false;
-	shid->poll_interval_ms = poll_interval;
+	shid->poll_interval_ms = 0;
 	shid->poll_missed = 0;
 	shid->works_initialized = true;
 

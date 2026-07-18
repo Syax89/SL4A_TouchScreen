@@ -1,4 +1,6 @@
 #!/bin/sh
+# WARNING: This script may cause system freeze. Use only with cold reboot.
+# See SESSION_HANDOFF.md safety rules.
 # Raw mode is armed for one boot only. Remove its marker before loading either
 # module so a frozen raw boot falls back to standard HID after a forced reboot.
 set -eu

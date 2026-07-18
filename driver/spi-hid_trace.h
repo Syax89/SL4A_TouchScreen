@@ -192,6 +192,14 @@ DEFINE_EVENT(spi_hid, spi_hid_response_handler,
 	TP_ARGS(shid)
 );
 
+/*
+ * NOTE: spi_hid_seq_state is intentionally a standalone TRACE_EVENT
+ * rather than using the common DECLARE_EVENT_CLASS(spi_hid) template.
+ * It is a lightweight event that only carries bus/chip/state/reason/ready
+ * fields, avoiding the overhead of the full descriptor fields (vendor,
+ * product, lengths, version) that the common class would include.
+ */
+
 TRACE_EVENT(spi_hid_seq_state,
 	TP_PROTO(struct spi_hid *shid, int old_state, int new_state, int reason),
 	TP_ARGS(shid, old_state, new_state, reason),

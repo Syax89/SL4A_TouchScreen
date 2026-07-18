@@ -310,9 +310,11 @@ struct spi_hid {
 	 */
 	int seq_state;
 	bool seq_enabled;
+	unsigned long seq_last_valid_jiffies;
+	u32 seq_storm_count;
 
 	u64 interrupt_time_stamps[2];
-	struct latency_instance latencies[64];
+	struct latency_instance latencies[SPI_HID_MAX_LATENCIES];
 	u8 latency_index;
 	u8 perf_mode;
 	u16 touch_signature_index;
@@ -320,6 +322,7 @@ struct spi_hid {
 	/* Report descriptor read from the device during standard discovery. */
 	u8 wire_report_descriptor[1024];
 	u32 wire_report_descriptor_len;
+	bool wire_report_descriptor_rejected;
 
 	/* Optional input state for validated passive CapImg frames. */
 	struct input_dev *touch_input;

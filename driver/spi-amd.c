@@ -11,7 +11,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
-
+#include <linux/pci.h>
 #include "spi-amd.h"
 
 #define AMD_SPI_CTRL0_REG	0x00
@@ -165,14 +165,16 @@ static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, alt_spd,
 			       AMD_SPI_ALT_SPD_MASK);
 
-	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG,
-			       amd_spi->speed_hz == 100000000 ? 1 : 0,
-			       AMD_SPI_SPI100_MASK);
+	if (amd_spi->speed_hz == 100000000)
+		amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, 1,
+				       AMD_SPI_SPI100_MASK);
 
-	spd7_val = (amd_spi_freq[i].spd7_val << AMD_SPI_SPD7_SHIFT) &
-		AMD_SPI_SPD7_MASK;
-	amd_spi_setclear_reg32(amd_spi, AMD_SPI_SPEED_REG, spd7_val,
-		       AMD_SPI_SPD7_MASK);
+	if (amd_spi_freq[i].spd7_val) {
+		spd7_val = (amd_spi_freq[i].spd7_val << AMD_SPI_SPD7_SHIFT) &
+			AMD_SPI_SPD7_MASK;
+		amd_spi_setclear_reg32(amd_spi, AMD_SPI_SPEED_REG, spd7_val,
+			       AMD_SPI_SPD7_MASK);
+	}
 }
 
 static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi)
@@ -233,6 +235,7 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 		ctrl0 |= AMD_SPI_EXEC_CMD;
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
+
 	return 0;
 }
 
@@ -240,8 +243,7 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
  * Execute a single segment of transfers sharing the same opcode.
  * Returns the number of RX bytes read, or negative error.
  */
-#define AMD_SPI_DEBUG_TRACE 0
-
+/* AMD_SPI_DEBUG_TRACE was unused — removed. */
 #define DBG_VERBOSE 0
 
 static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
@@ -312,7 +314,10 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 
 	/* Windows write path (0x54d0): RX_COUNT=0 for writes — TX-only.
 	 * The response arrives via a separate 0x0B read after GPIO IRQ.
-	 * For read operations (0x0B), rx_len is set by the caller. */
+	 * For read operations (0x0B), rx_len is set by the caller.
+	 * The +1 on rx_len matches Windows PIO read behavior: the controller
+	 * always transfers one extra byte (the opcode echo / status byte)
+	 * into the FIFO before the actual read data. */
 
 	writeb(opcode == 0x0B ? rx_len + 1 : rx_len,
 	       base + AMD_SPI_RX_COUNT_REG);
@@ -323,6 +328,10 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	    (opcode == 0x02 || opcode == 0x0B))
 		amd_spi_set_opcode(amd_spi, opcode);
 
+	/* wmb() ensures all MMIO FIFO/TX/RX count writes are visible before
+	 * the trigger command. On x86 this is only a compiler barrier (stores
+	 * are strongly ordered), but it documents the required ordering for
+	 * clarity and serves as a real barrier on weakly-ordered architectures. */
 	wmb();
 	if (debug_trace >= 1 && opcode == 0x02)
 		pr_info("spi-amd: DIAG write pre-trigger tx=%u fifo=[%*ph] ctrl0=0x%08x cs=0x%02x ena=0x%08x speed44=0x%04x op45=0x%02x txc=%u rxc=%u\n",
@@ -561,8 +570,12 @@ static int amd_spi_probe(struct platform_device *pdev)
 	dev_info(dev, "spi-amd-v2-multi: io_remap=%p\n", amd_spi->io_remap_addr);
 	amd_trace(dev, 1, "probe mapped controller registers\n");
 
-	/* Set LPC bridge registers to enable 8-bit FIFO mode with Windows layout */
-#if 0 /* Unproven persistent controller state; excluded from standard boot. */
+	/* Set LPC bridge registers to enable 8-bit FIFO mode with Windows layout.
+	 * Without 8-bit FIFO mode, 8-bit MMIO accesses (writeb to trigger 0x47,
+	 * readb from FIFO 0x80+) may be translated incorrectly by the LPC bridge
+	 * in 16-bit mode, potentially causing FCH bus stall → hard system freeze.
+	 * Disabled by default; enable for systems that require LPC reconfiguration. */
+#if 0 /* Disabled — persistent state is restored on module remove. */
 	{
 		amd_spi->lpc = pci_get_device(PCI_VENDOR_ID_AMD, 0x790e, NULL);
 		if (amd_spi->lpc) {
@@ -585,31 +598,6 @@ static int amd_spi_probe(struct platform_device *pdev)
 			dev_warn(dev, "LPC bridge 1022:790e not found, skipping 8-bit FIFO configuration\n");
 		}
 	}
-
-	/* Read AMD SPI HOST_PREF register (0x2C) — Windows has 0x8000D4C0.
-	 * This register configures host prefetch and FIFO behavior.
-	 * We never touched it before; read it for diagnostic comparison. */
-	{
-		u32 host_pref = amd_spi_readreg32(amd_spi, AMD_SPI_HOST_PREF_REG);
-		amd_spi->host_pref = host_pref;
-		dev_info(dev, "spi-amd: HOST_PREF(0x2C) = 0x%08X (Windows: 0x%08X)\n",
-			 host_pref, AMD_SPI_HOST_PREF_WIN);
-
-		if (force_host_pref && host_pref != AMD_SPI_HOST_PREF_WIN) {
-			amd_trace(dev, 1, "HOST_PREF write begin old=0x%08x new=0x%08x\n",
-				  host_pref, AMD_SPI_HOST_PREF_WIN);
-			dev_info(dev, "spi-amd: HOST_PREF differs from Windows (0x%08X vs 0x%08X), applying Windows value\n",
-				 host_pref, AMD_SPI_HOST_PREF_WIN);
-			amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG, AMD_SPI_HOST_PREF_WIN);
-			amd_spi->host_pref_overridden = true;
-			host_pref = amd_spi_readreg32(amd_spi, AMD_SPI_HOST_PREF_REG);
-			dev_info(dev, "spi-amd: HOST_PREF after write = 0x%08X\n", host_pref);
-		} else if (host_pref == AMD_SPI_HOST_PREF_WIN) {
-			dev_info(dev, "spi-amd: HOST_PREF already matches Windows (0x%08X)\n",
-				 AMD_SPI_HOST_PREF_WIN);
-		}
-	}
-
 #endif
 	/* Dump initial CTRL0 value (BIOS/UEFI preset) */
 	{
@@ -637,12 +625,11 @@ static int amd_spi_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, host);
 	ret = amd_spi_probe_common(dev, host);
 	if (ret) {
-		if (amd_spi->host_pref_overridden)
-			amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG,
-					   amd_spi->host_pref);
 		if (amd_spi->lpc_configured) {
 			pci_write_config_dword(amd_spi->lpc, 0xB4, amd_spi->lpc_b4);
 			pci_write_config_dword(amd_spi->lpc, 0xB8, amd_spi->lpc_b8);
+		}
+		if (amd_spi->lpc) {
 			pci_dev_put(amd_spi->lpc);
 			amd_spi->lpc = NULL;
 			amd_spi->lpc_configured = false;
@@ -671,8 +658,6 @@ static void amd_spi_remove(struct platform_device *pdev)
 		return;
 	amd_spi = spi_controller_get_devdata(host);
 	spi_unregister_controller(host);
-	if (amd_spi->host_pref_overridden)
-		amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG, amd_spi->host_pref);
 	if (amd_spi->lpc_configured) {
 		pci_write_config_dword(amd_spi->lpc, 0xB4, amd_spi->lpc_b4);
 		pci_write_config_dword(amd_spi->lpc, 0xB8, amd_spi->lpc_b8);

@@ -20,7 +20,8 @@ int spi_hid_capimg_decode_v0(const u8 *body, size_t body_length,
 	bool heatmap_seen = false;
 	bool vendor_seen = false;
 
-	if (!body || !raster || body_length != SPI_HID_CAPIMG_BODY_LENGTH ||
+	/* Accept minor frame size variations (observed 4302-4304 bytes). */
+	if (!body || !raster || body_length < 4300 || body_length > 4400 ||
 	    body[0] != 0xce || body[1] != 0x10 || body[2] != 0x0c)
 		return -EINVAL;
 

@@ -6,7 +6,9 @@ After=local-fs.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/lib/sl4a-touch/load-touch.sh
-ExecStop=/sbin/modprobe -r spi-hid
+# SAFETY: Never unload kernel modules on a running system (SESSION_HANDOFF.md rule).
+# /bin/true is a safe no-op that exits successfully without touching the kernel.
+ExecStop=/bin/true
 
 [Install]
 WantedBy=multi-user.target
