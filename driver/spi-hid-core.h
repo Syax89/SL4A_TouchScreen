@@ -448,6 +448,7 @@ struct spi_hid {
 	u32 stat_getfeat_resp;
 	u32 stat_frames_dropped;
 	u32 stat_irq_count;
+	u32 stat_wire_patches; /* descriptor bytes patched (0 = 100% wire-read) */
 	ktime_t seq_dbg_last_irq;
 	int seq_dbg_last_state;
 	bool seq_dbg_expect_fast;

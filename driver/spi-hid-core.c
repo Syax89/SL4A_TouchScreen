@@ -2254,7 +2254,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		s16 curr = shid->c590_lut[data[data_offset + i]];
 		s16 rise = curr - base;
 		shid->heatmap_signal[i] = rise;
-		shid->heatmap_touched[i] = (rise >= 400) ? 1 : 0;
+		shid->heatmap_touched[i] = (rise >= 200) ? 1 : 0;
 	}
 
 	/* Step 2: peak detection — cross-shaped 5-cell check
@@ -3111,6 +3111,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 					if (shid->wire_report_descriptor[k] == 0xFF &&
 					    k < HARDCODED_RD_SIZE &&
 					    hardcoded_report_descriptor[k] != 0xFF) {
+						shid->stat_wire_patches++;
 						seq_dbg(shid, 1, "SEQ: patching known-corrupt wire descriptor byte at offset %u (0xff -> 0x%02x)\n",
 							 k, hardcoded_report_descriptor[k]);
 						shid->wire_report_descriptor[k] =
@@ -3118,6 +3119,8 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 					}
 				}
 				shid->wire_report_descriptor_len = len;
+				dev_info(&shid->spi->dev, "SEQ: report descriptor %u bytes read from wire, %u bytes patched (target: 0)\n",
+					 len, shid->stat_wire_patches);
 			} else {
 				shid->wire_report_descriptor_len = 0;
 			}
@@ -3762,10 +3765,11 @@ static ssize_t protocol_stats_show(struct device *dev, struct device_attribute *
 {
 	struct spi_hid *shid = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "reset_rsp=%u\ndevice_desc=%u\nrpt_desc=%u\ndata=%u\ngetfeat_resp=%u\nframes_dropped=%u\nirq_count=%u\n",
+	return sysfs_emit(buf, "reset_rsp=%u\ndevice_desc=%u\nrpt_desc=%u\ndata=%u\ngetfeat_resp=%u\nframes_dropped=%u\nirq_count=%u\nwire_patches=%u\n",
 		shid->stat_reset_rsp, shid->stat_device_desc, shid->stat_rpt_desc,
 		shid->stat_data, shid->stat_getfeat_resp,
-		shid->stat_frames_dropped, shid->stat_irq_count);
+		shid->stat_frames_dropped, shid->stat_irq_count,
+		shid->stat_wire_patches);
 }
 static DEVICE_ATTR_RO(protocol_stats);
 
