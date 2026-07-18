@@ -70,7 +70,7 @@ _Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
 
 static int debug_level;
 static int getfeat_delay_ms;  /* RPT_DESC → GET_FEATURE settle time (0 = immediate, safe default) */
-static bool skip_getfeat = true;
+static bool skip_getfeat;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) \
 		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
@@ -1664,10 +1664,10 @@ module_param(blob_min_weight, int, 0644);
 MODULE_PARM_DESC(blob_min_weight,
 	"Minimum c590 signal rise sum across blob to consider it valid");
 
-static int ema_alpha = 15;
+static int ema_alpha = 10;
 module_param(ema_alpha, int, 0644);
 MODULE_PARM_DESC(ema_alpha,
-	"EMA smoothing: (prev*alpha + new)/(alpha+1). Higher = smoother. Default 15 (weight 1/16)");
+	"EMA smoothing: (prev*alpha + new)/(alpha+1). Higher = smoother. Default 10 (weight ~1/11)");
 
 static int dfa_data_offset;
 module_param(dfa_data_offset, int, 0444);
@@ -2833,20 +2833,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
 							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
-
-							/* Deadband: if EMA output moved < 1 cell from
-							 * the old output, keep old position. Suppresses
-							 * micro-jitter without stick-slip. */
-							{
-								s16 dbx = (s16)new_gx[s] - (s16)old_gx;
-								s16 dby = (s16)new_gy[s] - (s16)old_gy;
-
-								if (dbx >= -1 && dbx <= 1 &&
-								    dby >= -1 && dby <= 1) {
-									new_gx[s] = old_gx;
-									new_gy[s] = old_gy;
-								}
-							}
 						} else {
 							new_gx[s] = gx;
 							new_gy[s] = gy;
@@ -2900,12 +2886,12 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					s64 fx, fy, tmp;
 					u16 screen_gx, screen_gy;
 
-					/* 5-sample moving average from history ring
+					/* 3-sample moving average from history ring
 					 * for smooth cursor movement. */
 					{
 						u8 hc = shid->blob_slot_hcount[s];
 						u8 hp = shid->blob_slot_hpos[s];
-						u8 n = (hc < 5) ? hc : 5;
+						u8 n = (hc < 3) ? hc : 3;
 						u32 sumx = 0, sumy = 0;
 
 						for (u8 k = 0; k < n; k++) {
