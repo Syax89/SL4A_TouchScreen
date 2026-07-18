@@ -70,7 +70,7 @@ _Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
 
 static int debug_level;
 static int getfeat_delay_ms;  /* RPT_DESC → GET_FEATURE settle time (0 = immediate, safe default) */
-static bool skip_getfeat;
+static bool skip_getfeat = true;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) \
 		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
