@@ -2343,7 +2343,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			base = shid->c590_lut[shid->heatmap_baseline[i]];
 			curr = shid->c590_lut[data[data_offset + i]];
 			rise = curr - base;
-			if (rise < 400) continue;  /* min peak rise */
+			if (rise < 500) continue;  /* min peak rise (matching Windows) */
 
 			is_peak = true;
 			for (dy = -PEAK_RADIUS; dy <= PEAK_RADIUS && is_peak; dy++) {
@@ -2358,7 +2358,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					if (ni >= cell_count || !shid->heatmap_touched[ni]) continue;
 					ncurr = shid->c590_lut[data[data_offset + ni]] -
 						shid->c590_lut[shid->heatmap_baseline[ni]];
-					if (ncurr >= rise) is_peak = false;
+					if (ncurr > rise) is_peak = false;
 				}
 			}
 			if (!is_peak) continue;
@@ -2377,6 +2377,29 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					typeof(peaks[0]) t = peaks[pi];
 					peaks[pi] = peaks[ci]; peaks[ci] = t;
 				}
+
+		/* Merge nearby peaks: if two peaks are within 3 cells,
+		 * suppress the weaker one (keeps only the strongest
+		 * representative per finger). */
+		{
+			u16 a, b;
+			for (a = 0; a < npeaks; a++) {
+				if (peaks[a].rise == 0) continue;
+				for (b = a + 1; b < npeaks; b++) {
+					s32 dx = (s32)peaks[a].col - (s32)peaks[b].col;
+					s32 dy = (s32)peaks[a].row - (s32)peaks[b].row;
+					if (dx*dx + dy*dy <= 9) {  /* within 3 cells */
+						peaks[b].rise = 0;  /* suppressed */
+					}
+				}
+			}
+			b = 0;
+			for (a = 0; a < npeaks; a++) {
+				if (peaks[a].rise > 0)
+					peaks[b++] = peaks[a];
+			}
+			npeaks = b;
+		}
 
 		/* Assign each cell to its nearest peak within PEAK_RADIUS.
 		 * Cells not near any peak are ignored (noise suppression). */
