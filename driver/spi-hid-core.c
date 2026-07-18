@@ -2256,7 +2256,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				s16 curr = shid->c590_lut[data[data_offset + i]];
 				rise = curr - base;
 			}
-			if (rise < 500) continue;
+			if (rise < 350) continue;
 
 			/* Cross-shaped: check ±5 in N,S,E,W directions only */
 			{
