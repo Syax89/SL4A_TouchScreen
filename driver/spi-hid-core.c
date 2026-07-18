@@ -2054,7 +2054,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 {
 	struct device *dev = &shid->spi->dev;
 	u32 i, cell_count, ncols, nrows;
-	u16 nlabels;
 	int data_offset;
 	int configured_cols, configured_rows;
 	int touched_count = 0;
@@ -2310,112 +2309,131 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		memcpy(shid->heatmap_touched, expanded, cell_count);
 	}
 
-	/* Step 2: two-pass connected-component labeling (8-way) */
-	memset(shid->heatmap_label, 0xFF, cell_count * 2);
-	memset(shid->label_equiv, 0, sizeof(shid->label_equiv));
-	nlabels = 0;
+	/* Step 2: peak-based clustering (matching Windows 5-cell peak search).
+	 * Instead of connected-component labeling which produces unstable
+	 * blob boundaries, find local maxima (peaks) and assign each cell
+	 * to the nearest peak within PEAK_RADIUS.  This produces stable
+	 * blob regions because peak positions change slowly. */
+#define PEAK_RADIUS 5
+	{
+		struct { u16 col; u16 row; u16 rise; u16 idx; } peaks[16];
+		u16 npeaks = 0, pi, ci;
+		u16 peak_dsq_thresh = PEAK_RADIUS * PEAK_RADIUS;
 
-	for (i = 0; i < cell_count; i++) {
-		u16 col, row, new_label;
-		u16 neighbors[4];
-		int n_neigh = 0;
+		memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
+		memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
+		memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
+		memset(shid->blob_active, 0, sizeof(shid->blob_active));
+		memset(shid->blob_peak_rise, 0, sizeof(shid->blob_peak_rise));
 
-		if (!shid->heatmap_touched[i]) continue;
-		col = i % ncols;
-		row = i / ncols;
-		if (row >= nrows) break;
+		/* Find local maxima: a cell is a peak if its c590 signal rise
+		 * is >= touch threshold AND it's the maximum in its 5×5
+		 * neighborhood. Max 16 peaks (matching Windows limit). */
+		for (i = 0; i < cell_count && npeaks < 16; i++) {
+			u16 col, row;
+			s32 dx, dy;
+			s16 base, curr, rise;
+			bool is_peak;
 
-		new_label = 0xFFFF;
-		if (col > 0 && shid->heatmap_touched[i - 1])
-			neighbors[n_neigh++] = shid->heatmap_label[i - 1];
-		if (row > 0) {
-			if (col > 0 && shid->heatmap_touched[i - ncols - 1])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols - 1];
-			if (shid->heatmap_touched[i - ncols])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols];
-			if (col + 1 < ncols && shid->heatmap_touched[i - ncols + 1])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols + 1];
-		}
+			if (!shid->heatmap_touched[i]) continue;
+			col = i % ncols;
+			row = i / ncols;
+			if (row >= nrows) break;
 
-		if (n_neigh > 0) {
-			new_label = neighbors[0];
-			for (int j = 0; j < n_neigh; j++) {
-				u16 min_label = new_label, nj = neighbors[j];
-				u16 a = min_label < nj ? min_label : nj;
-				u16 b = a == min_label ? nj : min_label;
-				if (a < 256 && b < 256) {
-					while (shid->label_equiv[a]) a = shid->label_equiv[a];
-					while (shid->label_equiv[b]) b = shid->label_equiv[b];
-					if (a != b) shid->label_equiv[b] = a;
+			base = shid->c590_lut[shid->heatmap_baseline[i]];
+			curr = shid->c590_lut[data[data_offset + i]];
+			rise = curr - base;
+			if (rise < 400) continue;  /* min peak rise */
+
+			is_peak = true;
+			for (dy = -PEAK_RADIUS; dy <= PEAK_RADIUS && is_peak; dy++) {
+				for (dx = -PEAK_RADIUS; dx <= PEAK_RADIUS && is_peak; dx++) {
+					s32 ny = (s32)row + dy;
+					s32 nx = (s32)col + dx;
+					u32 ni;
+					s16 ncurr;
+					if (nx == col && ny == row) continue;
+					if (nx < 0 || ny < 0 || nx >= (s32)ncols || ny >= (s32)nrows) continue;
+					ni = (u32)ny * ncols + (u32)nx;
+					if (ni >= cell_count || !shid->heatmap_touched[ni]) continue;
+					ncurr = shid->c590_lut[data[data_offset + ni]] -
+						shid->c590_lut[shid->heatmap_baseline[ni]];
+					if (ncurr >= rise) is_peak = false;
 				}
 			}
-		} else {
-			new_label = nlabels++;
-			if (nlabels >= 256) new_label = 255;
+			if (!is_peak) continue;
+
+			peaks[npeaks].col = col;
+			peaks[npeaks].row = row;
+			peaks[npeaks].rise = rise;
+			peaks[npeaks].idx = npeaks;
+			npeaks++;
 		}
-		shid->heatmap_label[i] = new_label;
-	}
 
-	/* Resolve label equivalence */
-	for (i = 0; i < nlabels && i < 256; i++) {
-		u16 r = shid->label_equiv[i];
-		while (r && r < 256 && shid->label_equiv[r]) r = shid->label_equiv[r];
-		shid->label_equiv[i] = r;
-	}
+		/* Sort peaks by signal strength (strongest first). */
+		for (pi = 0; pi + 1 < npeaks; pi++)
+			for (ci = pi + 1; ci < npeaks; ci++)
+				if (peaks[ci].rise > peaks[pi].rise) {
+					typeof(peaks[0]) t = peaks[pi];
+					peaks[pi] = peaks[ci]; peaks[ci] = t;
+				}
 
-	/* Step 3: accumulate blob sums (weighted by signal drop from baseline).
-	 * Also track the peak cell per blob (max c590 signal rise). */
-	memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
-	memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
-	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
-	memset(shid->blob_active, 0, sizeof(shid->blob_active));
-	memset(shid->blob_peak_rise, 0, sizeof(shid->blob_peak_rise));
+		/* Assign each cell to its nearest peak within PEAK_RADIUS.
+		 * Cells not near any peak are ignored (noise suppression). */
+		for (i = 0; i < cell_count; i++) {
+			u16 col, row, best_pi;
+			u32 best_dsq, weight;
 
-	for (i = 0; i < cell_count; i++) {
-		u16 label, col, row;
-		u32 weight;
+			if (!shid->heatmap_touched[i]) continue;
+			col = i % ncols;
+			row = i / ncols;
+			if (row >= nrows) break;
 
-		if (!shid->heatmap_touched[i]) continue;
-		label = shid->heatmap_label[i];
-		while (label < 256 && shid->label_equiv[label]) label = shid->label_equiv[label];
-		if (label >= HEATMAP_MAX_BLOBS) continue;
+			{
+				s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
+				s16 curr = shid->c590_lut[data[data_offset + i]];
+				s16 rise = curr - base;
+				weight = rise > 0 ? (u32)rise : 0;
+			}
 
-		col = i % ncols;
-		row = i / ncols;
-		if (row >= nrows) break;
+			best_pi = 0xFFFF;
+			best_dsq = peak_dsq_thresh + 1;
+			for (pi = 0; pi < npeaks; pi++) {
+				s32 dx = (s32)col - (s32)peaks[pi].col;
+				s32 dy = (s32)row - (s32)peaks[pi].row;
+				u32 dsq = (u32)(dx * dx + dy * dy);
+				if (dsq < best_dsq) {
+					best_dsq = dsq;
+					best_pi = pi;
+				}
+			}
+			if (best_pi >= npeaks) continue;  /* too far from any peak */
 
-		/* Weight = current_signal - baseline_signal (touch increases c590 value) */
-		{
-			s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
-			s16 curr = shid->c590_lut[data[data_offset + i]];
-			s16 rise = curr - base;
-			weight = rise > 0 ? (u32)rise : 0;
+			shid->blob_xsum[best_pi] += (u32)col * weight;
+			shid->blob_ysum[best_pi] += (u32)row * weight;
+			shid->blob_wsum[best_pi] += weight;
+			shid->blob_active[best_pi] = true;
+
+			if (weight > shid->blob_peak_rise[best_pi]) {
+				shid->blob_peak_rise[best_pi] = weight;
+				shid->blob_peak_x[best_pi] = col;
+				shid->blob_peak_y[best_pi] = row;
+			}
+			touched_count++;
 		}
-		shid->blob_xsum[label] += (u32)col * weight;
-		shid->blob_ysum[label] += (u32)row * weight;
-		shid->blob_wsum[label] += weight;
-		shid->blob_active[label] = true;
 
-		if (weight > shid->blob_peak_rise[label]) {
-			shid->blob_peak_rise[label] = weight;
-			shid->blob_peak_x[label] = col;
-			shid->blob_peak_y[label] = row;
+		/* Compute centroids from peak regions: 75% signal-weighted
+		 * centroid + 25% peak position for stability. */
+		for (pi = 0; pi < npeaks; pi++) {
+			if (!shid->blob_active[pi] || shid->blob_wsum[pi] < blob_min_weight)
+				continue;
+			shid->blob_x[pi] = (u16)(shid->blob_xsum[pi] / shid->blob_wsum[pi]);
+			shid->blob_y[pi] = (u16)(shid->blob_ysum[pi] / shid->blob_wsum[pi]);
+			shid->blob_x[pi] = (u16)((shid->blob_x[pi] * 3 + peaks[pi].col) / 4);
+			shid->blob_y[pi] = (u16)((shid->blob_y[pi] * 3 + peaks[pi].row) / 4);
 		}
-		touched_count++;
 	}
-
-	/* Step 4: compute centroids — blend signal-weighted centroid (75%)
-	 * with the peak position (25%) for stability matching Windows
-	 * peak-constrained centroid. */
-	for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
-		if (!shid->blob_active[i] || shid->blob_wsum[i] < blob_min_weight)
-			continue;
-		shid->blob_x[i] = (u16)(shid->blob_xsum[i] / shid->blob_wsum[i]);
-		shid->blob_y[i] = (u16)(shid->blob_ysum[i] / shid->blob_wsum[i]);
-		/* Blend: 75% signal-weighted centroid + 25% peak position */
-		shid->blob_x[i] = (u16)((shid->blob_x[i] * 3 + shid->blob_peak_x[i]) / 4);
-		shid->blob_y[i] = (u16)((shid->blob_y[i] * 3 + shid->blob_peak_y[i]) / 4);
-	}
+#undef PEAK_RADIUS
 
 	/* Eigenvalue decomposition for the heaviest blob (GROUND_TRUTH.md §22.6) */
 	{
