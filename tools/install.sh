@@ -4,8 +4,8 @@
 # (Surface Laptop 4 AMD touchscreen, MSHW0231).
 #
 # Builds spi-amd.ko + spi-hid.ko via DKMS (auto-rebuilt on kernel updates),
-# installs a systemd unit that loads them at every boot in standard HID mode
-# (raw_mode=N — single-touch + pen; see README.md).
+# and configures /etc/modprobe.d for raw multi-touch mode.
+# Udev auto-loads the driver when AMDI0060 (AMD FCH SPI controller) is probed.
 #
 # Tested on: Arch, CachyOS, Ubuntu/Debian, Fedora, openSUSE.
 #
@@ -20,9 +20,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="sl4a-touch"
 PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SRC_DEST="/usr/src/${PKG_NAME}-${PKG_VERSION}"
-SERVICE_PATH="/etc/systemd/system/sl4a-touch.service"
 MODPROBE_CONF="/etc/modprobe.d/spi-hid.conf"
-LOAD_SCRIPT_PATH="/usr/lib/sl4a-touch/load-touch.sh"
 
 if [[ "$PKG_VERSION" == *-* ]]; then
 	echo "FAIL: VERSION ('$PKG_VERSION') contains '-', which breaks Arch/CachyOS's"
@@ -41,7 +39,6 @@ ID="unknown"; ID_LIKE=""
 if [ -f /etc/os-release ]; then
 	. /etc/os-release
 fi
-# Normalise: map sub-variants to their parent package manager
 case "$ID" in
 	cachyos|endeavouros|manjaro|arcolinux|garuda|archbang) ID_LIKE="arch" ;;
 	rhel|centos|almalinux|rocky|ol)                        ID_LIKE="fedora" ;;
@@ -50,11 +47,11 @@ esac
 
 kernel_headers_pkg=""; build_deps_pkg=""
 case "$ID_LIKE" in
-	arch)    kernel_headers_pkg="linux-headers" ;;     # actually a meta-pkg on Arch
+	arch)    kernel_headers_pkg="linux-headers" ;;
 	debian)  kernel_headers_pkg="linux-headers-$(uname -r)" ;;
 	fedora)  kernel_headers_pkg="kernel-devel" ;;
 	suse*|opensuse*) kernel_headers_pkg="kernel-devel" ;;
-	*)       kernel_headers_pkg="your kernel headers package" ;; # fallback
+	*)       kernel_headers_pkg="your kernel headers package" ;;
 esac
 case "$ID_LIKE" in
 	arch)    build_deps_pkg="dkms make" ;;
@@ -79,7 +76,7 @@ echo " Distro detected: $ID (${ID_LIKE:-unknown})"
 echo "============================================"
 echo ""
 echo "This installs an EXPERIMENTAL out-of-tree kernel driver."
-echo "Single-touch + pen are stable; multi-touch is experimental."
+echo "Single-touch + pen are stable; multi-touch is working."
 echo ""
 
 if [ "$EUID" -ne 0 ]; then
@@ -135,8 +132,6 @@ fi
 pass "All build dependencies present"
 
 info "Step 3: Leaving active modules untouched..."
-# Replacing a live controller module is unsafe. DKMS installs the new modules
-# for the next boot while the currently loaded pair continues to run.
 pass "Active modules left untouched; reboot will load the new modules"
 
 info "Step 4: Creating modprobe.d config (raw multi-touch mode)..."
@@ -163,6 +158,10 @@ cp -a "$REPO_DIR"/driver/. "$SRC_DEST"/
 rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c \
       "$SRC_DEST"/*.mod.o "$SRC_DEST"/Module.symvers "$SRC_DEST"/modules.order \
       "$SRC_DEST"/.*.cmd 2>/dev/null || true
+
+# Remove test harness and service files from the DKMS source—they're not
+# kernel modules and would trigger build warnings.
+rm -f "$SRC_DEST/test_harness.c" "$SRC_DEST/sl4a-touch.service" "$SRC_DEST/sl4a-touch-load.sh" 2>/dev/null || true
 sed -i "s/#VERSION#/${PKG_VERSION}/" "$SRC_DEST/dkms.conf"
 
 dkms add -m "$PKG_NAME" -v "$PKG_VERSION"
@@ -170,16 +169,9 @@ dkms build -m "$PKG_NAME" -v "$PKG_VERSION"
 dkms install -m "$PKG_NAME" -v "$PKG_VERSION"
 pass "spi-amd.ko + spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
 
-info "Step 6: Installing systemd service (standard HID with one-shot raw fallback)..."
-install -Dm644 "$REPO_DIR/driver/sl4a-touch.service" "$SERVICE_PATH"
-install -Dm755 "$REPO_DIR/driver/sl4a-touch-load.sh" "$LOAD_SCRIPT_PATH"
-systemctl daemon-reload
-pass "Service installed at $SERVICE_PATH"
-
-info "Step 7: Enabling the driver for the next boot..."
+info "Step 6: Updating module dependencies..."
 depmod -a
-systemctl enable sl4a-touch.service
-pass "The new modules will load at the next boot"
+pass "Module dependencies updated"
 
 # Warn about Secure Boot if enforced
 if [ -d /sys/firmware/efi ] && mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
@@ -193,8 +185,6 @@ fi
 echo ""
 echo "============================================"
 echo -e "${GREEN}Install complete. Reboot before using the touchscreen.${NC}"
-echo " The driver auto-loads on every boot via udev (modprobe.d)."
-echo " Reboot before using a newly installed spi-amd module."
-echo " Reboot before using a newly installed spi-amd module."
+echo " The driver auto-loads on every boot via udev + modprobe.d."
 echo " To remove: sudo ./tools/uninstall.sh"
 echo "============================================"

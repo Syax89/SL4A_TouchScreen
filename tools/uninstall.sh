@@ -1,8 +1,9 @@
 #!/bin/bash
 # ============================================================================
 # uninstall.sh — Removes everything tools/install.sh installed:
-# the systemd service and the DKMS-registered source tree (for every kernel it
-# was built against). Loaded modules are left intact until reboot.
+# the modprobe.d config, the DKMS-registered source tree (for every kernel it
+# was built against), and any leftover systemd service from older versions.
+# Loaded modules are left intact until reboot.
 #
 # Usage: sudo ./tools/uninstall.sh
 # ============================================================================
@@ -12,6 +13,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="sl4a-touch"
 PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SERVICE_PATH="/etc/systemd/system/sl4a-touch.service"
+LOAD_SCRIPT_PATH="/usr/lib/sl4a-touch/load-touch.sh"
 MODPROBE_CONF="/etc/modprobe.d/spi-hid.conf"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -27,12 +29,19 @@ echo "============================================"
 echo " SL4A_TouchScreen driver uninstaller"
 echo "============================================"
 
-info "Stopping and disabling the systemd service..."
-systemctl disable --now sl4a-touch.service 2>/dev/null || true
-rm -f "$SERVICE_PATH"
-systemctl daemon-reload
+info "Removing modprobe config..."
 rm -f "$MODPROBE_CONF"
-pass "Service and modprobe config removed"
+pass "Modprobe config removed"
+
+# Clean up legacy systemd service from older versions (no longer installed).
+if [ -f "$SERVICE_PATH" ]; then
+	info "Removing legacy systemd service..."
+	systemctl disable --now sl4a-touch.service 2>/dev/null || true
+	rm -f "$SERVICE_PATH"
+	rm -rf "$(dirname "$LOAD_SCRIPT_PATH")"
+	systemctl daemon-reload
+	pass "Legacy service removed"
+fi
 
 info "Leaving active modules untouched..."
 pass "Reboot is required to stop the active driver safely"
@@ -41,11 +50,6 @@ info "Removing DKMS registration ($PKG_NAME/$PKG_VERSION, all kernels)..."
 dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all 2>/dev/null || true
 rm -rf "/usr/src/${PKG_NAME}-${PKG_VERSION}"
 
-# Also sweep any leftovers from a *previous* version's source tree (e.g. from a mid-beta
-# VERSION bump) -- found live 2026-07-08: a stray /usr/src/sl4a-touch-1.0.0-beta1 directory
-# from before a hotfix kept getting rediscovered and rebuilt (under the wrong name) by
-# Arch/CachyOS's pacman dkms hook on every later kernel update, since that hook scans
-# /usr/src/*-*/dkms.conf directly instead of only trusting `dkms status`.
 for stale in /usr/src/${PKG_NAME}-*; do
 	[ -d "$stale" ] || continue
 	stale_nv="$(grep -oP '(?<=PACKAGE_VERSION=").*(?=")' "$stale/dkms.conf" 2>/dev/null || true)"
