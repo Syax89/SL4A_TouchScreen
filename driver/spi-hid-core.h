@@ -371,6 +371,7 @@ struct spi_hid {
 
 	/* Frame counter for gap detection (Surface: >5 frames → reset all). */
 	u32 heatmap_frame_id;
+	u32 heatmap_last_consecutive;
 
 	/* Eigenvalue/ellipsis tracking */
 	s32 eigmaj[HEATMAP_MAX_SLOTS];

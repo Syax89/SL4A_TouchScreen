@@ -1811,6 +1811,7 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	memset(shid->blob_active, 0, sizeof(shid->blob_active));
 	memset(shid->label_equiv, 0, sizeof(shid->label_equiv));
 	shid->heatmap_frame_id = 0;
+	shid->heatmap_last_consecutive = 0;
 }
 
 /* Screen mapping: logical range 0..32767 for both X and Y.
@@ -2127,6 +2128,20 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	}
 	if (cell_count > ncols * nrows)
 		cell_count = ncols * nrows;
+
+	/* Frame-gap detection (Windows: >5 frames → release all contacts).
+	 * heatmap_frame_id is a monotonic counter; we detect gaps by
+	 * tracking the last consecutive value. */
+	shid->heatmap_frame_id++;
+	if (shid->heatmap_frame_id > 0 &&
+	    shid->heatmap_frame_id - shid->heatmap_last_consecutive > 6) {
+		release_all_slots(shid->touch_input, shid->blob_slot_state,
+				  HEATMAP_MAX_SLOTS);
+		memset(shid->blob_slot_stationary, 0, sizeof(shid->blob_slot_stationary));
+		memset(shid->blob_slot_hcount, 0, sizeof(shid->blob_slot_hcount));
+		memset(shid->blob_slot_hpos, 0, sizeof(shid->blob_slot_hpos));
+	}
+	shid->heatmap_last_consecutive = shid->heatmap_frame_id;
 
 	if (cell_count > HEATMAP_MAX_CELLS) {
 		dev_warn(dev, "HEATMAP: frame too large (%u cells > %u max)\n", cell_count, HEATMAP_MAX_CELLS);
@@ -2516,21 +2531,24 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 		/* Ghost rejection (GROUND_TRUTH.md §22.7 step 3):
 		 * Merge blobs closer than ghost_dist threshold (grid cells).
-		 * If two blobs are within ghost_dist, keep the heavier one, discard the lighter. */
+		 * Windows uses Euclidean squared distance (dx²+dy² < ghost_dist²),
+		 * not axis-aligned box. If two blobs are within radius, keep the
+		 * heavier one, discard the lighter. */
 		{
 			u8 a, b, j;
+			u32 gdsq = (u32)ghost_dist * (u32)ghost_dist;
 
 			for (a = 0; a < sorted_count; a++) {
 				if (sorted[a].w == 0)
 					continue;
 				for (b = a + 1; b < sorted_count; b++) {
-					u16 dx, dy;
+					s16 dx, dy;
 
 					if (sorted[b].w == 0)
 						continue;
-					dx = abs((s16)sorted[a].gx - (s16)sorted[b].gx);
-					dy = abs((s16)sorted[a].gy - (s16)sorted[b].gy);
-					if (dx <= (u16)ghost_dist && dy <= (u16)ghost_dist) {
+					dx = (s16)sorted[a].gx - (s16)sorted[b].gx;
+					dy = (s16)sorted[a].gy - (s16)sorted[b].gy;
+					if ((u32)(dx * dx) + (u32)(dy * dy) <= gdsq) {
 						if (sorted[b].w > sorted[a].w) {
 							sorted[a].w = 0;
 							break;
@@ -2647,14 +2665,44 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 					if (new_active[s]) {
 						if (was_claimed && shid->blob_slot_state[s] == 2) {
-							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
-							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
+							/* Stationary lock: if raw centroid moved < 1 cell
+							 * from last output for 5+ frames, freeze position
+							 * to suppress jitter (matching Windows behavior). */
+							s16 raw_dx = (s16)gx - (s16)shid->blob_slot_gx[s];
+							s16 raw_dy = (s16)gy - (s16)shid->blob_slot_gy[s];
+
+							if (raw_dx >= -1 && raw_dx <= 1 &&
+							    raw_dy >= -1 && raw_dy <= 1) {
+								shid->blob_slot_stationary[s]++;
+							} else {
+								shid->blob_slot_stationary[s] = 0;
+							}
+
+							if (shid->blob_slot_stationary[s] >= 5) {
+								/* Freeze position; keep EMA value from last frame. */
+								new_gx[s] = shid->blob_slot_gx[s];
+								new_gy[s] = shid->blob_slot_gy[s];
+							} else {
+								new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
+								new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
+							}
 						} else {
 							new_gx[s] = gx;
 							new_gy[s] = gy;
+							shid->blob_slot_stationary[s] = 0;
 						}
 						shid->blob_slot_gx[s] = new_gx[s];
 						shid->blob_slot_gy[s] = new_gy[s];
+
+						/* History ring: push current position for 3-sample MA. */
+						{
+							u8 hp = shid->blob_slot_hpos[s];
+							shid->blob_slot_hx[s][hp] = new_gx[s];
+							shid->blob_slot_hy[s][hp] = new_gy[s];
+							shid->blob_slot_hpos[s] = (hp + 1) % SLOT_HISTORY_DEPTH;
+							if (shid->blob_slot_hcount[s] < SLOT_HISTORY_DEPTH)
+								shid->blob_slot_hcount[s]++;
+						}
 					}
 				} else {
 					switch (shid->blob_slot_state[s]) {
@@ -2689,9 +2737,24 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				input_mt_report_slot_state(input, MT_TOOL_FINGER, new_active[s]);
 				if (new_active[s]) {
 					s64 fx, fy, tmp;
-					u16 screen_gx = new_gx[s];
-					u16 screen_gy = new_gy[s];
+					u16 screen_gx, screen_gy;
 
+					/* 3-sample moving average from history ring
+					 * for smooth cursor movement (matching Windows). */
+					{
+						u8 hc = shid->blob_slot_hcount[s];
+						u8 hp = shid->blob_slot_hpos[s];
+						u8 n = (hc < 3) ? hc : 3;
+						u32 sumx = 0, sumy = 0;
+
+						for (u8 k = 0; k < n; k++) {
+							u8 idx = (hp + SLOT_HISTORY_DEPTH - n + k) % SLOT_HISTORY_DEPTH;
+							sumx += shid->blob_slot_hx[s][idx];
+							sumy += shid->blob_slot_hy[s][idx];
+						}
+						screen_gx = (u16)(sumx / n);
+						screen_gy = (u16)(sumy / n);
+					}
 					/* Orient first: scales and offsets always address final X/Y. */
 					if (swap_xy) {
 						tmp = screen_gx;
