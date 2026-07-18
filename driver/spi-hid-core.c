@@ -2812,9 +2812,10 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 					if (new_active[s]) {
 						if (was_claimed && shid->blob_slot_state[s] == 2) {
-							/* Stationary lock: if raw centroid moved < 1 cell
-							 * from last output for 5+ frames, freeze position
-							 * to suppress jitter (matching Windows behavior). */
+							/* Track stationary counter for diagnostics only.
+							 * We do NOT freeze the position (that causes
+							 * stick-slip jumping during slow drags). The
+							 * 3-sample MA + EMA are enough for smoothness. */
 							s16 raw_dx = (s16)gx - (s16)shid->blob_slot_gx[s];
 							s16 raw_dy = (s16)gy - (s16)shid->blob_slot_gy[s];
 
@@ -2825,14 +2826,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 								shid->blob_slot_stationary[s] = 0;
 							}
 
-							if (shid->blob_slot_stationary[s] >= 5) {
-								/* Freeze position; keep EMA value from last frame. */
-								new_gx[s] = shid->blob_slot_gx[s];
-								new_gy[s] = shid->blob_slot_gy[s];
-							} else {
-								new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
-								new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
-							}
+							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
+							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
 						} else {
 							new_gx[s] = gx;
 							new_gy[s] = gy;
