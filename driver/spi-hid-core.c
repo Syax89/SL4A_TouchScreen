@@ -1856,7 +1856,7 @@ static void heatmap_init_c590(struct spi_hid *shid)
 {
 	int i;
 	for (i = 0; i < 256; i++) {
-		s32 v = 10000 - ((s32)i * C590_STEP_NUM / C590_STEP_DEN + C590_OFFSET);
+		s32 v = 10000 - ((s32)i * 22 + 6000);
 		shid->c590_lut[i] = (s16)(v > 0 ? v : 0);
 	}
 	seq_dbg(shid, 1, "HEATMAP: c590 lookup table initialized (range %d..%d)\n",
@@ -2588,7 +2588,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			u8 col_match[HEATMAP_MAX_SLOTS];
 			u16 row_val[HEATMAP_MAX_BLOBS], col_val[HEATMAP_MAX_SLOTS];
 			u8 row_cover[HEATMAP_MAX_BLOBS], col_cover[HEATMAP_MAX_SLOTS];
-			u16 max_dist_sq;
 			s16 dx, dy;
 			u8 n_blobs = sorted_count;
 			u8 round, row, col;
@@ -2601,9 +2600,10 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			memset(col_match, 0xFF, sizeof(col_match));
 			memset(row_val, 0, sizeof(row_val));
 			memset(col_val, 0, sizeof(col_val));
-			max_dist_sq = (u16)blob_max_distance * (u16)blob_max_distance;
 
-			/* Build cost matrix and initial row minima. */
+			/* Build cost matrix: matching Python oracle Hungarian.
+			 * In-range: 10*sqrt(dx²+dy²), out-of-range: 100,
+			 * empty/new slot: 1000. */
 			for (row = 0; row < n_blobs; row++) {
 				row_val[row] = U16_MAX;
 				for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
@@ -2614,12 +2614,13 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						if (dy < 0) dy = -dy;
 						if ((u16)dx <= (u16)blob_max_distance &&
 						    (u16)dy <= (u16)blob_max_distance) {
-							cost[row][col] = (u16)dx * (u16)dx + (u16)dy * (u16)dy;
+							u16 dsq = (u16)dx * (u16)dx + (u16)dy * (u16)dy;
+							cost[row][col] = (u16)(int_sqrt((u64)dsq) * 10);
 						} else {
-							cost[row][col] = max_dist_sq * 8 + 1;
+							cost[row][col] = 100;
 						}
 					} else {
-						cost[row][col] = max_dist_sq * 4;
+						cost[row][col] = 1000;
 					}
 					if (cost[row][col] < row_val[row])
 						row_val[row] = cost[row][col];
@@ -2733,9 +2734,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						shid->blob_slot_duration[s] = 1;
 						break;
 					}
-					u16 old_gx = shid->blob_slot_gx[s];
-					u16 old_gy = shid->blob_slot_gy[s];
-
 					shid->blob_slot_missed[s] = 0;
 					shid->blob_slot_gx[s] = gx;
 					shid->blob_slot_gy[s] = gy;
@@ -2748,40 +2746,12 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					new_active[s] = (shid->blob_slot_state[s] >= 2);
 
 					if (new_active[s]) {
-						if (was_claimed && shid->blob_slot_state[s] == 2) {
-							/* Track stationary counter for diagnostics only.
-							 * We do NOT freeze the position (that causes
-							 * stick-slip jumping during slow drags). The
-							 * 3-sample MA + EMA are enough for smoothness. */
-							s16 raw_dx = (s16)gx - (s16)shid->blob_slot_gx[s];
-							s16 raw_dy = (s16)gy - (s16)shid->blob_slot_gy[s];
-
-							if (raw_dx >= -1 && raw_dx <= 1 &&
-							    raw_dy >= -1 && raw_dy <= 1) {
-								shid->blob_slot_stationary[s]++;
-							} else {
-								shid->blob_slot_stationary[s] = 0;
-							}
-
-							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
-							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
-						} else {
-							new_gx[s] = gx;
-							new_gy[s] = gy;
-							shid->blob_slot_stationary[s] = 0;
-						}
+						/* Python oracle: no EMA, no MA — raw observation
+						 * coordinates are stable enough from peak detection. */
+						new_gx[s] = gx;
+						new_gy[s] = gy;
 						shid->blob_slot_gx[s] = new_gx[s];
 						shid->blob_slot_gy[s] = new_gy[s];
-
-						/* History ring: push current position for 5-sample MA. */
-						{
-							u8 hp = shid->blob_slot_hpos[s];
-							shid->blob_slot_hx[s][hp] = new_gx[s];
-							shid->blob_slot_hy[s][hp] = new_gy[s];
-							shid->blob_slot_hpos[s] = (hp + 1) % SLOT_HISTORY_DEPTH;
-							if (shid->blob_slot_hcount[s] < SLOT_HISTORY_DEPTH)
-								shid->blob_slot_hcount[s]++;
-						}
 					}
 				} else {
 					switch (shid->blob_slot_state[s]) {
@@ -2816,24 +2786,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				input_mt_report_slot_state(input, MT_TOOL_FINGER, new_active[s]);
 				if (new_active[s]) {
 					s64 fx, fy, tmp;
-					u16 screen_gx, screen_gy;
-
-					/* 3-sample moving average from history ring
-					 * for smooth cursor movement. */
-					{
-						u8 hc = shid->blob_slot_hcount[s];
-						u8 hp = shid->blob_slot_hpos[s];
-						u8 n = (hc < 3) ? hc : 3;
-						u32 sumx = 0, sumy = 0;
-
-						for (u8 k = 0; k < n; k++) {
-							u8 idx = (hp + SLOT_HISTORY_DEPTH - n + k) % SLOT_HISTORY_DEPTH;
-							sumx += shid->blob_slot_hx[s][idx];
-							sumy += shid->blob_slot_hy[s][idx];
-						}
-						screen_gx = (u16)(sumx / n);
-						screen_gy = (u16)(sumy / n);
-					}
+					u16 screen_gx = new_gx[s];
+					u16 screen_gy = new_gy[s];
 					/* Orient first: scales and offsets always address final X/Y. */
 					if (swap_xy) {
 						tmp = screen_gx;
