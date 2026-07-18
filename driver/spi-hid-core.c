@@ -69,7 +69,7 @@ _Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
 #define SPI_HID_V0_MAX_OUTPUT_BODY 64
 
 static int debug_level;
-static int getfeat_delay_ms = 500;  /* RPT_DESC → GET_FEATURE settle time (was Windows 5900ms) */
+static int getfeat_delay_ms;  /* RPT_DESC → GET_FEATURE settle time (0 = immediate, safe default) */
 static bool skip_getfeat;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) \
