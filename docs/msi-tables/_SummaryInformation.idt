@@ -1,0 +1,17 @@
+PropertyId	Value
+i2	l255
+_SummaryInformation	PropertyId
+1	1252
+2	Installation Database
+3	SurfaceLaptop4_AMD_Win11_22631_26.040.2105.0
+4	Microsoft Corporation
+5	Installer
+6	This installer database contains the logic and data required to install SurfaceLaptop4_AMD_Win11_22631_26.040.2105.0.
+7	x64;1033
+9	{22FE76F0-F393-4023-93A1-ACF7DFE4C330}
+12	2026/04/02 13:06:18
+13	2026/04/02 13:06:18
+14	200
+15	2
+18	Windows Installer XML Toolset (3.11.2.4516)
+19	2

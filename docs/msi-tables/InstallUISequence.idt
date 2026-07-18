@@ -1,0 +1,20 @@
+Action	Condition	Sequence
+s72	S255	I2
+InstallUISequence	Action
+CostInitialize		800
+FileCost		900
+CostFinalize		1000
+FatalError		-3
+UserExit		-2
+ExitDialog		-1
+ExecuteAction		1300
+PrepareDlg		49
+ProgressDlg		1299
+ResumeDlg	Installed AND (RESUME OR Preselected)	1297
+WelcomeDlg	NOT Installed OR PATCH	1298
+MaintenanceWelcomeDlg	Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH	1296
+FindRelatedProducts		25
+LaunchConditions		100
+ValidateProductID		700
+MigrateFeatureStates		1200
+AppSearch		50
