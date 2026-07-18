@@ -3307,20 +3307,32 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 					spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 				}
 			} else {
+				static const u8 vendor_init[] = {
+					0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00,
+					0x03, 0x0A, 0x00,
+					0x56, 0xBD, 0x0C, 0xEE, 0x5B, 0x44, 0x4C, 0x00, 0x00
+				};
 				u8 gf[11] = {
 					0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
 					0x00, 0x04, 0x03, 0x00, 0x06
 				};
 				usleep_range(1400, 1800);
 				if (getfeat_delay_ms > 0) {
-					seq_dbg(shid, 1, "SEQ: scheduling GET_FEATURE after %dms delay (Windows: ~5900ms)...\n",
+					seq_dbg(shid, 1, "SEQ: scheduling vendor init + GET_FEATURE after %dms...\n",
 						getfeat_delay_ms);
 					shid->feat_delay_pending = true;
 					schedule_delayed_work(&shid->feat_delay_work,
 							      msecs_to_jiffies(getfeat_delay_ms));
-					/* Stay in state 2 until the delayed work fires */
 				} else {
-					seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE, state 5\n");
+					seq_dbg(shid, 1, "SEQ: vendor init + GET_FEATURE...\n");
+					usleep_range(68000, 72000);
+					if (spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0)) {
+						dev_warn(&shid->spi->dev, "SEQ: vendor init write failed\n");
+						schedule_delayed_work(&shid->raw_handshake_watchdog,
+							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+						return;
+					}
+					usleep_range(36000, 39000);
 					if (spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0)) {
 						dev_warn(&shid->spi->dev, "SEQ: GET_FEATURE write failed\n");
 						schedule_delayed_work(&shid->raw_handshake_watchdog,
