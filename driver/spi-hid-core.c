@@ -70,7 +70,7 @@ _Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
 
 static int debug_level;
 static int getfeat_delay_ms;  /* RPT_DESC → GET_FEATURE settle time (0 = immediate, safe default) */
-static bool skip_getfeat;
+static bool skip_getfeat = true;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) \
 		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
@@ -1664,10 +1664,10 @@ module_param(blob_min_weight, int, 0644);
 MODULE_PARM_DESC(blob_min_weight,
 	"Minimum c590 signal rise sum across blob to consider it valid");
 
-static int ema_alpha = 7;
+static int ema_alpha = 15;
 module_param(ema_alpha, int, 0644);
 MODULE_PARM_DESC(ema_alpha,
-	"EMA smoothing: (prev*alpha + new)/(alpha+1). Surface uses alpha=7 (weight 1/8)");
+	"EMA smoothing: (prev*alpha + new)/(alpha+1). Higher = smoother. Default 15 (weight 1/16)");
 
 static int dfa_data_offset;
 module_param(dfa_data_offset, int, 0444);
@@ -2577,6 +2577,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			sorted_count = j;
 		}
 
+		/* Blob splitting disabled — the eigenvalue heuristic split
+		 * single-finger blobs (centroid jitter → temporarily elongated
+		 * shape). The real Windows pipeline uses per-pixel peak detection
+		 * (FUN_180602e60); re-enable after that is implemented. */
+#if 0
 		/* Blob splitting (GROUND_TRUTH.md §22.7 step 4):
 		 * If the heaviest blob is elongated (ratio > 2:1) and heavy enough,
 		 * it likely contains two touching fingers. Split along the major
@@ -2640,7 +2645,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				}
 			}
 		}
-
+#endif
 		/* Hungarian global assignment (matching Windows TouchPenProcessor0C19).
 		 * Replaces the old greedy nearest-neighbor with minimum-cost bipartite
 		 * matching.  Each blob is assigned to exactly one slot, minimizing
@@ -2686,7 +2691,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 							cost[row][col] = max_dist_sq * 8 + 1;
 						}
 					} else {
-						cost[row][col] = max_dist_sq * 2;
+						cost[row][col] = max_dist_sq * 4;
 					}
 					if (cost[row][col] < row_val[row])
 						row_val[row] = cost[row][col];
@@ -2828,6 +2833,20 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
 							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
+
+							/* Deadband: if EMA output moved < 1 cell from
+							 * the old output, keep old position. Suppresses
+							 * micro-jitter without stick-slip. */
+							{
+								s16 dbx = (s16)new_gx[s] - (s16)old_gx;
+								s16 dby = (s16)new_gy[s] - (s16)old_gy;
+
+								if (dbx >= -1 && dbx <= 1 &&
+								    dby >= -1 && dby <= 1) {
+									new_gx[s] = old_gx;
+									new_gy[s] = old_gy;
+								}
+							}
 						} else {
 							new_gx[s] = gx;
 							new_gy[s] = gy;
@@ -2836,7 +2855,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						shid->blob_slot_gx[s] = new_gx[s];
 						shid->blob_slot_gy[s] = new_gy[s];
 
-						/* History ring: push current position for 3-sample MA. */
+						/* History ring: push current position for 5-sample MA. */
 						{
 							u8 hp = shid->blob_slot_hpos[s];
 							shid->blob_slot_hx[s][hp] = new_gx[s];
@@ -2881,12 +2900,12 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					s64 fx, fy, tmp;
 					u16 screen_gx, screen_gy;
 
-					/* 3-sample moving average from history ring
-					 * for smooth cursor movement (matching Windows). */
+					/* 5-sample moving average from history ring
+					 * for smooth cursor movement. */
 					{
 						u8 hc = shid->blob_slot_hcount[s];
 						u8 hp = shid->blob_slot_hpos[s];
-						u8 n = (hc < 3) ? hc : 3;
+						u8 n = (hc < 5) ? hc : 5;
 						u32 sumx = 0, sumy = 0;
 
 						for (u8 k = 0; k < n; k++) {
