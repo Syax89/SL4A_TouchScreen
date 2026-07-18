@@ -1660,12 +1660,12 @@ MODULE_PARM_DESC(debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-fra
 /* ── Blob detection tunables (runtime-validated) ────────────────── */
 
 static int blob_min_weight = 1000;
-module_param(blob_min_weight, int, 0444);
+module_param(blob_min_weight, int, 0644);
 MODULE_PARM_DESC(blob_min_weight,
 	"Minimum c590 signal rise sum across blob to consider it valid");
 
 static int ema_alpha = 7;
-module_param(ema_alpha, int, 0444);
+module_param(ema_alpha, int, 0644);
 MODULE_PARM_DESC(ema_alpha,
 	"EMA smoothing: (prev*alpha + new)/(alpha+1). Surface uses alpha=7 (weight 1/8)");
 
@@ -1680,17 +1680,17 @@ MODULE_PARM_DESC(touch_threshold_min,
 	"(unused, reserved for future adaptive filtering)");
 
 static int touch_signal_mode = 2;
-module_param(touch_signal_mode, int, 0444);
+module_param(touch_signal_mode, int, 0644);
 MODULE_PARM_DESC(touch_signal_mode,
 	"Touch detection mode: 0=any change, 1=rise only (touch INCREASES c590), 2=percentage rise");
 
 static int touch_threshold_pct = 10;
-module_param(touch_threshold_pct, int, 0444);
+module_param(touch_threshold_pct, int, 0644);
 MODULE_PARM_DESC(touch_threshold_pct,
 	"Percentage of c590 full-scale (4000) used as the touch rise threshold when touch_signal_mode=2. Default 10% (=400); observed touch peaks reach a rise of ~2300");
 
 static int ghost_dist = 6;
-module_param(ghost_dist, int, 0444);
+module_param(ghost_dist, int, 0644);
 MODULE_PARM_DESC(ghost_dist,
 	"Coalescence radius in grid cells (Surface: distance < 6 cells)");
 
@@ -1703,31 +1703,31 @@ module_param(grid_rows, int, 0444);
 MODULE_PARM_DESC(grid_rows, "Override grid rows (0=default 48)");
 
 static int calib_scale_x = 0;  /* 0 = use default: SCREEN_MAX/(cols-1) */
-module_param(calib_scale_x, int, 0444);
+module_param(calib_scale_x, int, 0644);
 MODULE_PARM_DESC(calib_scale_x, "X scale factor * 1000 (0=auto-calculate from grid dimensions)");
 
 static int calib_scale_y = 0;
-module_param(calib_scale_y, int, 0444);
+module_param(calib_scale_y, int, 0644);
 MODULE_PARM_DESC(calib_scale_y, "Y scale factor * 1000 (0=auto-calculate from grid dimensions)");
 
 static int calib_offset_x = 0;  /* screen pixel offset */
-module_param(calib_offset_x, int, 0444);
+module_param(calib_offset_x, int, 0644);
 MODULE_PARM_DESC(calib_offset_x, "X screen offset in logical coords (0..32767)");
 
 static int calib_offset_y = 0;
-module_param(calib_offset_y, int, 0444);
+module_param(calib_offset_y, int, 0644);
 MODULE_PARM_DESC(calib_offset_y, "Y screen offset in logical coords (0..32767)");
 
 static int blob_debounce = 3;
-module_param(blob_debounce, int, 0444);
+module_param(blob_debounce, int, 0644);
 MODULE_PARM_DESC(blob_debounce, "Frames before claiming a new blob (debounce)");
 
 static int blob_lift_frames = 3;
-module_param(blob_lift_frames, int, 0444);
+module_param(blob_lift_frames, int, 0644);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting");
 
 static int blob_max_distance = 3;
-module_param(blob_max_distance, int, 0444);
+module_param(blob_max_distance, int, 0644);
 MODULE_PARM_DESC(blob_max_distance,
 	"Max grid distance for slot re-assignment (Surface: 0.545 cells ≈ 3)");
 
@@ -2066,19 +2066,27 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	if (data_offset < 0 || data_offset >= data_len)
 		return;
 
-	/* Clamp unsafe module parameters to prevent division by zero
-	 * and undefined behavior. Values outside these ranges produce
-	 * garbage output or kernel panics. */
-	if (blob_min_weight < 1) blob_min_weight = 1;
-	if (ema_alpha < 0 || ema_alpha > 10000) ema_alpha = 3;
-	if (blob_debounce < 1) blob_debounce = 3;
-	if (blob_lift_frames < 1) blob_lift_frames = 3;
-	if (blob_max_distance < 1) blob_max_distance = 3;
-	if (ghost_dist < 1) ghost_dist = 6;
-	if (touch_threshold_pct < 0) touch_threshold_pct = 0;
-	if (touch_threshold_pct > 100) touch_threshold_pct = 100;
-	/* calib_offset_x/y may be negative: final clamp to [0,SCREEN_MAX]
-	 * is applied after swap/invert, so a negative shift is valid. */
+	/* Clamp unsafe parameters to prevent division by zero
+	 * and undefined behavior. Use local variables to avoid
+	 * overwriting user-set sysfs values every frame. */
+	{
+		s32 val;
+		val = READ_ONCE(blob_min_weight); if (val < 1) val = 1;
+		blob_min_weight = val;  /* one-time clamp only */
+		val = READ_ONCE(ema_alpha); if (val < 0 || val > 10000) val = 3;
+		ema_alpha = val;
+		val = READ_ONCE(blob_debounce); if (val < 1) val = 3;
+		blob_debounce = val;
+		val = READ_ONCE(blob_lift_frames); if (val < 1) val = 3;
+		blob_lift_frames = val;
+		val = READ_ONCE(blob_max_distance); if (val < 1) val = 3;
+		blob_max_distance = val;
+		val = READ_ONCE(ghost_dist); if (val < 1) val = 6;
+		ghost_dist = val;
+		val = READ_ONCE(touch_threshold_pct); if (val < 0) val = 0;
+		if (val > 100) val = 100;
+		touch_threshold_pct = val;
+	}
 
 	/* The candidate cell field begins after metadata. Its geometry is not yet
 	 * proven, so never infer cells from a short or malformed frame. */
@@ -2570,13 +2578,68 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		}
 
 		/* Blob splitting (GROUND_TRUTH.md §22.7 step 4):
-		 * If a single blob's weight exceeds split_threshold and we have
-		 * free slots, split by finding two peaks in the blob's cell
-		 * distribution. Simplified: split along the major axis. */
-		/* Not implementing full split yet — the DLL's version requires
-		 * per-pixel signal analysis that's expensive. This placeholder
-		 * splits very large blobs by halving, which handles merged-finger
-		 * cases approximately. */
+		 * If the heaviest blob is elongated (ratio > 2:1) and heavy enough,
+		 * it likely contains two touching fingers. Split along the major
+		 * eigenvalue axis into two sub-blobs at 30% of the semi-axis.
+		 * Each sub-blob gets half the weight and centroid shifted by
+		 * the split offset. This handles the most common merged-finger
+		 * case without per-pixel peak detection. */
+		{
+			u8 split_idx = 0;
+			u32 best_ws = 0;
+
+			for (i = 0; i < sorted_count; i++) {
+				if (sorted[i].w > best_ws) {
+					best_ws = sorted[i].w;
+					split_idx = i;
+				}
+			}
+			if (best_ws >= (u32)blob_min_weight && sorted_count < HEATMAP_MAX_SLOTS - 1) {
+				s32 maj = shid->eigmaj[0];
+				s32 min = shid->eigmin[0];
+				s32 ori = shid->eigori[0];
+
+				if (maj > min * 2 + 10 && maj >= 50 && best_ws > (u32)blob_min_weight * 3) {
+					s32 split_dist = (s32)int_sqrt((u64)maj) * 3 / 10;
+					s32 dx = 0, dy = 0;
+					u8 idx = sorted[split_idx].idx;
+
+					if (split_dist < 1)
+						split_dist = 1;
+					if (split_dist > 5)
+						split_dist = 5;
+
+					/* Approximate direction from orientation (degrees*100):
+					 * - near 0° or ±180° → split horizontally
+					 * - near ±90° → split vertically
+					 * - other → split diagonally */
+					if (ori > 18000) ori -= 18000;
+					if (ori < -18000) ori += 18000;
+
+					if (ori >= -6000 && ori <= 6000) {
+						dx = split_dist;
+					} else if ((ori >= 8000 && ori <= 10000) ||
+						   (ori >= -10000 && ori <= -8000)) {
+						dy = split_dist;
+					} else {
+						dx = split_dist * 7 / 10;
+						dy = split_dist * 7 / 10;
+					}
+
+					sorted[split_idx].gx = (s16)shid->blob_x[idx] - dx;
+					sorted[split_idx].gy = (s16)shid->blob_y[idx] - dy;
+					sorted[split_idx].w = best_ws / 2;
+
+					if (sorted_count < HEATMAP_MAX_SLOTS) {
+						sorted[sorted_count].gx = (s16)shid->blob_x[idx] + dx;
+						sorted[sorted_count].gy = (s16)shid->blob_y[idx] + dy;
+						sorted[sorted_count].w = best_ws / 2;
+						sorted[sorted_count].idx = HEATMAP_MAX_BLOBS;
+						sorted_count++;
+					}
+				}
+			}
+		}
 
 		/* Hungarian global assignment (matching Windows TouchPenProcessor0C19).
 		 * Replaces the old greedy nearest-neighbor with minimum-cost bipartite
@@ -4313,12 +4376,65 @@ static const struct spi_device_id spi_hid_id_table[] = {
 };
 MODULE_DEVICE_TABLE(spi, spi_hid_id_table);
 
+static int spi_hid_suspend(struct device *dev)
+{
+	struct spi_device *spi = to_spi_device(dev);
+	struct spi_hid *shid = spi_get_drvdata(spi);
+
+	seq_dbg(shid, 1, "PM: suspend\n");
+	mutex_lock(&shid->seq_lock);
+	WRITE_ONCE(shid->seq_enabled, false);
+	shid->poll_active = false;
+	shid->raw_handshake_confirmed = false;
+	shid->feat_delay_pending = false;
+	mutex_unlock(&shid->seq_lock);
+
+	cancel_delayed_work_sync(&shid->feat_delay_work);
+	cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
+
+	if (shid->irq_enabled) {
+		disable_irq(shid->irq);
+		shid->irq_enabled = false;
+	}
+	return 0;
+}
+
+static int spi_hid_resume(struct device *dev)
+{
+	struct spi_device *spi = to_spi_device(dev);
+	struct spi_hid *shid = spi_get_drvdata(spi);
+
+	seq_dbg(shid, 1, "PM: resume\n");
+	mutex_lock(&shid->seq_lock);
+	shid->ready = false;
+	shid->keep_powered = false;
+	shid->raw_handshake_confirmed = false;
+	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
+	shid->feat_delay_pending = false;
+	heatmap_reset_baseline(shid);
+	WRITE_ONCE(shid->seq_enabled, true);
+	shid->seq_state = 0;
+	mutex_unlock(&shid->seq_lock);
+
+	if (!shid->irq_enabled) {
+		enable_irq(shid->irq);
+		shid->irq_enabled = true;
+	}
+	return 0;
+}
+
+static const struct dev_pm_ops spi_hid_pm_ops = {
+	.suspend = spi_hid_suspend,
+	.resume = spi_hid_resume,
+};
+
 static struct spi_driver spi_hid_driver = {
 	.driver = {
 		.name	= "spi_hid",
 		.owner	= THIS_MODULE,
 		.of_match_table = of_match_ptr(spi_hid_of_match),
 		.acpi_match_table = ACPI_PTR(spi_hid_acpi_match),
+		.pm	= &spi_hid_pm_ops,
 	},
 	.probe		= spi_hid_probe,
 	.remove		= spi_hid_remove,
