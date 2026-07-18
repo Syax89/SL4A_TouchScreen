@@ -1998,7 +1998,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 			seq_dbg(shid, 2, "SEQ: poller cid=0x%02x len=%u\n",
 				 shid->data_buf[8], rl);
 
-			if (rl > 2 && rl - 2 > avail) {
+			if (rl >= 3 && rl - 3 > avail) {
 				dev_warn_ratelimited(dev,
 					"SEQ: poller DATA report len=%u exceeds buffer (avail=%u), dropped\n",
 					rl, avail);
@@ -3264,10 +3264,10 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			shid->stat_frames_dropped++;
 			return;
 		}
-		rl = body[6] | (body[7] << 8);
-		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[8], rl);
+		rl = body[5] | (body[6] << 8);
+		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[7], rl);
 
-		if (rl > 2 && rl - 2 > avail) {
+		if (rl >= 3 && rl - 3 > avail) {
 			dev_warn_ratelimited(dev,
 				"SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
 				rl, avail);
@@ -3275,7 +3275,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			return;
 		}
 
-		if (shid->raw_mode_active && body[8] == 0x0C && shid->touch_input) {
+		if (shid->raw_mode_active && body[7] == 0x0C && shid->touch_input) {
 			u32 clen = (rl > 2) ? (rl - 2) : 0;
 
 			if (!shid->raw_handshake_confirmed) {
@@ -3293,21 +3293,21 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 				/* The IRQ thread is the sole reader of input_register. Polling it
 				 * concurrently can consume a report before its IRQ is serviced. */
 			}
-			heatmap_process_frame(shid, &body[8], clen, body[8]);
-		} else if (rl > 2 && rl - 2 <= avail) {
-			if (shid->raw_mode_active && body[8] == 0x40 && rl - 2 >= 6) {
-				u16 hx = body[9] | (body[10] << 8);
-				u16 hy = body[11] | (body[12] << 8);
+			heatmap_process_frame(shid, &body[7], clen, body[7]);
+		} else if (rl >= 3 && rl - 3 <= avail) {
+			if (shid->raw_mode_active && body[7] == 0x40 && rl - 2 >= 6) {
+				u16 hx = body[8] | (body[10] << 8);
+				u16 hy = body[10] | (body[12] << 8);
 				seq_dbg(shid, 2, "CALIB_REF: hid=(%u,%u)\n", hx, hy);
 			}
 			if (shid->hid) {
 				int hret = hid_input_report(shid->hid, HID_INPUT_REPORT,
-							    &body[8], rl - 2, 1);
+							    &body[7], rl - 2, 1);
 				if (hret)
 					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x)\n",
-						 hret, body[8]);
+						 hret, body[7]);
 			}
-		} else if (rl <= 2) {
+		} else if (rl < 3) {
 			dev_warn(dev, "SEQ: DATA report too short to contain a report ID (len=%u), dropped\n",
 				 rl);
 		}
