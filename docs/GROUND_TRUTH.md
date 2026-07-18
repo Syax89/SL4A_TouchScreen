@@ -1543,9 +1543,9 @@ effect on the timing (not even a few ms of drift):
    mined directly from `traces/surface_boot_auto.csv` via `tools/parse_spi.py`
    (fixed in this session: hardcoded path was `~/Scrivania/traces`, now
    `traces/` relative to the repo):
-   - GET_FEATURE (content_id=4): `02 00 00 03 42 00 04 03 00 06` (to output register
+    - GET_FEATURE (type `0x04`, feature ID `0x06`): `02 00 00 03 42 00 04 03 00 06` (to output register
      0x0003, doubled-opcode framing as above)
-   - SET_FEATURE (content_id=4): `02 00 00 03 82 00 03 04 00 05 01 00 00 00`
+    - SET_FEATURE (type `0x03`, feature ID `0x05`, value `0x01`): `02 00 00 03 82 00 03 04 00 05 01 00 00 00`
    - Sent as a new `seq_state=5` in `spi_hid_seq_thread()` right after RPT_DESC.
    - Result: the GET_FEAT_RESP (type=5) **never arrives** — the device just resets at the
      same 507.6-508.3ms mark, now caught in state 5 instead of state 4. No difference.
@@ -2327,7 +2327,7 @@ type tag), there's no missing *software* step to find there. Two remaining, pure
   DESCREQ/GET_FEATURE — not something specific to shorter writes.
 
 **Both hypotheses ruled out.** The remaining candidates are: (a) something inside the touch
-chip's own firmware reacting specifically to the *semantic* SET_FEATURE(id=4, val=1) command
+chip's own firmware reacting specifically to the captured SET_FEATURE command
 — invisible to any Windows driver decompilation since it's on a physically separate chip; or
 (b) a physical-layer signal integrity issue specific to this exact transaction that would need
 a logic analyzer to observe directly, not more guessing from software. Not chased further live
@@ -2343,13 +2343,14 @@ the correct approach emerged: **do NOT send GET_FEATURE/SET_FEATURE**.
 
 ### 19.1 The mode switch mechanism
 
-Windows sends `GET_FEATURE(id=4)` followed by `SET_FEATURE(id=4, val=1)` to register 0x0003.
+Windows sends GET_FEATURE type `0x04`, feature ID `0x06`, followed by SET_FEATURE type
+`0x03`, feature ID `0x05`, value `0x01`, to register 0x0003.
 This switches the device from **standard HID mode** to **raw heatmap mode**:
 
 | Mode | Trigger | Reports | Touch |
 |------|---------|---------|-------|
 | Standard HID | Default (no SET_FEATURE) | Report ID 0x40 (TouchScreen), 0x01 (Pen) | Pre-computed X/Y/TipSwitch |
-| Raw heatmap | SET_FEATURE(id=4, val=1) | content_id=0x0C (4302-byte frames) | Raw capacitive DFT data |
+| Raw heatmap | Captured GET/SET_FEATURE exchange | content_id=0x0C (4302-byte frames) | Raw capacitive DFT data |
 
 ### 19.2 Standard mode behavior
 
@@ -2981,14 +2982,10 @@ per-slot state machine, eigenvalue-based major/minor/orientation reporting, and
 distance-based ghost rejection. It is an approximation of the DLL pipeline;
 the DLL's gain adaptation and blob splitting are not yet reproduced.
 
-**Raw mode handshake, local observation (2026-07-12)**: the current Linux test
-device has been observed streaming raw frames with `probe_raw_id=5`
-(content_id=0x0C at ~98 Hz, 4302 bytes/frame), whereas the captured Windows
-trace uses selector 4 and selector 4 has silenced this device in later Linux
-tests. The difference is not root-caused: firmware identity, controller state,
-timing, and probe methodology have not been isolated. Treat selector 5 as a
-local empirical configuration, not a protocol rule. Do not scan selectors on a
-live device until safe recovery and a passive firmware-identity mapping exist.
+**Raw mode handshake correction (2026-07-15)**: the old `probe_raw_id` setting
+modified bytes that are the captured V0 type/length fields, not a demonstrated
+selector. The driver now sends the canonical Windows frame unchanged. Earlier
+claims about selector 4 versus 5 are invalid and must not guide experiments.
 
 ## 14. References
 

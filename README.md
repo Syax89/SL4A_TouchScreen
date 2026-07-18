@@ -11,30 +11,25 @@
 
 ---
 
-## Status
+## Status: beta — standard HID works
 
 The driver successfully initializes the MSHW0231 touchscreen on the Surface Laptop 4 AMD.
-**Single-touch, pen, and multitouch work** via standard HID mode (Report IDs 0x40 and 0x01)
-plus a passive CapImg multitouch pipeline. KDE/Wayland recognizes touches correctly.
+**Single-touch and pen work** via standard HID mode (Report IDs 0x40 and 0x01).
+KDE/Wayland recognizes touches correctly — tap, drag, and single-finger gestures all work.
 
 | Feature | Status |
 |---------|--------|
 | Device initialization (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
-| HID report descriptor (936 bytes, read from device) | Complete |
-| Single-touch X/Y coordinates (Report ID 0x40) | Working |
-| BTN_TOUCH (tap/lift detection) | Working |
-| Stylus/Pen (Report ID 0x01) | Working |
-| Multitouch (Surface pipeline, up to 10 contacts) | **Beta** |
-| Touch major/minor/orientation (per-slot eigenellipsis) | Beta |
+| HID report descriptor (936 bytes, 98.5% wire-read + 14-byte targeted patch) | Complete |
+| Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
+| BTN_TOUCH (tap/lift detection) | **Working** |
+| Stylus/Pen (Report ID 0x01) | **Working** |
+| Multi-touch (raw heatmap pipeline) | Experimental |
+| Grid-to-screen calibration | In progress |
 
-The multitouch pipeline is a replica of the Windows Surface TouchPenProcessor0C19
-tracker: peak detection, flood-fill centroid, Hungarian assignment, EMA weight filter,
-stationary lock, lift history lookback, and post-emission coalescence.
-See [`docs/PIPELINE.md`](docs/PIPELINE.md).
-
-`raw_mode=1` (default) passively observes arriving CapImg frames.
-`raw_capture_only=1` and `raw_input_beta=1` enable the multitouch input device.
-The device appears as **"Surface Touchscreen"** in KDE/evdev.
+Multi-touch requires experimental `raw_mode=1`. Its frames are DFT antenna data,
+not a rectangular capacitive grid, and the raw-mode handshake and coordinate
+calibration are not reliable. Keep the default `raw_mode=0` for daily use.
 
 ---
 
@@ -64,16 +59,15 @@ The device appears as **"Surface Touchscreen"** in KDE/evdev.
 │  · DESCREQ → DEVICE_DESC → RPT_DESC  │
 │  · IRQ-driven seq_thread (states 0-5)│
 │  · Standard HID mode (Report 0x40)   │
-│  · Surface multitouch pipeline        │
-│  · Passive raw-frame capture          │
+│  · Optional raw heatmap interception │
 └──────────────┬───────────────────────┘
                │ Linux SPI framework
 ┌──────────────┴───────────────────────┐
 │  spi-amd.ko (driver/spi-amd.c)       │
 │  AMD FCH SPI controller driver (V2)  │
 │  · TX/RX FIFO management             │
-│  · Windows-shaped chunked PIO reads  │
-│  · 64-byte descriptor continuations  │
+│  · Chunked reads (>70B = DMA quanta) │
+│  · PIO remainder path                │
 └──────────────┬───────────────────────┘
                │ MMIO
 ┌──────────────┴───────────────────────┐
@@ -87,23 +81,20 @@ The driver uses an **IRQ-driven sequencer** (`spi_hid_seq_thread`) that mirrors 
 State 0 (WAIT_RESET)  → drain RESET_RSP → DESCREQ → State 1
 State 1 (WAIT_DESC)   → read DEVICE_DESC → DESCREQ2 → State 2
 State 2 (WAIT_RPT)    → read RPT_DESC → create HID device → State 4
-State 5 (WAIT_FEATURE)→ diagnostic feature response handling
+State 5 (WAIT_FEATURE)→ optional raw-mode GET_FEATURE response → State 4
 State 4 (DONE)        → forward input reports via hid_input_report()
-State 3 (VENDOR_INIT) → restart descriptor discovery on RESET_RSP
+State 3 (VENDOR_INIT) → vendor-init fallback path (hardcoded descriptors)
 ```
 
-State 3 is a recovery path. A RESET_RSP there restarts standard descriptor
-discovery; it never fabricates a device descriptor or substitutes a report
-descriptor. In practice the driver proceeds directly from state 2 to state 4
-in standard mode.
+State 3 is a recovery path reached when vendor-init mode does not produce
+a valid DATA report; it hardcodes the known descriptors and transitions
+to state 4. In practice the driver proceeds directly from state 2 to
+state 4 in standard mode.
 
 Input is IRQ-driven. `poll_interval` is deprecated and ignored; the runtime
 stream watchdog is disabled by default.
 
-**No feature command is sent in supported operation.** The device stays in
-standard HID mode and sends Report ID `0x40` touch and Report ID `0x01` pen
-reports. `raw_capture_only=1` can retain an already-arriving complete `0x0c` V0
-body but cannot request raw mode. See [`docs/RAW_CAPTURE_ONLY.md`](docs/RAW_CAPTURE_ONLY.md).
+**No GET_FEATURE/SET_FEATURE is sent** — the device stays in standard HID mode and sends proper Report ID 0x40 (TouchScreen) and Report ID 1 (Pen) reports with pre-computed X/Y coordinates.
 
 ---
 
@@ -136,12 +127,11 @@ sudo ./tools/install.sh
 sudo reboot
 ```
 
-This builds the driver via **DKMS** for every installed kernel with an available build
-tree, removes obsolete `sl4a-touch` DKMS versions, and installs a systemd service that
-loads the driver in standard HID mode on every boot via `/etc/modprobe.d/spi-hid.conf`
-(`options spi_hid raw_mode=N`). The installer deliberately does not replace loaded
-modules: reboot is required after an install or update to load a new `spi-amd`
-controller module.
+This builds the driver via **DKMS**, so it's automatically rebuilt for every kernel you
+install afterward, and installs a systemd service that loads the driver in standard HID
+mode on every boot via `/etc/modprobe.d/spi-hid.conf` (`options spi_hid raw_mode=N`).
+The installer deliberately does not replace loaded modules: reboot is required after
+an install or update to load a new `spi-amd` controller module.
 
 **Multi-distro support** (auto-detected via `/etc/os-release`): Arch/CachyOS (pacman),
 Ubuntu/Debian (apt), Fedora (dnf), openSUSE (zypper). Missing dependencies are reported
@@ -165,8 +155,7 @@ documented MOK process if the module is rejected after reboot.
 ### After installing
 
 The touchscreen appears as:
-- `/dev/input/eventN` — `Surface Touchscreen` for multitouch (beta, requires `raw_input_beta=1 raw_capture_only=1`)
-- `/dev/input/eventN` — `spi 045E:0C19` for single-touch via standard HID
+- `/dev/input/eventN` — `spi 045E:0C19` (ABS_X, ABS_Y, BTN_TOUCH) for touch
 - `/dev/input/eventN` — `spi 045E:0C19 Stylus` for pen
 
 For a boot freeze or initialization failure, use the opt-in trace procedure in
@@ -210,24 +199,24 @@ The installer and developer workflow use the same versioned
 
 ## Key Technical Decisions
 
-### HID Report Descriptor (device-read, no repair or fallback)
+### HID Report Descriptor (98.5% wire-read + 14-byte patch)
 
-The 936-byte report descriptor is read live from the device and parsed directly. The
-earlier apparent `0xFF` corruption was caused by the host controller driver adding a
-trailing dummy byte to each continuation: that changed the AMD FCH transaction from
-`TX_COUNT=3`/FIFO `0x84` to `TX_COUNT=4`/FIFO `0x85`. The Windows-shaped continuation
-keeps the three address bytes, `TX_COUNT=3`, `RX_COUNT=65`, and FIFO `0x84`. No bytes are
-patched and no captured descriptor is embedded as a fallback; a parse failure is reported
-instead of registering a guessed device.
+The 936-byte report descriptor is read live from the device. 14 specific byte positions (at offsets n·64+55 from descriptor start) are corrupted to `0xFF` by a characterized hardware defect in the device's 64-byte page structure. These bytes are patched from a hardcoded ground-truth copy. The remaining 922 bytes (98.5%) come from the live wire read every boot — meaning firmware updates or different SKUs would be picked up.
 
 ### No vendor init (Himax, 0x04 register)
 
 Windows cold-boot traces show a 14-byte vendor init write to register 0x04. Testing proved this is optional — the device initializes without it. Sending it may corrupt state.
 
-### Standard HID mode
+### Standard HID mode (no raw heatmap)
 
-The supported driver does not send feature commands and receives Report ID `0x40`
-touch coordinates plus Report ID `0x01` pen input through the normal HID path.
+By not sending the captured GET_FEATURE/SET_FEATURE mode-switch exchange, the device stays in standard HID mode and sends Report ID 0x40 with pre-computed touch coordinates. This avoids the complex blob detection on raw heatmap data that Windows handles via `TouchPenProcessor0C19.dll` (9.7 MB, DFT processing, CCL, Kalman tracking).
+
+### One-shot raw-mode validation
+
+Raw mode is never enabled permanently by the installer. To make one instrumented raw-mode
+boot, run `sudo ./tools/arm_raw_mode_once.sh` and reboot. The service deletes the marker
+before loading the modules; if raw mode freezes the system, the next forced reboot falls
+back to standard HID mode automatically. Do not reload either SPI module live.
 
 ### Companion chip (0x18/0x19/0x1A) not needed
 
@@ -242,7 +231,9 @@ The touchscreen has no companion chip dependency. Probed all CS lines 0-3, chip 
 | `install.sh` | `tools/install.sh` | **Multi-distro installer** (Arch/Debian/Fedora/openSUSE) — DKMS build + systemd service |
 | `uninstall.sh` | `tools/uninstall.sh` | Removes everything `install.sh` installed |
 | `rebuild_and_install.sh` | `tools/rebuild_and_install.sh` | Developer compile check and service sync; does not install or reload a module |
+| `calibrate_axes.py` | `tools/calibrate_axes.py` | Retired: raw geometry is not validated; see `docs/RAW_MODE_VALIDATION.md` |
 | `touchtest` / `touchviz` | `tools/touchtest*`, `tools/touchviz*` | evdev input inspection utilities |
+| `cli_probe.py` | `tools/cli_probe.py` | Calibration CLI protocol probe (Report ID 0x1f) |
 | `parse_spi.py` | `tools/parse_spi.py` | Full ETW CSV parser (transactions, timing, GPIO) |
 | `parse_spb_csv.py` | `tools/parse_spb_csv.py` | SPB payload extraction |
 | `ghidra/` | `tools/ghidra/` | Headless decompilation scripts for `TouchPenProcessor0C19.dll` |
@@ -256,12 +247,11 @@ Windows-side capture utilities are in `tools/windows_capture/`.
 
 | File | Contents |
 |------|----------|
-| [`docs/PIPELINE.md`](docs/PIPELINE.md) | Surface multitouch pipeline: stage-by-stage Windows-to-Linux mapping |
-| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Current roadmap and priorities |
 | [`docs/DEBUGGING.md`](docs/DEBUGGING.md) | Boot-freeze trace collection |
+| [`docs/TESTING.md`](docs/TESTING.md) | Portable protocol tests and kernel-test scope |
+| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Current raw-mode and calibration roadmap |
 | [`docs/AMD_CONTROLLER_VALIDATION.md`](docs/AMD_CONTROLLER_VALIDATION.md) | AMD FCH SPI controller validation boundary |
 | [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol reference |
-| [`docs/STANDARD_BOOT_EVIDENCE.md`](docs/STANDARD_BOOT_EVIDENCE.md) | Evidence boundary for supported standard boot behavior |
 | [`docs/GROUND_TRUTH.md`](docs/GROUND_TRUTH.md) | Dated research journal; later sections supersede earlier entries |
 | [`docs/CSV_SEQUENCE.md`](docs/CSV_SEQUENCE.md), [`docs/AMDSPI_DECOMP.md`](docs/AMDSPI_DECOMP.md), [`docs/decomp/`](docs/decomp/) | Historical Windows-trace and decompilation research |
 
@@ -294,7 +284,8 @@ These are local, untracked research inputs. They are not distributed by this rep
 
 ## Next Steps
 
-See [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
+See [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md). The open work is raw-mode handshake
+reliability, raw-data calibration, and upstream-quality patch preparation.
 
 ---
 

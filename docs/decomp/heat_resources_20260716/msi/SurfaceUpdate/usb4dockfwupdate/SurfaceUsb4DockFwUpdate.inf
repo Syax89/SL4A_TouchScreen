@@ -1,0 +1,97 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; File:               SurfaceUsb4DockwUpdate.inx
+;
+; Description:        Driver installation file for Surface USB4 Dock firmware update.
+;
+; Copyright (C) Microsoft Corporation.  All Rights Reserved.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+[Version]
+Signature="$Windows NT$"
+Class=Firmware
+ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+Provider=%ManufacturerName%
+CatalogFile=SurfaceUsb4DockFwUpdate.cat
+DriverVer = 03/13/2025,1.0.11.0
+PnPLockDown=1
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64.10.0...19041
+
+[Standard.NTamd64.10.0...19041]
+%SurfaceUsb4DockFwUpdate.DeviceDesc%=SurfaceUsb4DockFwUpdate, HID\VID_045E&PID_0877&Col01
+
+
+[SourceDisksNames]
+1 = %DiskName%
+
+; =================== UMDF Device ==================================
+
+[SurfaceUsb4DockFwUpdate.NT]
+Include            = HidCfu.inf
+Needs              = HidCfu.NT
+CopyFiles          = SurfaceUsb4DockFwUpdate.CopyFiles
+
+[SurfaceUsb4DockFwUpdate.NT.hw]
+AddReg = SurfaceUsb4DockFwUpdate_HWAddReg
+
+[SurfaceUsb4DockFwUpdate_HWAddReg]
+HKR,,FriendlyName,,%FwUpdateFriendlyName%
+HKR,,UseHidSetOutputReport,0x00010001,1
+HKR,,Alignment,0x00010001,1
+HKR,,OfferInputValueCapabilityUsageRangeMinimum,0x00010001,0x8A
+HKR,,OfferOutputValueCapabilityUsageRangeMinimum,0x00010001, 0x8E
+HKR,,PayloadInputValueCapabilityUsageRangeMinimum,0x00010001,0x66
+HKR,,PayloadOutputValueCapabilityUsageRangeMinimum,0x00010001,0x61
+HKR,,VersionsFeatureValueCapabilityUsageRangeMinimum,0x00010001, 0x62
+
+; Specify the location of the firmware offer and payload file in the registry.
+; The files are kept in driver store. When deployed, %13% would be expanded to the actual path in driver store.
+
+HKR,A410A898-8132-4246-AC1A-30F1E98BB0A4\SurfaceUsb4Dock_1_MCU1,Offer,   0x00000000, %13%\SurfaceUsb4Dock_1_MCU1.offer.bin
+HKR,A410A898-8132-4246-AC1A-30F1E98BB0A4\SurfaceUsb4Dock_1_MCU1,Payload,   0x00000000, %13%\SurfaceUsb4Dock_1_MCU1.payload.bin
+HKR,A410A898-8132-4246-AC1A-30F1E98BB0A4\SurfaceUsb4Dock_1_MCU2,Offer,   0x00000000, %13%\SurfaceUsb4Dock_1_MCU2.offer.bin
+HKR,A410A898-8132-4246-AC1A-30F1E98BB0A4\SurfaceUsb4Dock_1_MCU2,Payload,   0x00000000, %13%\SurfaceUsb4Dock_1_MCU2.payload.bin
+HKR,A410A898-8132-4246-AC1A-30F1E98BB0A4\SurfaceUsb4Dock_2_USB4,Offer,   0x00000000, %13%\SurfaceUsb4Dock_2_USB4.offer.bin
+HKR,A410A898-8132-4246-AC1A-30F1E98BB0A4\SurfaceUsb4Dock_2_USB4,Payload,   0x00000000, %13%\SurfaceUsb4Dock_2_USB4.payload.bin
+HKR,A410A898-8132-4246-AC1A-30F1E98BB0A4\SurfaceUsb4Dock_3_HDMI,Offer,   0x00000000, %13%\SurfaceUsb4Dock_3_HDMI.offer.bin
+HKR,A410A898-8132-4246-AC1A-30F1E98BB0A4\SurfaceUsb4Dock_3_HDMI,Payload,   0x00000000, %13%\SurfaceUsb4Dock_3_HDMI.payload.bin
+
+[SourceDisksFiles]
+SurfaceUsb4Dock_1_MCU1.offer.bin=1
+SurfaceUsb4Dock_1_MCU1.payload.bin=1
+SurfaceUsb4Dock_1_MCU2.offer.bin=1
+SurfaceUsb4Dock_1_MCU2.payload.bin=1
+SurfaceUsb4Dock_2_USB4.offer.bin=1
+SurfaceUsb4Dock_2_USB4.payload.bin=1
+SurfaceUsb4Dock_3_HDMI.offer.bin=1
+SurfaceUsb4Dock_3_HDMI.payload.bin=1
+
+[SurfaceUsb4DockFwUpdate.CopyFiles]
+SurfaceUsb4Dock_1_MCU1.offer.bin
+SurfaceUsb4Dock_1_MCU1.payload.bin
+SurfaceUsb4Dock_1_MCU2.offer.bin
+SurfaceUsb4Dock_1_MCU2.payload.bin
+SurfaceUsb4Dock_2_USB4.offer.bin
+SurfaceUsb4Dock_2_USB4.payload.bin
+SurfaceUsb4Dock_3_HDMI.offer.bin
+SurfaceUsb4Dock_3_HDMI.payload.bin
+
+[SurfaceUsb4DockFwUpdate.NT.Services]
+Include            = HidCfu.inf
+Needs              = HidCfu.NT.Services
+
+[SurfaceUsb4DockFwUpdate.NT.Wdf]
+Include            = HidCfu.inf
+Needs              = HidCfu.NT.Wdf
+
+[DestinationDirs]
+SurfaceUsb4DockFwUpdate.CopyFiles=13
+
+; =================== Generic ==================================
+
+[Strings]
+ManufacturerName="Surface"
+SurfaceUsb4DockFwUpdate.DeviceDesc = "Surface Usb4 Dock Firmware Update"
+DiskName = "Surface Usb4 Dock Firmware Update Installation Disk"
+FwUpdateFriendlyName= "Surface Usb4 Dock Firmware Update"

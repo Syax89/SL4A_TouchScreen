@@ -1,0 +1,11 @@
+Name	Data
+s72	v0
+Binary	Name
+InstallPrerequisitesII.CA.dll	Binary.InstallPrerequisitesII.CA.dll
+WixUIWixca	Binary.WixUIWixca
+WixUI_Bmp_Banner	Binary.WixUI_Bmp_Banner
+WixUI_Bmp_Dialog	Binary.WixUI_Bmp_Dialog
+WixUI_Ico_Exclam	Binary.WixUI_Ico_Exclam
+WixUI_Ico_Info	Binary.WixUI_Ico_Info
+WixUI_Bmp_New	Binary.WixUI_Bmp_New
+WixUI_Bmp_Up	Binary.WixUI_Bmp_Up

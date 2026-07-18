@@ -1,0 +1,81 @@
+Files Processed:
+	C:\Users\simon\Desktop\surface_touch_000001.etl
+Total Buffers Processed 62
+Total Events  Processed 26411
+Total Events  Lost      0
+Start Time              sabato 4 luglio 2026
+End Time                sabato 4 luglio 2026
+Elapsed Time            15 sec
++-------------------------------------------------------------------------------------------------------------------------+
+|Event Count   Event Name           Task            Opcode          Version         Guid                                  |
++-------------------------------------------------------------------------------------------------------------------------+
+|          1   EventTrace           0               PartitionInfoExtension 2               {68fdd900-4a3e-11d1-84f4-0000f80464e3}|
+|          1   EventTrace           0               Header          2               {68fdd900-4a3e-11d1-84f4-0000f80464e3}|
+|          1   Microsoft-Windows-Input-HIDCLASS 1               Arresta         0               {6465da78-e7a0-4f39-b084-8f53c7c30dc6}|
+|         18   Microsoft-Windows-Input-HIDCLASS 0               Informazioni    2               {6465da78-e7a0-4f39-b084-8f53c7c30dc6}|
+|          1   Microsoft-Windows-Input-HIDCLASS 1               Avvia           0               {6465da78-e7a0-4f39-b084-8f53c7c30dc6}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  0               EnableInterruptComplete 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  0               EnableInterruptStart 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  0               DisableInterruptComplete 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  0               DisableInterruptStart 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  0               MaskInterruptsComplete 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  0               MaskInterruptsStart 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|        550   Microsoft-Windows-GPIO-ClassExtension  1               InterruptInvokeDeviceIsrComplete 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|        550   Microsoft-Windows-GPIO-ClassExtension  1               InterruptInvokeDeviceIsrStart 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|        550   Microsoft-Windows-GPIO-ClassExtension  0               ClearActiveInterruptsComplete 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|        550   Microsoft-Windows-GPIO-ClassExtension  0               ClearActiveInterruptsStart 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1               Stop            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1               InterruptPinState 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1               QueryActiveInterruptsComplete 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1               QueryActiveInterruptsStart 1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1               Start           1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               Stop            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               IoComplete      1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       2198   Microsoft-Windows-SPB-ClassExtension  3               IoSpbDirection  1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               IoSpbPayloadStop 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       2198   Microsoft-Windows-SPB-ClassExtension  3               IoSpbPayloadTdStop 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       2198   Microsoft-Windows-SPB-ClassExtension  3               IoSpbPayloadTdBuffer 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       2198   Microsoft-Windows-SPB-ClassExtension  3               IoSpbPayloadTdStart 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               IoSpbPayloadStart 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               IoPresentToDriver 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               IoDispatchToController 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               IoForwardToControllerQueue 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               IoDispatchToTarget 1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  3               Start           1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
++-------------------------------------------------------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------------------------+
+|Event Count   Event Name           Event ID        Version         Guid                                  |
++---------------------------------------------------------------------------------------------------------+
+|          2   EventTrace           0               2               {68fdd900-4a3e-11d1-84f4-0000f80464e3}|
+|          1   Microsoft-Windows-Input-HIDCLASS 1               0               {6465da78-e7a0-4f39-b084-8f53c7c30dc6}|
+|          1   Microsoft-Windows-Input-HIDCLASS 2               0               {6465da78-e7a0-4f39-b084-8f53c7c30dc6}|
+|         18   Microsoft-Windows-Input-HIDCLASS 3               2               {6465da78-e7a0-4f39-b084-8f53c7c30dc6}|
+|        550   Microsoft-Windows-GPIO-ClassExtension  1002            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|        550   Microsoft-Windows-GPIO-ClassExtension  1003            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  1008            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  1009            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  1010            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  1011            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|        550   Microsoft-Windows-GPIO-ClassExtension  1012            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|        550   Microsoft-Windows-GPIO-ClassExtension  1013            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1014            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1015            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1016            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  1017            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|          1   Microsoft-Windows-GPIO-ClassExtension  1018            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1019            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1100   Microsoft-Windows-GPIO-ClassExtension  1020            1               {55ab77f6-fa04-43ef-af45-688fbf500482}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1010            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1011            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1012            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1013            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1014            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1015            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1016            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       2198   Microsoft-Windows-SPB-ClassExtension  1018            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1021            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       2198   Microsoft-Windows-SPB-ClassExtension  1022            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       2198   Microsoft-Windows-SPB-ClassExtension  1023            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       2198   Microsoft-Windows-SPB-ClassExtension  1024            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
+|       1099   Microsoft-Windows-SPB-ClassExtension  1025            1               {72cd9ff7-4af8-4b89-aede-5f26fda13567}|
++---------------------------------------------------------------------------------------------------------+

@@ -163,8 +163,7 @@ struct spi_hid_device_desc_raw {
 	__le16 wVendorID;
 	__le16 wProductID;
 	__le16 wVersionID;
-	__le16 wFlags;
-	__u8 reserved[4];
+	__le32 wFlags;
 } __packed;
 
 struct spi_hid_device_descriptor {
@@ -289,6 +288,9 @@ struct spi_hid {
 	struct mutex output_lock;
 	struct mutex raw_capture_lock;
 	struct completion output_done;
+	u8 expected_response_type;
+	u8 expected_response_id;
+	bool output_pending;
 
 	__u8 read_approval[SPI_HID_READ_APPROVAL_MAX];
 

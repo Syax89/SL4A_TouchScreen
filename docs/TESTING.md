@@ -54,6 +54,8 @@ The tool requires exactly eight 4304-byte slots, emits hashes for every slot,
 and writes only envelopes matching the frozen `ce 10 0c` boundary. It has no
 device-I/O code.
 
+Raw-mode hardware work additionally follows [Raw Mode Validation](RAW_MODE_VALIDATION.md).
+
 ## Kernel Fault Tests
 
 The running kernel must enable at least:

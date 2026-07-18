@@ -1,0 +1,281 @@
+
+7-Zip 26.02 (x64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-06-25
+ 64-bit locale=it_IT.UTF-8 Threads:12 OPEN_MAX:1048576, ASM
+
+Scanning the drive for archives:
+1 file, 735399936 bytes (702 MiB)
+
+Listing archive: /home/simone/Scaricati/SurfaceLaptop4_AMD_Win11_22631_26.040.2105.0.msi
+
+--
+Path = /home/simone/Scaricati/SurfaceLaptop4_AMD_Win11_22631_26.040.2105.0.msi
+Type = Compound
+Physical Size = 735399936
+Extension = msi
+Cluster Size = 4096
+
+----------
+Path = !File
+Size = 13000
+Packed Size = 16384
+Created = 
+Modified = 
+
+Path = cab1.cab
+Size = 601282383
+Packed Size = 601284608
+Created = 
+Modified = 
+
+Path = cab2.cab
+Size = 132732756
+Packed Size = 132734976
+Created = 
+Modified = 
+
+Path = !UIText
+Size = 204
+Packed Size = 256
+Created = 
+Modified = 
+
+Path = !Media
+Size = 28
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !Binary
+Size = 32
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !Dialog
+Size = 484
+Packed Size = 512
+Created = 
+Modified = 
+
+Path = !_Columns
+Size = 1120
+Packed Size = 1152
+Created = 
+Modified = 
+
+Path = !_Tables
+Size = 56
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !Feature
+Size = 32
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !CheckBox
+Size = 8
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !Control
+Size = 5590
+Packed Size = 8192
+Created = 
+Modified = 
+
+Path = !Upgrade
+Size = 32
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !Property
+Size = 84
+Packed Size = 128
+Created = 
+Modified = 
+
+Path = !TextStyle
+Size = 36
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !Directory
+Size = 492
+Packed Size = 512
+Created = 
+Modified = 
+
+Path = !Component
+Size = 7800
+Packed Size = 8192
+Created = 
+Modified = 
+
+Path = !_StringData
+Size = 141155
+Packed Size = 143360
+Created = 
+Modified = 
+
+Path = !_StringPool
+Size = 13864
+Packed Size = 16384
+Created = 
+Modified = 
+
+Path = !_Validation
+Size = 3408
+Packed Size = 3456
+Created = 
+Modified = 
+
+Path = !RadioButton
+Size = 36
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !ControlEvent
+Size = 1536
+Packed Size = 1536
+Created = 
+Modified = 
+
+Path = !MsiFileHash
+Size = 7580
+Packed Size = 8192
+Created = 
+Modified = 
+
+Path = !CustomAction
+Size = 72
+Packed Size = 128
+Created = 
+Modified = 
+
+Path = !EventMapping
+Size = 40
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = Binary.WixUIWixca
+Size = 116144
+Packed Size = 118784
+Created = 
+Modified = 
+
+Path = !LaunchCondition
+Size = 4
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !AdminUISequence
+Size = 42
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !ControlCondition
+Size = 504
+Packed Size = 512
+Created = 
+Modified = 
+
+Path = Binary.WixUI_Bmp_New
+Size = 318
+Packed Size = 320
+Created = 
+Modified = 
+
+Path = Binary.WixUI_Bmp_Up
+Size = 318
+Packed Size = 320
+Created = 
+Modified = 
+
+Path = !FeatureComponents
+Size = 2604
+Packed Size = 2624
+Created = 
+Modified = 
+
+Path = !InstallUISequence
+Size = 102
+Packed Size = 128
+Created = 
+Modified = 
+
+Path = Binary.WixUI_Ico_Info
+Size = 1078
+Packed Size = 1088
+Created = 
+Modified = 
+
+Path = !AdminExecuteSequence
+Size = 48
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = !AdvtExecuteSequence
+Size = 42
+Packed Size = 64
+Created = 
+Modified = 
+
+Path = Binary.WixUI_Bmp_Banner
+Size = 3194
+Packed Size = 3200
+Created = 
+Modified = 
+
+Path = Binary.WixUI_Bmp_Dialog
+Size = 8133
+Packed Size = 8192
+Created = 
+Modified = 
+
+Path = Binary.WixUI_Ico_Exclam
+Size = 766
+Packed Size = 768
+Created = 
+Modified = 
+
+Path = !InstallExecuteSequence
+Size = 144
+Packed Size = 192
+Created = 
+Modified = 
+
+Path = [5]DigitalSignature
+Size = 10287
+Packed Size = 12288
+Created = 
+Modified = 
+
+Path = Binary.InstallPrerequisitesII.CA.dll
+Size = 276387
+Packed Size = 278528
+Created = 
+Modified = 
+
+Path = [5]SummaryInformation
+Size = 612
+Packed Size = 640
+Created = 
+Modified = 
+
+Path = [5]MsiDigitalSignatureEx
+Size = 32
+Packed Size = 64
+Created = 
+Modified = 
+

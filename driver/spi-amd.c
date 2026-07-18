@@ -122,7 +122,7 @@ static void amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs)
 {
 	u8 tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
 	tmp &= ~AMD_SPI_ALT_CS_MASK;
-	/* Windows decomp always uses CS1 (0x01) — hardcode it */
+	/* MSHW0231 is wired to CS1; generic chip-select support is unverified. */
 	tmp |= 0x01;
 	amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, tmp);
 }
@@ -165,16 +165,14 @@ static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, alt_spd,
 			       AMD_SPI_ALT_SPD_MASK);
 
-	if (amd_spi->speed_hz == 100000000)
-		amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, 1,
-				       AMD_SPI_SPI100_MASK);
+	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG,
+			       amd_spi->speed_hz == 100000000 ? 1 : 0,
+			       AMD_SPI_SPI100_MASK);
 
-	if (amd_spi_freq[i].spd7_val) {
-		spd7_val = (amd_spi_freq[i].spd7_val << AMD_SPI_SPD7_SHIFT)
-			    & AMD_SPI_SPD7_MASK;
-		amd_spi_setclear_reg32(amd_spi, AMD_SPI_SPEED_REG, spd7_val,
-				       AMD_SPI_SPD7_MASK);
-	}
+	spd7_val = (amd_spi_freq[i].spd7_val << AMD_SPI_SPD7_SHIFT) &
+		AMD_SPI_SPD7_MASK;
+	amd_spi_setclear_reg32(amd_spi, AMD_SPI_SPEED_REG, spd7_val,
+		       AMD_SPI_SPD7_MASK);
 }
 
 static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi)
@@ -534,7 +532,7 @@ int amd_spi_probe_common(struct device *dev, struct spi_controller *host)
 	host->max_transfer_size = amd_spi_max_transfer_size;
 	host->max_message_size = amd_spi_max_transfer_size;
 
-	err = devm_spi_register_controller(dev, host);
+	err = spi_register_controller(host);
 	if (err)
 		return dev_err_probe(dev, err, "error registering SPI controller\n");
 
@@ -566,20 +564,22 @@ static int amd_spi_probe(struct platform_device *pdev)
 	/* Set LPC bridge registers to enable 8-bit FIFO mode with Windows layout */
 #if 0 /* Unproven persistent controller state; excluded from standard boot. */
 	{
-		struct pci_dev *lpc = pci_get_device(PCI_VENDOR_ID_AMD, 0x790e, NULL);
-		if (lpc) {
+		amd_spi->lpc = pci_get_device(PCI_VENDOR_ID_AMD, 0x790e, NULL);
+		if (amd_spi->lpc) {
 			u32 val, b4;
-			pci_read_config_dword(lpc, 0xB4, &b4);
-			pci_read_config_dword(lpc, 0xB8, &val);
+			pci_read_config_dword(amd_spi->lpc, 0xB4, &b4);
+			pci_read_config_dword(amd_spi->lpc, 0xB8, &val);
+			amd_spi->lpc_b4 = b4;
+			amd_spi->lpc_b8 = val;
 			amd_trace(dev, 1, "LPC before b4=0x%08x b8=0x%08x\n", b4, val);
 			val &= ~0x80; // force 8-bit mode (bit7 = 0)
-			pci_write_config_dword(lpc, 0xB8, val);
+			pci_write_config_dword(amd_spi->lpc, 0xB8, val);
 
-			pci_write_config_dword(lpc, 0xB4, 0x7DFFE000); // Windows FIFO layout
-			pci_read_config_dword(lpc, 0xB4, &b4);
-			pci_read_config_dword(lpc, 0xB8, &val);
+			pci_write_config_dword(amd_spi->lpc, 0xB4, 0x7DFFE000); // Windows FIFO layout
+			amd_spi->lpc_configured = true;
+			pci_read_config_dword(amd_spi->lpc, 0xB4, &b4);
+			pci_read_config_dword(amd_spi->lpc, 0xB8, &val);
 			amd_trace(dev, 1, "LPC after b4=0x%08x b8=0x%08x\n", b4, val);
-			pci_dev_put(lpc);
 			dev_info(dev, "Configured LPC bridge 00:14.3 for 8-bit FIFO mode (0xB8&=~0x80, 0xB4=0x7DFFE000)\n");
 		} else {
 			dev_warn(dev, "LPC bridge 1022:790e not found, skipping 8-bit FIFO configuration\n");
@@ -591,6 +591,7 @@ static int amd_spi_probe(struct platform_device *pdev)
 	 * We never touched it before; read it for diagnostic comparison. */
 	{
 		u32 host_pref = amd_spi_readreg32(amd_spi, AMD_SPI_HOST_PREF_REG);
+		amd_spi->host_pref = host_pref;
 		dev_info(dev, "spi-amd: HOST_PREF(0x2C) = 0x%08X (Windows: 0x%08X)\n",
 			 host_pref, AMD_SPI_HOST_PREF_WIN);
 
@@ -600,6 +601,7 @@ static int amd_spi_probe(struct platform_device *pdev)
 			dev_info(dev, "spi-amd: HOST_PREF differs from Windows (0x%08X vs 0x%08X), applying Windows value\n",
 				 host_pref, AMD_SPI_HOST_PREF_WIN);
 			amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG, AMD_SPI_HOST_PREF_WIN);
+			amd_spi->host_pref_overridden = true;
 			host_pref = amd_spi_readreg32(amd_spi, AMD_SPI_HOST_PREF_REG);
 			dev_info(dev, "spi-amd: HOST_PREF after write = 0x%08X\n", host_pref);
 		} else if (host_pref == AMD_SPI_HOST_PREF_WIN) {
@@ -632,7 +634,20 @@ static int amd_spi_probe(struct platform_device *pdev)
 	dev_info(dev, "SPI100_SPEED_CONFIG at MMIO+0x22 = 0x%04X\n", amd_spi->speed_cfg);
 
 	amd_trace(dev, 1, "probe registering SPI controller version=%u\n", amd_spi->version);
+	platform_set_drvdata(pdev, host);
 	ret = amd_spi_probe_common(dev, host);
+	if (ret) {
+		if (amd_spi->host_pref_overridden)
+			amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG,
+					   amd_spi->host_pref);
+		if (amd_spi->lpc_configured) {
+			pci_write_config_dword(amd_spi->lpc, 0xB4, amd_spi->lpc_b4);
+			pci_write_config_dword(amd_spi->lpc, 0xB8, amd_spi->lpc_b8);
+			pci_dev_put(amd_spi->lpc);
+			amd_spi->lpc = NULL;
+			amd_spi->lpc_configured = false;
+		}
+	}
 	amd_trace(dev, 1, "probe complete ret=%d\n", ret);
 	return ret;
 }
@@ -649,6 +664,22 @@ MODULE_DEVICE_TABLE(acpi, spi_acpi_match);
 
 static void amd_spi_remove(struct platform_device *pdev)
 {
+	struct spi_controller *host = platform_get_drvdata(pdev);
+	struct amd_spi *amd_spi;
+
+	if (!host)
+		return;
+	amd_spi = spi_controller_get_devdata(host);
+	spi_unregister_controller(host);
+	if (amd_spi->host_pref_overridden)
+		amd_spi_writereg32(amd_spi, AMD_SPI_HOST_PREF_REG, amd_spi->host_pref);
+	if (amd_spi->lpc_configured) {
+		pci_write_config_dword(amd_spi->lpc, 0xB4, amd_spi->lpc_b4);
+		pci_write_config_dword(amd_spi->lpc, 0xB8, amd_spi->lpc_b8);
+		pci_dev_put(amd_spi->lpc);
+		amd_spi->lpc = NULL;
+		amd_spi->lpc_configured = false;
+	}
 	amd_trace(&pdev->dev, 1, "remove entered\n");
 }
 

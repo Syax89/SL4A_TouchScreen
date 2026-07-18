@@ -1,0 +1,53 @@
+;
+; SurfaceSMF.inf
+; 0.0.0.88
+; Copyright (C) 2019 Microsoft Corporation.  All Rights Reserved.
+;
+[Version]
+Signature="$WINDOWS NT$"
+Class=Firmware
+ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+Provider=%Provider%
+DriverVer=04/27/2021,0.0.0.88
+PnpLockdown=1
+CatalogFile=SurfaceSMF.cat
+
+[Manufacturer]
+%MfgName% = Firmware,NTamd64
+
+[Firmware.NTamd64]
+%FirmwareDesc% = Firmware_Install,UEFI\RES_{C425CE9B-8489-4A5B-AD71-12DD29B2508E}
+
+[Firmware_Install.NT]
+CopyFiles = Firmware_CopyFiles
+
+[Firmware_CopyFiles]
+Smf_0.0.0.88.bin
+
+[Firmware_Install.NT.Hw]
+AddReg = Firmware_AddReg
+
+[Firmware_AddReg]
+HKR,,FirmwareId,,{C425CE9B-8489-4A5B-AD71-12DD29B2508E}
+HKR,,FirmwareVersion,%REG_DWORD%,0x58
+HKR,,FirmwareFilename,,Smf_0.0.0.88.bin
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+Smf_0.0.0.88.bin = 1
+
+[DestinationDirs]
+DefaultDestDir = %DIRID_WINDOWS%,Firmware ; %SystemRoot%\Firmware
+
+[Strings]
+; localizable
+Provider     = "Surface"
+MfgName      = "Microsoft"
+FirmwareDesc = ""Surface SMF""
+DiskName     = "Firmware Update"
+
+; non-localizable
+DIRID_WINDOWS = 10
+REG_DWORD     = 0x00010001

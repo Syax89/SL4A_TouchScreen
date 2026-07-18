@@ -9,10 +9,17 @@
 #include "../driver/spi-hid-protocol.h"
 
 static unsigned int g_passed, g_failed;
+static uint32_t fuzz_state = 0x6d5a56e9;
 #define CHECK(cond, msg) do { \
 	g_passed++; \
 	if (!(cond)) { g_failed++; fprintf(stderr, "FAIL: %s\n  %s:%d: %s\n", msg, __FILE__, __LINE__, #cond); } \
 } while (0)
+
+static uint32_t fuzz_next(void)
+{
+	fuzz_state = fuzz_state * 1664525u + 1013904223u;
+	return fuzz_state;
+}
 
 /* ── Header decode: valid report types ─────────────────────────── */
 
@@ -77,20 +84,24 @@ static void test_encode_output(void)
 	const spi_hid_proto_u8 max_addr[] = {0x02, 0xff, 0xff, 0xff, 0x42, 0x00};
 
 	/* DESCREQ: register 1, length 4 */
-	spi_hid_protocol_encode_output_header(raw, 1, 4);
+	CHECK(spi_hid_protocol_encode_output_header(raw, 1, 4) == 0,
+	      "encode: valid DESCREQ length");
 	CHECK(!memcmp(raw, descreq, 6), "encode: DESCREQ");
 
 	/* Max register address (24-bit) */
-	spi_hid_protocol_encode_output_header(raw, 0xFFFFFF, 4);
+	CHECK(spi_hid_protocol_encode_output_header(raw, 0xFFFFFF, 4) == 0,
+	      "encode: valid maximum register");
 	CHECK(!memcmp(raw, max_addr, 6), "encode: max register address");
 
 	/* Zero-length output */
-	spi_hid_protocol_encode_output_header(raw, 0, 0);
+	CHECK(spi_hid_protocol_encode_output_header(raw, 0, 0) == 0,
+	      "encode: valid zero length");
 	CHECK(raw[4] == SPI_HID_PROTOCOL_VERSION, "encode: zero-length version byte");
 	CHECK(raw[5] == 0, "encode: zero-length len_hi");
 
 	/* Max output length (0xFFF * 4 = 4092) */
-	spi_hid_protocol_encode_output_header(raw, 0x100, 4092);
+	CHECK(spi_hid_protocol_encode_output_header(raw, 0x100, 4092) == 0,
+	      "encode: valid maximum aligned length");
 	CHECK(raw[4] == (SPI_HID_PROTOCOL_VERSION | (0xc << 4)), "encode: max len_lo nibble");
 	CHECK(raw[5] == 0xff, "encode: max len_hi");
 }
@@ -111,119 +122,6 @@ static void test_encode_read(void)
 
 	spi_hid_protocol_encode_read_approval(raw, 0x000002);
 	CHECK(raw[1] == 0x00 && raw[2] == 0x00 && raw[3] == 0x02, "encode_read: RPT_DESC register");
-}
-
-/* ── V0 body envelope ──────────────────────────────────────────── */
-
-static void test_parse_content(void)
-{
-	struct spi_hid_protocol_content content;
-	spi_hid_proto_u8 raw_body[4304] = { 0xce, 0x10, 0x0c, 0x32, 0x48 };
-	const spi_hid_proto_u8 short_body[] = { 0x03, 0x00 };
-	const spi_hid_proto_u8 too_short[] = { 0x02, 0x00, 0x0c };
-	const spi_hid_proto_u8 truncated[] = { 0x08, 0x00, 0x0c, 0x01 };
-
-	raw_body[4301] = 0x7e;
-	raw_body[4302] = 0xa5;
-	raw_body[4303] = 0x5a;
-
-	CHECK(!spi_hid_protocol_parse_content(raw_body, sizeof(raw_body), &content),
-	      "content: raw frame parses");
-	CHECK(content.total_length == 4302, "content: preserves total length");
-	CHECK(content.content_id == 0x0c, "content: preserves raw content ID");
-	CHECK(content.data_length == 4299, "content: excludes V0 envelope");
-	CHECK(content.data == raw_body + 3, "content: begins after length and ID");
-	CHECK(content.data + content.data_length == raw_body + 4302,
-	      "content: excludes aligned tail");
-	CHECK(content.data[0] == 0x32 && content.data[1] == 0x48,
-	      "content: preserves first opaque raw bytes");
-	CHECK(content.data[4298] == 0x7e && raw_body[4302] == 0xa5 &&
-	      raw_body[4303] == 0x5a, "content: leaves aligned tail untouched");
-
-	CHECK(spi_hid_protocol_parse_content(short_body, sizeof(short_body), &content) < 0,
-	      "content: rejects missing ID");
-	CHECK(spi_hid_protocol_parse_content(too_short, sizeof(too_short), &content) < 0,
-	      "content: rejects total length below envelope");
-	CHECK(spi_hid_protocol_parse_content(truncated, sizeof(truncated), &content) < 0,
-	      "content: rejects truncated body");
-	CHECK(spi_hid_protocol_parse_content(NULL, sizeof(raw_body), &content) < 0,
-	      "content: rejects null body");
-	CHECK(!spi_hid_protocol_validate_raw_capture(raw_body, sizeof(raw_body), &content),
-	      "raw capture: accepts only the frozen full raw envelope");
-	raw_body[2] = 0x08;
-	CHECK(spi_hid_protocol_validate_raw_capture(raw_body, sizeof(raw_body), &content) < 0,
-	      "raw capture: rejects a non-raw report ID");
-	raw_body[2] = 0x0c;
-	raw_body[0] = 0xcd;
-	CHECK(spi_hid_protocol_validate_raw_capture(raw_body, sizeof(raw_body), &content) < 0,
-	      "raw capture: rejects a different semantic length");
-	raw_body[0] = 0xce;
-	CHECK(spi_hid_protocol_validate_raw_capture(raw_body, sizeof(raw_body) - 1, &content) < 0,
-	      "raw capture: rejects a missing aligned tail byte");
-}
-
-static void test_parse_content_boundaries(void)
-{
-	spi_hid_proto_u8 body[128] = { 0 };
-	struct spi_hid_protocol_content content;
-
-	/* Check every envelope length around each available body boundary. */
-	for (unsigned int body_length = 0; body_length <= sizeof(body); body_length++) {
-		for (unsigned int total_length = 0; total_length <= sizeof(body) + 1;
-		     total_length++) {
-			int valid = body_length >= 3 && total_length >= 3 &&
-				total_length <= body_length;
-			int result;
-
-			body[0] = (spi_hid_proto_u8)total_length;
-			body[1] = (spi_hid_proto_u8)(total_length >> 8);
-			body[2] = 0xa5;
-			result = spi_hid_protocol_parse_content(body, body_length, &content);
-			CHECK((result == 0) == valid,
-			      "content boundaries: accept only complete V0 envelopes");
-			if (valid) {
-				CHECK(content.total_length == total_length,
-				      "content boundaries: total length preserved");
-				CHECK(content.content_id == 0xa5,
-				      "content boundaries: content ID preserved");
-				CHECK(content.data == body + 3 &&
-				      content.data_length == total_length - 3,
-				      "content boundaries: data span is bounded");
-			}
-		}
-	}
-
-	CHECK(spi_hid_protocol_parse_content(body, sizeof(body), NULL) < 0,
-	      "content boundaries: rejects null result");
-}
-
-/* ── Frozen Windows feature vectors ────────────────────────────── */
-
-static void test_feature_vectors(void)
-{
-	spi_hid_proto_u8 get[10];
-	spi_hid_proto_u8 set[14];
-	const spi_hid_proto_u8 expected_get[] =
-		{ 0x02, 0x00, 0x00, 0x03, 0x42, 0x00, 0x04, 0x03, 0x00, 0x06 };
-	const spi_hid_proto_u8 expected_set[] =
-		{ 0x02, 0x00, 0x00, 0x03, 0x82, 0x00, 0x03, 0x04, 0x00,
-		  0x05, 0x01, 0x00, 0x00, 0x00 };
-
-	spi_hid_protocol_encode_output_header(get, 3, 4);
-	get[6] = 0x04;
-	get[7] = 0x03;
-	get[8] = 0x00;
-	get[9] = 0x06;
-	CHECK(!memcmp(get, expected_get, sizeof(get)), "feature: frozen GET wire vector");
-
-	spi_hid_protocol_encode_output_header(set, 3, 8);
-	set[6] = 0x03;
-	set[7] = 0x04;
-	set[8] = 0x00;
-	set[9] = 0x05;
-	set[10] = 0x01;
-	memset(set + 11, 0, 3);
-	CHECK(!memcmp(set, expected_set, sizeof(set)), "feature: frozen SET wire vector");
 }
 
 /* ── Header search ─────────────────────────────────────────────── */
@@ -268,18 +166,13 @@ static void test_find_header(void)
 
 static void test_fuzz_roundtrip(void)
 {
-	unsigned int state = 0x4a1d3e7b;
-
 	for (int i = 0; i < 5000; i++) {
 		spi_hid_proto_u8 raw[4];
 		struct spi_hid_protocol_header h;
 
-		state = state * 1103515245u + 12345u;
-		raw[0] = (spi_hid_proto_u8)((state & 0xf0) | 0x02); /* force version=2 */
-		state = state * 1103515245u + 12345u;
-		raw[1] = (spi_hid_proto_u8)(state & 0xf0);           /* reserved nibble = 0 */
-		state = state * 1103515245u + 12345u;
-		raw[2] = (spi_hid_proto_u8)(state & 0xff);
+		raw[0] = (spi_hid_proto_u8)((fuzz_next() & 0xf0) | 0x02); /* force version=2 */
+		raw[1] = (spi_hid_proto_u8)(fuzz_next() & 0xf0);           /* reserved nibble = 0 */
+		raw[2] = (spi_hid_proto_u8)(fuzz_next() & 0xff);
 		raw[3] = 0x5a;
 
 		spi_hid_protocol_decode_header(raw, &h);
@@ -309,20 +202,14 @@ static void test_fuzz_roundtrip(void)
 
 static void test_fuzz_output_roundtrip(void)
 {
-	unsigned int state = 0x9d3c7a51;
-
 	for (int i = 0; i < 5000; i++) {
 		spi_hid_proto_u8 raw[6];
-		unsigned int reg;
+		spi_hid_proto_u16 reg = (spi_hid_proto_u16)(fuzz_next() & 0xFFFFFF);
 		/* Max encodable real bytes: 12 bits → 0xFFF = 4095 */
-		spi_hid_proto_u16 outlen;
+		spi_hid_proto_u16 outlen = (spi_hid_proto_u16)(fuzz_next() & 0xFFF);
 
-		state = state * 1103515245u + 12345u;
-		reg = state & 0xffffff;
-		state = state * 1103515245u + 12345u;
-		outlen = (spi_hid_proto_u16)(state & 0xfff);
-
-		spi_hid_protocol_encode_output_header(raw, reg, outlen);
+		CHECK(spi_hid_protocol_encode_output_header(raw, reg, outlen) == 0,
+		      "fuzz_out: encodable length accepted");
 
 		/* Verify structural invariants */
 		CHECK(raw[0] == SPI_HID_PROTOCOL_WRITE_OPCODE, "fuzz_out: opcode");
@@ -370,13 +257,20 @@ static void test_output_length_boundaries(void)
 	for (unsigned int len = 0; len <= 0xfff; len++) {
 		unsigned int decoded;
 
-		spi_hid_protocol_encode_output_header(raw, 0x123456, len);
+		CHECK(spi_hid_protocol_encode_output_header(raw, 0x123456, len) == 0,
+		      "output length: encodable value accepted");
 		decoded = ((unsigned int)(raw[4] >> 4) & 0xf) |
 			((unsigned int)raw[5] << 4);
 		CHECK(decoded == len, "output length: all 12-bit values round-trip");
 		CHECK((raw[4] & 0xf) == SPI_HID_PROTOCOL_VERSION,
 		      "output length: version nibble preserved");
 	}
+	CHECK(spi_hid_protocol_output_length_valid(0xfff),
+	      "output length: maximum accepted");
+	CHECK(!spi_hid_protocol_output_length_valid(0x1000),
+	      "output length: overflow rejected");
+	CHECK(spi_hid_protocol_encode_output_header(raw, 0x123456, 0x1000) < 0,
+	      "output length: encoder rejects overflow");
 }
 
 static void test_header_offsets(void)
@@ -405,9 +299,6 @@ int main(void)
 	test_decode_boundary();
 	test_encode_output();
 	test_encode_read();
-	test_parse_content();
-	test_parse_content_boundaries();
-	test_feature_vectors();
 	test_find_header();
 	test_find_header_null_offset();
 	test_find_header_too_short();

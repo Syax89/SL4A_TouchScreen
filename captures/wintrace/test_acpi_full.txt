@@ -1,0 +1,18 @@
+BeginHeader
+   UnknownEvent/Classic,  TimeStamp,     Process Name ( PID),   ThreadID, CPU,                              EventGuid, Type, Level, Version, MofLength
+   InvalidEvent/Classic,  TimeStamp,     Process Name ( PID),   ThreadID, CPU,                              EventGuid, Type, Level, Version, MofLength
+   UnknownEvent/Crimson,  TimeStamp,     Process Name ( PID),   ThreadID, CPU,                             ProviderId,     Id,   Task, Opcode, Version, Channel, Level,            Keyword, UserDataLength
+   InvalidEvent/Crimson,  TimeStamp,     Process Name ( PID),   ThreadID, CPU,                             ProviderId,     Id,   Task, Opcode, Version, Channel, Level,            Keyword, UserDataLength
+                ImageId,  TimeStamp,     Process Name ( PID),           BaseAddr,  ImageSize, TimeDateStamp, OrigFileName
+             DbgId/None,  TimeStamp,     Process Name ( PID),           BaseAddr
+              DbgId/Bin,  TimeStamp,     Process Name ( PID),           BaseAddr,  ImageSize, TimeDateStamp,   Checksum, OrigFileName
+              DbgId/Dbg,  TimeStamp,     Process Name ( PID),           BaseAddr,  ImageSize, TimeDateStamp,   Checksum, OrigFileName
+             DbgId/NB10,  TimeStamp,     Process Name ( PID),           BaseAddr,  Signature,        Age, Pdb
+             DbgId/RSDS,  TimeStamp,     Process Name ( PID),           BaseAddr,                              Signature,        Age, Pdb
+           DbgId/ILRSDS,  TimeStamp,     Process Name ( PID),           BaseAddr,                              Signature,        Age, Pdb
+        DbgId/RSDS(Tmf),  TimeStamp,                              Signature,        Age, Pdb
+FirstReliableEventTimeStamp, TimeStamp
+EndHeader
+OS Version: 10.0.26200, Trace Size: 8KB, Events Lost: 0, Buffers lost: 0, Trace Start: 134279105254683618, Trace Length: 37 sec, PointerSize: 8, Trace Name: C:\test_acpi.etl
+FirstReliableEventTimeStamp, 0
+   UnknownEvent/Classic,          0,        "Unknown" (10300),      10596,   0, {68fdd900-4a3e-11d1-84f4-0000f80464e3}, 0x50,  0x00,  0x0002, 48

@@ -1,0 +1,106 @@
+;
+;/*++
+;
+;(C) Copyright 2020 Advanced Micro Devices, Inc.
+;
+;Module Name:
+; amdspi.inf
+;
+;Abstract:
+;    INF file for installing the AMD SPI Controller Driver
+;
+;
+;--*/
+
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%ManufacturerName%
+CatalogFile=amdspi.cat
+DriverVer = 11/04/2020,1.0.0.101
+
+;[DestinationDirs]
+
+
+; ================= Class section =====================
+
+;[ClassInstall32]
+;Addreg=SampleClassReg
+
+;[SampleClassReg]
+;HKR,,,0,%ClassName%
+;HKR,,Icon,,-5
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+;[SourceDisksFiles]
+
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=AMD,NTamd64.6.2
+
+[AMD.NTamd64.6.2]
+%amdspi.ControllerDesc%=amdspi_Controller, ACPI\AMDI0060
+
+[amdspi_Controller.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+amdspi.sys
+
+;-------------- Service installation
+[amdspi_Controller.NT.Services]
+AddService = amdspi,%SPSVCINST_ASSOCSERVICE%, amdspi_Service_Inst
+
+; -------------- amdspi driver install sections
+[amdspi_Service_Inst]
+DisplayName    = %amdspi.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\amdspi.sys
+LoadOrderGroup = Extended Base
+
+;
+;--- amdspi_Device Coinstaller installation ------
+;
+
+[DestinationDirs]
+DefaultDestDir = 12
+amdspi_Controller_CoInstaller_CopyFiles = 11
+
+[amdspi_Controller.NT.CoInstallers]
+AddReg=amdspi_Controller_CoInstaller_AddReg
+CopyFiles=amdspi_Controller_CoInstaller_CopyFiles
+
+[amdspi_Controller_CoInstaller_AddReg]
+;
+
+
+[amdspi_Controller_CoInstaller_CopyFiles]
+;
+
+
+[SourceDisksFiles]
+amdspi.sys  = 1,,
+;
+
+
+[amdspi_Controller.NT.Wdf]
+KmdfService =  amdspi, amdspi_wdfsect
+[amdspi_wdfsect]
+KmdfLibraryVersion = 1.15
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="AMD"
+DiskName = "amdspi Installation Disk"
+amdspi.ControllerDesc = "AMD SPI Controller"
+amdspi.SVCDESC = "amdspi Service"

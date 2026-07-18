@@ -1,0 +1,53 @@
+;
+; SurfaceSMF_13in.inf
+; 0.0.0.86
+; Copyright (C) 2019 Microsoft Corporation.  All Rights Reserved.
+;
+[Version]
+Signature="$WINDOWS NT$"
+Class=Firmware
+ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+Provider=%Provider%
+DriverVer=04/30/2021,0.0.0.86
+PnpLockdown=1
+CatalogFile=SurfaceSMF_13in.cat
+
+[Manufacturer]
+%MfgName% = Firmware,NTamd64
+
+[Firmware.NTamd64]
+%FirmwareDesc% = Firmware_Install,UEFI\RES_{F0A7F35F-128C-417A-9203-F794AC336CF5}
+
+[Firmware_Install.NT]
+CopyFiles = Firmware_CopyFiles
+
+[Firmware_CopyFiles]
+Smf_13in_0.0.0.86.bin
+
+[Firmware_Install.NT.Hw]
+AddReg = Firmware_AddReg
+
+[Firmware_AddReg]
+HKR,,FirmwareId,,{F0A7F35F-128C-417A-9203-F794AC336CF5}
+HKR,,FirmwareVersion,%REG_DWORD%,0x56
+HKR,,FirmwareFilename,,Smf_13in_0.0.0.86.bin
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+Smf_13in_0.0.0.86.bin = 1
+
+[DestinationDirs]
+DefaultDestDir = %DIRID_WINDOWS%,Firmware ; %SystemRoot%\Firmware
+
+[Strings]
+; localizable
+Provider     = "Surface"
+MfgName      = "Microsoft"
+FirmwareDesc = ""Surface SMF""
+DiskName     = "Firmware Update"
+
+; non-localizable
+DIRID_WINDOWS = 10
+REG_DWORD     = 0x00010001

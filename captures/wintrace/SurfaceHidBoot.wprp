@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="analisi MSHW0231" Company="" Copyright="" Tag="">
+  <Profiles>
+    <EventCollector Id="EventCollector_SurfaceHid" Name="Surface HID SPI Collector">
+      <BufferSize Value="1024"/>
+      <Buffers Value="256"/>
+    </EventCollector>
+
+    <EventProvider Id="EventProvider_SPB" Name="72CD9FF7-4AF8-4B89-AEDE-5F26FDA13567" Level="255">
+      <Keywords>
+        <Keyword Value="0xffffffffffffffff"/>
+      </Keywords>
+    </EventProvider>
+    <EventProvider Id="EventProvider_GPIO" Name="55AB77F6-FA04-43EF-AF45-688FBF500482" Level="255">
+      <Keywords>
+        <Keyword Value="0xffffffffffffffff"/>
+      </Keywords>
+    </EventProvider>
+    <EventProvider Id="EventProvider_HIDCLASS" Name="6465DA78-E7A0-4F39-B084-8F53C7C30DC6" Level="255">
+      <Keywords>
+        <Keyword Value="0xffffffffffffffff"/>
+      </Keywords>
+    </EventProvider>
+    <EventProvider Id="EventProvider_SurfaceHidMini" Name="2FEA7205-B0B1-41CA-8609-5A1D16F3132F" Level="255">
+      <Keywords>
+        <Keyword Value="0xffffffffffffffff"/>
+      </Keywords>
+    </EventProvider>
+
+    <Profile Id="SurfaceHid.Verbose.File" Name="SurfaceHid" Description="Surface HID-over-SPI boot trace (MSHW0231)" Base="" LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <EventCollectorId Value="EventCollector_SurfaceHid">
+          <EventProviders>
+            <EventProviderId Value="EventProvider_SPB"/>
+            <EventProviderId Value="EventProvider_GPIO"/>
+            <EventProviderId Value="EventProvider_HIDCLASS"/>
+            <EventProviderId Value="EventProvider_SurfaceHidMini"/>
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

@@ -1,0 +1,85 @@
+===== Locating the actual .inf in the DriverStore =====
+C:\Windows\System32\DriverStore\FileRepository\surfacedigitizerhidspiextnpackage.inf_amd64_4caecc051d4c6e2a\SurfaceDigitizerHidSpiExtnPackage.inf
+
+===== Full contents =====
+;/*++
+;
+;Copyright (c) Microsoft Corporation.  All rights reserved.
+;
+;Module Name:
+;    SurfaceDigitizerHidSpiExtnPackage.inx
+;
+;Abstract:
+;    INF file for installing the SurfaceDigitizerHidSpiExtnPackage
+;
+;--*/
+
+[Version]
+Signature="$Windows NT$"
+Class = Extension
+ClassGuid = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+Provider=%ManufacturerName%
+ExtensionId = {17F19A0B-64D7-4662-8C91-C90097D12608}
+CatalogFile=SurfaceDigitizerHidSpiExtnPackage.cat
+DriverVer = 03/24/2020,2.4.137.0
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%SurfaceDigitizerHidSpiExtnPackage.DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0134 
+%SurfaceDigitizerHidSpiExtnPackage.DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0162
+%SurfaceDigitizerHidSpiExtnPackage.DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0230
+%SurfaceDigitizerHidSpiExtnPackage.DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0231
+%SurfaceDigitizerHidSpiExtnPackage.DeviceDesc%=SurfaceDigitizerHidSpiExtnPackage, ACPI\MSHW0235
+
+[SurfaceDigitizerHidSpiExtnPackage.NT]
+
+[SurfaceDigitizerHidSpiExtnPackage.NT.HW]
+AddReg = SurfaceDigitizerHidSpiExtnPackage.HWAddReg
+
+[SurfaceDigitizerHidSpiExtnPackage.HWAddReg]
+HKR,,FriendlyName,,%SpiHidFriendlyName%
+HKR,,"SelectiveSuspendEnabled",%REG_DWORD%,1
+HKR,,"SelectiveSuspendTimeout",%REG_DWORD%,2000
+HKR,,"SuppressInputInCS",%REG_DWORD%,1
+
+;*****************************************
+; Strings section
+;*****************************************
+
+[Strings]
+ManufacturerName = "Surface"
+DiskName = "Surface Digtizer HidSpi Extn package Installation Disk"
+SurfaceDigitizerHidSpiExtnPackage.DeviceDesc = "Surface Digitizer HidSpi Extn Package"
+SurfaceDigitizerHidSpiExtnPackage.SVCDESC = "Surface Digitizer HidSpi Extn Package"
+SpiHidFriendlyName = "Surface Digtizer HidSpi Extn Package"
+
+;Non-Localizable
+REG_EXPAND_SZ          = 0x00020000 
+REG_DWORD              = 0x00010001 
+REG_MULTI_SZ           = 0x00010000
+REG_BINARY             = 0x00000001
+REG_SZ                 = 0x00000000
+
+SERVICE_KERNEL_DRIVER  = 0x1 
+SERVICE_ERROR_IGNORE   = 0x0 
+SERVICE_ERROR_NORMAL   = 0x1 
+SERVICE_ERROR_SEVERE   = 0x2 
+SERVICE_ERROR_CRITICAL = 0x3 
+
+===== Same directory listing (in case there's a companion .sys/.dll) =====
+ Il volume nell'unit… C non ha etichetta.
+ Numero di serie del volume: 58D5-5A19
+
+ Directory di C:\Windows\System32\DriverStore\FileRepository\surfacedigitizerhidspiextnpackage.inf_amd64_4caecc051d4c6e2a
+
+04/07/2026  10:29    <DIR>          .
+07/07/2026  09:26    <DIR>          ..
+16/09/2020  14:50            10.026 SurfaceDigitizerHidSpiExtnPackage.cat
+16/09/2020  14:38             4.578 SurfaceDigitizerHidSpiExtnPackage.inf
+               2 File         14.604 byte
+               2 Directory  25.520.943.104 byte disponibili

@@ -1,0 +1,43 @@
+1. Riavvia in Windows
+
+Usa l'entry di boot Windows dal menu Limine (quello che hai già verificato con efibootmgr).
+
+2. Apri PowerShell o CMD come Amministratore
+
+Tasto destro su Start → "Terminale (Amministratore)" o "PowerShell (Amministratore)". È necessario perché il controllo ETW richiede privilegi elevati.
+
+3. Avvia la cattura
+
+logman start TouchCap -p "{3FA102E9-1A62-5490-7AF8-6088C2F9E6BE}" 0xffffffffffffffff 0xff -o C:\touchcap.etl -ets
+
+Questo crea e avvia subito una sessione ETW in tempo reale sul provider Microsoft.Surface.TouchAndPen.Prod con tutti i keyword/livelli abilitati, salvando in C:\touchcap.etl.
+
+Se dà errore, dimmi il messaggio esatto — potrebbe essere una questione di sintassi delle virgolette in CMD vs PowerShell (in PowerShell a volte serve logman start TouchCap -p '{3FA102E9-1A62-5490-7AF8-6088C2F9E6BE}' ... con apici singoli).
+
+4. Tocca lo schermo in punti noti, uno alla volta, in ordine
+
+Non serve sincronizzare orari precisi — basta l'ordine. Suggerisco 5 punti ben distinguibili, con una pausa di almeno 3-4 secondi tra un tocco e l'altro:
+
+1. Angolo in alto a sinistra
+2. Angolo in alto a destra
+3. Centro schermo
+4. Angolo in basso a sinistra
+5. Angolo in basso a destra
+
+Tieni traccia tu stesso dell'ordine (basta ricordarlo o scriverlo, es. "1=alto-sx, 2=alto-dx, 3=centro, 4=basso-sx, 5=basso-dx") — te lo chiederò dopo per la correlazione.
+
+5. Ferma la cattura
+
+logman stop TouchCap -ets
+
+6. Converti in CSV (stesso formato delle tracce che abbiamo già)
+
+tracerpt C:\touchcap.etl -o C:\touchcap.csv -of CSV
+
+7. Portami il file
+
+Copia C:\touchcap.csv (e se possibile anche il .etl originale, nel dubbio) su Linux — chiavetta USB, cartella condivisa, o come hai fatto per le tracce precedenti in traces/.
+
+Una volta che ho il file, estraggo gli eventi del provider, e se tracerpt non riesce a decodificare i nomi dei campi (probabile, essendo un provider "privato" senza manifest pubblico — potresti vedere byte grezzi invece di TouchBlobCoMX=...), li decodifico io a mano usando lo schema dei campi che abbiamo già trovato nel DLL.
+
+Nota: se per qualche motivo il touch/pen non genera eventi su questo provider durante l'uso normale (cioè se il provider non è "attivo" di suo), fammi sapere cosa succede — potremmo dover controllare se un servizio specifico va avviato.

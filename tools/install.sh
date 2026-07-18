@@ -22,7 +22,7 @@ PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SRC_DEST="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 SERVICE_PATH="/etc/systemd/system/sl4a-touch.service"
 MODPROBE_CONF="/etc/modprobe.d/spi-hid.conf"
-RAW_CAPTURE_ONLY="${RAW_CAPTURE_ONLY:-0}"
+LOAD_SCRIPT_PATH="/usr/lib/sl4a-touch/load-touch.sh"
 
 if [[ "$PKG_VERSION" == *-* ]]; then
 	echo "FAIL: VERSION ('$PKG_VERSION') contains '-', which breaks Arch/CachyOS's"
@@ -140,24 +140,24 @@ info "Step 3: Leaving active modules untouched..."
 pass "Active modules left untouched; reboot will load the new modules"
 
 info "Step 4: Creating modprobe.d config (standard HID mode)..."
-if [ "$RAW_CAPTURE_ONLY" = "1" ]; then
-	cat > "$MODPROBE_CONF" <<'EOF'
-# SL4A_TouchScreen — passive raw capture; no feature writes or beta input.
-options spi_hid raw_mode=N raw_capture_only=Y raw_input_beta=N raw_transition_once=N isolated_set_test=N debug_level=2
-options spi_amd debug_trace=0
-EOF
-else
-	cat > "$MODPROBE_CONF" <<'EOF'
+cat > "$MODPROBE_CONF" <<'EOF'
 # SL4A_TouchScreen — standard HID mode (single-touch + pen, stable)
-options spi_hid raw_mode=N raw_capture_only=N raw_input_beta=N raw_transition_once=N isolated_set_test=N
-options spi_amd debug_trace=0
+options spi_hid raw_mode=N
 EOF
-fi
 pass "Created $MODPROBE_CONF"
 
 info "Step 5: Installing driver sources via DKMS ($SRC_DEST)..."
 dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all >/dev/null 2>&1 || true
 rm -rf "$SRC_DEST"
+for stale in /usr/src/${PKG_NAME}-*; do
+	[ -d "$stale" ] || continue
+	[ "$stale" = "$SRC_DEST" ] && continue
+	stale_nv="$(grep -oP '(?<=PACKAGE_VERSION=").*(?=")' "$stale/dkms.conf" 2>/dev/null || true)"
+	if [ -n "$stale_nv" ]; then
+		dkms remove -m "$PKG_NAME" -v "$stale_nv" --all >/dev/null 2>&1 || true
+	fi
+	rm -rf "$stale"
+done
 mkdir -p "$SRC_DEST"
 cp -a "$REPO_DIR"/driver/. "$SRC_DEST"/
 rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c \
@@ -166,31 +166,17 @@ rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c \
 sed -i "s/#VERSION#/${PKG_VERSION}/" "$SRC_DEST/dkms.conf"
 
 dkms add -m "$PKG_NAME" -v "$PKG_VERSION"
-for kernel_dir in /lib/modules/*; do
-	[ -d "$kernel_dir/build" ] || continue
-	kernelver="${kernel_dir##*/}"
-	dkms install --force -m "$PKG_NAME" -v "$PKG_VERSION" -k "$kernelver"
-done
-pass "spi-amd.ko + spi-hid.ko built and installed via DKMS for all installed kernels"
+dkms build -m "$PKG_NAME" -v "$PKG_VERSION"
+dkms install -m "$PKG_NAME" -v "$PKG_VERSION"
+pass "spi-amd.ko + spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
 
-info "Step 6: Removing obsolete $PKG_NAME DKMS versions..."
-for stale in /usr/src/${PKG_NAME}-*; do
-	[ -d "$stale" ] || continue
-	[ "$stale" = "$SRC_DEST" ] && continue
-	stale_nv="$(grep -oP '(?<=PACKAGE_VERSION=").*(?=")' "$stale/dkms.conf" 2>/dev/null || true)"
-	if [ -n "$stale_nv" ]; then
-		dkms remove -m "$PKG_NAME" -v "$stale_nv" --all 2>/dev/null || true
-	fi
-	rm -rf "$stale"
-done
-pass "Obsolete $PKG_NAME DKMS versions removed"
-
-info "Step 7: Installing systemd service (auto-load at boot)..."
+info "Step 6: Installing systemd service (standard HID with one-shot raw fallback)..."
 install -Dm644 "$REPO_DIR/driver/sl4a-touch.service" "$SERVICE_PATH"
+install -Dm755 "$REPO_DIR/driver/sl4a-touch-load.sh" "$LOAD_SCRIPT_PATH"
 systemctl daemon-reload
 pass "Service installed at $SERVICE_PATH"
 
-info "Step 8: Enabling the driver for the next boot..."
+info "Step 7: Enabling the driver for the next boot..."
 depmod -a
 systemctl enable sl4a-touch.service
 pass "The new modules will load at the next boot"

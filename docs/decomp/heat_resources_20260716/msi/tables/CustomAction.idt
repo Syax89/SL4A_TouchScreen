@@ -1,0 +1,9 @@
+Action	Type	Source	Target	ExtendedType
+s72	i2	S72	S255	I4
+CustomAction	Action
+WixUIValidatePath	65	WixUIWixca	ValidatePath	
+WixUIPrintEula	65	WixUIWixca	PrintEula	
+InstallPrerequisites	1	InstallPrerequisitesII.CA.dll	InstallPrerequisitesIIMain	
+AMD64_InstallDrivers_PS	3106	INSTALLFOLDER	powershell -executionpolicy unrestricted -NoProfile -NonInteractive -Window Hidden -Command "& {Get-ChildItem -Recurse -Include *.inf | ForEach-Object {pnputil -i -a $_}}"	
+ARM64_InstallCapsules_PS	3106	INSTALLFOLDER	powershell -executionpolicy unrestricted -NoProfile -NonInteractive -Window Hidden -Command "& {$m=gc 'tools\manifest.json'|ConvertFrom-JSON;gci *.inf -Recurse | % { if ($_.Name -in $m.capsules) {pnputil -i -a $_.FullName}}}"	
+ARM64_InstallDrivers_PS	3106	INSTALLFOLDER	powershell -executionpolicy unrestricted -NoProfile -NonInteractive -Window Hidden -Command "& {$m=gc 'tools\manifest.json'|ConvertFrom-JSON;gci *.inf -Recurse | % { if ($_.Name -in $m.drivers) {.\tools\DriverSetInstall.exe $_.DirectoryName}}}"	

@@ -1,0 +1,79 @@
+;;------------------------------------------------------------------------------
+;; File:          SurfaceStorageFwUpdate.inf
+;;
+;; Description:   Driver Installation file for Surface Storage Firmware Update
+;;
+;; Copyright (C) 2019 Microsoft Corporation.  All Rights Reserved.
+;;------------------------------------------------------------------------------
+;;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Firmware
+ClassGuid={f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+Provider=%ManufacturerName%
+CatalogFile=SurfaceStorageFwUpdate.cat
+DriverVer = 10/28/2020,6.31.139.0
+PnpLockdown=1 
+
+[DestinationDirs]
+DefaultDestDir = 13     ; copy to Driver Store
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+SurfaceStorageFwUpdate.sys  = 1,,
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%SurfaceStorageFwUpdate.DeviceDesc%=SurfaceStorageFwUpdate_Device, ACPI\MSHW0051
+%SurfaceStorageFwUpdate.DeviceDesc%=SurfaceStorageFwUpdate_Device, {98DE32A9-5D44-419E-B67D-66072BCEF58B}\SurfaceStorageFwUpdate_0024
+%SurfaceStorageFwUpdate.DeviceDesc%=SurfaceStorageFwUpdate_Device, {98DE32A9-5D44-419E-B67D-66072BCEF58B}\SurfaceStorageFwUpdate_0025
+%SurfaceStorageFwUpdate.DeviceDesc%=SurfaceStorageFwUpdate_Device, {98DE32A9-5D44-419E-B67D-66072BCEF58B}\SurfaceStorageFwUpdate_002C
+%SurfaceStorageFwUpdate.DeviceDesc%=SurfaceStorageFwUpdate_Device, {98DE32A9-5D44-419E-B67D-66072BCEF58B}\SurfaceStorageFwUpdate_002D
+%SurfaceStorageFwUpdate.DeviceDesc%=SurfaceStorageFwUpdate_Device, {98DE32A9-5D44-419E-B67D-66072BCEF58B}\SurfaceStorageFwUpdate_002E
+%SurfaceStorageFwUpdate.DeviceDesc%=SurfaceStorageFwUpdate_Device, {98DE32A9-5D44-419E-B67D-66072BCEF58B}\SurfaceStorageFwUpdate_0039
+
+[SurfaceStorageFwUpdate_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+SurfaceStorageFwUpdate.sys
+
+[SurfaceStorageFwUpdate_Device.NT.HW]
+
+[SurfaceStorageFwUpdate_Device.NT.Services]
+AddService = SurfaceStorageFwUpdate,%SPSVCINST_ASSOCSERVICE%, SurfaceStorageFwUpdate_Service_Inst
+
+[SurfaceStorageFwUpdate_Device.NT.Events]
+AddEventProvider = {CCDF3655-15AF-426C-BAC9-8E1EA00C22F7},SurfaceStorageFwUpdate_EventProviderInstall
+
+[SurfaceStorageFwUpdate_Service_Inst]
+DisplayName    = %SurfaceStorageFwUpdate.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\SurfaceStorageFwUpdate.sys
+
+[SurfaceStorageFwUpdate_EventProviderInstall]
+ProviderName=Microsoft-Surface-SurfaceStorageFwUpdate
+ResourceFile=%13%\SurfaceStorageFwUpdate.sys
+MessageFile=%13%\SurfaceStorageFwUpdate.sys
+AddChannel= Microsoft-Surface-SurfaceStorageFwUpdate/Operational,0x2,SurfaceStorageFwUpdate_ChannelInstall
+
+[SurfaceStorageFwUpdate_ChannelInstall]
+Isolation         = 2
+Enabled           = 1
+
+[Strings]
+SPSVCINST_ASSOCSERVICE              = 0x00000002
+ManufacturerName                    = "Surface"
+DiskName                            = "Surface Storage Firmware Installation Disk"
+SurfaceStorageFwUpdate.DeviceDesc   = "Surface Storage Firmware Update"
+SurfaceStorageFwUpdate.SVCDESC      = "Surface Storage Firmware Update Service"
+
+;; eof: SurfaceStorageFwUpdate.inx
+;;

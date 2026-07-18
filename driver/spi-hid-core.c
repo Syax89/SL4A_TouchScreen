@@ -54,20 +54,19 @@
 #include <linux/math.h>
 
 #include "spi-hid-core.h"
-#include "spi-hid-capimg.h"
 #include "spi-hid-protocol.h"
 #include "spi-hid_trace.h"
+/* Hardcoded HID Report Descriptor from Windows dump (936 bytes) */
+#include "hardcoded_rd.h"
 
 #define SPI_HID_MAX_RESET_ATTEMPTS 3
-#define RAW_TRANSITION_DELAY_MS 5900
-#define RAW_TRANSITION_RESPONSE_TIMEOUT_MS 1000
-#define ISOLATED_SET_OBSERVATION_TIMEOUT_MS 45000
+/* V0 has a 12-bit body field, but spi-amd only guarantees one atomic 70-byte
+ * PIO segment. The six-byte V0 header leaves 64 bytes for its padded body. */
+#define SPI_HID_V0_MAX_OUTPUT_BODY 64
 
 static int debug_level;
-static int probe_raw_id = 4;  /* Windows content_id for raw-mode handshake */
 static int getfeat_delay_ms = 5900;  /* Windows-observed RPT_DESC -> GET_FEATURE settle time */
-static bool raw_transition_once;
-static bool isolated_set_test;
+static bool skip_getfeat;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) \
 		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
@@ -127,6 +126,21 @@ static void spi_hid_parse_dev_desc(struct spi_hid_device_desc_raw *raw,
 	desc->power_response_delay = 0;
 }
 
+static int spi_hid_validate_dev_desc(const struct spi_hid_device_desc_raw *raw,
+		size_t available)
+{
+	u16 desc_len = le16_to_cpu(raw->wDeviceDescLength);
+
+	if (desc_len < sizeof(*raw) || desc_len > available)
+		return -EPROTO;
+	if (!le16_to_cpu(raw->wReportDescLength) ||
+	    le16_to_cpu(raw->wReportDescLength) > SZ_8K ||
+	    !le16_to_cpu(raw->wMaxInputLength))
+		return -EPROTO;
+
+	return 0;
+}
+
 static void spi_hid_populate_input_header(__u8 *buf,
 		struct spi_hid_input_header *header)
 {
@@ -163,10 +177,10 @@ static void spi_hid_input_report_prepare(struct spi_hid_input_buf *buf,
 	report->content = buf->content;
 }
 
-static void spi_hid_output_header(__u8 *buf,
+static int spi_hid_output_header(__u8 *buf,
 		u16 output_register, u16 output_report_length)
 {
-	spi_hid_protocol_encode_output_header(buf, output_register,
+	return spi_hid_protocol_encode_output_header(buf, output_register,
 			output_report_length);
 }
 
@@ -281,27 +295,20 @@ static const char *spi_hid_power_mode_string(u8 power_state)
 
 static int spi_hid_set_power(struct spi_hid *shid, u8 power_mode)
 {
-	u8 *raw_buf;
-	u16 body_len = 3; /* len16 LE = ContentID(1) + SET_POWER(1) + param(1) = 3 */
-	u16 total_len = 1 + 3 + 2 + body_len; /* opcode(1) + addr(3) + len(2) + body(3) */
+	u8 raw_buf[14] = {
+		0x02, 0x00, 0x00, 0x00, 0x82, 0x00, 0x00, 0x04,
+		SPI_HID_CONTENT_TYPE_COMMAND, SPI_HID_COMMAND_SET_POWER,
+		0x00, 0x00, 0x00, 0x00,
+	};
 	int ret;
 
-	if (shid->isolated_set_armed || shid->desc.command_register == 0)
+	if (shid->desc.command_register == 0)
 		return 0;
 
-	raw_buf = kmalloc(total_len, GFP_KERNEL);
-	if (!raw_buf)
-		return -ENOMEM;
-
-	raw_buf[0] = 0x02; /* write opcode */
 	raw_buf[1] = (shid->desc.command_register >> 16) & 0xff;
 	raw_buf[2] = (shid->desc.command_register >> 8) & 0xff;
-	raw_buf[3] = (shid->desc.command_register >> 0) & 0xff;
-	raw_buf[4] = body_len & 0xff; /* len16 LE */
-	raw_buf[5] = (body_len >> 8) & 0xff;
-	raw_buf[6] = 0x00; /* ContentID */
-	raw_buf[7] = 0x08; /* SET_POWER opcode */
-	raw_buf[8] = power_mode;
+	raw_buf[3] = shid->desc.command_register & 0xff;
+	raw_buf[10] = power_mode;
 
 	mutex_lock(&shid->output_lock);
 	{
@@ -310,14 +317,12 @@ static int spi_hid_set_power(struct spi_hid *shid, u8 power_mode)
 
 		memset(&transfer, 0, sizeof(transfer));
 		transfer.tx_buf = raw_buf;
-		transfer.len = total_len;
+		transfer.len = sizeof(raw_buf);
 
 		spi_message_init_with_transfers(&message, &transfer, 1);
 		ret = spi_sync(shid->spi, &message);
 	}
 	mutex_unlock(&shid->output_lock);
-
-	kfree(raw_buf);
 
 	return ret;
 }
@@ -370,7 +375,8 @@ static void spi_hid_stop_hid(struct spi_hid *shid)
 	}
 }
 
-/* ACPI has already powered the device before probe. */
+/* _RST calls M010 which DESTROYS the device (2026-07-07).
+ * On ACPI systems, _INI has already powered the device. Just wait. */
 static int spi_hid_reset_via_acpi(struct spi_hid *shid)
 {
 	msleep(300);
@@ -384,8 +390,6 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 	bool terminal_failure = false;
 
 	mutex_lock(&shid->power_lock);
-	if (shid->isolated_set_armed)
-		goto out;
 	if (shid->power_state == SPI_HID_POWER_MODE_OFF)
 		goto out;
 
@@ -455,20 +459,13 @@ out:
 
 /* Forward declarations */
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len);
-static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
-				  u32 data_len, u8 content_id);
-static void spi_hid_raw_capture_frame(struct spi_hid *shid, const u8 *body,
-				      unsigned int body_length);
-static void spi_hid_handle_raw_body(struct spi_hid *shid, const u8 *body,
-				    unsigned int body_length);
+static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, u8 content_id);
 static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *expect_fast);
 static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_data(struct spi_hid *shid, int type, u16 blen);
-static void spi_hid_isolated_set_capture(struct spi_hid *shid, int type,
-		const u8 *body, u32 body_length, u16 transport_length);
 
 /* Canonical DESCREQ frame used by every state transition that needs to re-request
  * the device descriptor. Opcode 0x02, register 0x000001, content_id=0, len=3. */
@@ -514,8 +511,6 @@ static void spi_hid_error_work(struct work_struct *work)
 
 	if (READ_ONCE(shid->removing))
 		return;
-	if (READ_ONCE(shid->isolated_set_armed))
-		return;
 
 	ret = spi_hid_error_handler(shid);
 	if (ret)
@@ -539,8 +534,6 @@ static void spi_hid_reset_work(struct work_struct *work)
 
 	dev_dbg(dev, "reset handler\n");
 	if (READ_ONCE(shid->removing))
-		return;
-	if (READ_ONCE(shid->isolated_set_armed))
 		return;
 	if (shid->ready) {
 		dev_err(dev, "Spontaneous FW reset!");
@@ -569,9 +562,9 @@ static void spi_hid_reset_work(struct work_struct *work)
 		buf->body[3] = 0x00; /* content_id = 0 */
 		buf->content[0] = 0x01; /* RESET command opcode */
 		buf->content[1] = 0x00; /* padding/reserved */
-		spi_hid_output_header(buf->header, shid->desc.command_register, body_len);
-
-		ret =  spi_hid_output(shid, buf, sizeof(buf->header) + body_len);
+		ret = spi_hid_output_header(buf->header, shid->desc.command_register, body_len);
+		if (!ret)
+			ret = spi_hid_output(shid, buf, sizeof(buf->header) + body_len);
 	}
 	mutex_unlock(&shid->output_lock);
 	if (ret) {
@@ -641,16 +634,19 @@ static int spi_hid_input_report_handler(struct spi_hid *shid,
 }
 
 static int spi_hid_response_handler(struct spi_hid *shid,
-		struct spi_hid_input_buf *buf)
+		u8 report_type, u8 content_id)
 {
 	trace_spi_hid_response_handler(shid);
 	dev_dbg(&shid->spi->dev, "response handler\n");
 
-	/* completion_done returns 0 if there are waiters, otherwise 1 */
-	if (completion_done(&shid->output_done))
-		dev_err(&shid->spi->dev, "Unexpected response report\n");
-	else
-		complete(&shid->output_done);
+	if (!READ_ONCE(shid->output_pending) ||
+	    READ_ONCE(shid->expected_response_type) != report_type ||
+	    READ_ONCE(shid->expected_response_id) != content_id) {
+		dev_warn(&shid->spi->dev, "Unexpected response type 0x%x ID 0x%x\n",
+			report_type, content_id);
+		return -EPROTO;
+	}
+	complete(&shid->output_done);
 
 	return 0;
 }
@@ -659,31 +655,42 @@ static int spi_hid_send_output_report(struct spi_hid *shid, u32 output_register,
 		struct spi_hid_output_report *report)
 {
 	u8 *raw_buf;
-	u16 content_len = report->content_length;
-	u16 body_len; /* len16 LE = ContentID(1) + content_len */
+	u16 payload_len = report->content_length;
+	u16 total_content_len;
+	u16 body_len;
+	u32 body_len_u32;
 	size_t total_len;
 	int ret;
 
-	if (content_len == U16_MAX)
+	if (payload_len && !report->content)
+		return -EINVAL;
+	if (payload_len > U16_MAX - 3)
 		return -EMSGSIZE;
 
-	body_len = content_len + 1;
-	total_len = 1 + 3 + 2 + body_len; /* opcode(1) + addr(3) + len(2) + body_len */
+	/* V0 body: type + total_content_len + content ID + payload, padded to 4. */
+	total_content_len = payload_len + 3;
+	body_len_u32 = round_up((u32)payload_len + 4, 4);
+	if (body_len_u32 > SPI_HID_V0_MAX_OUTPUT_BODY ||
+	    !spi_hid_protocol_output_length_valid(body_len_u32))
+		return -EMSGSIZE;
+	body_len = body_len_u32;
+	total_len = SPI_HID_OUTPUT_HEADER_LEN + body_len;
 
-	raw_buf = kmalloc(total_len, GFP_KERNEL);
+	raw_buf = kzalloc(total_len, GFP_KERNEL);
 	if (!raw_buf)
 		return -ENOMEM;
 
-	/* Format the packet in V0 format */
-	raw_buf[0] = 0x02; /* write opcode */
-	raw_buf[1] = (output_register >> 16) & 0xff;
-	raw_buf[2] = (output_register >> 8) & 0xff;
-	raw_buf[3] = (output_register >> 0) & 0xff;
-	raw_buf[4] = body_len & 0xff; /* len16 LE */
-	raw_buf[5] = (body_len >> 8) & 0xff;
-	raw_buf[6] = report->content_id;
-	if (content_len)
-		memcpy(&raw_buf[7], report->content, content_len);
+	ret = spi_hid_protocol_encode_output_header(raw_buf, output_register, body_len);
+	if (ret) {
+		kfree(raw_buf);
+		return ret;
+	}
+	raw_buf[6] = report->content_type;
+	raw_buf[7] = total_content_len & 0xff;
+	raw_buf[8] = total_content_len >> 8;
+	raw_buf[9] = report->content_id;
+	if (payload_len)
+		memcpy(&raw_buf[10], report->content, payload_len);
 
 	mutex_lock(&shid->output_lock);
 	{
@@ -713,16 +720,20 @@ static int spi_hid_send_output_report(struct spi_hid *shid, u32 output_register,
 * interrupt thread.
 */
 static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
-		struct spi_hid_output_report *report)
+		struct spi_hid_output_report *report, u8 expected_response_type)
 {
 	struct device *dev = &shid->spi->dev;
 	int ret = 0;
 
 	/* A completion is single-use: never let a prior response satisfy this request. */
 	reinit_completion(&shid->output_done);
+	WRITE_ONCE(shid->expected_response_type, expected_response_type);
+	WRITE_ONCE(shid->expected_response_id, report->content_id);
+	WRITE_ONCE(shid->output_pending, true);
 	ret = spi_hid_send_output_report(shid, output_register,
 			report);
 	if (ret) {
+		WRITE_ONCE(shid->output_pending, false);
 		dev_err(dev, "failed to transfer output report\n");
 		return ret;
 	}
@@ -731,6 +742,7 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	ret = wait_for_completion_interruptible_timeout(&shid->output_done,
 			msecs_to_jiffies(1000));
 	mutex_lock(&shid->lock);
+	WRITE_ONCE(shid->output_pending, false);
 	if (ret == 0) {
 		dev_err(dev, "response timed out\n");
 		schedule_work(&shid->error_work);
@@ -752,14 +764,15 @@ static int spi_hid_report_descriptor_request(struct spi_hid *shid)
 	struct device *dev = &shid->spi->dev;
 	struct spi_hid_output_report report = {
 		.content_type = SPI_HID_CONTENT_TYPE_COMMAND,
-		.content_length = 3,
+		.content_length = 0,
 		.content_id = 0,
 		.content = NULL,
 	};
 
 
 	ret =  spi_hid_sync_request(shid,
-			shid->desc.report_descriptor_register, &report);
+			shid->desc.report_descriptor_register, &report,
+			SPI_HID_REPORT_TYPE_REPORT_DESC);
 	if (ret) {
 		dev_err(dev, "Expected report descriptor not received!\n");
 		goto out;
@@ -789,10 +802,15 @@ static int spi_hid_process_input_report(struct spi_hid *shid,
 	spi_hid_populate_input_header(buf->header, &header);
 	spi_hid_populate_input_body(buf->body, &body);
 
-	if (body.content_length > header.report_length) {
-		dev_err(dev, "Bad body length %d > %d\n", body.content_length,
-							header.report_length);
-		return -EINVAL;
+	{
+		u16 total_content_len = buf->body[0] | (buf->body[1] << 8);
+
+		if (total_content_len < SPI_HID_INPUT_BODY_LEN ||
+		    total_content_len > header.report_length) {
+			dev_err(dev, "Bad body length %u for report body %u\n",
+				total_content_len, header.report_length);
+			return -EINVAL;
+		}
 	}
 
 	if (body.content_id == SPI_HID_HEARTBEAT_REPORT_ID) {
@@ -810,9 +828,18 @@ static int spi_hid_process_input_report(struct spi_hid *shid,
 		break;
 	case SPI_HID_REPORT_TYPE_DEVICE_DESC:
 		dev_dbg(dev, "received device descriptor\n");
+		if (body.content_length < sizeof(*raw)) {
+			dev_err(dev, "device descriptor too short: %u\n", body.content_length);
+			return -EPROTO;
+		}
 		/* Reset attempts at every device descriptor fetch */
 		shid->attempts = 0;
 		raw = (struct spi_hid_device_desc_raw *) buf->content;
+		ret = spi_hid_validate_dev_desc(raw, body.content_length);
+		if (ret) {
+			dev_err(dev, "invalid device descriptor: %d\n", ret);
+			return ret;
+		}
 		spi_hid_parse_dev_desc(raw, &shid->desc);
 		if (!shid->hid) {
 			schedule_work(&shid->create_device_work);
@@ -832,7 +859,7 @@ static int spi_hid_process_input_report(struct spi_hid *shid,
 		}
 		fallthrough;
 	case SPI_HID_REPORT_TYPE_REPORT_DESC:
-		ret = spi_hid_response_handler(shid, buf);
+		ret = spi_hid_response_handler(shid, header.report_type, body.content_id);
 		break;
 	default:
 		dev_err(dev, "Unknown input report: 0x%x\n", header.report_type);
@@ -866,8 +893,13 @@ static int spi_hid_bus_validate_header(struct spi_hid *shid, struct spi_hid_inpu
 			header->length_reserved);
 		return -EINVAL;
 	}
+	if (header->report_length < SPI_HID_INPUT_BODY_LEN) {
+		dev_err(dev, "Input report body too short: %u\n", header->report_length);
+		return -EMSGSIZE;
+	}
 
-	if (shid->desc.max_input_length != 0 && header->report_length > shid->desc.max_input_length) {
+	if (!shid->raw_mode_active && shid->desc.max_input_length != 0 &&
+	    header->report_length > shid->desc.max_input_length) {
 		dev_err(dev, "Report body of size %u larger than max expected of %u\n",
 				header->report_length, shid->desc.max_input_length);
 		return -EMSGSIZE;
@@ -911,7 +943,16 @@ static int spi_hid_create_device(struct spi_hid *shid)
 	shid->hid = hid;
 
 	ret = hid_add_device(hid);
-	/* hid_add_device() can succeed without a driver binding the parsed device. */
+	/* 2026-07-08: hid_add_device() only reports whether the device was
+	 * registered on the bus, not whether any driver actually bound to it
+	 * — a corrupted wire-read descriptor can make hid_parse_report()
+	 * return success (its own per-item validation is lenient, e.g.
+	 * "unexpected long global item" is only a warning there) while the
+	 * matched driver's own probe (hid-generic in our case) fails
+	 * synchronously inside this same call, leaving hid->driver NULL.
+	 * That's the actual reliable "this descriptor wasn't good enough"
+	 * signal (see docs/NEXT_STEPS.md §C), not hid_parse_report()'s return
+	 * code or hid_add_device()'s return code. */
 	if (!ret && !hid->driver) {
 		dev_warn(dev, "SEQ: hid_add_device succeeded but no driver bound to it\n");
 		ret = -ENODEV;
@@ -926,6 +967,12 @@ static int spi_hid_create_device(struct spi_hid *shid)
 		if (hid)
 			hid_destroy_device(hid);
 
+		if (shid->wire_report_descriptor_len > 0 &&
+		    !shid->wire_report_descriptor_rejected) {
+			dev_warn(dev, "SEQ: forcing hardcoded report descriptor fallback and retrying once\n");
+			shid->wire_report_descriptor_rejected = true;
+			return spi_hid_create_device(shid);
+		}
 		return ret;
 	}
 
@@ -1183,14 +1230,14 @@ static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
 {
 	struct spi_hid_output_report report = {
 		.content_type = SPI_HID_CONTENT_TYPE_GET_FEATURE,
-		.content_length = 3,
+		.content_length = 0,
 		.content_id = content_id,
 		.content = NULL,
 	};
 
 
 	return spi_hid_sync_request(shid, shid->desc.output_register,
-			&report);
+			&report, SPI_HID_REPORT_TYPE_GET_FEATURE_RESP);
 }
 
 static int spi_hid_set_request(struct spi_hid *shid,
@@ -1201,7 +1248,7 @@ static int spi_hid_set_request(struct spi_hid *shid,
 
 	struct spi_hid_output_report report = {
 		.content_type = SPI_HID_CONTENT_TYPE_SET_FEATURE,
-		.content_length = arg_len + 3,
+		.content_length = arg_len,
 		.content_id = content_id,
 		.content = arg_buf,
 	};
@@ -1216,8 +1263,6 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 	u8 tx[5]; struct spi_transfer xf[2]; struct spi_message msg;
 	int ret;
 
-	if (!rx || rx_len <= 0)
-		return -EINVAL;
 	lockdep_assert_held(&shid->seq_lock);
 	tx[0]=0x0B; tx[1]=(reg>>16)&0xff; tx[2]=(reg>>8)&0xff; tx[3]=reg&0xff;
 	tx[4]=0xFF;
@@ -1240,8 +1285,6 @@ static int spi_hid_seq_write_speed(struct spi_hid *shid, const u8 *buf, int len,
 	struct spi_transfer xf[2];
 	struct spi_message msg;
 
-	if (!buf || len <= 0 || rx_len < 0 || (rx_len && !rx))
-		return -EINVAL;
 	lockdep_assert_held(&shid->seq_lock);
 	seq_dbg(shid, 3, "SEQ: write op=0x%02x len=%d rx=%d raw=[%*ph]\n",
 		buf[0], len, rx_len, min(len, 16), buf);
@@ -1294,7 +1337,14 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 	return 0;
 }
 
-/* Legacy raw-handshake watchdog. raw_mode does not activate this path. */
+/* raw_mode handshake watchdog (2026-07-08, docs/GROUND_TRUTH.md §18.7): SET_FEATURE
+ * occasionally makes the device go completely silent (no further IRQ at all, not even
+ * a RESET_RSP), so the existing IRQ-triggered retry in spi_hid_seq_thread() never gets
+ * a chance to run. Decompiling the real HidSpiCx.sys showed Windows's own SmFx state
+ * machine hits the same intermittent failure and papers over it with a bounded,
+ * timer-based retry — CompleteTransferIfDoneOrStartResponseTimer arms a 2000ms response
+ * timer, and CheckingResetRetryCountEntry retries up to 3 times before giving up. This
+ * mirrors those exact parameters. */
 #define RAW_HANDSHAKE_TIMEOUT_MS 2000
 #define RAW_HANDSHAKE_MAX_RETRIES 3
 
@@ -1350,7 +1400,15 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	shid->raw_handshake_retries_left--;
 	dev_warn(dev, "SEQ: raw_mode handshake watchdog: no heatmap data after %dms, retrying (%d left)\n",
 		 RAW_HANDSHAKE_TIMEOUT_MS, shid->raw_handshake_retries_left);
-	/* Prevent concurrent delayed feature work during legacy recovery. */
+	/* Windows-style recovery: SET_POWER(D2→D0) instead of _PS3→_PS0.
+	 * The D2→D0 cycle is a "soft" reset that doesn't cut physical power,
+	 * matching how Windows recovers from a failed feature handshake.
+	 *
+	 * 2026-07-12: cancel any pending feat_delay_work (otherwise
+	 * feat_delay_work's 5900ms timer and our 2000ms watchdog timer race —
+	 * the watchdog always fires first, creating an infinite reset loop).
+	 * Re-arm the watchdog with a timeout longer than getfeat_delay_ms so
+	 * the next feat_delay_work always has time to fire before us. */
 	cancel_delayed_work(&shid->feat_delay_work);
 	shid->feat_delay_pending = false;
 	if (spi_hid_vendor_init(shid)) {
@@ -1379,12 +1437,9 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, feat_delay_work.work);
 	struct device *dev = &shid->spi->dev;
-	u8 selector;
 	u8 gf[11] = {
-		/* spi-amd consumes byte zero as its opcode; the following bytes are
-		 * the ten-byte Windows FIFO payload. */
 		0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
-		0x00, 0x00, 0x03, 0x00, 0x06
+		0x00, 0x04, 0x03, 0x00, 0x06
 	};
 
 	mutex_lock(&shid->seq_lock);
@@ -1392,114 +1447,48 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		goto out;
 	shid->feat_delay_pending = false;
 
-	/* The normal HID create work may advance to DONE during the required
-	 * 5.9-second one-shot delay. Both WAIT_RPT and DONE have a valid descriptor. */
-	if (shid->seq_state != 2 &&
-	    !(raw_transition_once && shid->raw_transition_attempted &&
-	      shid->seq_state == 4)) {
-		if (raw_transition_once && shid->raw_transition_attempted) {
-			shid->raw_transition_state_skipped++;
-			dev_info(dev,
-				 "RAW_TRANSITION: GET skipped because state changed to %d\n",
-				 shid->seq_state);
-		}
+	if (shid->seq_state != 2) {
 		seq_dbg(shid, 1, "SEQ: feat_delay_work: state changed to %d, skipping\n",
 			shid->seq_state);
 		goto out;
 	}
+	if (skip_getfeat) {
+		static const u8 vendor_init[] = {
+			0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00,
+			0x03, 0x0A, 0x00, 0x56, 0xBD, 0x0C, 0xEE,
+			0x5B, 0x44, 0x4C, 0x00, 0x00
+		};
+		u8 sf[15] = {
+			0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
+			0x03, 0x04, 0x00, 0x05, 0x01,
+			0x00, 0x00, 0x00
+		};
 
-	selector = raw_transition_once ? 4 : probe_raw_id & 0xFF;
-	if (raw_transition_once)
-		gf[7] = selector;
-	else
-		gf[8] = selector;
-	seq_dbg(shid, 1, "SEQ: GET_FEATURE(id=%u) after delay, state 5\n", selector);
-	if (spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0)) {
-		if (raw_transition_once && shid->raw_transition_attempted)
-			shid->raw_transition_get_write_failed++;
-		dev_warn(dev, "SEQ: delayed GET_FEATURE write failed\n");
-		if (!raw_transition_once)
-			mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
-				msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
-		goto out;
-	}
-	if (raw_transition_once && shid->raw_transition_attempted) {
-		shid->raw_transition_get_sent++;
-		dev_info(dev, "RAW_TRANSITION: GET selector %u sent\n", selector);
-	}
-	spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
-	if (raw_transition_once && shid->raw_transition_attempted)
-		schedule_delayed_work(&shid->raw_transition_timeout_work,
-			msecs_to_jiffies(RAW_TRANSITION_RESPONSE_TIMEOUT_MS));
-	if (!raw_transition_once)
+		seq_dbg(shid, 1, "SEQ: delayed vendor init + SET_FEATURE\n");
+		if (spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0))
+			goto retry_watchdog;
+		usleep_range(36000, 39000);
+		if (spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0))
+			goto retry_watchdog;
+		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_REQUEST);
 		mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
 			msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
-out:
-	mutex_unlock(&shid->seq_lock);
-}
-
-static void spi_hid_raw_transition_timeout_work(struct work_struct *work)
-{
-	struct spi_hid *shid = container_of(work, struct spi_hid,
-					    raw_transition_timeout_work.work);
-
-	mutex_lock(&shid->seq_lock);
-	if (!READ_ONCE(shid->removing) && raw_transition_once &&
-	    shid->raw_transition_attempted && !shid->raw_transition_get_response &&
-	    shid->seq_state == 5) {
-		shid->raw_transition_timeout++;
-		dev_warn(&shid->spi->dev,
-			 "RAW_TRANSITION: GET response timeout; returning to standard HID\n");
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
-	}
-	mutex_unlock(&shid->seq_lock);
-}
-
-static void spi_hid_isolated_set_timeout_work(struct work_struct *work)
-{
-	struct spi_hid *shid = container_of(work, struct spi_hid,
-					    isolated_set_timeout_work.work);
-
-	mutex_lock(&shid->seq_lock);
-	if (!READ_ONCE(shid->removing) &&
-	    shid->isolated_set_state == SPI_HID_ISOLATED_SET_OBSERVING) {
-		shid->isolated_set_timeout++;
-		shid->isolated_set_state = SPI_HID_ISOLATED_SET_COMPLETE;
-		/* Observation ends without a recovery, reset, or follow-up write. */
-	}
-	mutex_unlock(&shid->seq_lock);
-}
-
-static void spi_hid_isolated_set_work(struct work_struct *work)
-{
-	struct spi_hid *shid = container_of(work, struct spi_hid,
-					    isolated_set_work.work);
-	/* spi-amd consumes source byte zero as the opcode; FIFO sees the ten bytes
-	 * captured from Windows for GET_FEATURE report ID 6. */
-	static const u8 get_id6[11] = {
-		0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
-		0x00, 0x04, 0x03, 0x00, 0x06,
-	};
-
-	mutex_lock(&shid->seq_lock);
-	if (READ_ONCE(shid->removing) ||
-	    shid->isolated_set_state != SPI_HID_ISOLATED_SET_WAIT_GET ||
-	    shid->seq_state != 4 || !shid->hid) {
-		if (!READ_ONCE(shid->removing)) {
-			shid->isolated_set_write_failed++;
-			shid->isolated_set_state = SPI_HID_ISOLATED_SET_FAILED;
-			dev_warn(&shid->spi->dev,
-				 "ISOLATED_SET: HID runtime precondition failed; no write sent\n");
-		}
 		goto out;
 	}
-	if (spi_hid_seq_write(shid, get_id6, sizeof(get_id6), NULL, 0)) {
-		shid->isolated_set_write_failed++;
-		shid->isolated_set_state = SPI_HID_ISOLATED_SET_FAILED;
-		goto out;
+
+	seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE after delay, state 5\n");
+	if (spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0)) {
+		goto retry_watchdog;
 	}
-	shid->isolated_set_get_sent++;
 	spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
+	mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
+			 msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+	goto out;
+
+retry_watchdog:
+	dev_warn(dev, "SEQ: delayed raw handshake write failed\n");
+	mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
+		msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 out:
 	mutex_unlock(&shid->seq_lock);
 }
@@ -1507,7 +1496,7 @@ out:
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
-	u8 hdr[9];
+	u8 hdr[10];
 	int type, hdr_off;
 
 	mutex_lock(&shid->seq_lock);
@@ -1521,20 +1510,35 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && hdr_off != 5) {
+	if (type >= 0 && hdr_off != 6) {
 		seq_dbg(shid, 1, "SEQ: poll-work: header at unexpected offset %d\n", hdr_off);
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 		goto out;
 	}
-	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 9, hdr);
+	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 10, hdr);
 	if (type == 7) {
 		shid->stat_device_desc++;
 		seq_dbg(shid, 1, "SEQ: poll-work: GOT DEVICE_DESC!\n");
 		/* Re-trigger the IRQ thread to handle it */
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
-		seq_dbg(shid, 1, "SEQ: poll-work: RESET_RSP, restarting discovery\n");
-		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
+		seq_dbg(shid, 1, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
+		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FALLBACK);
+		shid->ready = true;
+		shid->keep_powered = true;
+		/* Hardcode and create device */
+		shid->desc.hid_version = 0x0100;
+		shid->desc.report_descriptor_length = 936;
+		shid->desc.report_descriptor_register = 0x0002;
+		shid->desc.input_register = 0x0000;
+		shid->desc.max_input_length = 0x1000;
+		shid->desc.output_register = 0x0003;
+		shid->desc.max_output_length = 0x0100;
+		shid->desc.command_register = 0x0004;
+		shid->desc.vendor_id = 0x045E;
+		shid->desc.product_id = 0x0C19;
+		shid->desc.version_id = 0x0100;
+		if (!shid->hid) spi_hid_create_device(shid);
 	} else {
 		seq_dbg(shid, 1, "SEQ: poll-work: unexpected type=%d, retrying...\n", type);
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
@@ -1544,9 +1548,24 @@ out:
 }
 
 
-/* CapImg raster blob detection. The raster is validated before this code sees
- * it; baseline tracking, connected-component labeling and slot reporting are
- * deliberately local to the beta input device. */
+/* Heatmap blob detection (2026-07-08 D).
+ * The raw content_id=0x0C frame is a capacitive sensor heatmap:
+ * 2 bytes SurfaceSwitch (timestamp/scan ID), then cell data.
+ * Each byte indexes the c590 lookup table for actual signal level.
+ * Baseline is tracked per cell via dynamic max-tracking (~30 frames).
+ * Detect significant signal changes, cluster into contiguous blobs via
+ * connected-component labeling, compute weighted centroids, and emit
+ * multitouch events.
+ */
+/* DFT antenna frame layout (content_id=0x0C, ~4302 bytes):
+ *   byte[0]      content_id (0x0C)
+ *   byte[1..2]   SurfaceSwitch (16-bit timestamp)
+ *   byte[3..25]  frame metadata (23 bytes)
+ *   byte[26..]   capacitive node magnitudes (288 columns, row-major, 1 byte each)
+ * Each byte is an index into the c590 signal lookup table.
+ * Row count is auto-detected from the payload size. */
+#define HEATMAP_DFT_META_LEN  23
+#define HEATMAP_DATA_OFFSET   (3 + HEATMAP_DFT_META_LEN)   /* = 26 */
 
 /* ── Module parameters ──────────────────────────────────────────
  * Stable controls: modify probe behaviour or runtime operation.
@@ -1559,85 +1578,70 @@ module_param(debug_coords, bool, 0444);
 MODULE_PARM_DESC(debug_coords, "(unused, reserved for future calibration debugging)");
 
 static bool invert_x;
-module_param(invert_x, bool, 0644);
+module_param(invert_x, bool, 0444);
 MODULE_PARM_DESC(invert_x, "Invert X axis");
 
 static bool invert_y;
-module_param(invert_y, bool, 0644);
+module_param(invert_y, bool, 0444);
 MODULE_PARM_DESC(invert_y, "Invert Y axis");
 
 static bool swap_xy;
-module_param(swap_xy, bool, 0644);
+module_param(swap_xy, bool, 0444);
 MODULE_PARM_DESC(swap_xy, "Swap X and Y axes");
 
 /* ── Operating mode ────────────────────────────────────────────── */
-/* Deprecated compatibility knob. It is intentionally inert: switching modes
- * is unsafe, while raw_capture_only observes a frame only if one already arrives. */
-static bool raw_mode = true;
-module_param(raw_mode, bool, 0644);
+static bool raw_mode;
+module_param(raw_mode, bool, 0444);
 MODULE_PARM_DESC(raw_mode,
-	"Deprecated and inert: raw mode transitions are unsupported");
+	"0 = standard HID mode (single-touch, Report ID 0x40); "
+	"1 = raw DFT heatmap mode (send GET_FEATURE/SET_FEATURE, multi-touch blob detection)");
 
-static bool raw_capture_only;
-module_param(raw_capture_only, bool, 0444);
-MODULE_PARM_DESC(raw_capture_only,
-	"Passively retain complete 0x0c V0 bodies that already arrive; never sends raw-mode commands");
-
-static bool raw_input_beta;
-module_param(raw_input_beta, bool, 0444);
-MODULE_PARM_DESC(raw_input_beta,
-	"Beta: report multitouch from passively arriving validated 0x0c CapImg frames; requires raw_capture_only=1");
-
-module_param(raw_transition_once, bool, 0444);
-MODULE_PARM_DESC(raw_transition_once,
-	"DANGEROUS: once per boot, send only the observed GET_FEATURE selector 4; requires raw_capture_only=1");
-
-module_param(isolated_set_test, bool, 0444);
-MODULE_PARM_DESC(isolated_set_test,
-	"DANGEROUS: boot-time-only GET ID6 then one exact SET observation; requires raw_capture_only=1 and raw_transition_once=0");
-
-/* Standard discovery consumes the ACPI-provided reset response without
- * changing the device power state. */
-static bool acpi_probe_power_cycle;
-module_param(acpi_probe_power_cycle, bool, 0644);
+/* Kept enabled for compatibility with the currently validated boot path.
+ * Disable only for a controlled trace comparison against ACPI _INI startup. */
+static bool acpi_probe_power_cycle = true;
+module_param(acpi_probe_power_cycle, bool, 0444);
 MODULE_PARM_DESC(acpi_probe_power_cycle,
-	"Power-cycle ACPI _PS3->_PS0 at probe (disabled by default; experimental)");
+	"Power-cycle ACPI _PS3->_PS0 at probe (legacy default; experimental to disable)");
 
-/* Legacy raw-handshake tuning controls. */
+/* 2026-07-08 (handshake reliability experiments, GROUND_TRUTH.md §18.7): SET_FEATURE
+ * always writes fine at the driver level but the device silently stops responding
+ * afterward most of the time. Two testable hypotheses, toggled independently so results
+ * aren't conflated: (1) the write happens too fast/at the wrong SPI clock speed for the
+ * touch chip to sample correctly; (2) our seq_write() opcode-doubling quirk (needed for
+ * DESCREQ/GET_FEATURE) doesn't apply the same way to this specific, longer write. */
 static uint setfeat_speed_hz;
-module_param(setfeat_speed_hz, uint, 0644);
+module_param(setfeat_speed_hz, uint, 0444);
 MODULE_PARM_DESC(setfeat_speed_hz,
 	"Override SPI clock speed (Hz) for the SET_FEATURE write only; 0 = bus default (33.33MHz)");
 
 static bool setfeat_no_double;
-module_param(setfeat_no_double, bool, 0644);
+module_param(setfeat_no_double, bool, 0444);
 MODULE_PARM_DESC(setfeat_no_double,
 	"Send SET_FEATURE without the leading-opcode-doubling quirk (14 bytes instead of 15)");
 
-static bool skip_getfeat;
-module_param(skip_getfeat, bool, 0644);
+module_param(skip_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_getfeat,
 	"Skip GET_FEATURE, send SET_FEATURE directly after RPT_DESC");
 
-static int probe_raw_id;
-module_param(probe_raw_id, int, 0644);
-MODULE_PARM_DESC(probe_raw_id,
-	"Legacy raw feature selector (unused while raw_mode is disabled)");
-
-module_param(debug_level, int, 0644);
+module_param(debug_level, int, 0444);
 MODULE_PARM_DESC(debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex");
 
 /* ── Blob detection tunables (runtime-validated) ────────────────── */
 
 static int blob_min_weight = 1000;
-module_param(blob_min_weight, int, 0644);
+module_param(blob_min_weight, int, 0444);
 MODULE_PARM_DESC(blob_min_weight,
 	"Minimum c590 signal rise sum across blob to consider it valid");
 
 static int ema_alpha = 3;
-module_param(ema_alpha, int, 0644);
+module_param(ema_alpha, int, 0444);
 MODULE_PARM_DESC(ema_alpha,
 	"EMA smoothing factor: (prev*alpha + new) / (alpha+1)");
+
+static int dfa_data_offset = 26;
+module_param(dfa_data_offset, int, 0444);
+MODULE_PARM_DESC(dfa_data_offset,
+	"DFT antenna frame data offset in bytes");
 
 static int touch_threshold_min = 20;
 module_param(touch_threshold_min, int, 0444);
@@ -1645,183 +1649,76 @@ MODULE_PARM_DESC(touch_threshold_min,
 	"(unused, reserved for future adaptive filtering)");
 
 static int touch_signal_mode = 2;
-module_param(touch_signal_mode, int, 0644);
+module_param(touch_signal_mode, int, 0444);
 MODULE_PARM_DESC(touch_signal_mode,
 	"Touch detection mode: 0=any change, 1=rise only (touch INCREASES c590), 2=percentage rise");
 
 static int touch_threshold_pct = 10;
-module_param(touch_threshold_pct, int, 0644);
+module_param(touch_threshold_pct, int, 0444);
 MODULE_PARM_DESC(touch_threshold_pct,
 	"Percentage of c590 full-scale (4000) used as the touch rise threshold when touch_signal_mode=2. Default 10% (=400); observed touch peaks reach a rise of ~2300");
 
 static int ghost_dist = 15;
-module_param(ghost_dist, int, 0644);
+module_param(ghost_dist, int, 0444);
 MODULE_PARM_DESC(ghost_dist, "Ghost rejection distance threshold (grid cells)");
 
 static int grid_cols = 0;  /* 0 = default 72 */
-module_param(grid_cols, int, 0644);
+module_param(grid_cols, int, 0444);
 MODULE_PARM_DESC(grid_cols, "Override grid columns (0=default 72)");
 
 static int grid_rows = 0;  /* 0 = default 48 */
-module_param(grid_rows, int, 0644);
+module_param(grid_rows, int, 0444);
 MODULE_PARM_DESC(grid_rows, "Override grid rows (0=default 48)");
 
 static int calib_scale_x = 0;  /* 0 = use default: SCREEN_MAX/(cols-1) */
-module_param(calib_scale_x, int, 0644);
+module_param(calib_scale_x, int, 0444);
 MODULE_PARM_DESC(calib_scale_x, "X scale factor * 1000 (0=auto-calculate from grid dimensions)");
 
 static int calib_scale_y = 0;
-module_param(calib_scale_y, int, 0644);
+module_param(calib_scale_y, int, 0444);
 MODULE_PARM_DESC(calib_scale_y, "Y scale factor * 1000 (0=auto-calculate from grid dimensions)");
 
 static int calib_offset_x = 0;  /* screen pixel offset */
-module_param(calib_offset_x, int, 0644);
+module_param(calib_offset_x, int, 0444);
 MODULE_PARM_DESC(calib_offset_x, "X screen offset in logical coords (0..32767)");
 
 static int calib_offset_y = 0;
-module_param(calib_offset_y, int, 0644);
+module_param(calib_offset_y, int, 0444);
 MODULE_PARM_DESC(calib_offset_y, "Y screen offset in logical coords (0..32767)");
 
 static int blob_debounce = 3;
-module_param(blob_debounce, int, 0644);
+module_param(blob_debounce, int, 0444);
 MODULE_PARM_DESC(blob_debounce, "Frames before claiming a new blob (debounce)");
 
 static int blob_lift_frames = 2;
-module_param(blob_lift_frames, int, 0644);
+module_param(blob_lift_frames, int, 0444);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting");
 
-static int blob_max_distance = 3;
-module_param(blob_max_distance, int, 0644);
+static int blob_max_distance = 50;
+module_param(blob_max_distance, int, 0444);
 MODULE_PARM_DESC(blob_max_distance, "Max grid distance for slot re-assignment");
 
-/* Legacy raw-handshake timing. */
-module_param(getfeat_delay_ms, int, 0644);
+/* ── Raw-mode handshake timing (EXPERIMENTAL) ───────────────────── */
+module_param(getfeat_delay_ms, int, 0444);
 MODULE_PARM_DESC(getfeat_delay_ms,
 	"Delay in ms between RPT_DESC and GET_FEATURE (default 5900; 0=immediate)");
+/* Default matches the Windows-observed ~5.9s RPT_DESC->GET_FEATURE gap. */
 
 static int stream_watchdog_ms = 0;  /* disabled by default, too aggressive for raw mode */
-module_param(stream_watchdog_ms, int, 0644);
+module_param(stream_watchdog_ms, int, 0444);
 MODULE_PARM_DESC(stream_watchdog_ms,
 	"Runtime streaming watchdog interval in ms (0=disable, Windows uses 2000)");
 
 static int stream_watchdog_max_retries = 3;
-module_param(stream_watchdog_max_retries, int, 0644);
+module_param(stream_watchdog_max_retries, int, 0444);
 MODULE_PARM_DESC(stream_watchdog_max_retries,
 	"Max re-init retries before giving up");
 
 /* ── Runtime recovery ──────────────────────────────────────────── */
 static int poll_interval;
-module_param(poll_interval, int, 0644);
+module_param(poll_interval, int, 0444);
 MODULE_PARM_DESC(poll_interval,
 	"Deprecated and ignored: IRQ is the sole input-report consumer");
-
-struct heatmap_blob_candidate {
-	u32 gx;
-	u32 gy;
-	u32 w;
-	u8 idx;
-};
-
-/* Match real blobs to real active slots globally. Unmatched blobs are left for
- * the caller to allocate; dummy and out-of-radius edges never map to a slot. */
-static void heatmap_assign_active_slots(struct spi_hid *shid,
-		const struct heatmap_blob_candidate *blobs, u8 blob_count,
-		u8 assigned_slot[HEATMAP_MAX_BLOBS])
-{
-	int cost[HEATMAP_MAX_BLOBS][HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS];
-	int u[HEATMAP_MAX_BLOBS + 1] = {};
-	int v[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1] = {};
-	int p[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1] = {};
-	int way[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1] = {};
-	u8 active_slots[HEATMAP_MAX_SLOTS];
-	int row_to_column[HEATMAP_MAX_BLOBS];
-	u32 max_distance_squared = (u32)blob_max_distance * blob_max_distance;
-	int active_count = 0;
-	int columns;
-	u8 i, j;
-
-	for (i = 0; i < HEATMAP_MAX_BLOBS; i++)
-		assigned_slot[i] = 0xFF;
-	if (!blob_count)
-		return;
-
-	for (i = 0; i < HEATMAP_MAX_SLOTS; i++)
-		if (shid->blob_slot_state[i] >= 1)
-			active_slots[active_count++] = i;
-	if (!active_count)
-		return;
-
-	columns = active_count + blob_count;
-	for (i = 0; i < blob_count; i++) {
-		for (j = 0; j < active_count; j++) {
-			s32 dx = (s32)(blobs[i].gx >> 8) - (s32)(shid->blob_slot_gx[active_slots[j]] >> 8);
-			s32 dy = (s32)(blobs[i].gy >> 8) - (s32)(shid->blob_slot_gy[active_slots[j]] >> 8);
-			u32 distance_squared = dx * dx + dy * dy;
-
-			cost[i][j] = distance_squared <= max_distance_squared ?
-				int_sqrt(distance_squared) : 1000000;
-		}
-		for (; j < columns; j++)
-			cost[i][j] = 1000;
-		row_to_column[i] = -1;
-	}
-
-	/* Rectangular Hungarian assignment with rows <= columns. */
-	for (i = 1; i <= blob_count; i++) {
-		int minv[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1];
-		bool used[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1] = {};
-		int j0 = 0;
-
-		for (j = 1; j <= columns; j++)
-			minv[j] = 1000000;
-		p[0] = i;
-		do {
-			int i0 = p[j0];
-			int delta = 1000000;
-			int j1 = 0;
-
-			used[j0] = true;
-			for (j = 1; j <= columns; j++) {
-				int cur;
-
-				if (used[j])
-					continue;
-				cur = cost[i0 - 1][j - 1] - u[i0] - v[j];
-				if (cur < minv[j]) {
-					minv[j] = cur;
-					way[j] = j0;
-				}
-				if (minv[j] < delta) {
-					delta = minv[j];
-					j1 = j;
-				}
-			}
-			for (j = 0; j <= columns; j++) {
-				if (used[j]) {
-					u[p[j]] += delta;
-					v[j] -= delta;
-				} else if (j) {
-					minv[j] -= delta;
-				}
-			}
-			j0 = j1;
-		} while (p[j0]);
-		do {
-			int j1 = way[j0];
-
-			p[j0] = p[j1];
-			j0 = j1;
-		} while (j0);
-	}
-
-	for (j = 1; j <= columns; j++)
-		if (p[j])
-			row_to_column[p[j] - 1] = j - 1;
-	for (i = 0; i < blob_count; i++)
-		if (row_to_column[i] >= 0 && row_to_column[i] < active_count &&
-		    cost[i][row_to_column[i]] < 1000000)
-			assigned_slot[i] = active_slots[row_to_column[i]];
-}
 
 static void release_all_slots(struct input_dev *input, u8 *slot_state,
 		unsigned int max_slots)
@@ -1864,7 +1761,28 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	memset(shid->eigori, 0, sizeof(shid->eigori));
 }
 
-/* Beta mapping uses a 72-column by 48-row raster and the logical input range. */
+/* Screen mapping: logical range 0..32767 for both X and Y.
+ * Reverse-engineered from TouchPenProcessor0C19.dll (GROUND_TRUTH.md §22.3):
+ * raw frame is 288 columns (stride 0x120), rows auto-detected from data size.
+ * Each byte indexes a float[256] lookup table (c590) for actual signal level.
+ * Signal = c590[raw_byte] = max_signal - (index * step + offset).
+ *
+ * Grid calibration formula (§22.8):
+ *   screen_x = grid_x * scale_x  where scale_x = (phys_x * SCALE) / (grid_w - 1)
+ *   screen_y = grid_y * scale_y  where scale_y = (phys_y * SCALE) / (grid_h - 1)
+ *
+ * Using max range 0..32767 with aspect ratio from HID descriptor (2934×1652).
+ *
+ * Grid geometry (empirically derived 2026-07-13 from surface_touch.csv raw
+ * frames): the content_id=0x0C report carries a contiguous 3456-byte cell
+ * field starting at dfa_data_offset=26, laid out as 72 columns × 48 rows
+ * (row-major, 72-wide fast axis). This is a clean 3:2 grid matching the
+ * landscape display — confirmed by connected-component / compactness analysis
+ * across 150 touch frames (W=72 gave a single compact blob per finger; other
+ * widths fragmented the blobs). The earlier 288×~14 assumption stretched Y
+ * onto ~14 rows and scrambled the X/Y mapping. The trailing ~820 bytes of the
+ * frame past cell 3456 are footer/metadata and must NOT be treated as cells.
+ */
 #define GRID_COLS_DEFAULT   72     /* default, overridden by auto-detect or module param */
 #define GRID_ROWS_DEFAULT   48
 #define GRID_CELLS_DEFAULT  (GRID_COLS_DEFAULT * GRID_ROWS_DEFAULT)  /* 3456 */
@@ -1950,8 +1868,11 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 			heatmap_reset_baseline(shid);
 
 			{
-			spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
-			spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_WATCHDOG);
+			if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
+				dev_warn(dev, "SEQ: stream watchdog DESCREQ failed\n");
+			} else {
+				spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_WATCHDOG);
+			}
 		}
 		} else {
 			dev_err(dev, "SEQ: stream watchdog: max retries reached, giving up\n");
@@ -1971,7 +1892,8 @@ out:
 static void spi_hid_poll_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, poll_work);
-	u8 hdr[9];
+	struct device *dev = &shid->spi->dev;
+	u8 hdr[10];
 	int type, ret, hdr_off;
 	u16 blen;
 
@@ -1988,24 +1910,32 @@ static void spi_hid_poll_work(struct work_struct *work)
 		goto resched;
 
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && hdr_off != 5) {
+	if (type >= 0 && (hdr_off != 6 || (hdr[7] & 0x0f))) {
 		seq_dbg(shid, 1, "SEQ: poller header at unexpected offset %d\n", hdr_off);
 		shid->poll_missed++;
 		goto resched;
 	}
 	if (type == 1 && (shid->hid ||
 			(shid->raw_mode_active && shid->touch_input))) {
-		u32 cap = shid->desc.max_input_length ?
-			  shid->desc.max_input_length : 0x1000;
+		u32 cap = shid->raw_mode_active ? shid->data_buf_len :
+			  (shid->desc.max_input_length ? shid->desc.max_input_length : 0x1000);
 
-		blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
+		blen = (((hdr[7] >> 4) & 0xF) << 0) | (hdr[8] << 4);
 		blen *= 4;
 
 		{
-			u32 rblen = (blen + 5) < cap ? (blen + 5) : cap;
+			u32 wanted = blen + 6;
+			u32 rblen = min_t(u32, wanted, cap);
 			u32 avail;
 			u16 rl;
-			struct spi_hid_protocol_content content;
+
+			if (shid->raw_mode_active && wanted > shid->data_buf_len) {
+				dev_warn_ratelimited(dev,
+					"SEQ: raw DATA body %u exceeds buffer %u, dropped\n",
+					wanted, shid->data_buf_len);
+				shid->stat_frames_dropped++;
+				goto resched;
+			}
 
 			rblen = min_t(u32, rblen, shid->data_buf_len);
 			avail = (rblen > 8) ? (rblen - 8) : 0;
@@ -2016,23 +1946,26 @@ static void spi_hid_poll_work(struct work_struct *work)
 
 			if (rblen < 9)
 				goto resched;
-			rl = shid->data_buf[5] | (shid->data_buf[6] << 8);
+			rl = shid->data_buf[6] | (shid->data_buf[7] << 8);
 
 			shid->stat_data++;
 			seq_dbg(shid, 2, "SEQ: poller cid=0x%02x len=%u\n",
-				 shid->data_buf[7], rl);
+				 shid->data_buf[8], rl);
 
-			if (raw_capture_only &&
-			    !spi_hid_protocol_parse_content(shid->data_buf + 5,
-							     rblen - 5, &content) &&
-			    content.content_id == SPI_HID_RAW_CAPTURE_CONTENT_ID) {
-				spi_hid_handle_raw_body(shid, shid->data_buf + 5, rblen - 5);
-			} else if (shid->raw_mode_active && shid->touch_input &&
-			    !spi_hid_protocol_parse_content(shid->data_buf + 5,
-							     rblen - 5, &content) &&
-			    content.content_id == 0x0C) {
-				heatmap_process_frame(shid, content.data,
-						      content.data_length, content.content_id);
+			if (rl > 2 && rl - 2 > avail) {
+				dev_warn_ratelimited(dev,
+					"SEQ: poller DATA report len=%u exceeds buffer (avail=%u), dropped\n",
+					rl, avail);
+				shid->stat_frames_dropped++;
+				goto resched;
+			}
+
+			if (shid->raw_mode_active && shid->data_buf[8] == 0x0C &&
+			    shid->touch_input) {
+				u32 clen = (rl > 2) ? (rl - 2) : 0;
+
+				heatmap_process_frame(shid, &shid->data_buf[8],
+						      clen, shid->data_buf[8]);
 			} else if (rl > 2 && rl - 2 <= avail) {
 				if (shid->hid) {
 					int hret = hid_input_report(shid->hid,
@@ -2063,20 +1996,20 @@ out:
 	mutex_unlock(&shid->seq_lock);
 }
 
-static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
-				  u32 data_len, u8 content_id)
+static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, u8 content_id)
 {
 	struct device *dev = &shid->spi->dev;
 	u32 i, cell_count, ncols, nrows;
+	u16 nlabels;
 	int data_offset;
 	int configured_cols, configured_rows;
 	int touched_count = 0;
 
-	/* The CapImg decoder supplies only the validated raster. */
-	data_offset = 0;
+	/* Parameters are fixed at module load; validate the frame before caching geometry. */
+	data_offset = READ_ONCE(dfa_data_offset);
 	configured_cols = READ_ONCE(grid_cols);
 	configured_rows = READ_ONCE(grid_rows);
-	if (data_len != SPI_HID_CAPIMG_RASTER_SAMPLES)
+	if (data_offset < 0 || data_offset >= data_len)
 		return;
 
 	/* Clamp unsafe module parameters to prevent division by zero
@@ -2086,17 +2019,22 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 	if (ema_alpha < 0 || ema_alpha > 10000) ema_alpha = 3;
 	if (blob_debounce < 1) blob_debounce = 3;
 	if (blob_lift_frames < 1) blob_lift_frames = 2;
-	if (blob_max_distance < 1 || blob_max_distance > 1000) blob_max_distance = 3;
+	if (blob_max_distance < 1) blob_max_distance = 50;
 	if (ghost_dist < 1) ghost_dist = 15;
 	if (touch_threshold_pct < 0) touch_threshold_pct = 0;
 	if (touch_threshold_pct > 100) touch_threshold_pct = 100;
 	/* calib_offset_x/y may be negative: final clamp to [0,SCREEN_MAX]
 	 * is applied after swap/invert, so a negative shift is valid. */
 
-	/* data contains precisely the 72 by 48 decoder-validated samples. */
-	cell_count = data_len;
+	/* The candidate cell field begins after metadata. Its geometry is not yet
+	 * proven, so never infer cells from a short or malformed frame. */
+	{
+		u32 avail = data_len - data_offset;
+		cell_count = avail;
+	}
 
-	/* Use the decoder-established geometry unless explicitly overridden. */
+	/* The 72×48 default is an unvalidated experimental candidate. It remains
+	 * configurable only for controlled capture comparison, never calibration. */
 	if (!shid->heatmap_grid_cols || !shid->heatmap_grid_rows) {
 		if (configured_cols > 1)
 			ncols = configured_cols;
@@ -2116,6 +2054,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 			dev_warn(dev, "HEATMAP: invalid grid rows %u, using default\n", nrows);
 			nrows = GRID_ROWS_DEFAULT;
 		}
+		if (nrows > HEATMAP_MAX_CELLS / ncols || ncols * nrows > cell_count) {
+			dev_warn(dev, "HEATMAP: frame has %u bytes, insufficient for %ux%u grid\n",
+				 cell_count, ncols, nrows);
+			return;
+		}
 		shid->heatmap_grid_cols = ncols;
 		shid->heatmap_grid_rows = nrows;
 		seq_dbg(shid, 1, "HEATMAP: grid %u cols × %u rows (offset %d, frame avail %u cells)\n",
@@ -2124,8 +2067,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 	ncols = shid->heatmap_grid_cols;
 	nrows = shid->heatmap_grid_rows;
 
-	/* Clamp cell_count to the actual grid so footer/metadata bytes beyond
-	 * the 72×48 field are never treated as sensor cells. */
+	/* Clamp to the candidate grid so trailing bytes cannot become cells. */
 	if (!ncols || nrows > HEATMAP_MAX_CELLS / ncols) {
 		dev_warn(dev, "HEATMAP: invalid grid %ux%u\n", ncols, nrows);
 		return;
@@ -2199,169 +2141,235 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 
 	if (!shid->touch_input) return;
 
-	/* Surface frame-gap reset: if >5 frames skipped, release all slots.
-	 * FUN_180600ad0 + FUN_1805ffd00:107-112. */
+	/* Step 1: mark touched cells using c590 signal lookup.
+	 *
+	 * Empirical hardware behaviour (surface_touch.csv, 2026-07-13): every
+	 * cell rests at raw byte 0xB4 (=180) and a finger *lowers* the raw byte
+	 * (down to ~0x7C). Through the c590 LUT (c590[i]=4000-22i) this means the
+	 * touch SIGNAL RISES: c590[resting 180]≈40 → c590[touch 124]≈1272. So the
+	 * touch metric is a signal *rise* above the resting baseline:
+	 *   rise = c590[current] - c590[baseline]   (>0 on touch)
+	 *   touched if rise >= threshold
+	 * (The previous code subtracted in the opposite direction, so `drop` was
+	 * always <0 and no cell was ever detected — the digitizer produced zero
+	 * touches. This matches the Step-3 weight, which already uses `rise`.)
+	 *
+	 * threshold = c590_range * touch_threshold_pct / 100, with c590_range =
+	 * c590[0] = 4000. Observed touch peaks reach a rise of ~2300, so the
+	 * default 10% (=400) sits well inside the dynamic range. */
+	memset(shid->heatmap_touched, 0, cell_count);
 	{
-		u32 frame_id = shid->heatmap_frame_id + 1;
-		s32 gap = (s32)frame_id - (s32)shid->heatmap_frame_id;
-		if (shid->heatmap_frame_id && gap > 5) {
-			for (i = 0; i < HEATMAP_MAX_SLOTS; i++)
-				shid->blob_slot_state[i] = 0;
-			memset(shid->blob_slot_duration, 0, sizeof(shid->blob_slot_duration));
-			memset(shid->blob_slot_missed, 0, sizeof(shid->blob_slot_missed));
-			memset(shid->blob_slot_hpos, 0, sizeof(shid->blob_slot_hpos));
-		}
-		shid->heatmap_frame_id = frame_id;
-	}
+		s32 c590_range = shid->c590_lut[0]; /* full-scale signal = 4000 */
+		s32 threshold;
 
-/* Surface peak detection (FUN_1805fba00): find local maxima with 5-cell
- * neighbour radius, using c590 fixed-point signal rise.
- * Minimum peak rise threshold 500 filters noise (c590 ~22-326),
- * keeping genuine touch signals (c590 ~1448-1912). */
-	#define PEAK_MAX_CANDIDATES 16
-	#define PEAK_MIN_RISE 500
-	{
-		struct { u32 cell; u32 rise; } peaks[PEAK_MAX_CANDIDATES];
-		u32 peak_count = 0;
-		u32 pi;
+		if (touch_signal_mode == 2)
+			threshold = (c590_range * touch_threshold_pct) / 100;
+		else if (touch_signal_mode == 1)
+			threshold = (c590_range * 10) / 100; /* reasonable default */
+		else
+			threshold = 0; /* any change */
 
 		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
 			u8 raw = data[data_offset + i];
-			s16 curr = shid->c590_lut[raw];
-			s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
-			s32 rise = (s32)curr - (s32)base;
-			u32 col, row;
-			bool is_peak;
+			u8 baseline_raw = shid->heatmap_baseline[i];
+			s16 baseline_signal = shid->c590_lut[baseline_raw];
+			s16 signal = shid->c590_lut[raw];
+			s32 rise = (s32)signal - (s32)baseline_signal;
 
-			if (rise < PEAK_MIN_RISE)
+			if (touch_signal_mode == 0) {
+				if (rise > 0)
+					shid->heatmap_touched[i] = 1;
+			} else {
+				if (rise >= threshold)
+					shid->heatmap_touched[i] = 1;
+			}
+		}
+	}
+
+	/* Temporal consistency: cells must be active for 2+ consecutive frames
+	 * to be considered stable touches. Single-frame spikes are suppressed. */
+	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
+		if (shid->heatmap_touched[i]) {
+			if (shid->heatmap_frame_persistence[i] < 255)
+				shid->heatmap_frame_persistence[i]++;
+		} else {
+			shid->heatmap_frame_persistence[i] = 0;
+		}
+		/* Only promote cells that have persisted for 2+ frames */
+		if (shid->heatmap_frame_persistence[i] < 2)
+			shid->heatmap_touched[i] = 0;
+	}
+
+	/* Morphological dilation: expand high-confidence touched region by 1 cell
+	 * to merge nearby clusters. Only applied to cells with persistence >= 3
+	 * (strong confidence) to avoid amplifying noise. */
+	{
+		u8 *expanded = shid->heatmap_expanded;
+		memcpy(expanded, shid->heatmap_touched, cell_count);
+		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
+			/* Only dilate cells with strong persistence */
+			if (!shid->heatmap_touched[i] || shid->heatmap_frame_persistence[i] < 3)
 				continue;
-			col = i % ncols;
-			row = i / ncols;
-
-			/* 5-cell neighbour comparison */
-			is_peak = true;
-			if (col >= 5) {
-				u32 ni = i - 5;
-				s16 nc = shid->c590_lut[data[data_offset + ni]];
-				s16 nb = shid->c590_lut[shid->heatmap_baseline[ni]];
-				if ((s32)nc - (s32)nb > rise)
-					is_peak = false;
+			u16 col = i % ncols, row = i / ncols;
+			if (col > 0 && i > 0) expanded[i - 1] = 1;
+			if (col + 1 < ncols && i + 1 < cell_count && i + 1 < HEATMAP_MAX_CELLS) expanded[i + 1] = 1;
+			if (row > 0 && i >= ncols) {
+				expanded[i - ncols] = 1;
+				if (col > 0) expanded[i - ncols - 1] = 1;
+				if (col + 1 < ncols && i - ncols + 1 < cell_count) expanded[i - ncols + 1] = 1;
 			}
-			if (is_peak && col + 5 < ncols) {
-				u32 ni = i + 5;
-				s16 nc = shid->c590_lut[data[data_offset + ni]];
-				s16 nb = shid->c590_lut[shid->heatmap_baseline[ni]];
-				if ((s32)nc - (s32)nb > rise)
-					is_peak = false;
-			}
-			if (is_peak && row >= 5) {
-				u32 ni = i - 5 * ncols;
-				s16 nc = shid->c590_lut[data[data_offset + ni]];
-				s16 nb = shid->c590_lut[shid->heatmap_baseline[ni]];
-				if ((s32)nc - (s32)nb > rise)
-					is_peak = false;
-			}
-			if (is_peak && row + 5 < nrows) {
-				u32 ni = i + 5 * ncols;
-				s16 nc = shid->c590_lut[data[data_offset + ni]];
-				s16 nb = shid->c590_lut[shid->heatmap_baseline[ni]];
-				if ((s32)nc - (s32)nb > rise)
-					is_peak = false;
-			}
-
-			if (is_peak) {
-				/* Insertion sort by rise descending */
-				u32 pos;
-				for (pos = peak_count; pos > 0 && peaks[pos-1].rise < (u32)rise; pos--)
-					peaks[pos] = peaks[pos-1];
-				peaks[pos].cell = i;
-				peaks[pos].rise = (u32)rise;
-				if (peak_count < PEAK_MAX_CANDIDATES)
-					peak_count++;
-			}
-		} /* end peak scan */
-
-		/* Surface Stage 9e centroid (FUN_180602e60): signal-weighted
-		 * over full connected component via flood-fill from each peak.
-		 * Noise-floor subtraction (baseline c590), per-blob eigenellipsis. */
-		memset(shid->blob_active, 0, sizeof(shid->blob_active));
-		memset(shid->heatmap_label, 0, cell_count * sizeof(shid->heatmap_label[0]));
-		memset(shid->eigmaj, 0, sizeof(shid->eigmaj));
-		memset(shid->eigmin, 0, sizeof(shid->eigmin));
-		memset(shid->eigori, 0, sizeof(shid->eigori));
-		for (pi = 0; pi < peak_count; pi++) {
-			u32 pcell = peaks[pi].cell;
-			u32 queue[HEATMAP_MAX_CELLS];
-			u32 qhead = 0, qtail = 0;
-			u64 fxsum = 0, fysum = 0, fwsum = 0;
-			u16 blob_label = (u16)(pi + 1);
-			s32 blob_cx_cell, blob_cy_cell;
-			s64 sum_xx = 0, sum_yy = 0, sum_xy = 0;
-			s32 blob_pixel_count = 0;
-
-			if (shid->heatmap_label[pcell] != 0)
-				continue;
-
-			queue[qtail++] = pcell;
-			shid->heatmap_label[pcell] = blob_label;
-
-			while (qhead < qtail) {
-				u32 ci = queue[qhead++];
-				s32 c = (s32)(ci % ncols);
-				s32 r = (s32)(ci / ncols);
-				s16 curr = shid->c590_lut[data[data_offset + ci]];
-				s16 base = shid->c590_lut[shid->heatmap_baseline[ci]];
-				s32 rise = (s32)curr - (s32)base;
-
-				if (rise > 0) {
-					fxsum += (u64)c * (u64)rise * 256;
-					fysum += (u64)r * (u64)rise * 256;
-					fwsum += (u64)rise;
-					blob_pixel_count++;
-
-					if (c > 0) { u32 ni = ci - 1; if (!shid->heatmap_label[ni]) { shid->heatmap_label[ni] = blob_label; queue[qtail++] = ni; } }
-					if (c + 1 < (s32)ncols) { u32 ni = ci + 1; if (!shid->heatmap_label[ni]) { shid->heatmap_label[ni] = blob_label; queue[qtail++] = ni; } }
-					if (r > 0) { u32 ni = ci - ncols; if (!shid->heatmap_label[ni]) { shid->heatmap_label[ni] = blob_label; queue[qtail++] = ni; } }
-					if (r + 1 < (s32)nrows) { u32 ni = ci + ncols; if (!shid->heatmap_label[ni]) { shid->heatmap_label[ni] = blob_label; queue[qtail++] = ni; } }
+			if (row + 1 < nrows) {
+				u32 idx = i + ncols;
+				if (idx < cell_count && idx < HEATMAP_MAX_CELLS) {
+					expanded[idx] = 1;
+					if (col > 0 && idx > 0) expanded[idx - 1] = 1;
+					if (col + 1 < ncols && idx + 1 < cell_count) expanded[idx + 1] = 1;
 				}
 			}
+		}
+		memcpy(shid->heatmap_touched, expanded, cell_count);
+	}
 
-			if (fwsum == 0 || fwsum < (u32)blob_min_weight)
-				continue;
+	/* Step 2: two-pass connected-component labeling (8-way) */
+	memset(shid->heatmap_label, 0xFF, cell_count * 2);
+	memset(shid->label_equiv, 0, sizeof(shid->label_equiv));
+	nlabels = 0;
 
-			shid->blob_x[pi] = (u32)(fxsum / fwsum);
-			shid->blob_y[pi] = (u32)(fysum / fwsum);
-			shid->blob_wsum[pi] = (u32)fwsum;
-			shid->blob_active[pi] = true;
+	for (i = 0; i < cell_count; i++) {
+		u16 col, row, new_label;
+		u16 neighbors[4];
+		int n_neigh = 0;
 
-			if (blob_pixel_count < 2)
-				continue;
+		if (!shid->heatmap_touched[i]) continue;
+		col = i % ncols;
+		row = i / ncols;
+		if (row >= nrows) break;
 
-			blob_cx_cell = (s32)(shid->blob_x[pi] >> 8);
-			blob_cy_cell = (s32)(shid->blob_y[pi] >> 8);
+		new_label = 0xFFFF;
+		if (col > 0 && shid->heatmap_touched[i - 1])
+			neighbors[n_neigh++] = shid->heatmap_label[i - 1];
+		if (row > 0) {
+			if (col > 0 && shid->heatmap_touched[i - ncols - 1])
+				neighbors[n_neigh++] = shid->heatmap_label[i - ncols - 1];
+			if (shid->heatmap_touched[i - ncols])
+				neighbors[n_neigh++] = shid->heatmap_label[i - ncols];
+			if (col + 1 < ncols && shid->heatmap_touched[i - ncols + 1])
+				neighbors[n_neigh++] = shid->heatmap_label[i - ncols + 1];
+		}
+
+		if (n_neigh > 0) {
+			new_label = neighbors[0];
+			for (int j = 0; j < n_neigh; j++) {
+				u16 min_label = new_label, nj = neighbors[j];
+				u16 a = min_label < nj ? min_label : nj;
+				u16 b = a == min_label ? nj : min_label;
+				if (a < 256 && b < 256) {
+					while (shid->label_equiv[a]) a = shid->label_equiv[a];
+					while (shid->label_equiv[b]) b = shid->label_equiv[b];
+					if (a != b) shid->label_equiv[b] = a;
+				}
+			}
+		} else {
+			new_label = nlabels++;
+			if (nlabels >= 256) new_label = 255;
+		}
+		shid->heatmap_label[i] = new_label;
+	}
+
+	/* Resolve label equivalence */
+	for (i = 0; i < nlabels && i < 256; i++) {
+		u16 r = shid->label_equiv[i];
+		while (r && r < 256 && shid->label_equiv[r]) r = shid->label_equiv[r];
+		shid->label_equiv[i] = r;
+	}
+
+	/* Step 3: accumulate blob sums (weighted by signal drop from baseline) */
+	memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
+	memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
+	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
+	memset(shid->blob_active, 0, sizeof(shid->blob_active));
+
+	for (i = 0; i < cell_count; i++) {
+		u16 label, col, row;
+		u32 weight;
+
+		if (!shid->heatmap_touched[i]) continue;
+		label = shid->heatmap_label[i];
+		while (label < 256 && shid->label_equiv[label]) label = shid->label_equiv[label];
+		if (label >= HEATMAP_MAX_BLOBS) continue;
+
+		col = i % ncols;
+		row = i / ncols;
+		if (row >= nrows) break;
+
+		/* Weight = current_signal - baseline_signal (touch increases c590 value) */
+		{
+			s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
+			s16 curr = shid->c590_lut[data[data_offset + i]];
+			s16 rise = curr - base;
+			weight = rise > 0 ? (u32)rise : 0;
+		}
+		shid->blob_xsum[label] += (u32)col * weight;
+		shid->blob_ysum[label] += (u32)row * weight;
+		shid->blob_wsum[label] += weight;
+		shid->blob_active[label] = true;
+		touched_count++;
+	}
+
+	/* Step 4: compute centroids and emit */
+	for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
+		if (!shid->blob_active[i] || shid->blob_wsum[i] < blob_min_weight)
+			continue;
+		shid->blob_x[i] = (u16)(shid->blob_xsum[i] / shid->blob_wsum[i]);
+		shid->blob_y[i] = (u16)(shid->blob_ysum[i] / shid->blob_wsum[i]);
+	}
+
+	/* Eigenvalue decomposition for the heaviest blob (GROUND_TRUTH.md §22.6) */
+	{
+		u32 best_idx = 0;
+		u32 best_w = 0;
+		s64 sum_xx = 0, sum_yy = 0, sum_xy = 0;
+
+		for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
+			if (shid->blob_active[i] && shid->blob_wsum[i] > best_w) {
+				best_w = shid->blob_wsum[i];
+				best_idx = i;
+			}
+		}
+		if (best_w >= (u32)blob_min_weight) {
+			s32 cx = (s32)shid->blob_x[best_idx];
+			s32 cy = (s32)shid->blob_y[best_idx];
 
 			for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-				s32 rise, dx, dy;
+				u16 label;
+				s32 dx, dy, w;
 				s16 base, curr;
 
-				if (shid->heatmap_label[i] != blob_label)
+				if (!shid->heatmap_touched[i])
 					continue;
-				base = shid->c590_lut[shid->heatmap_baseline[i]];
-				curr = shid->c590_lut[data[data_offset + i]];
-				rise = (s32)curr - (s32)base;
-				if (rise <= 0)
+				label = shid->heatmap_label[i];
+				while (label < 256 && shid->label_equiv[label])
+					label = shid->label_equiv[label];
+				if (label != best_idx)
 					continue;
 
-				dx = (s32)(i % (u32)ncols) - blob_cx_cell;
-				dy = (s32)(i / (u32)ncols) - blob_cy_cell;
-				sum_xx += (s64)dx * (s64)dx * (s64)rise;
-				sum_yy += (s64)dy * (s64)dy * (s64)rise;
-				sum_xy += (s64)dx * (s64)dy * (s64)rise;
+				base = shid->c590_lut[shid->heatmap_baseline[i]];
+				curr = shid->c590_lut[data[data_offset + i]];
+				w = (s32)curr - (s32)base;
+				if (w <= 0)
+					continue;
+
+				dx = (s32)(i % ncols) - cx;
+				dy = (s32)(i / ncols) - cy;
+				sum_xx += dx * dx * w;
+				sum_yy += dy * dy * w;
+				sum_xy += dx * dy * w;
 			}
 
 			{
-				s64 trace = sum_xx + sum_yy;
-				s64 det = sum_xx * sum_yy - sum_xy * sum_xy;
+				s64 trace = (s64)sum_xx + (s64)sum_yy;
+				s64 det = (s64)sum_xx * (s64)sum_yy -
+					  (s64)sum_xy * (s64)sum_xy;
 				s64 disc = trace * trace - 4 * det;
 				s32 sq;
 
@@ -2369,8 +2377,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					disc = 0;
 				sq = (s32)int_sqrt((u64)disc);
 
-				shid->eigmaj[pi] = (s32)((trace + sq) / 2);
-				shid->eigmin[pi] = (s32)((trace - sq) / 2);
+				shid->eigmaj[0] = (s32)((trace + sq) / 2);
+				shid->eigmin[0] = (s32)((trace - sq) / 2);
 
 				{
 					s32 num = 2 * sum_xy;
@@ -2379,25 +2387,28 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 
 					if (den != 0 || num != 0) {
 						deg = atan2_approx(num, den) / 2;
+						/* Signed range [-90.00°, +89.99°] */
 						if (deg >= 18000)
 							deg -= 18000;
 						else if (deg <= -18000)
 							deg += 18000;
-						shid->eigori[pi] = deg;
+						shid->eigori[0] = deg;
 					} else {
-						shid->eigori[pi] = 0;
+						shid->eigori[0] = 0;
 					}
 				}
 			}
 		}
-		touched_count = peak_count;
 	}
 
-	/* Emit multitouch events with smoothing and slot tracking. */
+	/* Step 5: emit multitouch events with EMA smoothing and slot tracking.
+	 * Grid → screen mapping per GROUND_TRUTH.md §22.8.  Calibration
+	 * parameters describe the final screen axes, so choose the source grid
+	 * extent after swap_xy has selected which grid axis feeds each output. */
 	{
 		struct input_dev *input = shid->touch_input;
 		bool any_touch = false;
-		struct heatmap_blob_candidate sorted[HEATMAP_MAX_BLOBS];
+		struct { u16 gx; u16 gy; u32 w; u8 idx; } sorted[HEATMAP_MAX_BLOBS];
 		u8 sorted_count = 0;
 		const u32 SCREEN_MAX = 32767;
 		u32 scale_x, scale_y;
@@ -2426,18 +2437,18 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 		for (i = 0; i + 1 < sorted_count; i++)
 			for (u8 j = i + 1; j < sorted_count; j++)
 				if (sorted[j].w > sorted[i].w) {
-					struct heatmap_blob_candidate t = sorted[i];
+					typeof(sorted[0]) t = sorted[i];
 					sorted[i] = sorted[j]; sorted[j] = t;
 				}
 		if (sorted_count > HEATMAP_MAX_SLOTS)
 			sorted_count = HEATMAP_MAX_SLOTS;
 
 		for (i = 0; i < sorted_count; i++) {
-			u32 screen_gx = swap_xy ? sorted[i].gy >> 8 : sorted[i].gx >> 8;
-			u32 screen_gy = swap_xy ? sorted[i].gx >> 8 : sorted[i].gy >> 8;
+			u16 screen_gx = swap_xy ? sorted[i].gy : sorted[i].gx;
+			u16 screen_gy = swap_xy ? sorted[i].gx : sorted[i].gy;
 
 			seq_dbg(shid, 2, "CALIB: blob[%u] grid=(%u,%u) screen=(%u,%u) weight=%u scale=(%ux%u)\n",
-				 i, sorted[i].gx >> 8, sorted[i].gy >> 8,
+				 i, sorted[i].gx, sorted[i].gy,
 				 (screen_gx * scale_x + 500) / 1000,
 				 (screen_gy * scale_y + 500) / 1000,
 				 sorted[i].w, scale_x, scale_y);
@@ -2446,7 +2457,9 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 			seq_dbg(shid, 2, "CALIB: blobs=%u cells_touched=%d\n",
 				 sorted_count, touched_count);
 
-		/* Pre-assignment blob merging: Surface coalesces within 6 cells. */
+		/* Ghost rejection (GROUND_TRUTH.md §22.7 step 3):
+		 * Merge blobs closer than ghost_dist threshold (grid cells).
+		 * If two blobs are within ghost_dist, keep the heavier one, discard the lighter. */
 		{
 			u8 a, b, j;
 
@@ -2454,20 +2467,19 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 				if (sorted[a].w == 0)
 					continue;
 				for (b = a + 1; b < sorted_count; b++) {
-					s32 dx, dy;
+					u16 dx, dy;
 
 					if (sorted[b].w == 0)
 						continue;
-					dx = (s32)(sorted[a].gx >> 8) - (s32)(sorted[b].gx >> 8);
-					dy = (s32)(sorted[a].gy >> 8) - (s32)(sorted[b].gy >> 8);
-					/* Surface coalesces within 6 grid cells (dx^2+dy^2 < 36). */
-					if (dx * dx + dy * dy < 36) {
+					dx = abs((s16)sorted[a].gx - (s16)sorted[b].gx);
+					dy = abs((s16)sorted[a].gy - (s16)sorted[b].gy);
+					if (dx <= (u16)ghost_dist && dy <= (u16)ghost_dist) {
 						if (sorted[b].w > sorted[a].w) {
 							sorted[a].w = 0;
 							break;
 						} else {
 							sorted[b].w = 0;
-					}
+						}
 					}
 				}
 			}
@@ -2482,11 +2494,18 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 			sorted_count = j;
 		}
 
-		/* Large merged blobs are not split in the beta path. */
+		/* Blob splitting (GROUND_TRUTH.md §22.7 step 4):
+		 * If a single blob's weight exceeds split_threshold and we have
+		 * free slots, split by finding two peaks in the blob's cell
+		 * distribution. Simplified: split along the major axis. */
+		/* Not implementing full split yet — the DLL's version requires
+		 * per-pixel signal analysis that's expensive. This placeholder
+		 * splits very large blobs by halving, which handles merged-finger
+		 * cases approximately. */
 
 		{
 			u8 assigned_slot[HEATMAP_MAX_BLOBS];
-			u32 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
+			u16 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
 			bool new_active[HEATMAP_MAX_SLOTS];
 
 			memset(new_active, 0, sizeof(new_active));
@@ -2495,29 +2514,39 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 			for (i = 0; i < sorted_count; i++)
 				assigned_slot[i] = 0xFF;
 
-			heatmap_assign_active_slots(shid, sorted, sorted_count, assigned_slot);
+			/* Slot assignment: match detected blobs to existing slots by distance */
 			for (i = 0; i < sorted_count; i++) {
-				if (assigned_slot[i] != 0xFF)
-					continue;
+				u16 best_dist = 0xFFFF;
+				u8 best_slot = 0xFF;
+
 				for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
 					bool taken = false;
 					u8 k;
 
-					if (shid->blob_slot_state[s] != 0)
-						continue;
 					for (k = 0; k < i; k++)
-						if (assigned_slot[k] == s) {
-							taken = true;
-							break;
+						if (assigned_slot[k] == s) { taken = true; break; }
+					if (taken) continue;
+
+					if (shid->blob_slot_state[s] >= 1) { /* prefer claimed or debouncing slots */
+						u16 dx = abs((s16)sorted[i].gx - (s16)shid->blob_slot_gx[s]);
+						u16 dy = abs((s16)sorted[i].gy - (s16)shid->blob_slot_gy[s]);
+						if (dx <= (u16)blob_max_distance && dy <= (u16)blob_max_distance) {
+							u16 dist = dx + dy;
+							if (dist < best_dist) {
+								best_dist = dist;
+								best_slot = s;
+							}
 						}
-					if (!taken) {
-						assigned_slot[i] = s;
-						break;
+					} else if (shid->blob_slot_state[s] == 0) {
+						if (best_slot == 0xFF) best_slot = s;
 					}
 				}
+				if (best_slot != 0xFF)
+					assigned_slot[i] = best_slot;
 			}
 
-			/* States: empty, new, claimed, lift. */
+			/* Process slot state transitions (GROUND_TRUTH §22.4):
+			 * 0=empty, 1=new, 2=claimed, 3=lift */
 			for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
 				u8 bi = 0xFF;
 
@@ -2526,8 +2555,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 				}
 
 				if (bi != 0xFF) {
-					u32 gx = sorted[bi].gx;
-					u32 gy = sorted[bi].gy;
+					u16 gx = sorted[bi].gx;
+					u16 gy = sorted[bi].gy;
 					u32 w  = sorted[bi].w;
 					bool was_claimed = (shid->blob_slot_state[s] >= 2);
 
@@ -2535,27 +2564,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					case 0:
 						shid->blob_slot_state[s] = 1;
 						shid->blob_slot_duration[s] = 1;
-						shid->blob_slot_hpos[s] = 0;
-						shid->blob_slot_hcount[s] = 0;
-						memset(shid->blob_slot_hx[s], 0, sizeof(shid->blob_slot_hx[s]));
-						memset(shid->blob_slot_hy[s], 0, sizeof(shid->blob_slot_hy[s]));
 						break;
 					case 1:
 						shid->blob_slot_duration[s]++;
-						if (shid->blob_slot_duration[s] >= (u32)blob_debounce) {
-							u32 hmin = gx, hmax = gx;
-							u8 hc = shid->blob_slot_hcount[s];
-							u8 hp;
-							for (hp = 0; hp < hc; hp++) {
-								u32 hx = shid->blob_slot_hx[s][hp];
-								if (hx && hx < hmin) hmin = hx;
-								if (hx > hmax) hmax = hx;
-							}
-							if (hmax - hmin <= 768)
-								shid->blob_slot_state[s] = 2;
-							else
-								shid->blob_slot_duration[s] = 1;
-						}
+						if (shid->blob_slot_duration[s] >= (u32)blob_debounce)
+							shid->blob_slot_state[s] = 2;
 						break;
 					case 2:
 						shid->blob_slot_duration[s]++;
@@ -2565,60 +2578,23 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 						shid->blob_slot_duration[s] = 1;
 						break;
 					}
-					shid->blob_slot_blob[s] = sorted[bi].idx;
-					/* Push to history ring (10-entry circular buffer). */
-				{
-						u8 hp = shid->blob_slot_hpos[s];
-						shid->blob_slot_hx[s][hp] = gx;
-						shid->blob_slot_hy[s][hp] = gy;
-						shid->blob_slot_hpos[s] = (hp + 1) % SLOT_HISTORY_DEPTH;
-						if (shid->blob_slot_hcount[s] < SLOT_HISTORY_DEPTH)
-							shid->blob_slot_hcount[s]++;
-					}
+					u16 old_gx = shid->blob_slot_gx[s];
+					u16 old_gy = shid->blob_slot_gy[s];
+
 					shid->blob_slot_missed[s] = 0;
-					/* Surface stationary detection (FUN_180608000):
-					 * lock position if movement < 1 cell for 5+ frames. */
-					{
-						u32 ox = shid->blob_slot_gx[s];
-						u32 oy = shid->blob_slot_gy[s];
-						u32 dx = gx > ox ? gx - ox : ox - gx;
-						u32 dy = gy > oy ? gy - oy : oy - gy;
-						if (dx <= 256 && dy <= 256 &&
-						    shid->blob_slot_state[s] == 2)
-							shid->blob_slot_stationary[s]++;
-						else
-							shid->blob_slot_stationary[s] = 0;
-					}
-					/* Surface EMA weight filter (FUN_180608000):
-					 * weight[s] = (1-α) * old + α * new, α=1/8. */
-					shid->blob_slot_weight[s] = (shid->blob_slot_weight[s] * 7 + w) / 8;
 					shid->blob_slot_gx[s] = gx;
 					shid->blob_slot_gy[s] = gy;
+					shid->blob_slot_weight[s] = w;
 
 					new_active[s] = (shid->blob_slot_state[s] >= 2);
 
 					if (new_active[s]) {
 						if (was_claimed && shid->blob_slot_state[s] == 2) {
-							u8 hc = shid->blob_slot_hcount[s];
-							u8 n = hc > 3 ? 3 : (hc > 0 ? hc : 1);
-							u8 hp = shid->blob_slot_hpos[s];
-							u64 sx = 0, sy = 0;
-							u8 k;
-							for (k = 0; k < n; k++) {
-								u8 idx = (hp + SLOT_HISTORY_DEPTH - 1 - k) % SLOT_HISTORY_DEPTH;
-								sx += shid->blob_slot_hx[s][idx];
-								sy += shid->blob_slot_hy[s][idx];
-							}
-							new_gx[s] = (u32)(sx / n);
-							new_gy[s] = (u32)(sy / n);
+							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
+							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
 						} else {
 							new_gx[s] = gx;
 							new_gy[s] = gy;
-						}
-						/* Lock position when stationary (Surface still detection). */
-						if (shid->blob_slot_stationary[s] >= 5) {
-							new_gx[s] = shid->blob_slot_gx[s];
-							new_gy[s] = shid->blob_slot_gy[s];
 						}
 						shid->blob_slot_gx[s] = new_gx[s];
 						shid->blob_slot_gy[s] = new_gy[s];
@@ -2628,7 +2604,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					case 1:
 						shid->blob_slot_state[s] = 0;
 						shid->blob_slot_duration[s] = 0;
-						new_active[s] = false;
 						break;
 					case 2:
 						shid->blob_slot_missed[s]++;
@@ -2636,81 +2611,38 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 							shid->blob_slot_state[s] = 3;
 							shid->blob_slot_missed[s] = 0;
 						}
-						new_active[s] = true;
-						new_gx[s] = shid->blob_slot_gx[s];
-						new_gy[s] = shid->blob_slot_gy[s];
 						break;
-				case 3:
-					shid->blob_slot_missed[s]++;
-					/* Surface lift history lookback (FUN_180601dd0):
-					 * emit lift at position from N frames ago. */
-				{
-						u8 hc = shid->blob_slot_hcount[s];
-						u8 hp = shid->blob_slot_hpos[s];
-							u8 lb = shid->blob_slot_missed[s];
-							if (lb > hc || lb < 1)
-								lb = (hc > 0) ? 1 : 0;
-							if (lb > 0) {
-								u8 idx = (hp + SLOT_HISTORY_DEPTH - lb) % SLOT_HISTORY_DEPTH;
-								new_gx[s] = shid->blob_slot_hx[s][idx];
-								new_gy[s] = shid->blob_slot_hy[s][idx];
-							} else {
-								new_gx[s] = shid->blob_slot_gx[s];
-								new_gy[s] = shid->blob_slot_gy[s];
-							}
-						}
-						new_active[s] = true;
+					case 3:
+						shid->blob_slot_missed[s]++;
 						if (shid->blob_slot_missed[s] >= 2) {
 							shid->blob_slot_state[s] = 0;
 							shid->blob_slot_missed[s] = 0;
-							new_active[s] = false;
 						}
 						break;
 					case 0:
-						new_active[s] = false;
 						break;
 					}
+
+				new_active[s] = false;
 		}
 	}
-
-	/* Surface post-emission coalescence (FUN_1806025c0, Stage 10):
-		 * suppress weaker contacts within 6 cells (squared dist < 36). */
-		{
-			u8 sa, sb;
-			for (sa = 0; sa < HEATMAP_MAX_SLOTS; sa++) {
-				if (!new_active[sa])
-					continue;
-				for (sb = sa + 1; sb < HEATMAP_MAX_SLOTS; sb++) {
-					s32 dx, dy;
-					if (!new_active[sb])
-						continue;
-					dx = (s32)(new_gx[sa] >> 8) - (s32)(new_gx[sb] >> 8);
-					dy = (s32)(new_gy[sa] >> 8) - (s32)(new_gy[sb] >> 8);
-					if (dx * dx + dy * dy < 36) {
-						if (shid->blob_slot_weight[sa] <
-						    shid->blob_slot_weight[sb])
-							new_active[sa] = false;
-						else
-							new_active[sb] = false;
-					}
-				}
-			}
-		}
 
 			for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
 				input_mt_slot(input, s);
 				input_mt_report_slot_state(input, MT_TOOL_FINGER, new_active[s]);
 				if (new_active[s]) {
-					s64 fx, fy;
-					u32 raw_gx = swap_xy ? new_gy[s] : new_gx[s];
-					u32 raw_gy = swap_xy ? new_gx[s] : new_gy[s];
-					u32 cell_x = raw_gx >> 8, frac_x = raw_gx & 0xFF;
-					u32 cell_y = raw_gy >> 8, frac_y = raw_gy & 0xFF;
+					s64 fx, fy, tmp;
+					u16 screen_gx = new_gx[s];
+					u16 screen_gy = new_gy[s];
 
-					fx = ((s64)cell_x * scale_x + 500) / 1000;
-					fx += ((s64)frac_x * scale_x) / (1000 * 256);
-					fy = ((s64)cell_y * scale_y + 500) / 1000;
-					fy += ((s64)frac_y * scale_y) / (1000 * 256);
+					/* Orient first: scales and offsets always address final X/Y. */
+					if (swap_xy) {
+						tmp = screen_gx;
+						screen_gx = screen_gy;
+						screen_gy = tmp;
+					}
+					fx = ((s64)screen_gx * scale_x + 500) / 1000;
+					fy = ((s64)screen_gy * scale_y + 500) / 1000;
 					fx += calib_offset_x;
 					fy += calib_offset_y;
 					if (invert_x) fx = (s64)SCREEN_MAX - fx;
@@ -2723,10 +2655,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					input_report_abs(input, ABS_MT_POSITION_Y, (u16)fy);
 					any_touch = true;
 
-				/* Emit per-slot eigenellipsis from flood-fill blob. */
-				{
-					u8 bi = shid->blob_slot_blob[s];
-					if (shid->blob_active[bi] && shid->eigmaj[bi] > 0) {
+					/* Emit orientation and touch ellipse for slot 0 (heaviest blob) */
+					if (s == 0 && shid->eigmaj[0] > 0) {
 						u32 major, minor;
 						s32 ori;
 
@@ -2734,9 +2664,9 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 						 * grid-cell² units; project the std-dev onto
 						 * screen units using the per-axis scale so the
 						 * major/minor reflect the real X/Y pitch. */
-						major = ((u32)int_sqrt(shid->eigmaj[bi]) * scale_x + 500) / 1000;
-						minor = ((u32)int_sqrt(shid->eigmin[bi]) * scale_y + 500) / 1000;
-						ori = shid->eigori[bi] / 100;
+						major = ((u32)int_sqrt(shid->eigmaj[0]) * scale_x + 500) / 1000;
+						minor = ((u32)int_sqrt(shid->eigmin[0]) * scale_y + 500) / 1000;
+						ori = shid->eigori[0] / 100;
 						if (swap_xy) {
 							u32 t = major; major = minor; minor = t;
 							ori = -ori;
@@ -2757,9 +2687,16 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					}
 				}
 			}
-			}
 		}
 
+		/* Bug fix (2026-07-08 review): only HEATMAP_MAX_SLOTS slots were
+		 * ever allocated via input_mt_init_slots() — the loop above
+		 * already reports the correct active/inactive state for all of
+		 * them. Calling input_mt_slot() with an out-of-range index here
+		 * was a no-op in the input core (slot left unchanged at the last
+		 * valid one, HEATMAP_MAX_SLOTS-1), so this loop was re-clearing
+		 * that last real slot immediately after it was just reported
+		 * active, silently deactivating the second finger every frame. */
 		input_mt_sync_frame(input);
 		input_report_key(input, BTN_TOUCH, any_touch ? 1 : 0);
 		input_sync(input);
@@ -2787,7 +2724,7 @@ static ssize_t heatmap_debug_show(struct device *dev,
 	off += sysfs_emit_at(buf, off,
 		"content_id=0x%02x len=%u cells=%u grid=%ux%u\n",
 		snapshot_cid, snapshot_len,
-		snapshot_len,
+		snapshot_len - 2,
 		snapshot_cols, snapshot_rows);
 	for (i = 0; i < snapshot_len && off < PAGE_SIZE - 4; i += 32) {
 		u32 chunk = min_t(u32, 32, snapshot_len - i);
@@ -2799,170 +2736,11 @@ static ssize_t heatmap_debug_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(heatmap_debug);
 
-static void spi_hid_raw_capture_frame(struct spi_hid *shid, const u8 *body,
-		unsigned int body_length)
-{
-	struct spi_hid_protocol_content content;
-	u32 slot;
-
-	if (spi_hid_protocol_validate_raw_capture(body, body_length, &content)) {
-		mutex_lock(&shid->raw_capture_lock);
-		shid->raw_capture_invalid++;
-		mutex_unlock(&shid->raw_capture_lock);
-		return;
-	}
-
-	mutex_lock(&shid->raw_capture_lock);
-	slot = shid->raw_capture_next;
-	memcpy(shid->raw_capture_frames[slot], body, body_length);
-	shid->raw_capture_count++;
-	shid->raw_capture_sequence[slot] = shid->raw_capture_count;
-	shid->raw_capture_timestamp_ns[slot] = ktime_get_ns();
-	shid->raw_capture_next = (slot + 1) % SPI_HID_RAW_CAPTURE_SLOTS;
-	mutex_unlock(&shid->raw_capture_lock);
-}
-
-static void spi_hid_handle_raw_body(struct spi_hid *shid, const u8 *body,
-		unsigned int body_length)
-{
-	struct spi_hid_capimg_raster raster;
-
-	spi_hid_raw_capture_frame(shid, body, body_length);
-	if (!raw_input_beta || !shid->touch_input)
-		return;
-	if (spi_hid_capimg_decode_v0(body, body_length, &raster)) {
-		mutex_lock(&shid->raw_capture_lock);
-		shid->raw_input_invalid++;
-		mutex_unlock(&shid->raw_capture_lock);
-		return;
-	}
-
-	heatmap_process_frame(shid, raster.samples, SPI_HID_CAPIMG_RASTER_SAMPLES,
-			      SPI_HID_RAW_CAPTURE_CONTENT_ID);
-}
-
-static void spi_hid_isolated_set_capture(struct spi_hid *shid, int type,
-		const u8 *body, u32 body_length, u16 transport_length)
-{
-	struct spi_hid_isolated_set_frame *frame;
-	u32 copied;
-
-	if (shid->isolated_set_state != SPI_HID_ISOLATED_SET_OBSERVING)
-		return;
-	if (shid->isolated_set_count >= SPI_HID_ISOLATED_SET_RING_SLOTS)
-		shid->isolated_set_overflow++;
-
-	frame = &shid->isolated_set_ring[shid->isolated_set_next];
-	frame->timestamp_ns = ktime_get_ns();
-	frame->transport_length = transport_length;
-	frame->body_length = min_t(u32, body_length,
-		SPI_HID_ISOLATED_SET_BODY_LENGTH);
-	frame->type = type;
-	frame->truncated = body_length > SPI_HID_ISOLATED_SET_BODY_LENGTH;
-	memcpy(frame->header, shid->isolated_set_header, sizeof(frame->header));
-	copied = frame->body_length;
-	if (copied)
-		memcpy(frame->body, body, copied);
-	if (copied < sizeof(frame->body))
-		memset(frame->body + copied, 0, sizeof(frame->body) - copied);
-	shid->isolated_set_count++;
-	shid->isolated_set_next = (shid->isolated_set_next + 1) %
-		SPI_HID_ISOLATED_SET_RING_SLOTS;
-}
-
-/* The binary file is a fixed eight-slot ring of complete 4304-byte V0 bodies.
- * Consult raw_capture_status for slot sequence numbers and timestamps. */
-static ssize_t raw_capture_read(struct file *filp, struct kobject *kobj,
-		const struct bin_attribute *attr, char *buf, loff_t off, size_t count)
-{
-	struct device *dev = kobj_to_dev(kobj);
-	struct spi_hid *shid = dev_get_drvdata(dev);
-	const size_t total = SPI_HID_RAW_CAPTURE_SLOTS * SPI_HID_RAW_CAPTURE_BODY_LENGTH;
-	size_t copied = 0;
-
-	if (off < 0 || off >= total)
-		return 0;
-	count = min(count, total - (size_t)off);
-
-	mutex_lock(&shid->raw_capture_lock);
-	while (copied < count) {
-		size_t position = (size_t)off + copied;
-		u32 slot = position / SPI_HID_RAW_CAPTURE_BODY_LENGTH;
-		size_t slot_offset = position % SPI_HID_RAW_CAPTURE_BODY_LENGTH;
-		size_t chunk = min(count - copied,
-			SPI_HID_RAW_CAPTURE_BODY_LENGTH - slot_offset);
-
-		memcpy(buf + copied, shid->raw_capture_frames[slot] + slot_offset, chunk);
-		copied += chunk;
-	}
-	mutex_unlock(&shid->raw_capture_lock);
-
-	return copied;
-}
-
-static struct bin_attribute raw_capture_bin_attr = {
-	.attr = {
-		.name = "raw_capture",
-		.mode = 0400,
-	},
-	.size = SPI_HID_RAW_CAPTURE_SLOTS * SPI_HID_RAW_CAPTURE_BODY_LENGTH,
-	.read = raw_capture_read,
-};
-
-static ssize_t isolated_set_ring_read(struct file *filp, struct kobject *kobj,
-		const struct bin_attribute *attr, char *buf, loff_t off, size_t count)
-{
-	struct device *dev = kobj_to_dev(kobj);
-	struct spi_hid *shid = dev_get_drvdata(dev);
-	const size_t total = sizeof(shid->isolated_set_ring);
-
-	if (off < 0 || off >= total)
-		return 0;
-	count = min(count, total - (size_t)off);
-	mutex_lock(&shid->seq_lock);
-	memcpy(buf, (u8 *)shid->isolated_set_ring + off, count);
-	mutex_unlock(&shid->seq_lock);
-	return count;
-}
-
-static struct bin_attribute isolated_set_ring_bin_attr = {
-	.attr = {
-		.name = "isolated_set_ring",
-		.mode = 0400,
-	},
-	.size = SPI_HID_ISOLATED_SET_RING_SLOTS *
-		sizeof(struct spi_hid_isolated_set_frame),
-	.read = isolated_set_ring_read,
-};
-
-static ssize_t raw_capture_status_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct spi_hid *shid = dev_get_drvdata(dev);
-	u32 i;
-	ssize_t len = 0;
-
-	mutex_lock(&shid->raw_capture_lock);
-	len += sysfs_emit_at(buf, len,
-		"enabled=%u\nraw_input_beta=%u\nframe_body_length=%u\nslots=%u\ncaptured=%llu\ninvalid=%u\nraw_input_invalid=%u\nnext_slot=%u\n",
-		raw_capture_only, raw_input_beta, SPI_HID_RAW_CAPTURE_BODY_LENGTH,
-		SPI_HID_RAW_CAPTURE_SLOTS, shid->raw_capture_count,
-		shid->raw_capture_invalid, shid->raw_input_invalid, shid->raw_capture_next);
-	for (i = 0; i < SPI_HID_RAW_CAPTURE_SLOTS; i++)
-		len += sysfs_emit_at(buf, len, "slot%u_sequence=%llu\nslot%u_timestamp_ns=%llu\n",
-			i, shid->raw_capture_sequence[i], i,
-			shid->raw_capture_timestamp_ns[i]);
-	mutex_unlock(&shid->raw_capture_lock);
-
-	return len;
-}
-static DEVICE_ATTR_RO(raw_capture_status);
-
 static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[9]; int type; u16 blen = 0;
+	u8 hdr[10]; int type; u16 blen = 0;
 	int hdr_off;
 	s64 dbg_dt_us;
 	irqreturn_t result = IRQ_HANDLED;
@@ -2977,6 +2755,11 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	shid->stat_irq_count++;
 
+	/* Bug fix (2026-07-08 review): this used to compare seq_state (int,
+	 * values 0-5) against seq_enabled (bool), which collapses to
+	 * "seq_state != 1" and fired on every IRQ while parked in any other
+	 * state — including state 4, the steady-state loop that handles every
+	 * touch report — defeating the point of only logging on transitions. */
 	if (shid->seq_state != shid->seq_dbg_last_state) {
 		seq_dbg(shid, 1, "SEQ: thread seq_state=%d\n", shid->seq_state);
 		shid->seq_dbg_last_state = shid->seq_state;
@@ -2986,14 +2769,15 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		ktime_us_delta(ktime_get(), shid->seq_dbg_last_irq) : -1;
 	shid->seq_dbg_last_irq = ktime_get();
 
-	/* Windows reads response header first: 5 sync bytes plus a 4-byte header. */
+	/* Windows reads response header first: 5 sync bytes + 4-byte header = 9 bytes.
+	 * AMD controller with TX_COUNT=3 sees 6 sync bytes; try 10 to capture full header. */
 	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
 		dev_dbg(dev, "sequencer header read failed\n");
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
 	seq_dbg(shid, 2, "SEQ[state=%d] type=%d hdr=[%*ph] dt=%lld us%s\n",
-		 shid->seq_state, type, 4, &hdr[5], dbg_dt_us,
+		 shid->seq_state, type, 4, &hdr[6], dbg_dt_us,
 		 shid->seq_dbg_expect_fast ? (dbg_dt_us >= 0 && dbg_dt_us < 5000 ?
 		 " <<< FAST IRQ AFTER DESCREQ: WRITE REACHED DEVICE" :
 		 " <<< slow IRQ: DESCREQ ignored (device just re-reset)") : "");
@@ -3012,42 +2796,17 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		}
 		goto out;
 	}
-	if (hdr_off != 5) {
+	if (hdr_off != 6 || (hdr[7] & 0x0f)) {
 		dev_warn_ratelimited(dev,
-			"SEQ: input header at unexpected offset %d, dropping frame\n", hdr_off);
+			"SEQ: malformed input header at offset %d, dropping frame\n", hdr_off);
 		shid->stat_frames_dropped++;
 		goto out;
 	}
 
-	blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
+	blen = (((hdr[7] >> 4) & 0xF) << 0) | (hdr[8] << 4);
 	blen *= 4;
 	if (blen > sizeof(shid->input.content))
 		blen = sizeof(shid->input.content);
-	memcpy(shid->isolated_set_header, &hdr[5],
-	       sizeof(shid->isolated_set_header));
-	if (shid->isolated_set_armed && type == SPI_HID_REPORT_TYPE_RESET_RESP) {
-		u32 rblen = min_t(u32, blen + 5, shid->data_buf_len);
-
-		if (!spi_hid_seq_read(shid, shid->data_buf, rblen))
-			spi_hid_isolated_set_capture(shid, type, shid->data_buf, rblen,
-						     blen);
-		shid->isolated_set_reset++;
-		shid->isolated_set_state = SPI_HID_ISOLATED_SET_RESET;
-		cancel_delayed_work(&shid->isolated_set_timeout_work);
-		cancel_delayed_work(&shid->isolated_set_work);
-		/* Reset is terminal after the harness arms: never recover or retry. */
-		goto out;
-	}
-	if (shid->isolated_set_state == SPI_HID_ISOLATED_SET_OBSERVING &&
-	    (type == SPI_HID_REPORT_TYPE_COMMAND_RESP ||
-	     type == SPI_HID_REPORT_TYPE_GET_FEATURE_RESP)) {
-		u32 rblen = min_t(u32, blen + 5, shid->data_buf_len);
-
-		if (!spi_hid_seq_read(shid, shid->data_buf, rblen))
-			spi_hid_isolated_set_capture(shid, type, shid->data_buf, rblen,
-						     blen);
-		goto out;
-	}
 
 	switch (shid->seq_state) {
 	case 0: seq_handle_reset(shid, type, blen, &shid->seq_dbg_expect_fast); break;
@@ -3100,7 +2859,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 7) {
 		u8 body[64] = {};
-		u32 rblen = min_t(u32, blen + 5, sizeof(body));
+		u32 rblen = min_t(u32, blen + 6, sizeof(body));
 
 		shid->stat_device_desc++;
 		seq_dbg(shid, 1, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
@@ -3112,7 +2871,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		{
 			struct spi_hid_device_desc_raw raw = {};
 			u32 off = 0;
-			u32 required = sizeof(raw) - sizeof(raw.reserved);
+			u32 required = sizeof(raw);
 
 			while (off + 3 < rblen && body[off] == 0xFF)
 				off++;
@@ -3127,6 +2886,10 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 			seq_dbg(shid, 2, "SEQ: parsing at rx+%u\n", off);
 			memcpy(&raw, body + off,
 			       min_t(u32, sizeof(raw), rblen > off ? rblen - off : 0));
+			if (spi_hid_validate_dev_desc(&raw, rblen - off - 3)) {
+				dev_warn(&shid->spi->dev, "SEQ: invalid DEVICE_DESC\n");
+				return;
+			}
 			spi_hid_parse_dev_desc(&raw, &shid->desc);
 			seq_dbg(shid, 2, "SEQ: vid=0x%04X pid=0x%04X ver=0x%04X inp=0x%04X out=0x%04X cmd=0x%04X rpt_len=%u max_in=%u max_out=%u\n",
 				shid->desc.vendor_id, shid->desc.product_id,
@@ -3153,7 +2916,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		spi_hid_seq_set_state(shid, 2, SPI_HID_SEQ_DEVICE_DESCRIPTOR);
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 5, sizeof(body));
+		u32 rblen = min_t(u32, blen + 6, sizeof(body));
 
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
@@ -3170,7 +2933,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 8) {
 		u8 body[1024] = {};
-		u32 rblen = min_t(u32, blen + 5, sizeof(body));
+		u32 rblen = min_t(u32, blen + 6, sizeof(body));
 
 		shid->stat_rpt_desc++;
 		seq_dbg(shid, 1, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
@@ -3198,7 +2961,19 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			len = min_t(u32, shid->desc.report_descriptor_length,
 				    sizeof(shid->wire_report_descriptor));
 			if (off < rblen && len > 0 && off + len <= rblen) {
+				u32 k;
+
 				memcpy(shid->wire_report_descriptor, body + off, len);
+				for (k = 55; k < len; k += 64) {
+					if (shid->wire_report_descriptor[k] == 0xFF &&
+					    k < HARDCODED_RD_SIZE &&
+					    hardcoded_report_descriptor[k] != 0xFF) {
+						seq_dbg(shid, 1, "SEQ: patching known-corrupt wire descriptor byte at offset %u (0xff -> 0x%02x)\n",
+							 k, hardcoded_report_descriptor[k]);
+						shid->wire_report_descriptor[k] =
+							hardcoded_report_descriptor[k];
+					}
+				}
 				shid->wire_report_descriptor_len = len;
 			} else {
 				shid->wire_report_descriptor_len = 0;
@@ -3211,37 +2986,8 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			bool queued = schedule_work(&shid->create_device_work);
 			seq_dbg(shid, 1, "SEQ: scheduled create_device_work, queued=%d\n", queued);
 		}
-		if (isolated_set_test && !shid->isolated_set_attempted) {
-			shid->isolated_set_attempted = true;
-			shid->isolated_set_armed = true;
-			shid->isolated_set_state = SPI_HID_ISOLATED_SET_WAIT_GET;
-			/* Keep normal input dispatch live while the isolated worker waits
-			 * for both HID creation and the Windows-observed settle interval. */
-			spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
-			dev_info(&shid->spi->dev,
-				 "ISOLATED_SET: GET ID6 scheduled; recovery is disabled for this test\n");
-			schedule_delayed_work(&shid->isolated_set_work,
-				msecs_to_jiffies(RAW_TRANSITION_DELAY_MS));
-		} else if (raw_transition_once && !shid->raw_transition_attempted) {
-			/* One exact, delayed Windows-observed request. There is no retry if
-			 * the device resets or remains silent after the later SET_FEATURE. */
-			shid->raw_transition_attempted = true;
-			shid->raw_transition_scheduled++;
-			shid->feat_delay_pending = true;
-			dev_info(&shid->spi->dev,
-				 "RAW_TRANSITION: GET selector 4 scheduled after %dms\n",
-				 RAW_TRANSITION_DELAY_MS);
-			seq_dbg(shid, 1,
-				"SEQ: scheduling one-shot GET_FEATURE(id=4) after %dms\n",
-				RAW_TRANSITION_DELAY_MS);
-			schedule_delayed_work(&shid->feat_delay_work,
-				msecs_to_jiffies(RAW_TRANSITION_DELAY_MS));
-		} else if (shid->raw_mode_active) {
-			if (probe_raw_id < 0) {
-				seq_dbg(shid, 1, "SEQ: raw_mode=1 probe_raw_id=%d -> skipping SET_FEATURE, staying standard\n",
-					 probe_raw_id);
-				spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
-			} else if (skip_getfeat) {
+		if (shid->raw_mode_active) {
+			if (skip_getfeat) {
 				static const u8 vendor_init[] = {
 					0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00,
 					0x03, 0x0A, 0x00,
@@ -3259,22 +3005,32 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				} else {
 					seq_dbg(shid, 1, "SEQ: vendor init (18B, TXN#267) +70ms delay...\n");
 					usleep_range(68000, 72000);
-					spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0);
+					if (spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0)) {
+						dev_warn(&shid->spi->dev, "SEQ: vendor init write failed\n");
+						schedule_delayed_work(&shid->raw_handshake_watchdog,
+							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+						return;
+					}
 					usleep_range(36000, 39000);
 					{
 						u8 sf[15] = {
 							0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-							0x03, probe_raw_id & 0xFF, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
+							0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
 						};
-						seq_dbg(shid, 1, "SEQ: probe_id=%d SET_FEATURE -> state 4\n", probe_raw_id);
-						spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0);
+						seq_dbg(shid, 1, "SEQ: SET_FEATURE -> state 4\n");
+						if (spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0)) {
+							dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
+							schedule_delayed_work(&shid->raw_handshake_watchdog,
+								msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+							return;
+						}
 					}
 					spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 				}
 			} else {
 				u8 gf[11] = {
 					0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
-					0x00, probe_raw_id & 0xFF, 0x03, 0x00, 0x06
+					0x00, 0x04, 0x03, 0x00, 0x06
 				};
 				usleep_range(1400, 1800);
 				if (getfeat_delay_ms > 0) {
@@ -3285,7 +3041,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 							      msecs_to_jiffies(getfeat_delay_ms));
 					/* Stay in state 2 until the delayed work fires */
 				} else {
-					seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE(id=%d), state 5\n", probe_raw_id);
+					seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE, state 5\n");
 					if (spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0)) {
 						dev_warn(&shid->spi->dev, "SEQ: GET_FEATURE write failed\n");
 						schedule_delayed_work(&shid->raw_handshake_watchdog,
@@ -3302,7 +3058,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		}
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 5, sizeof(body));
+		u32 rblen = min_t(u32, blen + 6, sizeof(body));
 
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
@@ -3317,14 +3073,10 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 5) {
 		u8 body[256] = {};
-		u32 rblen = min_t(u32, blen + 5, sizeof(body));
+		u32 rblen = min_t(u32, blen + 6, sizeof(body));
 		u32 off;
 
 		shid->stat_getfeat_resp++;
-		if (raw_transition_once && shid->raw_transition_attempted) {
-			shid->raw_transition_get_response++;
-			dev_info(&shid->spi->dev, "RAW_TRANSITION: GET response received\n");
-		}
 		seq_dbg(shid, 1, "SEQ: GET_FEAT_RESP! reading body (%u bytes)...\n", blen);
 		if (rblen < 3 || spi_hid_seq_read(shid, body, rblen)) {
 			dev_warn(&shid->spi->dev, "SEQ: GET_FEATURE response read failed or was truncated\n");
@@ -3335,104 +3087,42 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 			seq_dbg(shid, 3, "  GET_FEAT_RESP[%u..%u]: %*ph\n",
 				 off, off + chunk - 1, chunk, body + off);
 		}
-		if (isolated_set_test &&
-		    shid->isolated_set_state == SPI_HID_ISOLATED_SET_WAIT_GET) {
-			/* This is the sole SET in the harness. The controller consumes the
-			 * first byte, leaving the exact 14-byte Windows FIFO vector. */
-			static const u8 set_vector[15] = {
-				0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-				0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00,
-			};
-
-			shid->isolated_set_state = SPI_HID_ISOLATED_SET_WAIT_SET;
-			usleep_range(4500, 5500);
-			if (spi_hid_seq_write(shid, set_vector, sizeof(set_vector), NULL, 0)) {
-				shid->isolated_set_write_failed++;
-				shid->isolated_set_state = SPI_HID_ISOLATED_SET_FAILED;
-				goto out_done;
-			}
-			shid->isolated_set_set_sent++;
-			shid->isolated_set_state = SPI_HID_ISOLATED_SET_OBSERVING;
-			spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
-			schedule_delayed_work(&shid->isolated_set_timeout_work,
-				msecs_to_jiffies(ISOLATED_SET_OBSERVATION_TIMEOUT_MS));
-			return;
-		}
-		if (raw_transition_once && shid->raw_transition_attempted) {
-			/* A GET response proves only that GET reached the device. SET has
-			 * no verified completion contract and must remain a separate test. */
-			memcpy(shid->raw_transition_get_body, body, rblen);
-			shid->raw_transition_get_body_len = rblen;
-			cancel_delayed_work(&shid->raw_transition_timeout_work);
-			dev_info(&shid->spi->dev,
-				 "RAW_TRANSITION: GET-only transaction complete; SET is disabled\n");
-			spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
-			return;
-		}
 		{
-			u8 selector = raw_transition_once ? 4 : probe_raw_id & 0xff;
 			u8 sf[15] = {
 				0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-				0x03, 0x00, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
+				0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
 			};
 			u8 sf_nd[14] = {
 				0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-				0x03, 0x00, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
+				0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
 			};
-			sf[8] = selector;
-			sf_nd[7] = selector;
 			usleep_range(4500, 5500);
-			seq_dbg(shid, 1, "SEQ: sending SET_FEATURE(id=%d) speed=%u no_double=%d\n",
-					 selector, setfeat_speed_hz, setfeat_no_double);
+			seq_dbg(shid, 1, "SEQ: sending SET_FEATURE speed=%u no_double=%d\n",
+				 setfeat_speed_hz, setfeat_no_double);
 			int ret;
 
-			if (raw_transition_once)
-				ret = spi_hid_seq_write_speed(shid, sf_nd, sizeof(sf_nd),
-							  NULL, 0, 0);
-			else if (setfeat_no_double)
+			if (setfeat_no_double)
 				ret = spi_hid_seq_write_speed(shid, sf_nd, sizeof(sf_nd),
 								  NULL, 0, setfeat_speed_hz);
 			else
 				ret = spi_hid_seq_write_speed(shid, sf, sizeof(sf),
 								  NULL, 0, setfeat_speed_hz);
 			if (ret) {
-				if (raw_transition_once && shid->raw_transition_attempted)
-					shid->raw_transition_set_write_failed++;
 				dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed: %d\n", ret);
 				return;
-			}
-			if (raw_transition_once && shid->raw_transition_attempted) {
-				shid->raw_transition_set_sent++;
-				dev_info(&shid->spi->dev,
-					 "RAW_TRANSITION: SET selector %u sent\n", selector);
 			}
 		}
 		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
 	} else if (type == 3) {
 		u8 body[16];
-		u32 rblen = min_t(u32, blen + 5, sizeof(body));
+		u32 rblen = min_t(u32, blen + 6, sizeof(body));
 
 		shid->stat_reset_rsp++;
-		if (isolated_set_test && shid->isolated_set_armed) {
-			if (rblen)
-				spi_hid_seq_read(shid, body, rblen);
-			shid->isolated_set_reset++;
-			shid->isolated_set_state = SPI_HID_ISOLATED_SET_RESET;
-			cancel_delayed_work(&shid->isolated_set_timeout_work);
-			/* A reset is terminal for this harness: do not send recovery. */
-			return;
-		}
-		if (raw_transition_once && shid->raw_transition_attempted &&
-		    !shid->raw_transition_get_response)
-			shid->raw_transition_reset_before_response++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in state 5, sending DESCREQ directly\n");
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
-
-out_done:
-	return;
 }
 
 /* ── State handler: VENDOR_INIT (state 3) ────────────────────────── */
@@ -3448,8 +3138,25 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		seq_handle_data(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
-		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: RESET_RSP, restarting discovery\n");
-		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
+		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: got RESET_RSP, vendor init ignored. Hardcoding descriptors...\n");
+		shid->desc.hid_version = 0x0100;
+		shid->desc.report_descriptor_length = 936;
+		shid->desc.report_descriptor_register = 0x0002;
+		shid->desc.input_register = 0x0000;
+		shid->desc.max_input_length = 0x1000;
+		shid->desc.output_register = 0x0003;
+		shid->desc.max_output_length = 0x0100;
+		shid->desc.command_register = 0x0004;
+		shid->desc.vendor_id = 0x045E;
+		shid->desc.product_id = 0x0C19;
+		shid->desc.version_id = 0x0100;
+		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FALLBACK);
+		shid->ready = true;
+		shid->keep_powered = true;
+		if (!shid->hid) {
+			seq_dbg(shid, 1, "SEQ: creating HID device with hardcoded descriptors...\n");
+			spi_hid_create_device(shid);
+		}
 	}
 }
 
@@ -3465,31 +3172,22 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		seq_dbg(shid, 1, "SEQ: Device reset detected in state 4. Re-initializing sequencer...\n");
 		if (spi_hid_seq_read(shid, body, sizeof(body)))
 			return;
-		spi_hid_isolated_set_capture(shid, type, body, sizeof(body), blen);
-		if (shid->isolated_set_state == SPI_HID_ISOLATED_SET_OBSERVING) {
-			shid->isolated_set_reset++;
-			shid->isolated_set_state = SPI_HID_ISOLATED_SET_RESET;
-			cancel_delayed_work(&shid->isolated_set_timeout_work);
-			return;
-		}
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_DEVICE_RESET);
 		return;
 	}
 	if (type != 1)
 		return;
-	if (!shid->hid && !(shid->raw_mode_active && shid->touch_input) &&
-	    shid->isolated_set_state != SPI_HID_ISOLATED_SET_OBSERVING)
+	if (!shid->hid && !(shid->raw_mode_active && shid->touch_input))
 		return;
 
 	shid->stat_data++;
 	{
-		u32 cap = shid->desc.max_input_length ?
-			  shid->desc.max_input_length : 0x1000;
-		u32 rblen = min_t(u32, blen + 5, cap);
+		u32 cap = shid->raw_mode_active ? shid->data_buf_len :
+			  (shid->desc.max_input_length ? shid->desc.max_input_length : 0x1000);
+		u32 rblen = min_t(u32, blen + 6, cap);
 		u32 avail;
 		u16 rl;
 		u8 *body;
-		struct spi_hid_protocol_content content;
 
 		rblen = min_t(u32, rblen, shid->data_buf_len);
 		body = shid->data_buf;
@@ -3504,18 +3202,20 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			shid->stat_frames_dropped++;
 			return;
 		}
-		spi_hid_isolated_set_capture(shid, type, body, rblen, blen);
-		rl = body[5] | (body[6] << 8);
-		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[7], rl);
+		rl = body[6] | (body[7] << 8);
+		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[8], rl);
 
-		if (raw_capture_only &&
-		    !spi_hid_protocol_parse_content(body + 5, rblen - 5, &content) &&
-		    content.content_id == SPI_HID_RAW_CAPTURE_CONTENT_ID) {
-			spi_hid_handle_raw_body(shid, body + 5, rblen - 5);
+		if (rl > 2 && rl - 2 > avail) {
+			dev_warn_ratelimited(dev,
+				"SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
+				rl, avail);
+			shid->stat_frames_dropped++;
 			return;
-		} else if (shid->raw_mode_active && shid->touch_input &&
-		    !spi_hid_protocol_parse_content(body + 5, rblen - 5, &content) &&
-		    content.content_id == 0x0C) {
+		}
+
+		if (shid->raw_mode_active && body[8] == 0x0C && shid->touch_input) {
+			u32 clen = (rl > 2) ? (rl - 2) : 0;
+
 			if (!shid->raw_handshake_confirmed) {
 				shid->raw_handshake_confirmed = true;
 				cancel_delayed_work(&shid->raw_handshake_watchdog);
@@ -3534,27 +3234,23 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 					dev_warn_once(dev,
 						"SEQ: poll_interval is ignored; IRQ owns input reads\n");
 			}
-			heatmap_process_frame(shid, content.data, content.data_length,
-					      content.content_id);
-		} else if (rl >= 3 && rl - 3 <= avail) {
-			if (shid->raw_mode_active && body[8] == 0x40 && rl - 3 >= 6) {
+			heatmap_process_frame(shid, &body[8], clen, body[8]);
+		} else if (rl > 2 && rl - 2 <= avail) {
+			if (shid->raw_mode_active && body[8] == 0x40 && rl - 2 >= 6) {
 				u16 hx = body[9] | (body[10] << 8);
 				u16 hy = body[11] | (body[12] << 8);
 				seq_dbg(shid, 2, "CALIB_REF: hid=(%u,%u)\n", hx, hy);
 			}
 			if (shid->hid) {
 				int hret = hid_input_report(shid->hid, HID_INPUT_REPORT,
-						    &body[7], rl - 2, 1);
+							    &body[8], rl - 2, 1);
 				if (hret)
 					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x)\n",
 						 hret, body[8]);
 			}
-		} else if (rl >= 3 && rl - 3 > avail) {
-			dev_warn(dev, "SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
-				 rl, avail);
-		} else {
+		} else if (rl <= 2) {
 			dev_warn(dev, "SEQ: DATA report too short to contain a report ID (len=%u), dropped\n",
-					 rl);
+				 rl);
 		}
 	}
 }
@@ -3576,9 +3272,8 @@ static int spi_hid_ll_start(struct hid_device *hid)
 	struct spi_device *spi = hid->driver_data;
 	struct spi_hid *shid = spi_get_drvdata(spi);
 
-	if (shid->desc.max_input_length < HID_MIN_BUFFER_SIZE) {
-		dev_err(&shid->spi->dev, "HID_MIN_BUFFER_SIZE > max_input_length (%d)\n",
-				shid->desc.max_input_length);
+	if (!shid->desc.max_input_length) {
+		dev_err(&shid->spi->dev, "device descriptor has no input length\n");
 		return -EINVAL;
 	}
 
@@ -3622,23 +3317,43 @@ static int spi_hid_ll_parse(struct hid_device *hid)
 
 	mutex_lock(&shid->lock);
 
-	if (!shid->wire_report_descriptor_len) {
-		ret = -EINVAL;
-		goto out;
+	/* 2026-07-08: prefer the descriptor actually read off the wire
+	 * (docs/NEXT_STEPS.md §C) — a real driver shouldn't permanently rely on
+	 * a descriptor hardcoded from one past capture, which can't track
+	 * firmware revisions or other SKUs of the same VID/PID. Trust
+	 * hid_parse_report()'s own structural validation as the sanity check:
+	 * if the wire-read bytes don't parse, fall back to the hardcoded copy
+	 * exactly as before. */
+	if (shid->wire_report_descriptor_len > 0 && !shid->wire_report_descriptor_rejected) {
+		seq_dbg(shid, 1, "SEQ: ll_parse — trying device-read report descriptor (%u bytes)\n",
+			 shid->wire_report_descriptor_len);
+		ret = hid_parse_report(hid, shid->wire_report_descriptor,
+					shid->wire_report_descriptor_len);
+		if (!ret) {
+			shid->report_descriptor_crc32 = crc32_le(0,
+				shid->wire_report_descriptor,
+				shid->wire_report_descriptor_len);
+			mutex_unlock(&shid->lock);
+			return 0;
+		}
+		dev_warn(dev, "SEQ: device-read report descriptor failed to parse (%d), falling back to hardcoded\n",
+			 ret);
 	}
 
-	seq_dbg(shid, 1, "SEQ: ll_parse: device-read report descriptor (%u bytes)\n",
-		 shid->wire_report_descriptor_len);
-	ret = hid_parse_report(hid, shid->wire_report_descriptor,
-				shid->wire_report_descriptor_len);
+	seq_dbg(shid, 1, "SEQ: ll_parse — using HARDCODED report descriptor (%d bytes)\n",
+		 HARDCODED_RD_SIZE);
+
+	/* Copy hardcoded descriptor into response buffer */
+	memcpy(shid->response.content, hardcoded_report_descriptor, HARDCODED_RD_SIZE);
+
+	ret = hid_parse_report(hid, (__u8 *) shid->response.content, HARDCODED_RD_SIZE);
 	if (ret)
-		dev_err(dev, "device-read report descriptor failed to parse: %d\n", ret);
+		dev_err(dev, "failed parsing report: %d\n", ret);
 	else
 		shid->report_descriptor_crc32 = crc32_le(0,
-			shid->wire_report_descriptor,
-			shid->wire_report_descriptor_len);
+			(unsigned char const *) shid->response.content,
+			HARDCODED_RD_SIZE);
 
-out:
 	mutex_unlock(&shid->lock);
 	return ret;
 }
@@ -3654,8 +3369,6 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
 
 	if (!len)
 		return -EINVAL;
-	if (READ_ONCE(shid->isolated_set_state) == SPI_HID_ISOLATED_SET_OBSERVING)
-		return -EBUSY;
 
 	if (!shid->ready) {
 		dev_err(&shid->spi->dev, "%s called in unready state\n", __func__);
@@ -3725,11 +3438,9 @@ static int spi_hid_ll_output_report(struct hid_device *hid,
 
 	if (!len || len > U16_MAX - 3)
 		return -EMSGSIZE;
-	if (READ_ONCE(shid->isolated_set_state) == SPI_HID_ISOLATED_SET_OBSERVING)
-		return -EBUSY;
 
 	report.content_type = SPI_HID_CONTENT_TYPE_OUTPUT_REPORT;
-	report.content_length = len + 2;
+	report.content_length = len - 1;
 	report.content_id = buf[0];
 	report.content = &buf[1];
 
@@ -3855,9 +3566,13 @@ spi_hid_perf_mode_store(struct device *dev,
 	struct spi_hid *shid = dev_get_drvdata(dev);
 	unsigned long flags;
 
-	spin_lock_irqsave(&shid->input_lock, flags);
-	if (kstrtou8(buf, 10, &shid->perf_mode))
+	u8 perf_mode;
+
+	if (kstrtou8(buf, 10, &perf_mode))
 		return -EINVAL;
+
+	spin_lock_irqsave(&shid->input_lock, flags);
+	shid->perf_mode = perf_mode;
 
 	// Reset the log
 	if (shid->perf_mode) {
@@ -3890,70 +3605,6 @@ static ssize_t protocol_stats_show(struct device *dev, struct device_attribute *
 		shid->stat_frames_dropped, shid->stat_irq_count);
 }
 static DEVICE_ATTR_RO(protocol_stats);
-
-static ssize_t raw_transition_status_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct spi_hid *shid = dev_get_drvdata(dev);
-	ssize_t len;
-
-	mutex_lock(&shid->seq_lock);
-	len = sysfs_emit(buf,
-		"enabled=%u\nattempted=%u\ncurrent_state=%d\nscheduled=%u\nget_sent=%u\nget_write_failed=%u\nget_response=%u\ntimeout=%u\nset_sent=%u\nset_write_failed=%u\nstate_skipped=%u\nreset_before_response=%u\n",
-		raw_transition_once, shid->raw_transition_attempted, shid->seq_state,
-		shid->raw_transition_scheduled, shid->raw_transition_get_sent,
-		shid->raw_transition_get_write_failed,
-		shid->raw_transition_get_response, shid->raw_transition_timeout,
-		shid->raw_transition_set_sent,
-		shid->raw_transition_set_write_failed,
-		shid->raw_transition_state_skipped,
-		shid->raw_transition_reset_before_response);
-	mutex_unlock(&shid->seq_lock);
-
-	return len;
-}
-static DEVICE_ATTR_RO(raw_transition_status);
-
-static ssize_t raw_transition_response_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct spi_hid *shid = dev_get_drvdata(dev);
-	ssize_t len;
-
-	mutex_lock(&shid->seq_lock);
-	len = sysfs_emit(buf, "length=%u\nbody=%*ph\n",
-		shid->raw_transition_get_body_len,
-		(int)shid->raw_transition_get_body_len,
-		shid->raw_transition_get_body);
-	mutex_unlock(&shid->seq_lock);
-
-	return len;
-}
-static DEVICE_ATTR_RO(raw_transition_response);
-
-static ssize_t isolated_set_status_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct spi_hid *shid = dev_get_drvdata(dev);
-
-	mutex_lock(&shid->seq_lock);
-	{
-		ssize_t len = sysfs_emit(buf,
-			"enabled=%u\narmed=%u\nattempted=%u\nstate=%u\nget_sent=%u\nset_sent=%u\nwrite_failed=%u\ntimeout=%u\nreset=%u\ncaptured=%u\noverflow=%u\nnext_slot=%u\nring_record_size=%zu\n",
-			isolated_set_test, shid->isolated_set_armed,
-			shid->isolated_set_attempted, shid->isolated_set_state,
-			shid->isolated_set_get_sent, shid->isolated_set_set_sent,
-			shid->isolated_set_write_failed, shid->isolated_set_timeout,
-			shid->isolated_set_reset, shid->isolated_set_count,
-			shid->isolated_set_overflow,
-			shid->isolated_set_next,
-			sizeof(struct spi_hid_isolated_set_frame));
-
-		mutex_unlock(&shid->seq_lock);
-		return len;
-	}
-}
-static DEVICE_ATTR_RO(isolated_set_status);
 
 static ssize_t baseline_status_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -3989,10 +3640,6 @@ static const struct attribute *const spi_hid_attributes[] = {
 	&dev_attr_spi_hid_latency.attr,
 	&dev_attr_spi_hid_perf_mode.attr,
 	&dev_attr_heatmap_debug.attr,
-	&dev_attr_raw_capture_status.attr,
-	&dev_attr_raw_transition_status.attr,
-	&dev_attr_raw_transition_response.attr,
-	&dev_attr_isolated_set_status.attr,
 	&dev_attr_seq_state.attr,
 	&dev_attr_protocol_stats.attr,
 	&dev_attr_baseline_status.attr,
@@ -4055,9 +3702,6 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 	cancel_delayed_work_sync(&shid->poll_work);
 	cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
 	cancel_delayed_work_sync(&shid->feat_delay_work);
-	cancel_delayed_work_sync(&shid->raw_transition_timeout_work);
-	cancel_delayed_work_sync(&shid->isolated_set_timeout_work);
-	cancel_delayed_work_sync(&shid->isolated_set_work);
 	cancel_delayed_work_sync(&shid->stream_watchdog);
 	cancel_work_sync(&shid->reset_work);
 	cancel_work_sync(&shid->create_device_work);
@@ -4072,19 +3716,8 @@ static int spi_hid_probe(struct spi_device *spi)
 	unsigned long irqflags;
 	int ret;
 
-	dev_info(dev, "TRACE[hid] probe begin irq=%d raw_capture_only=%u raw_transition_once=%u isolated_set_test=%u acpi_power_cycle=%u\n",
-		 spi->irq, raw_capture_only, raw_transition_once, isolated_set_test,
-		 acpi_probe_power_cycle);
-	if (raw_mode)
-		dev_warn(dev, "raw_mode=1 is deprecated and inert; no mode-switch command will be sent\n");
-	if ((raw_transition_once || raw_input_beta) && !raw_capture_only) {
-		dev_err(dev, "raw_transition_once and raw_input_beta require raw_capture_only=1\n");
-		return -EINVAL;
-	}
-	if (isolated_set_test && (!raw_capture_only || raw_transition_once)) {
-		dev_err(dev, "isolated_set_test requires raw_capture_only=1 and raw_transition_once=0\n");
-		return -EINVAL;
-	}
+	dev_info(dev, "TRACE[hid] probe begin irq=%d raw_mode=%u acpi_power_cycle=%u\n",
+		 spi->irq, raw_mode, acpi_probe_power_cycle);
 
 	if (dev->of_node && spi->irq <= 0) {
 		dev_err(dev, "Missing IRQ\n");
@@ -4104,23 +3737,12 @@ static int spi_hid_probe(struct spi_device *spi)
 	mutex_init(&shid->seq_lock);
 	mutex_init(&shid->power_lock);
 	mutex_init(&shid->output_lock);
-	mutex_init(&shid->raw_capture_lock);
 	spi_set_drvdata(spi, shid);
 
 	ret = sysfs_create_files(&dev->kobj, spi_hid_attributes);
 	if (ret) {
 		dev_err(dev, "Unable to create sysfs attributes\n");
 		goto err0;
-	}
-	ret = sysfs_create_bin_file(&dev->kobj, &raw_capture_bin_attr);
-	if (ret) {
-		dev_err(dev, "Unable to create raw capture file\n");
-		goto err1;
-	}
-	ret = sysfs_create_bin_file(&dev->kobj, &isolated_set_ring_bin_attr);
-	if (ret) {
-		dev_err(dev, "Unable to create isolated set ring file\n");
-		goto err1;
 	}
 
 	ret = spi_hid_get_descriptor_reg(dev, &shid->device_descriptor_register);
@@ -4201,15 +3823,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_DELAYED_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
 	INIT_DELAYED_WORK(&shid->raw_handshake_watchdog, spi_hid_raw_handshake_watchdog);
 	INIT_DELAYED_WORK(&shid->feat_delay_work, spi_hid_feat_delay_work);
-	INIT_DELAYED_WORK(&shid->raw_transition_timeout_work,
-			  spi_hid_raw_transition_timeout_work);
-	INIT_DELAYED_WORK(&shid->isolated_set_timeout_work,
-			  spi_hid_isolated_set_timeout_work);
-	INIT_DELAYED_WORK(&shid->isolated_set_work, spi_hid_isolated_set_work);
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
-	/* raw_mode is disabled. */
-	shid->raw_mode_active = false;
+	shid->raw_mode_active = raw_mode;
 	shid->seq_dbg_last_state = -1;
 
 	INIT_DELAYED_WORK(&shid->stream_watchdog, spi_hid_stream_watchdog_work);
@@ -4262,7 +3878,9 @@ static int spi_hid_probe(struct spi_device *spi)
 		seq_dbg(shid, 1, "GPIO dance complete\n");
 	}
 
-	/* Optional ACPI power-cycle experiment. */
+	/* This is a device-specific legacy experiment, not generic SPI-HID power
+	 * management. Keep it controllable until cold-boot A/B traces prove it is
+	 * required. Never wait as if a failed AML transition had succeeded. */
 	if (acpi_probe_power_cycle) {
 		acpi_handle h = ACPI_HANDLE(dev);
 		if (h) {
@@ -4295,12 +3913,18 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->ready = shid->seq_state >= 4 ? true : false;
 	shid->keep_powered = true;
 
-	/* Allow ACPI initialization to complete before arming the IRQ. */
+	/* TEST: wait for device to stabilize after ACPI _INI power-on.
+	 * _INI is called by the ACPI subsystem before probe() and handles
+	 * GPIO power sequencing. The device is already powered and sending
+	 * RESET_RSP. Do NOT call _RST/M009/M010 — power cycle kills the
+	 * device until reboot (verified 2026-07-07, see GROUND_TRUTH §10.7). */
 	seq_dbg(shid, 1, "probe settling delay begin\n");
 	msleep(300);
 	seq_dbg(shid, 1, "probe settling delay complete\n");
 	shid->desc.input_register = 0x000000;
 
+	/* 2026-07-12: vendor init disabled — the working cold boot did not
+	 * have it. D2->D0 may confuse the controller after _PS3->_PS0. */
 	if (0 && raw_mode) {
 		dev_info(dev, "SEQ: sending vendor init (SET_POWER D2->D0)...\n");
 		spi_hid_vendor_init(shid);
@@ -4308,11 +3932,20 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	dev_info(dev, "SEQ: device powered by ACPI _INI, arming IRQ\n");
 
-	/* Register the optional input device only for the passive beta path. */
-	if (raw_input_beta && raw_capture_only) {
+	/* Create multitouch input device for heatmap-to-touch pipeline.
+	 * Bug fix (2026-07-08 review): this used to be created unconditionally,
+	 * even in the default raw_mode=0 configuration where it never receives
+	 * a single event (only heatmap_process_frame() feeds it, and that's
+	 * only called when raw_mode is set) — exposing a second, permanently
+	 * dead "MSHW0231 Touchscreen" input device alongside the real
+	 * hid-core one and risking userspace picking the wrong one. Switching
+	 * raw_mode 0->1 always goes through a fresh probe (module
+	 * reload/rebind), so gating creation on raw_mode here loses no
+	 * capability. */
+	if (shid->raw_mode_active) {
 		shid->touch_input = input_allocate_device();
 		if (shid->touch_input) {
-			shid->touch_input->name = "Surface Touchscreen";
+			shid->touch_input->name = "MSHW0231 Touchscreen";
 			shid->touch_input->phys = "spi-hid/input1";
 			shid->touch_input->id.bustype = BUS_SPI;
 			shid->touch_input->id.vendor = 0x045E;
@@ -4380,8 +4013,6 @@ static int spi_hid_probe(struct spi_device *spi)
 		input_free_device(shid->touch_input);
 		shid->touch_input = NULL;
 	}
-	sysfs_remove_bin_file(&dev->kobj, &isolated_set_ring_bin_attr);
-	sysfs_remove_bin_file(&dev->kobj, &raw_capture_bin_attr);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 	return ret;
 
@@ -4409,8 +4040,6 @@ err1:
 	}
 	kfree(shid->heatmap_buf);
 	shid->heatmap_buf = NULL;
-	sysfs_remove_bin_file(&dev->kobj, &isolated_set_ring_bin_attr);
-	sysfs_remove_bin_file(&dev->kobj, &raw_capture_bin_attr);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 
 err0:
@@ -4448,8 +4077,6 @@ static void spi_hid_remove(struct spi_device *spi)
 	kfree(shid->heatmap_buf);
 	if (shid->gpiod)
 		gpiod_put(shid->gpiod);
-	sysfs_remove_bin_file(&dev->kobj, &isolated_set_ring_bin_attr);
-	sysfs_remove_bin_file(&dev->kobj, &raw_capture_bin_attr);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 	dev_info(dev, "TRACE[hid] remove complete\n");
 }

@@ -1,0 +1,24 @@
+Property	Value
+s72	l0
+Property	Property
+UpgradeCode	{C9ECCDE4-9532-4242-8D2E-2CC92C267765}
+WixUIRMOption	UseRM
+WIXUI_INSTALLDIR	INSTALLFOLDER
+ALLUSERS	1
+ARPNOMODIFY	1
+ARPNOREPAIR	1
+InstallPrerequisites	OSVersion=Win11;OSBuild=22631;OSUpdateBuildRevision=0;SystemModels=Surface Laptop 4;SystemSKUs=Surface_Laptop_4_1958:1959|Surface_Laptop_4_1952:1953
+INSTALLMETHOD	0
+ARPCONTACT	http://www.surface.com
+ARPURLINFOABOUT	http://www.surface.com
+ARPHELPLINK	https://www.surface.com/support
+DISABLEROLLBACK	1
+Manufacturer	Microsoft
+ProductCode	{B2046FCC-A864-449E-935E-51C92E7A3E5B}
+ProductLanguage	1033
+ProductName	Surface Laptop 4 Update 26.040.2105.0
+ProductVersion	26.040.2105.0
+DefaultUIFont	WixUI_Font_Normal
+WixUI_Mode	InstallDir
+ErrorDialog	ErrorDlg
+SecureCustomProperties	WIX_DOWNGRADE_DETECTED;WIX_UPGRADE_DETECTED

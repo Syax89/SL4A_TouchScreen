@@ -1,0 +1,82 @@
+;
+; AmdLpcFilterDriver.inf
+;
+; Copyright (C) 2020 Microsoft Corporation.  All Rights Reserved.
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%ManufacturerName%
+CatalogFile=AmdLpcFilterDriver.cat
+DriverVer = 11/03/2020,1.0.0.18
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir                = 12                            ; %WinDir%\System32\Drivers
+
+; ================= Class section =====================
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+AmdLpcFilterDriver.sys       = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%AmdLpcFilterDriver.DeviceDesc%=AmdLpcFilterDriver_Device, PCI\VEN_1022&DEV_790E&SUBSYS_790E1022&REV_51
+
+[AmdLpcFilterDriver_Device.NT]
+CopyFiles=DefaultDestDir
+Include=machine.inf
+Needs=MSISADRV
+
+[DefaultDestDir]
+AmdLpcFilterDriver.sys
+
+;-------------- Service installation
+[AmdLpcFilterDriver_Device.NT.Services]
+;
+; %SPSVCINST_ASSOCSERVICE% should only be specified if this is a function driver.
+;
+AddService = AmdLpcFilterDriver, 0x00000108, AmdLpcFilterDriver_Service_Inst
+Include=machine.inf
+Needs=MSISADRV.Services
+
+; -------------- AmdLpcFilterDriver driver install sections
+[AmdLpcFilterDriver_Service_Inst]
+DisplayName    = %AmdLpcFilterDriver.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\AmdLpcFilterDriver.sys
+
+; --------------- Configuring upper filter
+[AmdLpcFilterDriver_Device.NT.HW]
+AddReg = AmdLpcFilterDriver_Device.HW.AddReg
+
+[AmdLpcFilterDriver_Device.HW.AddReg]
+HKR,,"UpperFilters",REG_MULTI_SZ,"AmdLpcFilterDriver"
+
+[Strings]
+SPSVCINST_ASSOCSERVICE          = 0x00000002
+SPSVCINST_NOCLOBBER_DISPLAYNAME = 0x00000008
+SPSVCINST_NOCLOBBER_DESCRIPTION = 0x00000100
+
+ManufacturerName="AMD"
+DiskName = "AMD LPC Filter Driver Installation Disk"
+AmdLpcFilterDriver.DeviceDesc = "AMD LPC Filter"
+AmdLpcFilterDriver.SVCDESC = "AMD LPC Filter Driver"
+REG_EXPAND_SZ          = 0x00020000 
+REG_DWORD              = 0x00010001 
+REG_MULTI_SZ           = 0x00010000
+REG_BINARY             = 0x00000001
+REG_SZ                 = 0x00000000
+

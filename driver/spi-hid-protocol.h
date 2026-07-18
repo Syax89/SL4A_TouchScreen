@@ -16,6 +16,12 @@ typedef uint16_t spi_hid_proto_u16;
 #define SPI_HID_PROTOCOL_SYNC_BYTE 0x5a
 #define SPI_HID_PROTOCOL_READ_OPCODE 0x0b
 #define SPI_HID_PROTOCOL_WRITE_OPCODE 0x02
+#define SPI_HID_PROTOCOL_MAX_OUTPUT_LENGTH 0x0fff
+
+static inline int spi_hid_protocol_output_length_valid(unsigned int output_length)
+{
+	return output_length <= SPI_HID_PROTOCOL_MAX_OUTPUT_LENGTH;
+}
 
 /* The only raw frame shape accepted by the passive capture path. */
 #define SPI_HID_RAW_CAPTURE_CONTENT_ID 0x0c
@@ -53,15 +59,19 @@ static inline void spi_hid_protocol_decode_header(const spi_hid_proto_u8 raw[4],
 	header->sync_const = raw[3];
 }
 
-static inline void spi_hid_protocol_encode_output_header(spi_hid_proto_u8 raw[6],
+static inline int spi_hid_protocol_encode_output_header(spi_hid_proto_u8 raw[6],
 		unsigned int output_register, spi_hid_proto_u16 output_length)
 {
+	if (!spi_hid_protocol_output_length_valid(output_length))
+		return -1;
+
 	raw[0] = SPI_HID_PROTOCOL_WRITE_OPCODE;
 	raw[1] = output_register >> 16;
 	raw[2] = output_register >> 8;
 	raw[3] = output_register;
 	raw[4] = SPI_HID_PROTOCOL_VERSION | ((output_length & 0x0f) << 4);
 	raw[5] = output_length >> 4;
+	return 0;
 }
 
 static inline void spi_hid_protocol_encode_read_approval(spi_hid_proto_u8 raw[5],

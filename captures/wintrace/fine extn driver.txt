@@ -1,0 +1,229 @@
+Microsoft Windows [Versione 10.0.26200.8737]
+(c) Microsoft Corporation. Tutti i diritti riservati.
+
+C:\Windows\System32>cd C:\Users\simon\Desktop\SL4A_capture\windows_capture
+
+C:\Users\simon\Desktop\SL4A_capture\windows_capture>04_find_extn_driver.cmd
+===== PnP device: ACPI\MSHW0231\A =====
+
+
+Class                       : HIDClass
+FriendlyName                : Surface Digtizer HidSpi Extn Package
+InstanceId                  : ACPI\MSHW0231\A
+Problem                     : CM_PROB_NONE
+ConfigManagerErrorCode      : CM_PROB_NONE
+ProblemDescription          : This device is working properly.
+Caption                     : Surface Digtizer HidSpi Extn Package
+Description                 : Dispositivo SPI HID
+InstallDate                 :
+Name                        : Surface Digtizer HidSpi Extn Package
+Status                      : OK
+Availability                :
+ConfigManagerUserConfig     : False
+CreationClassName           : Win32_PnPEntity
+DeviceID                    : ACPI\MSHW0231\A
+ErrorCleared                :
+ErrorDescription            :
+LastErrorCode               :
+PNPDeviceID                 : ACPI\MSHW0231\A
+PowerManagementCapabilities :
+PowerManagementSupported    :
+StatusInfo                  :
+SystemCreationClassName     : Win32_ComputerSystem
+SystemName                  : SURFACE
+ClassGuid                   : {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+CompatibleID                : {ACPI\PNP0C51, PNP0C51}
+HardwareID                  : {ACPI\VEN_MSHW&DEV_0231, ACPI\MSHW0231, *MSHW0231}
+Manufacturer                : Microsoft
+PNPClass                    : HIDClass
+Present                     : True
+Service                     : hidspi
+PSComputerName              :
+CimClass                    : ROOT/cimv2:Win32_PnPEntity
+CimInstanceProperties       : {Caption, Description, InstallDate, Name...}
+CimSystemProperties         : Microsoft.Management.Infrastructure.CimSystemProperties
+
+
+
+
+===== Driver service + INF bound to it =====
+
+KeyName                      Data
+-------                      ----
+DEVPKEY_Device_Service       hidspi
+DEVPKEY_Device_DriverInfPath hidspi_km.inf
+DEVPKEY_Device_Driver        {745a17a0-74d3-11d0-b6fe-00a0c90f57da}\0018
+
+
+
+===== Same, for every MSHW0231 child (COL01-08 + \A), for comparison =====
+--- HID\MSHW0231&COL01\4&20999191&0&0000 ---
+
+--- HID\MSHW0231&COL06\4&20999191&0&0005 ---
+Data
+----
+
+
+--- ACPI\MSHW0231\A ---
+h...
+--- HID\MSHW0231&COL02\4&20999191&0&0001 ---
+
+--- HID\MSHW0231&COL07\4&20999191&0&0006 ---
+S...
+--- HID\MSHW0231&COL03\4&20999191&0&0002 ---
+
+--- HID\MSHW0231&COL08\4&20999191&0&0007 ---
+W...
+--- HID\MSHW0231&COL04\4&20999191&0&0003 ---
+
+--- HID\MSHW0231&COL05\4&20999191&0&0004 ---
+
+
+
+
+===== driverquery: match any service name found above =====
+Nome modulo:             hidspi
+Percorso:                C:\WINDOWS\system32\drivers\hidspi.sys
+Nome modulo:             HidSpiCx
+Nome visualizzato:       HidSpi KMDF Class Extension
+Descrizione:             HidSpi KMDF Class Extension
+Percorso:                C:\WINDOWS\system32\drivers\HidSpiCx.sys
+Nome modulo:             SurfaceHidMini
+Percorso:                C:\WINDOWS\system32\DriverStore\FileRepository\surfacehidminidriver.inf_amd64_9d11d7611c0502db\SurfaceHidMiniDriver.sys
+
+===== pnputil full driver package list (look for a Surface digitizer / HidSpi ext package) =====
+Nome provider:      AMD
+Nome provider:      Advanced Micro Devices, Inc
+Nome provider:      AMD
+Nome provider:      Advanced Micro Devices, Inc
+Nome provider:      Advanced Micro Devices, Inc.
+Nome provider:      AMD
+Nome provider:      Advanced Micro Devices, Inc.
+Nome provider:      Advanced Micro Devices Inc.
+Nome provider:      Surface
+Nome provider:      AMD
+Nome provider:      AMD
+Nome provider:      Dolby
+Nome provider:      Surface
+Nome provider:      Realtek
+Nome provider:      Razer Inc
+Nome provider:      Advanced Micro Devices, Inc
+Nome originale:      surfacebattery.inf
+Nome provider:      Surface
+Nome originale:      surfacebutton.inf
+Nome provider:      Surface
+Nome originale:      surfacecfuoverhid.inf
+Nome provider:      Surface
+Nome originale:      surfacedigitizerhidspiextnpackage.inf
+Nome provider:      Surface
+Nome originale:      surfacedock2fwupdate.inf
+Nome provider:      Surface
+Nome originale:      surfacehidfriendlynames.inf
+Nome provider:      Surface
+Nome originale:      surfacehidminidriver.inf
+Nome provider:      Surface
+Nome originale:      surfacehotplug.inf
+Nome provider:      Surface
+Nome originale:      surfaceintegrationdriver.inf
+Nome provider:      Surface
+Nome originale:      surfacekip.inf
+Nome provider:      Surface
+Nome originale:      surfacelightsensor.inf
+Nome provider:      Surface
+Nome originale:      surfacepd.inf
+Nome provider:      Surface
+Nome originale:      surfacepd.inf
+Nome provider:      Surface
+Nome originale:      surfacepen0953cfuoverblelcextnpackage.inf
+Nome provider:      Surface
+Nome originale:      surfacepen0953firmwareupdate.inf
+Nome provider:      Surface
+Nome originale:      surfacepen217fwupdate.inf
+Nome provider:      Surface
+Nome originale:      surfacepen217integration.inf
+Nome provider:      Surface
+Nome originale:      surfacepenblelcaddradaptationdriver.inf
+Nome provider:      Surface
+Nome originale:      surfacepencfuoverblelc.inf
+Nome provider:      Surface
+Nome originale:      surfacepowertrackercore.inf
+Nome provider:      Surface
+Nome originale:      surfacesam.inf
+Nome provider:      Surface
+Nome originale:      surfaceserialhubdriver.inf
+Nome provider:      Surface
+Nome originale:      surfaceservicenulldriver.inf
+Nome provider:      Surface
+Nome originale:      surfacesmf.inf
+Nome provider:      Surface
+Nome originale:      surfacesmfclient.inf
+Nome provider:      Surface
+Nome originale:      surfacesmfdisplayclient.inf
+Nome provider:      Surface
+Nome originale:      surfacesmf_13in.inf
+Nome provider:      Surface
+Nome originale:      surfacestoragefwupdate.inf
+Nome provider:      Surface
+Nome originale:      surfacesystemmanagementframeworkdriver.inf
+Nome provider:      Surface
+Nome originale:      surfacesystemtelemetrydriver.inf
+Nome provider:      Surface
+Nome originale:      surfacetcon13.inf
+Nome provider:      Surface
+Nome originale:      surfacetcon13b.inf
+Nome provider:      Surface
+Nome originale:      surfacetcon13c.inf
+Nome provider:      Surface
+Nome originale:      surfacetcon13d.inf
+Nome provider:      Surface
+Nome originale:      surfacetcon15.inf
+Nome provider:      Surface
+Nome originale:      surfacetcon15b.inf
+Nome provider:      Surface
+Nome originale:      surfacetcondriver.inf
+Nome provider:      Surface
+Nome originale:      surfacethermalpolicy.inf
+Nome provider:      Surface
+Nome originale:      surfacethunderbolt4dockfwupdate.inf
+Nome provider:      Surface
+Nome originale:      surfacetimealarmacpifilter.inf
+Nome provider:      Surface
+Nome originale:      surfacetouchfw.inf
+Nome provider:      Surface
+Nome originale:      surfacetouchfw.inf
+Nome provider:      Surface
+Nome originale:      surfacetouchpenprocessorupdate.inf
+Nome provider:      Surface
+Nome originale:      surfacetouchpenprocessorupdate.inf
+Nome provider:      Surface
+Nome originale:      surfacetrackpad.inf
+Nome provider:      Surface
+Nome originale:      surfaceucmucsihidclient.inf
+Nome provider:      Surface
+Nome originale:      surfaceuefi.inf
+Nome provider:      Surface
+Nome originale:      surfaceusb4dockfwupdate.inf
+Nome provider:      Surface
+Nome originale:      surfacevirtualfunctionenum.inf
+Nome provider:      Surface
+Nome originale:      surface_tpm.inf
+Nome provider:      Surface
+Nome provider:      Advanced Micro Devices
+Nome provider:      Dolby
+Nome provider:      Dolby
+Nome provider:      Realtek Semiconductor Corp.
+Nome provider:      Intel Corporation
+Nome provider:      Realtek
+Nome provider:      Realtek
+Nome provider:      Surface
+Nome provider:      Intel
+Nome provider:      Microsoft
+Nome provider:      TP-Link Systems Inc.
+Nome provider:      Realtek
+Nome originale:      surfaceoempanel.inf
+Nome provider:      Surface
+Nome originale:      surfacepowermeter.inf
+Nome provider:      Surface
+Nome provider:      Advanced Micro Devices, Inc.
+Nome provider:      Advanced Micro Devices, Inc.
+Nome provider:      Microsoft Corporation

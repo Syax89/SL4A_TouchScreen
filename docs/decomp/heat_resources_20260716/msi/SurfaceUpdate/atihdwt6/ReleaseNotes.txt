@@ -1,0 +1,203 @@
+############################Release Notes#################################
+
+(c) Copyright 2019 Advanced Micro Devices, Inc.  All rights reserved.  
+
+LIMITATION OF LIABILITY:  THE MATERIALS ARE PROVIDED AS IS WITHOUT ANY EXPRESS OR
+IMPLIED WARRANTY OF ANY KIND INCLUDING WARRANTIES OF MERCHANTABILITY, 
+NONINFRINGEMENT OF THIRD-PARTY INTELLECTUAL PROPERTY, OR FITNESS FOR ANY PARTICULAR
+PURPOSE. IN NO EVENT SHALL AMD OR ITS SUPPLIERS BE LIABLE FOR ANY DAMAGES 
+WHATSOEVER (INCLUDING, WITHOUT LIMITATION, DAMAGES FOR LOSS OF PROFITS, BUSINESS
+INTERRUPTION, LOSS OF INFORMATION) ARISING OUT OF THE USE OF OR INABILITY TO USE
+THE MATERIALS, EVEN IF AMD HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+BECAUSE SOME JURISDICTIONS PROHIBIT THE EXCLUSION OR LIMITATION OF LIABILITY FOR
+CONSEQUENTIAL OR INCIDENTAL DAMAGES, THE ABOVE LIMITATION MAY NOT APPLY TO YOU.
+AMD does not assume any responsibility for any errors which may appear in the 
+Materials nor any responsibility to support or update the Materials.  AMD
+retains the right to make changes to its test specifications at any time, 
+without notice.  NO SUPPORT OBLIGATION: AMD is not obligated to furnish, support, 
+or make any further information, software, technical information, know-how, or 
+show-how available to you.
+
+U.S. GOVERNMENT RESTRICTED RIGHTS: The Materials and documentation are provided 
+with RESTRICTED RIGHTS.  Use, duplication or disclosure by the Government is 
+subject to restrictions as set forth in FAR52.227014 and DFAR252.227-7013, et
+seq., or its successor.  Use of the Materials by the Government constitutes
+acknowledgment of AMD’s proprietary rights in them.
+
+===========================================================================
+
+
+HDMI revision history:
+======================
+Driver version = 10.0.1.31 , 08/17/2023
+=======================================
+Fixed 	 : MSFT Security Bug Fix.
+
+
+Driver version = 10.0.1.30 , 07/27/2023
+=======================================
+Fixed 	 : Dolby Atmos for Home Theatre with Dolby Access option gives an error.
+
+
+Driver version = 10.0.1.29 , 07/17/2023
+=======================================
+Added 	 : Jack detection debouncing logic back to avoid reporting temporary jack states to Windows which causes audio stream to be stopped immediately..
+
+
+Driver version = 10.0.1.28 , 07/05/2023
+=======================================
+Fixed 	 : Unable to install AMD High-definition Audio Device because of mismatch of Hardware ID.
+
+
+Driver version = 10.0.1.27 , 04/12/2023
+=======================================
+Fixed 	 : DF Tests are failing with BSOD-Driver Verifier Detected Violation in AMD High Definition Audio device.
+
+Fixed 	 : CodeQL is failing for Audio component
+
+
+Driver version = 10.0.1.26 , 03/09/2023
+=======================================
+Fixed 	 : Palamida scan remediation.
+
+
+Driver version = 10.0.1.25 , 09/02/2022
+=======================================
+Fixed 	 : PnP monitor icon in [Devices and Printers] change from one to two after hot unplug VGA monitor when attach HDMI and VGA monitor to hub.
+
+
+Driver version = 10.0.1.24 , 06/08/2022
+=======================================
+Fixed 	 : Modified Manufacture section in INF to handle SV2 Capx requirements.
+
+
+Driver version = 10.0.1.23 , 07/27/2021
+=======================================
+Removed  : CETCOMPAT linker flag in VS solution and make files.
+
+
+Driver version = 10.0.1.22 , 07/21/2021
+=======================================
+Added 	 : CETCOMPAT linker flag in VS solution and make files.
+
+
+Driver version = 10.0.1.21 , 07/13/2021
+=======================================
+Fixed 	 : CodeQL Mustfix and recommended errors.
+
+
+
+Driver version = 10.0.1.20 , 03/02/2021
+=======================================
+Bug fixed: S4 Test Fail with (bugcheck x50)
+
+
+
+Driver version = 10.0.1.19 , 02/18/2021
+=======================================
+
+Bug fixed: Audio loss observed intermittently when playing any stream with Navi 21
+Bug fixed: connect to Huawei smart screen with HDMI , keyboard mute(F4) hotkey has no function
+
+
+
+Driver version = 10.0.1.18 , 10/16/2020
+=======================================
+
+Improvements: Enabled ETW tracing for Windows 10 and Windows 7 OS
+
+
+
+=======================================
+Driver version = 10.0.1.17 , 08/20/2020
+=======================================
+
+Improvements: Changed variable names for Palamida Scan failures
+
+
+
+Driver version = 10.0.1.16 , 04/01/2020
+=======================================
+
+Bug fixed: Fix the uninstall driver on HG Renoir AM4 + Navi10 configuration
+
+
+
+Driver version = 10.0.1.15 , 03/18/2020
+=======================================
+
+Bug fixed: Fix for System Audio - Lullaby WHQL test on 20H1 OS
+
+
+
+Driver version = 10.0.1.14 , 03/17/2020
+=======================================
+Bug fixed:  Resolved a BSOD 50 while running WHQL test
+
+
+
+Driver version = 10.0.1.13 , 02/19/2020
+=======================================
+
+Bug fixed: Added Hardware ID for Navi21
+
+
+
+Driver version = 10.0.1.12 , 07/10/2019
+=======================================
+
+Bug fixed: Resolved delay in audio streaming when HDMI to type C dongle is used 
+The Microsoft License and copyrights have been updated
+
+
+
+Driver version = 10.0.1.11 , 05/10/2019
+=======================================
+
+Bug fixed: BSOD is resolved in race conditions.
+
+
+
+Driver version = 10.0.1.10 , 04/30/2019
+=======================================
+
+Bug fixed: BSOD is resolved in long plug/unplug cycles.
+
+
+
+Driver version = 10.0.1.09 , 02/27/2019
+=======================================
+
+Bug fixed: Surprise removal of an external dGPU is now supported.
+
+
+
+Driver version = 10.0.1.08 , 01/11/2019
+=======================================
+
+Improvements: 1. Device can now enter D3 state in idle condition.
+              2. BACO settings from audio side implemented.
+
+
+
+Driver version = 10.0.1.07 , 03/30/2018
+=================================
+
+Changes: To support latest OS version RS4
+
+
+
+Driver version = 10.0.1.06 , 11/16/2017
+=======================================
+
+Bug fixed: Avoiding device to enter D3 in DC mode.
+
+
+
+Driver version = 10.0.1.05 , 10/30/2017
+=======================================
+
+Removed: DelayAPO is not supported.
+
+
+============================================================================

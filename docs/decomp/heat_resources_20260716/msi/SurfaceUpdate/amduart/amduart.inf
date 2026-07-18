@@ -1,0 +1,75 @@
+;/*++
+;
+;(C) Copyright 2014-2020  Advanced Micro Devices, Inc.
+;
+;Module Name:
+;
+;    amduart.INF
+;
+;Abstract:
+;    INF file for installing AMD UART Controller Driver.
+;
+;--*/
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider= AMD 
+DriverVer = 12/16/2020,1.2.0.113
+CatalogFile = amduart.cat
+
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskId1%
+
+[SourceDisksFiles.amd64]
+amduart.sys = 1,
+
+[ControlFlags]
+ExcludeFromSelect=*
+
+[Manufacturer]
+%AMD%=AMD,NTamd64
+
+[AMD.NTamd64]
+%amduart.DeviceDesc%= amduart_Inst, ACPI\AMD0020
+%amduart.DeviceDesc%= amduart_Inst, ACPI\AMDI0020
+%amduart.DeviceDesc%= amduart_Inst, ACPI\AMDI0022
+
+[amduart_Inst.NTamd64]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+amduart.sys
+
+;-------------- Service installation
+[amduart_Inst.NTamd64.Services]
+AddService = amduart,%SPSVCINST_ASSOCSERVICE%, amduart_Service_Inst
+
+[amduart_Inst.NTamd64.HW]
+AddReg             = amduart_dfx_Support_AddReg
+
+[amduart_dfx_Support_AddReg]
+HKR,"WDF","WdfDirectedPowerTransitionEnable",0x00010001,1
+
+; -------------- amduart driver install sections
+[amduart_Service_Inst]
+DisplayName    = %amduart.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START 
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\amduart.sys
+LoadOrderGroup = Extended Base
+Dependencies   = SerCx2
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+AMD = "Advanced Micro Devices, Inc."
+DiskId1 = "AMD UART on Installation Disk #1"
+amduart.DeviceDesc = "AMD UART Controller"
+amduart.SVCDESC = "AMD UART Service"
+
