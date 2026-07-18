@@ -340,20 +340,13 @@ struct spi_hid {
 	u32 heatmap_baseline_frames;
 	u8  heatmap_touched[HEATMAP_MAX_CELLS];
 	s16 heatmap_signal[HEATMAP_MAX_CELLS];   /* precomputed c590 signal rise */
-	u8  heatmap_frame_persistence[HEATMAP_MAX_CELLS];
-	u16 heatmap_label[HEATMAP_MAX_CELLS];
 
-	/* Blob state. Coordinates are fixed-point with 8 fractional bits. */
+	/* Blob state. Coordinates are fixed-point grid ×100. */
 	u32 blob_x[HEATMAP_MAX_BLOBS];
 	u32 blob_y[HEATMAP_MAX_BLOBS];
-	u32 blob_peak_x[HEATMAP_MAX_BLOBS];
-	u32 blob_peak_y[HEATMAP_MAX_BLOBS];
-	u32 blob_peak_rise[HEATMAP_MAX_BLOBS];
 	u32 blob_wsum[HEATMAP_MAX_BLOBS];
-	u64 blob_xsum[HEATMAP_MAX_BLOBS];
-	u64 blob_ysum[HEATMAP_MAX_BLOBS];
 	bool blob_active[HEATMAP_MAX_BLOBS];
-	u16 label_equiv[256];
+	u16 cost[HEATMAP_MAX_BLOBS][HEATMAP_MAX_SLOTS]; /* Hungarian cost matrix */
 
 	/* Slot state, duration, and coordinate history. */
 	u8 blob_slot_state[HEATMAP_MAX_SLOTS];      /* 0=empty 1=new 2=claimed 3=lift */

@@ -1784,7 +1784,6 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	shid->heatmap_baseline_cells = 0;
 	shid->heatmap_baseline_frames = 0;
 	memset(shid->heatmap_baseline, 0, sizeof(shid->heatmap_baseline));
-	memset(shid->heatmap_frame_persistence, 0, sizeof(shid->heatmap_frame_persistence));
 	memset(shid->blob_slot_state, 0, sizeof(shid->blob_slot_state));
 	memset(shid->blob_slot_duration, 0, sizeof(shid->blob_slot_duration));
 	memset(shid->blob_slot_gx, 0, sizeof(shid->blob_slot_gx));
@@ -1796,7 +1795,6 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	memset(shid->eigori, 0, sizeof(shid->eigori));
 	memset(shid->heatmap_touched, 0, sizeof(shid->heatmap_touched));
 	memset(shid->heatmap_signal, 0, sizeof(shid->heatmap_signal));
-	memset(shid->heatmap_label, 0, sizeof(shid->heatmap_label));
 	memset(shid->blob_slot_hx, 0, sizeof(shid->blob_slot_hx));
 	memset(shid->blob_slot_hy, 0, sizeof(shid->blob_slot_hy));
 	memset(shid->blob_slot_hpos, 0, sizeof(shid->blob_slot_hpos));
@@ -1806,10 +1804,7 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	memset(shid->blob_x, 0, sizeof(shid->blob_x));
 	memset(shid->blob_y, 0, sizeof(shid->blob_y));
 	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
-	memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
-	memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
 	memset(shid->blob_active, 0, sizeof(shid->blob_active));
-	memset(shid->label_equiv, 0, sizeof(shid->label_equiv));
 	shid->heatmap_frame_id = 0;
 	shid->heatmap_last_consecutive = 0;
 }
@@ -2213,9 +2208,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		if (raw >= base) {
 			u16 cur = (u16)base * 7 + (u16)raw;
 			shid->heatmap_baseline[i] = (u8)(cur / 8);
-		} else if (shid->heatmap_frame_persistence[i] == 0 && base > 0) {
-			/* untouched-but-lower: rare; nudge down 1 count slowly */
-			shid->heatmap_baseline[i] = base - 1;
 		}
 	}
 
@@ -2235,8 +2227,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	 * (matching Python oracle / Windows FUN_1805fba00).
 	 * A cell is a peak if no neighbor at ±5 in N/S/E/W has a
 	 * HIGHER signal rise. Min rise = 500. Max 16 peaks. */
-	memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
-	memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
 	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
 	memset(shid->blob_active, 0, sizeof(shid->blob_active));
 	nlabels = 0;
@@ -2454,75 +2444,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			sorted_count = j;
 		}
 
-		/* Blob splitting disabled — the eigenvalue heuristic split
-		 * single-finger blobs (centroid jitter → temporarily elongated
-		 * shape). The real Windows pipeline uses per-pixel peak detection
-		 * (FUN_180602e60); re-enable after that is implemented. */
-#if 0
-		/* Blob splitting (GROUND_TRUTH.md §22.7 step 4):
-		 * If the heaviest blob is elongated (ratio > 2:1) and heavy enough,
-		 * it likely contains two touching fingers. Split along the major
-		 * eigenvalue axis into two sub-blobs at 30% of the semi-axis.
-		 * Each sub-blob gets half the weight and centroid shifted by
-		 * the split offset. This handles the most common merged-finger
-		 * case without per-pixel peak detection. */
-		{
-			u8 split_idx = 0;
-			u32 best_ws = 0;
-
-			for (i = 0; i < sorted_count; i++) {
-				if (sorted[i].w > best_ws) {
-					best_ws = sorted[i].w;
-					split_idx = i;
-				}
-			}
-			if (best_ws >= (u32)blob_min_weight && sorted_count < HEATMAP_MAX_SLOTS - 1) {
-				s32 maj = shid->eigmaj[0];
-				s32 min = shid->eigmin[0];
-				s32 ori = shid->eigori[0];
-
-				if (maj > min * 2 + 10 && maj >= 50 && best_ws > (u32)blob_min_weight * 3) {
-					s32 split_dist = (s32)int_sqrt((u64)maj) * 3 / 10;
-					s32 dx = 0, dy = 0;
-					u8 idx = sorted[split_idx].idx;
-
-					if (split_dist < 1)
-						split_dist = 1;
-					if (split_dist > 5)
-						split_dist = 5;
-
-					/* Approximate direction from orientation (degrees*100):
-					 * - near 0° or ±180° → split horizontally
-					 * - near ±90° → split vertically
-					 * - other → split diagonally */
-					if (ori > 18000) ori -= 18000;
-					if (ori < -18000) ori += 18000;
-
-					if (ori >= -6000 && ori <= 6000) {
-						dx = split_dist;
-					} else if ((ori >= 8000 && ori <= 10000) ||
-						   (ori >= -10000 && ori <= -8000)) {
-						dy = split_dist;
-					} else {
-						dx = split_dist * 7 / 10;
-						dy = split_dist * 7 / 10;
-					}
-
-					sorted[split_idx].gx = (s16)shid->blob_x[idx] - dx;
-					sorted[split_idx].gy = (s16)shid->blob_y[idx] - dy;
-					sorted[split_idx].w = best_ws / 2;
-
-					if (sorted_count < HEATMAP_MAX_SLOTS) {
-						sorted[sorted_count].gx = (s16)shid->blob_x[idx] + dx;
-						sorted[sorted_count].gy = (s16)shid->blob_y[idx] + dy;
-						sorted[sorted_count].w = best_ws / 2;
-						sorted[sorted_count].idx = HEATMAP_MAX_BLOBS;
-						sorted_count++;
-					}
-				}
-			}
-		}
-#endif
 		/* Hungarian global assignment (matching Windows TouchPenProcessor0C19).
 		 * Replaces the old greedy nearest-neighbor with minimum-cost bipartite
 		 * matching.  Each blob is assigned to exactly one slot, minimizing
@@ -2532,7 +2453,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			u8 assigned_slot[HEATMAP_MAX_BLOBS];
 			u32 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
 			bool new_active[HEATMAP_MAX_SLOTS];
-			u16 cost[HEATMAP_MAX_BLOBS][HEATMAP_MAX_SLOTS];
 			u8 row_match[HEATMAP_MAX_BLOBS];
 			u8 col_match[HEATMAP_MAX_SLOTS];
 			u16 row_val[HEATMAP_MAX_BLOBS], col_val[HEATMAP_MAX_SLOTS];
@@ -2567,19 +2487,19 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						max_d = bmd > bmd + 1 ? 0 : bmd;
 						if ((u32)dx <= bmd && (u32)dy <= bmd) {
 							u32 d = (u32)dx * (u32)dx + (u32)dy * (u32)dy;
-							cost[row][col] = (u16)(int_sqrt((u64)d) / 10);
+							shid->cost[row][col] = (u16)(int_sqrt((u64)d) / 10);
 						} else {
-							cost[row][col] = 100;
+							shid->cost[row][col] = 100;
 						}
 					} else {
-						cost[row][col] = 1000;
+						shid->cost[row][col] = 1000;
 					}
-					if (cost[row][col] < row_val[row])
-						row_val[row] = cost[row][col];
+					if (shid->cost[row][col] < row_val[row])
+						row_val[row] = shid->cost[row][col];
 				}
 				/* Subtract row minimum. */
 				for (col = 0; col < HEATMAP_MAX_SLOTS; col++)
-					cost[row][col] -= row_val[row];
+					shid->cost[row][col] -= row_val[row];
 			}
 
 			/* Hungarian algorithm iterations. */
@@ -2597,7 +2517,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						if (row_cover[row]) continue;
 						for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
 							if (col_cover[col]) continue;
-							if (cost[row][col] == 0) {
+							if (shid->cost[row][col] == 0) {
 								row_match[row] = col;
 								col_match[col] = row;
 								row_cover[row] = 1;
@@ -2615,8 +2535,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						if (row_cover[row]) continue;
 						for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
 							if (col_cover[col]) continue;
-							if (cost[row][col] < min_val)
-								min_val = cost[row][col];
+							if (shid->cost[row][col] < min_val)
+								min_val = shid->cost[row][col];
 						}
 					}
 					if (min_val == U16_MAX)
@@ -2625,9 +2545,9 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					for (row = 0; row < n_blobs; row++) {
 						for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
 							if (row_cover[row] && col_cover[col])
-								cost[row][col] += min_val;
+								shid->cost[row][col] += min_val;
 							else if (!row_cover[row] && !col_cover[col])
-								cost[row][col] -= min_val;
+								shid->cost[row][col] -= min_val;
 						}
 					}
 				}
