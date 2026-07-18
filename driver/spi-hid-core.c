@@ -1698,10 +1698,10 @@ module_param(blob_min_weight, int, 0644);
 MODULE_PARM_DESC(blob_min_weight,
 	"Minimum c590 signal rise sum across blob to consider it valid");
 
-static int ema_alpha = 3;
+static int ema_alpha = 7;
 module_param(ema_alpha, int, 0644);
 MODULE_PARM_DESC(ema_alpha,
-	"EMA smoothing: (prev*alpha + new)/(alpha+1). Default 3 (weight 1/4, light)");
+	"EMA smoothing: (prev*alpha + new)/(alpha+1). Default 7 (weight 1/8, stable)");
 
 static int dfa_data_offset;
 module_param(dfa_data_offset, int, 0444);
@@ -2635,6 +2635,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					case 0:
 						shid->blob_slot_state[s] = 1;
 						shid->blob_slot_duration[s] = 1;
+						shid->blob_slot_stationary[s] = 0;
 						break;
 					case 1:
 						shid->blob_slot_duration[s]++;
@@ -2647,6 +2648,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					case 3:
 						shid->blob_slot_state[s] = 1;
 						shid->blob_slot_duration[s] = 1;
+						shid->blob_slot_stationary[s] = 0;
 						break;
 					}
 					shid->blob_slot_missed[s] = 0;
@@ -2661,14 +2663,39 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					new_active[s] = (shid->blob_slot_state[s] >= 2);
 
 					if (new_active[s]) {
-						/* Light EMA for smoothness (alpha=3, weight 1/4).
-						 * Raw peak centroids are coherent but have
-						 * pixel-level jitter from 5×5 window edges. */
+						/* EMA + deadband + stationary lock.
+						 * EMA alpha=7 (weight 1/8) for smooth tracking.
+						 * Deadband ±80 (0.8 cells, ~3.7 px) suppresses
+						 * antenna-noise jitter during slow holds.
+						 * After 6 consecutive stationary frames the
+						 * position is frozen until a real move occurs. */
 						if (was_claimed && shid->blob_slot_state[s] == 2) {
 							u32 old_gx = shid->blob_slot_gx[s];
 							u32 old_gy = shid->blob_slot_gy[s];
-							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
-							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
+							u32 egx = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
+							u32 egy = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
+							s32 ddx = (s32)egx - (s32)old_gx;
+							s32 ddy = (s32)egy - (s32)old_gy;
+
+							if (ddx >= -80 && ddx <= 80 &&
+							    ddy >= -80 && ddy <= 80) {
+								u8 c = shid->blob_slot_stationary[s];
+								if (c < 6) {
+									c++;
+									shid->blob_slot_stationary[s] = c;
+								}
+								if (c >= 6) {
+									new_gx[s] = old_gx;
+									new_gy[s] = old_gy;
+								} else {
+									new_gx[s] = egx;
+									new_gy[s] = egy;
+								}
+							} else {
+								shid->blob_slot_stationary[s] = 0;
+								new_gx[s] = egx;
+								new_gy[s] = egy;
+							}
 						} else {
 							new_gx[s] = gx;
 							new_gy[s] = gy;
