@@ -2322,8 +2322,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				}
 			}
 			if (sw >= blob_min_weight) {
-				shid->blob_x[pi] = (u16)(sx / sw);
-				shid->blob_y[pi] = (u16)(sy / sw);
+				/* Fixed-point ×100 for sub-cell precision (matching
+				 * Python oracle float division). Grid 0..71 → 0..7100,
+				 * each sub-step = 0.01 cells ≈ 4.6 screen pixels. */
+				shid->blob_x[pi] = (u32)(sx * 100 / sw);
+				shid->blob_y[pi] = (u32)(sy * 100 / sw);
 				shid->blob_wsum[pi] = (u32)sw;
 				shid->blob_active[pi] = true;
 				nlabels++;
@@ -2345,8 +2348,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			}
 		}
 		if (best_w >= (u32)blob_min_weight) {
-			s32 cx = (s32)shid->blob_x[best_idx];
-			s32 cy = (s32)shid->blob_y[best_idx];
+			s32 cx = (s32)shid->blob_x[best_idx] / 100; /* back to cells */
+			s32 cy = (s32)shid->blob_y[best_idx] / 100;
 
 			for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
 				u16 label;
@@ -2416,7 +2419,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	{
 		struct input_dev *input = shid->touch_input;
 		bool any_touch = false;
-		struct { u16 gx; u16 gy; u32 w; u8 idx; } sorted[HEATMAP_MAX_BLOBS];
+		struct { u32 gx; u32 gy; u32 w; u8 idx; } sorted[HEATMAP_MAX_BLOBS];
 		u8 sorted_count = 0;
 		const u32 SCREEN_MAX = 32767;
 		u32 scale_x, scale_y;
@@ -2472,18 +2475,18 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		 * heavier one, discard the lighter. */
 		{
 			u8 a, b, j;
-			u32 gdsq = (u32)ghost_dist * (u32)ghost_dist;
+			u32 gdsq = (u32)ghost_dist * (u32)ghost_dist * 10000; /* ×100 scale */
 
 			for (a = 0; a < sorted_count; a++) {
 				if (sorted[a].w == 0)
 					continue;
 				for (b = a + 1; b < sorted_count; b++) {
-					s16 dx, dy;
+					s32 dx, dy;
 
 					if (sorted[b].w == 0)
 						continue;
-					dx = (s16)sorted[a].gx - (s16)sorted[b].gx;
-					dy = (s16)sorted[a].gy - (s16)sorted[b].gy;
+					dx = (s32)sorted[a].gx - (s32)sorted[b].gx;
+					dy = (s32)sorted[a].gy - (s32)sorted[b].gy;
 					if ((u32)(dx * dx) + (u32)(dy * dy) <= gdsq) {
 						if (sorted[b].w > sorted[a].w) {
 							sorted[a].w = 0;
@@ -2581,14 +2584,14 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		 * so that new slots are only created when no claimed slot is nearby. */
 		{
 			u8 assigned_slot[HEATMAP_MAX_BLOBS];
-			u16 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
+			u32 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
 			bool new_active[HEATMAP_MAX_SLOTS];
 			u16 cost[HEATMAP_MAX_BLOBS][HEATMAP_MAX_SLOTS];
 			u8 row_match[HEATMAP_MAX_BLOBS];
 			u8 col_match[HEATMAP_MAX_SLOTS];
 			u16 row_val[HEATMAP_MAX_BLOBS], col_val[HEATMAP_MAX_SLOTS];
 			u8 row_cover[HEATMAP_MAX_BLOBS], col_cover[HEATMAP_MAX_SLOTS];
-			s16 dx, dy;
+			s32 dx, dy;
 			u8 n_blobs = sorted_count;
 			u8 round, row, col;
 			u16 min_val;
@@ -2607,15 +2610,18 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			for (row = 0; row < n_blobs; row++) {
 				row_val[row] = U16_MAX;
 				for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
+					u32 max_d, bmd;
+
 					if (shid->blob_slot_state[col] >= 1) {
-						dx = (s16)sorted[row].gx - (s16)shid->blob_slot_gx[col];
-						dy = (s16)sorted[row].gy - (s16)shid->blob_slot_gy[col];
+						s32 dx = (s32)sorted[row].gx - (s32)shid->blob_slot_gx[col];
+						s32 dy = (s32)sorted[row].gy - (s32)shid->blob_slot_gy[col];
 						if (dx < 0) dx = -dx;
 						if (dy < 0) dy = -dy;
-						if ((u16)dx <= (u16)blob_max_distance &&
-						    (u16)dy <= (u16)blob_max_distance) {
-							u16 dsq = (u16)dx * (u16)dx + (u16)dy * (u16)dy;
-							cost[row][col] = (u16)(int_sqrt((u64)dsq) * 10);
+						bmd = (u32)blob_max_distance * 100;
+						max_d = bmd > bmd + 1 ? 0 : bmd;
+						if ((u32)dx <= bmd && (u32)dy <= bmd) {
+							u32 d = (u32)dx * (u32)dx + (u32)dy * (u32)dy;
+							cost[row][col] = (u16)(int_sqrt((u64)d) / 10);
 						} else {
 							cost[row][col] = 100;
 						}
@@ -2689,12 +2695,12 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				row = col_match[col];
 				if (row >= n_blobs) continue;
 				if (shid->blob_slot_state[col] >= 1) {
-					dx = (s16)sorted[row].gx - (s16)shid->blob_slot_gx[col];
-					dy = (s16)sorted[row].gy - (s16)shid->blob_slot_gy[col];
+					dx = (s32)sorted[row].gx - (s32)shid->blob_slot_gx[col];
+					dy = (s32)sorted[row].gy - (s32)shid->blob_slot_gy[col];
 					if (dx < 0) dx = -dx;
 					if (dy < 0) dy = -dy;
-					if ((u16)dx <= (u16)blob_max_distance &&
-					    (u16)dy <= (u16)blob_max_distance)
+					if ((u32)dx <= (u32)blob_max_distance * 100 &&
+					    (u32)dy <= (u32)blob_max_distance * 100)
 						assigned_slot[row] = col;
 				} else {
 					assigned_slot[row] = col;
@@ -2794,16 +2800,17 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				input_mt_report_slot_state(input, MT_TOOL_FINGER, new_active[s]);
 				if (new_active[s]) {
 					s64 fx, fy, tmp;
-					u16 screen_gx = new_gx[s];
-					u16 screen_gy = new_gy[s];
+					u32 screen_gx = new_gx[s];
+					u32 screen_gy = new_gy[s];
 					/* Orient first: scales and offsets always address final X/Y. */
 					if (swap_xy) {
 						tmp = screen_gx;
 						screen_gx = screen_gy;
 						screen_gy = tmp;
 					}
-					fx = ((s64)screen_gx * scale_x + 500) / 1000;
-					fy = ((s64)screen_gy * scale_y + 500) / 1000;
+					/* Fixed-point ×100: divide by 100000 not 1000. */
+					fx = ((s64)screen_gx * scale_x + 50000) / 100000;
+					fy = ((s64)screen_gy * scale_y + 50000) / 100000;
 					fx += calib_offset_x;
 					fy += calib_offset_y;
 					if (invert_x) fx = (s64)SCREEN_MAX - fx;
