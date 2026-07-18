@@ -1,1 +1,0 @@
-./fch_test.o

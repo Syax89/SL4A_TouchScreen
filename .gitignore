@@ -14,6 +14,15 @@ driver/..module*
 
 # Tests
 tests/protocol_test
+tests/fch-test/*.o
+tests/fch-test/*.ko
+tests/fch-test/*.mod
+tests/fch-test/*.mod.c
+tests/fch-test/*.mod.o
+tests/fch-test/Module.symvers
+tests/fch-test/modules.order
+tests/fch-test/.*.cmd
+tests/fch-test/..module*
 
 # Calibration tool binary
 tools/calibrate
