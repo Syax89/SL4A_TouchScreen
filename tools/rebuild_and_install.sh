@@ -9,9 +9,8 @@
 #
 # Usage: ./tools/rebuild_and_install.sh [raw_mode=1 debug_coords=1 ...]
 #   Any extra arguments are passed straight through as insmod parameters for
-#   spi-hid.ko (e.g. to test raw_mode=1) — the systemd service itself always
-#   loads with no parameters (raw_mode=0, the stable default), so passing
-#   parameters here only affects this one manual run, not future boots.
+#   spi-hid.ko.  The modprobe.d config controls boot-time parameters;
+#   passing parameters here only affects this one manual run, not future boots.
 # ============================================================================
 set -e
 

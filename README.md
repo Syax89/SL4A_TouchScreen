@@ -11,25 +11,25 @@
 
 ---
 
-## Status: beta — standard HID works
+## Status: beta — standard HID + raw multi-touch work
 
-The driver successfully initializes the MSHW0231 touchscreen on the Surface Laptop 4 AMD.
-**Single-touch and pen work** via standard HID mode (Report IDs 0x40 and 0x01).
-KDE/Wayland recognizes touches correctly — tap, drag, and single-finger gestures all work.
+Standard HID (single-touch + pen, Report IDs 0x40 and 0x01) is stable.
+**Raw multi-touch mode** (`raw_mode=1`) is functional: 2-finger tracking is very
+good, 3-finger tracking gradually loses contacts. The driver activates raw mode
+automatically on boot via `/etc/modprobe.d/spi-hid.conf` and auto-retries the
+handshake if needed.
 
 | Feature | Status |
 |---------|--------|
 | Device initialization (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
-| HID report descriptor (936 bytes, 98.5% wire-read + 14-byte targeted patch) | Complete |
+| HID report descriptor (936 bytes, 98.5% wire-read + 14-byte patch) | Complete |
 | Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
 | BTN_TOUCH (tap/lift detection) | **Working** |
 | Stylus/Pen (Report ID 0x01) | **Working** |
-| Multi-touch (raw heatmap pipeline) | Experimental |
-| Grid-to-screen calibration | In progress |
-
-Multi-touch requires experimental `raw_mode=1`. Its frames are DFT antenna data,
-not a rectangular capacitive grid, and the raw-mode handshake and coordinate
-calibration are not reliable. Keep the default `raw_mode=0` for daily use.
+| Multi-touch (raw heatmap, peak+centroid+Hungarian) | **Working** |
+| Auto-retry on cold boot handshake failure | **Working** |
+| Touch ellipse (per-blob eigenvalues) | **Working** |
+| 3+ finger tracking | Gradual contact loss |
 
 ---
 
@@ -53,14 +53,18 @@ calibration are not reliable. Keep the default `raw_mode=0` for daily use.
 ## Architecture
 
 ```
-┌──────────────────────────────────────┐
-│  spi-hid.ko (driver/spi-hid-core.c)  │
-│  HID-over-SPI protocol state machine │
-│  · DESCREQ → DEVICE_DESC → RPT_DESC  │
-│  · IRQ-driven seq_thread (states 0-5)│
-│  · Standard HID mode (Report 0x40)   │
-│  · Optional raw heatmap interception │
-└──────────────┬───────────────────────┘
+┌─────────────────────────────────────────────────┐
+│  spi-hid.ko (driver/spi-hid-core.c)             │
+│  HID-over-SPI protocol state machine            │
+│  · DESCREQ → DEVICE_DESC → RPT_DESC             │
+│  · IRQ-driven seq_thread (states 0-5)           │
+│  · Standard HID mode (Report 0x40)              │
+│  · Raw heatmap pipeline:                        │
+│    baseline → peak detect → 5×5 centroid →      │
+│    Hungarian → EMA → eigenvalues → MT emission  │
+│  · Auto-retry: 3 probe attempts on handshake    │
+│    failure (5s delay, D2→D0+DISCREQ restart)   │
+└──────────────┬──────────────────────────────────┘
                │ Linux SPI framework
 ┌──────────────┴───────────────────────┐
 │  spi-amd.ko (driver/spi-amd.c)       │
@@ -128,10 +132,10 @@ sudo reboot
 ```
 
 This builds the driver via **DKMS**, so it's automatically rebuilt for every kernel you
-install afterward, and installs a systemd service that loads the driver in standard HID
-mode on every boot via `/etc/modprobe.d/spi-hid.conf` (`options spi_hid raw_mode=N`).
-The installer deliberately does not replace loaded modules: reboot is required after
-an install or update to load a new `spi-amd` controller module.
+install afterward. Udev auto-loads the driver when `AMDI0060` (AMD FCH SPI controller)
+is probed. `/etc/modprobe.d/spi-hid.conf` is configured with `raw_mode=Y skip_getfeat=Y`
+for multi-touch raw mode. The installer does not replace loaded modules: reboot is
+required after an install or update.
 
 **Multi-distro support** (auto-detected via `/etc/os-release`): Arch/CachyOS (pacman),
 Ubuntu/Debian (apt), Fedora (dnf), openSUSE (zypper). Missing dependencies are reported
@@ -144,18 +148,19 @@ sudo ./tools/uninstall.sh
 sudo reboot
 ```
 
-The uninstaller removes the service and DKMS installation but leaves active
+The uninstaller removes the DKMS installation but leaves active
 modules untouched; reboot to stop the driver safely.
 
-This is beta software: single-touch + pen are stable, multi-touch is experimental (see
-above). The out-of-tree module taints the kernel. Secure Boot support depends on your
-distribution's DKMS signing setup; enroll its signing key through your distribution's
-documented MOK process if the module is rejected after reboot.
+This is beta software: single-touch + pen are stable, multi-touch is working (2-finger
+very good, 3-finger gradually loses contacts). The out-of-tree module taints the kernel.
+Secure Boot support depends on your distribution's DKMS signing setup; enroll its
+signing key through your distribution's documented MOK process if the module is
+rejected after reboot.
 
 ### After installing
 
 The touchscreen appears as:
-- `/dev/input/eventN` — `spi 045E:0C19` (ABS_X, ABS_Y, BTN_TOUCH) for touch
+- `/dev/input/eventN` — `spi 045E:0C19` (multi-touch) for all touch contacts
 - `/dev/input/eventN` — `spi 045E:0C19 Stylus` for pen
 
 For a boot freeze or initialization failure, use the opt-in trace procedure in
@@ -165,11 +170,13 @@ For a boot freeze or initialization failure, use the opt-in trace procedure in
 
 ## Building from source (developers)
 
-If you're working on the driver itself, build locally for a quick compile check.
+If you're working on the driver itself, build locally for a compile check.
 To test modified code, install the working tree through DKMS and then reboot:
 
 ```bash
 make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
+sudo cp -f driver/spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
+sudo depmod -a
 sudo ./tools/install.sh
 sudo reboot
 ```
@@ -184,17 +191,6 @@ make -C tests
 ./tests/protocol_test
 ```
 
-`driver/sl4a-touch.service` loads the driver via `modprobe` at boot.
-`tools/rebuild_and_install.sh` is a compile check that synchronizes the unit
-file if needed; it does not install or reload a module:
-
-```bash
-./tools/rebuild_and_install.sh
-```
-
-The installer and developer workflow use the same versioned
-`driver/sl4a-touch.service` file.
-
 ---
 
 ## Key Technical Decisions
@@ -203,20 +199,31 @@ The installer and developer workflow use the same versioned
 
 The 936-byte report descriptor is read live from the device. 14 specific byte positions (at offsets n·64+55 from descriptor start) are corrupted to `0xFF` by a characterized hardware defect in the device's 64-byte page structure. These bytes are patched from a hardcoded ground-truth copy. The remaining 922 bytes (98.5%) come from the live wire read every boot — meaning firmware updates or different SKUs would be picked up.
 
-### No vendor init (Himax, 0x04 register)
+### Raw Mode Activation
 
-Windows cold-boot traces show a 14-byte vendor init write to register 0x04. Testing proved this is optional — the device initializes without it. Sending it may corrupt state.
+The device enters raw (heatmap) mode via `SET_FEATURE` (type 0x03, feature ID 5, value 0x01). The
+`skip_getfeat=1` path first sends a vendor-init command (0xC2 opcode) to prepare the device, then
+writes the SET_FEATURE frame. After cold boot the first handshake attempt may fail intermittently;
+the driver auto-retries up to 2 additional times (3 total attempts) with a 5-second delay and a
+full D2→D0 power cycle between each, then falls back to standard HID.
 
-### Standard HID mode (no raw heatmap)
+### Raw Heatmap Pipeline
 
-By not sending the captured GET_FEATURE/SET_FEATURE mode-switch exchange, the device stays in standard HID mode and sends Report ID 0x40 with pre-computed touch coordinates. This avoids the complex blob detection on raw heatmap data that Windows handles via `TouchPenProcessor0C19.dll` (9.7 MB, DFT processing, CCL, Kalman tracking).
+The pipeline replicates the Windows `TouchPenProcessor0C19.dll` processing chain at ~85% fidelity
+(verified against Python oracle in `tools/surface_tracker.py`):
 
-### One-shot raw-mode validation
+1. **c590 LUT**: maps raw 16-bit cell values to fixed-point signal `c590[i] = max(0, 10000 - (i×22 + 6000))`
+2. **Baseline** (30 frames): asymmetric per-cell EMA (7/8 upward), cells under touch protected
+3. **Peak detection**: cross-shaped (±5 cells N/S/E/W), min rise = 350 c590 units, max 16 candidates sorted by strength — matches Windows `FUN_1805fba00`
+4. **5×5 local centroid**: signal-weighted average in ±2 window around each peak, fixed-point ×100 sub-cell precision
+5. **Pre-merge**: coalesce neighbors within distance² < 36 cells, keep strongest
+6. **Hungarian assignment**: cost matrix matching Windows oracle costs (in-radius: `int_sqrt(dx²+dy²)`, out-of-radius: 1000000, dummy: 1000)
+7. **Light EMA**: alpha=3 position smoothing per active slot
+8. **Lift lookback**: emit lift at history position from 2 frames ago
+9. **Per-blob eigenvalues**: touch major/minor and orientation via second-moment decomposition
 
-Raw mode is never enabled permanently by the installer. To make one instrumented raw-mode
-boot, run `sudo ./tools/arm_raw_mode_once.sh` and reboot. The service deletes the marker
-before loading the modules; if raw mode freezes the system, the next forced reboot falls
-back to standard HID mode automatically. Do not reload either SPI module live.
+Module parameters for tuning: `blob_max_distance`, `blob_min_weight`, `blob_debounce`,
+`blob_lift_frames`, `ema_alpha`, `grid_cols`, `grid_rows`, `calib_scale_x/y`, `calib_offset_x/y`.
 
 ### Companion chip (0x18/0x19/0x1A) not needed
 
@@ -284,8 +291,8 @@ These are local, untracked research inputs. They are not distributed by this rep
 
 ## Next Steps
 
-See [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md). The open work is raw-mode handshake
-reliability, raw-data calibration, and upstream-quality patch preparation.
+See [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md). The open work is 3+ finger tracking
+reliability, coordinate calibration, and upstream-quality patch preparation.
 
 ---
 
