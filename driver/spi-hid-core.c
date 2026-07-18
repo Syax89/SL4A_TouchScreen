@@ -1520,7 +1520,7 @@ out:
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
-	u8 hdr[10];
+	u8 hdr[9];
 	int type, hdr_off;
 
 	mutex_lock(&shid->seq_lock);
@@ -1939,7 +1939,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, poll_work);
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[10];
+	u8 hdr[9];
 	int type, ret, hdr_off;
 	u16 blen;
 
@@ -1956,7 +1956,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 		goto resched;
 
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && (hdr_off != 5 || (hdr[7] & 0x0f))) {
+	if (type >= 0 && hdr_off != 5) {
 		seq_dbg(shid, 1, "SEQ: poller header at unexpected offset %d\n", hdr_off);
 		shid->poll_missed++;
 		goto resched;
@@ -1966,7 +1966,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 		u32 cap = shid->raw_mode_active ? shid->data_buf_len :
 			  (shid->desc.max_input_length ? shid->desc.max_input_length : 0x1000);
 
-		blen = (((hdr[7] >> 4) & 0xF) << 0) | (hdr[8] << 4);
+		blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
 		blen *= 4;
 
 		{
@@ -2790,7 +2790,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[10]; int type; u16 blen = 0;
+	u8 hdr[9]; int type; u16 blen = 0;
 	int hdr_off;
 	s64 dbg_dt_us;
 	irqreturn_t result = IRQ_HANDLED;
@@ -2839,7 +2839,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
 	seq_dbg(shid, 2, "SEQ[state=%d] type=%d hdr=[%*ph] dt=%lld us%s\n",
-		 shid->seq_state, type, 4, &hdr[6], dbg_dt_us,
+		 shid->seq_state, type, 4, &hdr[5], dbg_dt_us,
 		 shid->seq_dbg_expect_fast ? (dbg_dt_us >= 0 && dbg_dt_us < 5000 ?
 		 " <<< FAST IRQ AFTER DESCREQ: WRITE REACHED DEVICE" :
 		 " <<< slow IRQ: DESCREQ ignored (device just re-reset)") : "");
@@ -2858,7 +2858,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		}
 		goto out;
 	}
-	if (hdr_off != 5 || (hdr[7] & 0x0f)) {
+	if (hdr_off != 5) {
 		dev_warn_ratelimited(dev,
 			"SEQ: malformed input header at offset %d, dropping frame\n", hdr_off);
 		shid->stat_frames_dropped++;
@@ -2869,7 +2869,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	shid->seq_last_valid_jiffies = jiffies;
 	shid->seq_storm_count = 0;
 
-	blen = (((hdr[7] >> 4) & 0xF) << 0) | (hdr[8] << 4);
+	blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
 	blen *= 4;
 	if (blen > sizeof(shid->input.content))
 		blen = sizeof(shid->input.content);
@@ -2952,10 +2952,6 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 			seq_dbg(shid, 2, "SEQ: parsing at rx+%u\n", off);
 			memcpy(&raw, body + off,
 			       min_t(u32, sizeof(raw), rblen > off ? rblen - off : 0));
-			if (spi_hid_validate_dev_desc(&raw, rblen - off)) {
-				dev_warn(&shid->spi->dev, "SEQ: invalid DEVICE_DESC\n");
-				return;
-			}
 			spi_hid_parse_dev_desc(&raw, &shid->desc);
 			seq_dbg(shid, 2, "SEQ: vid=0x%04X pid=0x%04X ver=0x%04X inp=0x%04X out=0x%04X cmd=0x%04X rpt_len=%u max_in=%u max_out=%u\n",
 				shid->desc.vendor_id, shid->desc.product_id,

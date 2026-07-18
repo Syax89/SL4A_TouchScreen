@@ -127,7 +127,7 @@ static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
 	/* Start scan from offset 0 for robustness; the sync byte (0x5A)
 	 * typically appears at offset 5-7.
 	 */
-	for (i = 0; i < length; i++) {
+	for (i = 3; i < length; i++) {
 		if (raw[i] == SPI_HID_PROTOCOL_SYNC_BYTE &&
 		    (raw[i - 3] & 0x0f) == SPI_HID_PROTOCOL_VERSION) {
 			if (offset)
