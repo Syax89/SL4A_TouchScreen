@@ -422,6 +422,7 @@ struct spi_hid {
 	int raw_handshake_retries_left;
 	u8 raw_handshake_state5_defers;
 	bool raw_handshake_confirmed;
+	u8 raw_probe_attempts;                /* deferred probe retry count */
 
 	struct delayed_work feat_delay_work;	/* GET_FEATURE delay (Windows: ~5900ms) */
 	bool feat_delay_pending;

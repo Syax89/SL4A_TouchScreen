@@ -1385,8 +1385,42 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		goto out;
 
 	if (shid->raw_handshake_retries_left <= 0) {
-		dev_err(dev, "SEQ: raw_mode handshake failed after %d retries, giving up\n",
-			RAW_HANDSHAKE_MAX_RETRIES);
+		if (shid->raw_probe_attempts < 2) {
+			/* First-attempt failure is common after cold boot.
+			 * Retry the entire discovery sequence after a 5s delay
+			 * instead of immediately falling back to standard HID. */
+			shid->raw_probe_attempts++;
+			shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
+			shid->raw_handshake_confirmed = false;
+			dev_warn(dev, "SEQ: raw handshake failed (attempt %u/3), restarting in 5s...\n",
+				 shid->raw_probe_attempts + 1);
+			cancel_delayed_work(&shid->feat_delay_work);
+			shid->feat_delay_pending = false;
+			/* Reset state and let the IRQ thread re-discover. */
+			spi_hid_seq_set_state(shid, 0, SPI_HID_SEQ_WATCHDOG);
+			shid->raw_handshake_state5_defers = 0;
+			mutex_unlock(&shid->seq_lock);
+			msleep(5000);
+			mutex_lock(&shid->seq_lock);
+			if (READ_ONCE(shid->removing) || !shid->raw_mode_active) {
+				mutex_unlock(&shid->seq_lock);
+				return;
+			}
+			/* Restart: D2→D0 power cycle then DESCREQ. */
+			if (spi_hid_vendor_init(shid)) {
+				mutex_unlock(&shid->seq_lock);
+				return;
+			}
+			if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
+				mutex_unlock(&shid->seq_lock);
+				return;
+			}
+			spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_WATCHDOG);
+			mutex_unlock(&shid->seq_lock);
+			return;
+		}
+		dev_err(dev, "SEQ: raw_mode handshake failed after %d attempts, falling back to standard HID\n",
+			shid->raw_probe_attempts + 1);
 		/* The descriptor was already acquired. Stop the experimental input
 		 * path and instantiate standard HID without requiring module reload. */
 		shid->raw_mode_active = false;
@@ -3916,6 +3950,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_DELAYED_WORK(&shid->feat_delay_work, spi_hid_feat_delay_work);
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
+	shid->raw_probe_attempts = 0;
 	shid->raw_mode_active = raw_mode; /* false → heatmap/raw code dead; infrastructure stays zeroed for mode switch */
 	shid->seq_dbg_last_state = -1;
 
@@ -4213,6 +4248,7 @@ static int spi_hid_resume(struct device *dev)
 	shid->keep_powered = false;
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
+	shid->raw_probe_attempts = 0;
 	shid->feat_delay_pending = false;
 	heatmap_reset_baseline(shid);
 	WRITE_ONCE(shid->seq_enabled, true);
