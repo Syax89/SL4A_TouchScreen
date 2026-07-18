@@ -1722,7 +1722,7 @@ static int blob_debounce = 3;
 module_param(blob_debounce, int, 0444);
 MODULE_PARM_DESC(blob_debounce, "Frames before claiming a new blob (debounce)");
 
-static int blob_lift_frames = 2;
+static int blob_lift_frames = 3;
 module_param(blob_lift_frames, int, 0444);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting");
 
@@ -2072,7 +2072,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	if (blob_min_weight < 1) blob_min_weight = 1;
 	if (ema_alpha < 0 || ema_alpha > 10000) ema_alpha = 3;
 	if (blob_debounce < 1) blob_debounce = 3;
-	if (blob_lift_frames < 1) blob_lift_frames = 2;
+	if (blob_lift_frames < 1) blob_lift_frames = 3;
 	if (blob_max_distance < 1) blob_max_distance = 3;
 	if (ghost_dist < 1) ghost_dist = 6;
 	if (touch_threshold_pct < 0) touch_threshold_pct = 0;
@@ -2578,46 +2578,130 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		 * splits very large blobs by halving, which handles merged-finger
 		 * cases approximately. */
 
+		/* Hungarian global assignment (matching Windows TouchPenProcessor0C19).
+		 * Replaces the old greedy nearest-neighbor with minimum-cost bipartite
+		 * matching.  Each blob is assigned to exactly one slot, minimizing
+		 * Euclidean squared distance. Empty slots receive a uniform penalty
+		 * so that new slots are only created when no claimed slot is nearby. */
 		{
 			u8 assigned_slot[HEATMAP_MAX_BLOBS];
 			u16 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
 			bool new_active[HEATMAP_MAX_SLOTS];
+			u16 cost[HEATMAP_MAX_BLOBS][HEATMAP_MAX_SLOTS];
+			u8 row_match[HEATMAP_MAX_BLOBS];
+			u8 col_match[HEATMAP_MAX_SLOTS];
+			u16 row_val[HEATMAP_MAX_BLOBS], col_val[HEATMAP_MAX_SLOTS];
+			u8 row_cover[HEATMAP_MAX_BLOBS], col_cover[HEATMAP_MAX_SLOTS];
+			u16 max_dist_sq;
+			s16 dx, dy;
+			u8 n_blobs = sorted_count;
+			u8 round, row, col;
+			u16 min_val;
 
 			memset(new_active, 0, sizeof(new_active));
 			memset(new_gx, 0, sizeof(new_gx));
 			memset(new_gy, 0, sizeof(new_gy));
-			for (i = 0; i < sorted_count; i++)
-				assigned_slot[i] = 0xFF;
+			memset(row_match, 0xFF, sizeof(row_match));
+			memset(col_match, 0xFF, sizeof(col_match));
+			memset(row_val, 0, sizeof(row_val));
+			memset(col_val, 0, sizeof(col_val));
+			max_dist_sq = (u16)blob_max_distance * (u16)blob_max_distance;
 
-			/* Slot assignment: match detected blobs to existing slots by distance */
-			for (i = 0; i < sorted_count; i++) {
-				u16 best_dist = 0xFFFF;
-				u8 best_slot = 0xFF;
+			/* Build cost matrix and initial row minima. */
+			for (row = 0; row < n_blobs; row++) {
+				row_val[row] = U16_MAX;
+				for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
+					if (shid->blob_slot_state[col] >= 1) {
+						dx = (s16)sorted[row].gx - (s16)shid->blob_slot_gx[col];
+						dy = (s16)sorted[row].gy - (s16)shid->blob_slot_gy[col];
+						if (dx < 0) dx = -dx;
+						if (dy < 0) dy = -dy;
+						if ((u16)dx <= (u16)blob_max_distance &&
+						    (u16)dy <= (u16)blob_max_distance) {
+							cost[row][col] = (u16)dx * (u16)dx + (u16)dy * (u16)dy;
+						} else {
+							cost[row][col] = max_dist_sq * 8 + 1;
+						}
+					} else {
+						cost[row][col] = max_dist_sq * 2;
+					}
+					if (cost[row][col] < row_val[row])
+						row_val[row] = cost[row][col];
+				}
+				/* Subtract row minimum. */
+				for (col = 0; col < HEATMAP_MAX_SLOTS; col++)
+					cost[row][col] -= row_val[row];
+			}
 
-				for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
-					bool taken = false;
-					u8 k;
+			/* Hungarian algorithm iterations. */
+			memset(row_cover, 0, sizeof(row_cover));
+			memset(col_cover, 0, sizeof(col_cover));
+			for (round = 0; round < n_blobs; round++) {
+				memset(row_cover, 0, sizeof(row_cover));
+				memset(col_cover, 0, sizeof(col_cover));
 
-					for (k = 0; k < i; k++)
-						if (assigned_slot[k] == s) { taken = true; break; }
-					if (taken) continue;
+				for (;;) {
+					u8 changed = 0;
 
-					if (shid->blob_slot_state[s] >= 1) { /* prefer claimed or debouncing slots */
-						u16 dx = abs((s16)sorted[i].gx - (s16)shid->blob_slot_gx[s]);
-						u16 dy = abs((s16)sorted[i].gy - (s16)shid->blob_slot_gy[s]);
-						if (dx <= (u16)blob_max_distance && dy <= (u16)blob_max_distance) {
-							u16 dist = dx + dy;
-							if (dist < best_dist) {
-								best_dist = dist;
-								best_slot = s;
+					/* Select uncovered row with zero in an uncovered column. */
+					for (row = 0; row < n_blobs; row++) {
+						if (row_cover[row]) continue;
+						for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
+							if (col_cover[col]) continue;
+							if (cost[row][col] == 0) {
+								row_match[row] = col;
+								col_match[col] = row;
+								row_cover[row] = 1;
+								col_cover[col] = 1;
+								changed = 1;
+								break;
 							}
 						}
-					} else if (shid->blob_slot_state[s] == 0) {
-						if (best_slot == 0xFF) best_slot = s;
+					}
+					if (changed) continue;
+
+					/* All uncovered costs > 0: find min and update. */
+					min_val = U16_MAX;
+					for (row = 0; row < n_blobs; row++) {
+						if (row_cover[row]) continue;
+						for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
+							if (col_cover[col]) continue;
+							if (cost[row][col] < min_val)
+								min_val = cost[row][col];
+						}
+					}
+					if (min_val == U16_MAX)
+						break;
+
+					for (row = 0; row < n_blobs; row++) {
+						for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
+							if (row_cover[row] && col_cover[col])
+								cost[row][col] += min_val;
+							else if (!row_cover[row] && !col_cover[col])
+								cost[row][col] -= min_val;
+						}
 					}
 				}
-				if (best_slot != 0xFF)
-					assigned_slot[i] = best_slot;
+			}
+
+			/* Build final assignments from the matching.
+			 * Only keep matches with cost below the empty-slot penalty. */
+			for (row = 0; row < n_blobs; row++)
+				assigned_slot[row] = 0xFF;
+			for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
+				row = col_match[col];
+				if (row >= n_blobs) continue;
+				if (shid->blob_slot_state[col] >= 1) {
+					dx = (s16)sorted[row].gx - (s16)shid->blob_slot_gx[col];
+					dy = (s16)sorted[row].gy - (s16)shid->blob_slot_gy[col];
+					if (dx < 0) dx = -dx;
+					if (dy < 0) dy = -dy;
+					if ((u16)dx <= (u16)blob_max_distance &&
+					    (u16)dy <= (u16)blob_max_distance)
+						assigned_slot[row] = col;
+				} else {
+					assigned_slot[row] = col;
+				}
 			}
 
 			/* Process slot state transitions (GROUND_TRUTH §22.4):
