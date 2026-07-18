@@ -139,10 +139,10 @@ info "Step 3: Leaving active modules untouched..."
 # for the next boot while the currently loaded pair continues to run.
 pass "Active modules left untouched; reboot will load the new modules"
 
-info "Step 4: Creating modprobe.d config (standard HID mode)..."
+info "Step 4: Creating modprobe.d config (raw multi-touch mode)..."
 cat > "$MODPROBE_CONF" <<'EOF'
-# SL4A_TouchScreen — standard HID mode (single-touch + pen, stable)
-options spi_hid raw_mode=N
+# SL4A_TouchScreen — raw multi-touch heatmap mode
+options spi_hid raw_mode=Y skip_getfeat=Y
 EOF
 pass "Created $MODPROBE_CONF"
 

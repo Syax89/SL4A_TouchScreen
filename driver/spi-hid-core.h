@@ -346,6 +346,9 @@ struct spi_hid {
 	/* Blob state. Coordinates are fixed-point with 8 fractional bits. */
 	u32 blob_x[HEATMAP_MAX_BLOBS];
 	u32 blob_y[HEATMAP_MAX_BLOBS];
+	u32 blob_peak_x[HEATMAP_MAX_BLOBS];
+	u32 blob_peak_y[HEATMAP_MAX_BLOBS];
+	u32 blob_peak_rise[HEATMAP_MAX_BLOBS];
 	u32 blob_wsum[HEATMAP_MAX_BLOBS];
 	u64 blob_xsum[HEATMAP_MAX_BLOBS];
 	u64 blob_ysum[HEATMAP_MAX_BLOBS];

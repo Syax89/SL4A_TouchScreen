@@ -2363,11 +2363,13 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		shid->label_equiv[i] = r;
 	}
 
-	/* Step 3: accumulate blob sums (weighted by signal drop from baseline) */
+	/* Step 3: accumulate blob sums (weighted by signal drop from baseline).
+	 * Also track the peak cell per blob (max c590 signal rise). */
 	memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
 	memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
 	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
 	memset(shid->blob_active, 0, sizeof(shid->blob_active));
+	memset(shid->blob_peak_rise, 0, sizeof(shid->blob_peak_rise));
 
 	for (i = 0; i < cell_count; i++) {
 		u16 label, col, row;
@@ -2393,15 +2395,26 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		shid->blob_ysum[label] += (u32)row * weight;
 		shid->blob_wsum[label] += weight;
 		shid->blob_active[label] = true;
+
+		if (weight > shid->blob_peak_rise[label]) {
+			shid->blob_peak_rise[label] = weight;
+			shid->blob_peak_x[label] = col;
+			shid->blob_peak_y[label] = row;
+		}
 		touched_count++;
 	}
 
-	/* Step 4: compute centroids and emit */
+	/* Step 4: compute centroids — blend signal-weighted centroid (75%)
+	 * with the peak position (25%) for stability matching Windows
+	 * peak-constrained centroid. */
 	for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
 		if (!shid->blob_active[i] || shid->blob_wsum[i] < blob_min_weight)
 			continue;
 		shid->blob_x[i] = (u16)(shid->blob_xsum[i] / shid->blob_wsum[i]);
 		shid->blob_y[i] = (u16)(shid->blob_ysum[i] / shid->blob_wsum[i]);
+		/* Blend: 75% signal-weighted centroid + 25% peak position */
+		shid->blob_x[i] = (u16)((shid->blob_x[i] * 3 + shid->blob_peak_x[i]) / 4);
+		shid->blob_y[i] = (u16)((shid->blob_y[i] * 3 + shid->blob_peak_y[i]) / 4);
 	}
 
 	/* Eigenvalue decomposition for the heaviest blob (GROUND_TRUTH.md §22.6) */
@@ -2811,7 +2824,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					shid->blob_slot_missed[s] = 0;
 					shid->blob_slot_gx[s] = gx;
 					shid->blob_slot_gy[s] = gy;
-					shid->blob_slot_weight[s] = w;
+					/* EMA on blob weight (matching Windows: weight_smoothed = (old*7+new)/8) */
+					if (was_claimed && shid->blob_slot_state[s] == 2)
+						shid->blob_slot_weight[s] = (shid->blob_slot_weight[s] * 7 + w) / 8;
+					else
+						shid->blob_slot_weight[s] = w;
 
 					new_active[s] = (shid->blob_slot_state[s] >= 2);
 
