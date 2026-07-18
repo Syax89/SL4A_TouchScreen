@@ -276,5 +276,4 @@ reliability, coordinate calibration, and upstream-quality patch preparation.
 
 ## Licensing
 
-Licensing is specified in each source-file header. A repository-wide license file is
-not currently supplied.
+SPDX-License-Identifier: GPL-2.0. See [LICENSE](LICENSE) for the full text.

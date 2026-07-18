@@ -1,11 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
-/*
- * AMD SPI controller driver
- *
- * Copyright (c) 2025, Advanced Micro Devices, Inc.
- *
- * Author: Krishnamoorthi M <krishnamoorthi.m@amd.com>
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (c) 2025, Advanced Micro Devices, Inc. */
 
 #ifndef AMD_SPI_H
 #define AMD_SPI_H

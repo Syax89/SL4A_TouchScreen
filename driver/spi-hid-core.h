@@ -1,13 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * spi-hid-core.h
- *
- * Copyright (c) 2020 Microsoft Corporation
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
 #ifndef SPI_HID_CORE_H
 #define SPI_HID_CORE_H

@@ -1,27 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * HID over SPI protocol implementation
- * spi-hid-core.c
- *
- * Copyright (c) 2020 Microsoft Corporation
- *
- * This code is partly based on "HID over I2C protocol implementation:
- *
- *  Copyright (c) 2012 Benjamin Tissoires <benjamin.tissoires@gmail.com>
- *  Copyright (c) 2012 Ecole Nationale de l'Aviation Civile, France
- *  Copyright (c) 2012 Red Hat, Inc
- *
- *  which in turn is partly based on "USB HID support for Linux":
- *
- *  Copyright (c) 1999 Andreas Gal
- *  Copyright (c) 2000-2005 Vojtech Pavlik <vojtech@suse.cz>
- *  Copyright (c) 2005 Michael Haboustak <mike-@cinci.rr.com> for Concept2, Inc
- *  Copyright (c) 2007-2008 Oliver Neukum
- *  Copyright (c) 2006-2010 Jiri Kosina
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #include <linux/acpi.h>

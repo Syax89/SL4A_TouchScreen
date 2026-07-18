@@ -1,13 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * spi-hid_trace.h
- *
- * Copyright (c) 2020 Microsoft Corporation
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM spi_hid

@@ -1,9 +1,6 @@
-/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/*
- * AMD SPI controller driver — multi-opcode variant
- * Based on upstream v6.15 spi-amd.c
- * Added: AMDI0060 support, multi-opcode intra-message switching
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (c) 2025, Advanced Micro Devices, Inc. */
+/* Based on upstream v6.15 spi-amd.c; added AMDI0060 + multi-opcode support. */
 
 #include <linux/acpi.h>
 #include <linux/delay.h>
