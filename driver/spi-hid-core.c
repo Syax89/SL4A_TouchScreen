@@ -2277,7 +2277,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			col = i % ncols; row = i / ncols;
 			if (row >= nrows) break;
 			rise = shid->heatmap_signal[i];
-			if (rise < 400) continue;
+			if (rise < 300) continue;
 
 			/* Cross-shaped: check ±5 in N,S,E,W directions only */
 			{
