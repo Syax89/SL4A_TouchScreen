@@ -1664,10 +1664,10 @@ module_param(blob_min_weight, int, 0644);
 MODULE_PARM_DESC(blob_min_weight,
 	"Minimum c590 signal rise sum across blob to consider it valid");
 
-static int ema_alpha = 10;
+static int ema_alpha = 3;
 module_param(ema_alpha, int, 0644);
 MODULE_PARM_DESC(ema_alpha,
-	"EMA smoothing: (prev*alpha + new)/(alpha+1). Higher = smoother. Default 10 (weight ~1/11)");
+	"EMA smoothing: (prev*alpha + new)/(alpha+1). Default 3 (weight 1/4, light)");
 
 static int dfa_data_offset;
 module_param(dfa_data_offset, int, 0444);
@@ -2746,10 +2746,18 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					new_active[s] = (shid->blob_slot_state[s] >= 2);
 
 					if (new_active[s]) {
-						/* Python oracle: no EMA, no MA — raw observation
-						 * coordinates are stable enough from peak detection. */
-						new_gx[s] = gx;
-						new_gy[s] = gy;
+						/* Light EMA for smoothness (alpha=3, weight 1/4).
+						 * Raw peak centroids are coherent but have
+						 * pixel-level jitter from 5×5 window edges. */
+						if (was_claimed && shid->blob_slot_state[s] == 2) {
+							u16 old_gx = shid->blob_slot_gx[s];
+							u16 old_gy = shid->blob_slot_gy[s];
+							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
+							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
+						} else {
+							new_gx[s] = gx;
+							new_gy[s] = gy;
+						}
 						shid->blob_slot_gx[s] = new_gx[s];
 						shid->blob_slot_gy[s] = new_gy[s];
 					}
