@@ -1604,15 +1604,15 @@ module_param(debug_coords, bool, 0444);
 MODULE_PARM_DESC(debug_coords, "(unused, reserved for future calibration debugging)");
 
 static bool invert_x;
-module_param(invert_x, bool, 0444);
+module_param(invert_x, bool, 0644);
 MODULE_PARM_DESC(invert_x, "Invert X axis");
 
 static bool invert_y;
-module_param(invert_y, bool, 0444);
+module_param(invert_y, bool, 0644);
 MODULE_PARM_DESC(invert_y, "Invert Y axis");
 
 static bool swap_xy;
-module_param(swap_xy, bool, 0444);
+module_param(swap_xy, bool, 0644);
 MODULE_PARM_DESC(swap_xy, "Swap X and Y axes");
 
 /* ── Operating mode ────────────────────────────────────────────── */
