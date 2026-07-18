@@ -1795,7 +1795,7 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	memset(shid->eigmin, 0, sizeof(shid->eigmin));
 	memset(shid->eigori, 0, sizeof(shid->eigori));
 	memset(shid->heatmap_touched, 0, sizeof(shid->heatmap_touched));
-	memset(shid->heatmap_expanded, 0, sizeof(shid->heatmap_expanded));
+	memset(shid->heatmap_signal, 0, sizeof(shid->heatmap_signal));
 	memset(shid->heatmap_label, 0, sizeof(shid->heatmap_label));
 	memset(shid->blob_slot_hx, 0, sizeof(shid->blob_slot_hx));
 	memset(shid->blob_slot_hy, 0, sizeof(shid->blob_slot_hy));
@@ -2221,12 +2221,13 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 	if (!shid->touch_input) return;
 
-	/* Step 1: compute signal rise per cell. */
+	/* Step 1: compute signal rise per cell once, reuse everywhere. */
 	memset(shid->heatmap_touched, 0, cell_count);
 	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
 		s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
 		s16 curr = shid->c590_lut[data[data_offset + i]];
 		s16 rise = curr - base;
+		shid->heatmap_signal[i] = rise;
 		shid->heatmap_touched[i] = (rise >= 400) ? 1 : 0;
 	}
 
@@ -2251,32 +2252,20 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			if (!shid->heatmap_touched[i]) continue;
 			col = i % ncols; row = i / ncols;
 			if (row >= nrows) break;
-			{
-				s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
-				s16 curr = shid->c590_lut[data[data_offset + i]];
-				rise = curr - base;
-			}
+			rise = shid->heatmap_signal[i];
 			if (rise < 350) continue;
 
 			/* Cross-shaped: check ±5 in N,S,E,W directions only */
 			{
-				int k; bool ok = true;
-				s16 nb[4] = { -9999, -9999, -9999, -9999 };
-				if (col >= 5 && shid->heatmap_touched[i - 5])
-					nb[0] = (s16)shid->c590_lut[data[data_offset + i - 5]] -
-						shid->c590_lut[shid->heatmap_baseline[i - 5]];
-				if (col + 5 < ncols && shid->heatmap_touched[i + 5])
-					nb[1] = (s16)shid->c590_lut[data[data_offset + i + 5]] -
-						shid->c590_lut[shid->heatmap_baseline[i + 5]];
-				if (row >= 5 && shid->heatmap_touched[i - 5 * ncols])
-					nb[2] = (s16)shid->c590_lut[data[data_offset + i - 5 * ncols]] -
-						shid->c590_lut[shid->heatmap_baseline[i - 5 * ncols]];
-				if (row + 5 < nrows && shid->heatmap_touched[i + 5 * ncols])
-					nb[3] = (s16)shid->c590_lut[data[data_offset + i + 5 * ncols]] -
-						shid->c590_lut[shid->heatmap_baseline[i + 5 * ncols]];
-				for (k = 0; k < 4; k++) {
-					if (nb[k] > rise) { ok = false; break; }
-				}
+				bool ok = true;
+				if (col >= 5 && shid->heatmap_touched[i - 5] &&
+				    shid->heatmap_signal[i - 5] > rise) ok = false;
+				if (col + 5 < ncols && shid->heatmap_touched[i + 5] &&
+				    shid->heatmap_signal[i + 5] > rise) ok = false;
+				if (row >= 5 && shid->heatmap_touched[i - 5 * ncols] &&
+				    shid->heatmap_signal[i - 5 * ncols] > rise) ok = false;
+				if (row + 5 < nrows && shid->heatmap_touched[i + 5 * ncols] &&
+				    shid->heatmap_signal[i + 5 * ncols] > rise) ok = false;
 				if (!ok) continue;
 			}
 
@@ -2312,11 +2301,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					s16 w;
 
 					if (idx >= cell_count || !shid->heatmap_touched[idx]) continue;
-					{
-						s16 base = shid->c590_lut[shid->heatmap_baseline[idx]];
-						s16 curr = shid->c590_lut[data[data_offset + idx]];
-						w = curr - base;
-					}
+					w = shid->heatmap_signal[idx];
 					if (w <= 0) continue;
 					sx += (s64)c * w;
 					sy += (s64)r * w;
@@ -2341,11 +2326,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						s16 w;
 
 						if (idx >= cell_count || !shid->heatmap_touched[idx]) continue;
-						{
-							s16 base = shid->c590_lut[shid->heatmap_baseline[idx]];
-							s16 curr = shid->c590_lut[data[data_offset + idx]];
-							w = curr - base;
-						}
+						w = shid->heatmap_signal[idx];
 						if (w <= 0) continue;
 						dx = (s32)c - (s32)cx;
 						dy = (s32)r - (s32)cy;
