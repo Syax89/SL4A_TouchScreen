@@ -55,6 +55,7 @@
 
 #include "spi-hid-core.h"
 #include "spi-hid-protocol.h"
+#include "spi-hid-capimg.h"
 #include "spi-hid_trace.h"
 /* Hardcoded HID Report Descriptor from Windows dump (936 bytes) */
 #include "hardcoded_rd.h"
@@ -468,7 +469,7 @@ out:
 
 /* Forward declarations */
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len);
-static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, u8 content_id);
+static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data_len, u8 content_id);
 static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *expect_fast);
 static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen);
@@ -1621,6 +1622,11 @@ MODULE_PARM_DESC(raw_mode,
 	"0 = standard HID mode (single-touch, Report ID 0x40); "
 	"1 = raw DFT heatmap mode (send GET_FEATURE/SET_FEATURE, multi-touch blob detection)");
 
+static bool raw_input_beta = true;
+module_param(raw_input_beta, bool, 0444);
+MODULE_PARM_DESC(raw_input_beta,
+	"Publish beta multitouch input device from decoded CapImg heatmap frames");
+
 /* Kept enabled for compatibility with the currently validated boot path.
  * Disable only for a controlled trace comparison against ACPI _INI startup. */
 static bool acpi_probe_power_cycle = false;
@@ -1663,10 +1669,10 @@ module_param(ema_alpha, int, 0444);
 MODULE_PARM_DESC(ema_alpha,
 	"EMA smoothing: (prev*alpha + new)/(alpha+1). Surface uses alpha=7 (weight 1/8)");
 
-static int dfa_data_offset = 26;
+static int dfa_data_offset;
 module_param(dfa_data_offset, int, 0444);
 MODULE_PARM_DESC(dfa_data_offset,
-	"DFT antenna frame data offset in bytes");
+	"DFT antenna frame data offset in bytes (0 = decoded raster, no offset)");
 
 static int touch_threshold_min = 20;
 module_param(touch_threshold_min, int, 0444);
@@ -1835,20 +1841,21 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 #define GRID_CELLS  (288 * 50)     /* max buffer allocation (headroom) */
 #define GRID_ROW_STRIDE_DEFAULT GRID_COLS_DEFAULT
 
-/* Signal lookup table (c590[256]). Actual values extracted from DLL .rdata:
- *   c590[i] = 1.0 - (i * 0.00222035 + 0.6)
- * Range: 0.4 (resting, byte=0) down to ~0 (touched, byte=255).
- * We use fixed-point: c590[i] = (s16)((1.0f - (i*0.00222035f + 0.6f)) * 10000.0f)
- * giving values 4000..0 with 4 decimal digits of precision. */
-#define C590_BASE   10000   /* 1.0 * 10000 */
-#define C590_STEP   22      /* 0.00222035 * 10000 ≈ 22 */
-#define C590_OFFSET 6000    /* 0.6 * 10000 */
+/* Signal lookup table (c590[256]). Extracted from TouchPenProcessor0C19.dll .rdata:
+ *   c590[i] = 1.0 - (i * 0.00222035428 + 0.600000024)
+ * Range: 0.4 (resting) down to ~-0.166 (byte 255).
+ * Fixed-point: c590[i] = (10000 - (i * 22204 / 1000 + 6000)), clamped >= 0.
+ * Scaled to [0, 4000] with 4 decimal digits of precision. */
+#define C590_BASE   10000
+#define C590_STEP_NUM 22204   /* 0.00222035428 * 10000000 / 1000 */
+#define C590_STEP_DEN 1000
+#define C590_OFFSET 6000      /* 0.600000024 * 10000 ≈ 6000 */
 
 static void heatmap_init_c590(struct spi_hid *shid)
 {
 	int i;
 	for (i = 0; i < 256; i++) {
-		s32 v = 10000 - ((s32)i * 22 + 6000);
+		s32 v = 10000 - ((s32)i * C590_STEP_NUM / C590_STEP_DEN + C590_OFFSET);
 		shid->c590_lut[i] = (s16)(v > 0 ? v : 0);
 	}
 	seq_dbg(shid, 1, "HEATMAP: c590 lookup table initialized (range %d..%d)\n",
@@ -2042,7 +2049,7 @@ out:
 	mutex_unlock(&shid->seq_lock);
 }
 
-static void heatmap_process_frame(struct spi_hid *shid, u8 *data, u32 data_len, u8 content_id)
+static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data_len, u8 content_id)
 {
 	struct device *dev = &shid->spi->dev;
 	u32 i, cell_count, ncols, nrows;
@@ -3266,7 +3273,6 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		}
 		rl = body[5] | (body[6] << 8);
 		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[7], rl);
-
 		if (rl >= 3 && rl - 3 > avail) {
 			dev_warn_ratelimited(dev,
 				"SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
@@ -3275,8 +3281,9 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			return;
 		}
 
-		if (shid->raw_mode_active && body[7] == 0x0C && shid->touch_input) {
-			u32 clen = (rl > 2) ? (rl - 2) : 0;
+		if (shid->raw_mode_active && raw_input_beta && body[7] == 0x0C && shid->touch_input) {
+			struct spi_hid_capimg_raster raster;
+			int cret;
 
 			if (!shid->raw_handshake_confirmed) {
 				shid->raw_handshake_confirmed = true;
@@ -3290,10 +3297,14 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 					schedule_delayed_work(&shid->stream_watchdog,
 							      msecs_to_jiffies(stream_watchdog_ms));
 				}
-				/* The IRQ thread is the sole reader of input_register. Polling it
-				 * concurrently can consume a report before its IRQ is serviced. */
 			}
-			heatmap_process_frame(shid, &body[7], clen, body[7]);
+			cret = spi_hid_capimg_decode_v0(&body[5], rblen - 5, &raster);
+			if (cret) {
+				dev_warn(dev, "SEQ: CapImg decode failed: %d (rblen=%u)\n", cret, rblen);
+				shid->stat_frames_dropped++;
+				return;
+			}
+			heatmap_process_frame(shid, raster.samples, SPI_HID_CAPIMG_RASTER_SAMPLES, 0x0C);
 		} else if (rl >= 3 && rl - 3 <= avail) {
 			if (shid->raw_mode_active && body[7] == 0x40 && rl - 2 >= 6) {
 				u16 hx = body[8] | (body[10] << 8);
