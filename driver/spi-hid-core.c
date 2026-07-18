@@ -2294,13 +2294,15 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					peaks[pi] = peaks[ci]; peaks[ci] = t;
 				}
 
-		/* Step 3: 5×5 local centroid around each peak
+		/* Step 3: 5×5 local centroid + eigenvalue per peak
 		 * (matching Python oracle _centroid function).
 		 * Only cells within ±2 of the peak contribute to
-		 * the weighted centroid. */
+		 * the weighted centroid and second moments. */
 		for (pi = 0; pi < npeaks; pi++) {
 			s64 sx = 0, sy = 0, sw = 0;
+			s64 sxx = 0, syy = 0, sxy = 0;
 			s32 pr, pc, r, c;
+			u32 cx, cy;
 
 			pc = peaks[pi].col;
 			pr = peaks[pi].row;
@@ -2322,90 +2324,53 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				}
 			}
 			if (sw >= blob_min_weight) {
-				/* Fixed-point ×100 for sub-cell precision (matching
-				 * Python oracle float division). Grid 0..71 → 0..7100,
-				 * each sub-step = 0.01 cells ≈ 4.6 screen pixels. */
 				shid->blob_x[pi] = (u32)(sx * 100 / sw);
 				shid->blob_y[pi] = (u32)(sy * 100 / sw);
 				shid->blob_wsum[pi] = (u32)sw;
 				shid->blob_active[pi] = true;
 				nlabels++;
 				touched_count++;
-			}
-		}
-	}
 
-	/* Eigenvalue decomposition for the heaviest blob (GROUND_TRUTH.md §22.6) */
-	{
-		u32 best_idx = 0;
-		u32 best_w = 0;
-		s64 sum_xx = 0, sum_yy = 0, sum_xy = 0;
+				/* Eigenvalues: second moments around the centroid. */
+				cx = shid->blob_x[pi] / 100;
+				cy = shid->blob_y[pi] / 100;
+				for (r = max(0, pr - 2); r <= min((s32)nrows - 1, pr + 2); r++) {
+					for (c = max(0, pc - 2); c <= min((s32)ncols - 1, pc + 2); c++) {
+						u32 idx = (u32)r * ncols + (u32)c;
+						s32 dx, dy;
+						s16 w;
 
-		for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
-			if (shid->blob_active[i] && shid->blob_wsum[i] > best_w) {
-				best_w = shid->blob_wsum[i];
-				best_idx = i;
-			}
-		}
-		if (best_w >= (u32)blob_min_weight) {
-			s32 cx = (s32)shid->blob_x[best_idx] / 100; /* back to cells */
-			s32 cy = (s32)shid->blob_y[best_idx] / 100;
-
-			for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-				u16 label;
-				s32 dx, dy, w;
-				s16 base, curr;
-
-				if (!shid->heatmap_touched[i])
-					continue;
-				label = shid->heatmap_label[i];
-				while (label < 256 && shid->label_equiv[label])
-					label = shid->label_equiv[label];
-				if (label != best_idx)
-					continue;
-
-				base = shid->c590_lut[shid->heatmap_baseline[i]];
-				curr = shid->c590_lut[data[data_offset + i]];
-				w = (s32)curr - (s32)base;
-				if (w <= 0)
-					continue;
-
-				dx = (s32)(i % ncols) - cx;
-				dy = (s32)(i / ncols) - cy;
-				sum_xx += dx * dx * w;
-				sum_yy += dy * dy * w;
-				sum_xy += dx * dy * w;
-			}
-
-			{
-				s64 trace = (s64)sum_xx + (s64)sum_yy;
-				s64 det = (s64)sum_xx * (s64)sum_yy -
-					  (s64)sum_xy * (s64)sum_xy;
-				s64 disc = trace * trace - 4 * det;
-				s32 sq;
-
-				if (disc < 0)
-					disc = 0;
-				sq = (s32)int_sqrt((u64)disc);
-
-				shid->eigmaj[0] = (s32)((trace + sq) / 2);
-				shid->eigmin[0] = (s32)((trace - sq) / 2);
-
+						if (idx >= cell_count || !shid->heatmap_touched[idx]) continue;
+						{
+							s16 base = shid->c590_lut[shid->heatmap_baseline[idx]];
+							s16 curr = shid->c590_lut[data[data_offset + idx]];
+							w = curr - base;
+						}
+						if (w <= 0) continue;
+						dx = (s32)c - (s32)cx;
+						dy = (s32)r - (s32)cy;
+						sxx += (s64)dx * dx * w;
+						syy += (s64)dy * dy * w;
+						sxy += (s64)dx * dy * w;
+					}
+				}
 				{
-					s32 num = 2 * sum_xy;
-					s32 den = sum_yy - sum_xx;
-					s32 deg;
+					s64 trace = sxx + syy;
+					s64 det = sxx * syy - sxy * sxy;
+					s64 disc = trace * trace - 4 * det;
+					s32 sq;
 
-					if (den != 0 || num != 0) {
-						deg = atan2_approx(num, den) / 2;
-						/* Signed range [-90.00°, +89.99°] */
-						if (deg >= 18000)
-							deg -= 18000;
-						else if (deg <= -18000)
-							deg += 18000;
-						shid->eigori[0] = deg;
+					if (disc < 0) disc = 0;
+					sq = (s32)int_sqrt((u64)disc);
+					shid->eigmaj[pi] = (s32)((trace + sq) / 2);
+					shid->eigmin[pi] = (s32)((trace - sq) / 2);
+					if (syy - sxx != 0 || sxy != 0) {
+						s32 deg = atan2_approx((s32)(2 * sxy), (s32)(syy - sxx)) / 2;
+						if (deg >= 18000) deg -= 18000;
+						else if (deg <= -18000) deg += 18000;
+						shid->eigori[pi] = deg;
 					} else {
-						shid->eigori[0] = 0;
+						shid->eigori[pi] = 0;
 					}
 				}
 			}
@@ -2721,6 +2686,15 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					u16 gy = sorted[bi].gy;
 					u32 w  = sorted[bi].w;
 					bool was_claimed = (shid->blob_slot_state[s] >= 2);
+					u8 blob_idx = sorted[bi].idx;
+
+					/* Copy per-blob eigenvalues to the assigned slot. */
+					if (blob_idx < HEATMAP_MAX_BLOBS &&
+					    shid->eigmaj[blob_idx] > 0) {
+						shid->eigmaj[s] = shid->eigmaj[blob_idx];
+						shid->eigmin[s] = shid->eigmin[blob_idx];
+						shid->eigori[s] = shid->eigori[blob_idx];
+					}
 
 					switch (shid->blob_slot_state[s]) {
 					case 0:
@@ -2842,18 +2816,14 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					input_report_abs(input, ABS_MT_POSITION_Y, (u16)fy);
 					any_touch = true;
 
-					/* Emit orientation and touch ellipse for slot 0 (heaviest blob) */
-					if (s == 0 && shid->eigmaj[0] > 0) {
+					/* Emit touch ellipse for this slot. */
+					if (shid->eigmaj[s] > 0) {
 						u32 major, minor;
 						s32 ori;
 
-						/* Anisotropic ellipse: eigenvalues are in
-						 * grid-cell² units; project the std-dev onto
-						 * screen units using the per-axis scale so the
-						 * major/minor reflect the real X/Y pitch. */
-						major = ((u32)int_sqrt(shid->eigmaj[0]) * scale_x + 500) / 1000;
-						minor = ((u32)int_sqrt(shid->eigmin[0]) * scale_y + 500) / 1000;
-						ori = shid->eigori[0] / 100;
+						major = ((u32)int_sqrt(shid->eigmaj[s]) * scale_x + 500) / 1000;
+						minor = ((u32)int_sqrt(shid->eigmin[s]) * scale_y + 500) / 1000;
+						ori = shid->eigori[s] / 100;
 						if (swap_xy) {
 							u32 t = major; major = minor; minor = t;
 							ori = -ori;
