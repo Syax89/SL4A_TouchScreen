@@ -60,11 +60,14 @@
 
 #define SPI_HID_MAX_RESET_ATTEMPTS 3
 #define RAW_TRANSITION_DELAY_MS 5900
+#define RAW_TRANSITION_RESPONSE_TIMEOUT_MS 1000
+#define ISOLATED_SET_OBSERVATION_TIMEOUT_MS 45000
 
 static int debug_level;
 static int probe_raw_id = 4;  /* Windows content_id for raw-mode handshake */
 static int getfeat_delay_ms = 5900;  /* Windows-observed RPT_DESC -> GET_FEATURE settle time */
 static bool raw_transition_once;
+static bool isolated_set_test;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (debug_level >= (level)) \
 		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
@@ -283,7 +286,7 @@ static int spi_hid_set_power(struct spi_hid *shid, u8 power_mode)
 	u16 total_len = 1 + 3 + 2 + body_len; /* opcode(1) + addr(3) + len(2) + body(3) */
 	int ret;
 
-	if (shid->desc.command_register == 0)
+	if (shid->isolated_set_armed || shid->desc.command_register == 0)
 		return 0;
 
 	raw_buf = kmalloc(total_len, GFP_KERNEL);
@@ -381,6 +384,8 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 	bool terminal_failure = false;
 
 	mutex_lock(&shid->power_lock);
+	if (shid->isolated_set_armed)
+		goto out;
 	if (shid->power_state == SPI_HID_POWER_MODE_OFF)
 		goto out;
 
@@ -462,6 +467,8 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_data(struct spi_hid *shid, int type, u16 blen);
+static void spi_hid_isolated_set_capture(struct spi_hid *shid, int type,
+		const u8 *body, u32 body_length, u16 transport_length);
 
 /* Canonical DESCREQ frame used by every state transition that needs to re-request
  * the device descriptor. Opcode 0x02, register 0x000001, content_id=0, len=3. */
@@ -507,6 +514,8 @@ static void spi_hid_error_work(struct work_struct *work)
 
 	if (READ_ONCE(shid->removing))
 		return;
+	if (READ_ONCE(shid->isolated_set_armed))
+		return;
 
 	ret = spi_hid_error_handler(shid);
 	if (ret)
@@ -530,6 +539,8 @@ static void spi_hid_reset_work(struct work_struct *work)
 
 	dev_dbg(dev, "reset handler\n");
 	if (READ_ONCE(shid->removing))
+		return;
+	if (READ_ONCE(shid->isolated_set_armed))
 		return;
 	if (shid->ready) {
 		dev_err(dev, "Spontaneous FW reset!");
@@ -1369,8 +1380,10 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 	struct spi_hid *shid = container_of(work, struct spi_hid, feat_delay_work.work);
 	struct device *dev = &shid->spi->dev;
 	u8 selector;
-	u8 gf[10] = {
-		0x02, 0x00, 0x00, 0x03, 0x42,
+	u8 gf[11] = {
+		/* spi-amd consumes byte zero as its opcode; the following bytes are
+		 * the ten-byte Windows FIFO payload. */
+		0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
 		0x00, 0x00, 0x03, 0x00, 0x06
 	};
 
@@ -1397,9 +1410,9 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 
 	selector = raw_transition_once ? 4 : probe_raw_id & 0xFF;
 	if (raw_transition_once)
-		gf[6] = selector;
-	else
 		gf[7] = selector;
+	else
+		gf[8] = selector;
 	seq_dbg(shid, 1, "SEQ: GET_FEATURE(id=%u) after delay, state 5\n", selector);
 	if (spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0)) {
 		if (raw_transition_once && shid->raw_transition_attempted)
@@ -1415,9 +1428,78 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		dev_info(dev, "RAW_TRANSITION: GET selector %u sent\n", selector);
 	}
 	spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
+	if (raw_transition_once && shid->raw_transition_attempted)
+		schedule_delayed_work(&shid->raw_transition_timeout_work,
+			msecs_to_jiffies(RAW_TRANSITION_RESPONSE_TIMEOUT_MS));
 	if (!raw_transition_once)
 		mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
 			msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+out:
+	mutex_unlock(&shid->seq_lock);
+}
+
+static void spi_hid_raw_transition_timeout_work(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(work, struct spi_hid,
+					    raw_transition_timeout_work.work);
+
+	mutex_lock(&shid->seq_lock);
+	if (!READ_ONCE(shid->removing) && raw_transition_once &&
+	    shid->raw_transition_attempted && !shid->raw_transition_get_response &&
+	    shid->seq_state == 5) {
+		shid->raw_transition_timeout++;
+		dev_warn(&shid->spi->dev,
+			 "RAW_TRANSITION: GET response timeout; returning to standard HID\n");
+		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
+	}
+	mutex_unlock(&shid->seq_lock);
+}
+
+static void spi_hid_isolated_set_timeout_work(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(work, struct spi_hid,
+					    isolated_set_timeout_work.work);
+
+	mutex_lock(&shid->seq_lock);
+	if (!READ_ONCE(shid->removing) &&
+	    shid->isolated_set_state == SPI_HID_ISOLATED_SET_OBSERVING) {
+		shid->isolated_set_timeout++;
+		shid->isolated_set_state = SPI_HID_ISOLATED_SET_COMPLETE;
+		/* Observation ends without a recovery, reset, or follow-up write. */
+	}
+	mutex_unlock(&shid->seq_lock);
+}
+
+static void spi_hid_isolated_set_work(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(work, struct spi_hid,
+					    isolated_set_work.work);
+	/* spi-amd consumes source byte zero as the opcode; FIFO sees the ten bytes
+	 * captured from Windows for GET_FEATURE report ID 6. */
+	static const u8 get_id6[11] = {
+		0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
+		0x00, 0x04, 0x03, 0x00, 0x06,
+	};
+
+	mutex_lock(&shid->seq_lock);
+	if (READ_ONCE(shid->removing) ||
+	    shid->isolated_set_state != SPI_HID_ISOLATED_SET_WAIT_GET ||
+	    shid->seq_state != 4 || !shid->hid) {
+		if (!READ_ONCE(shid->removing)) {
+			shid->isolated_set_write_failed++;
+			shid->isolated_set_state = SPI_HID_ISOLATED_SET_FAILED;
+			dev_warn(&shid->spi->dev,
+				 "ISOLATED_SET: HID runtime precondition failed; no write sent\n");
+		}
+		goto out;
+	}
+	if (spi_hid_seq_write(shid, get_id6, sizeof(get_id6), NULL, 0)) {
+		shid->isolated_set_write_failed++;
+		shid->isolated_set_state = SPI_HID_ISOLATED_SET_FAILED;
+		goto out;
+	}
+	shid->isolated_set_get_sent++;
+	spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
 out:
 	mutex_unlock(&shid->seq_lock);
 }
@@ -1491,7 +1573,7 @@ MODULE_PARM_DESC(swap_xy, "Swap X and Y axes");
 /* ── Operating mode ────────────────────────────────────────────── */
 /* Deprecated compatibility knob. It is intentionally inert: switching modes
  * is unsafe, while raw_capture_only observes a frame only if one already arrives. */
-static bool raw_mode;
+static bool raw_mode = true;
 module_param(raw_mode, bool, 0644);
 MODULE_PARM_DESC(raw_mode,
 	"Deprecated and inert: raw mode transitions are unsupported");
@@ -1508,7 +1590,11 @@ MODULE_PARM_DESC(raw_input_beta,
 
 module_param(raw_transition_once, bool, 0444);
 MODULE_PARM_DESC(raw_transition_once,
-	"DANGEROUS: once per boot, send the observed GET/SET feature selector 4; requires raw_capture_only=1");
+	"DANGEROUS: once per boot, send only the observed GET_FEATURE selector 4; requires raw_capture_only=1");
+
+module_param(isolated_set_test, bool, 0444);
+MODULE_PARM_DESC(isolated_set_test,
+	"DANGEROUS: boot-time-only GET ID6 then one exact SET observation; requires raw_capture_only=1 and raw_transition_once=0");
 
 /* Standard discovery consumes the ACPI-provided reset response without
  * changing the device power state. */
@@ -1604,7 +1690,7 @@ static int blob_lift_frames = 2;
 module_param(blob_lift_frames, int, 0644);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting");
 
-static int blob_max_distance = 50;
+static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0644);
 MODULE_PARM_DESC(blob_max_distance, "Max grid distance for slot re-assignment");
 
@@ -1628,6 +1714,114 @@ static int poll_interval;
 module_param(poll_interval, int, 0644);
 MODULE_PARM_DESC(poll_interval,
 	"Deprecated and ignored: IRQ is the sole input-report consumer");
+
+struct heatmap_blob_candidate {
+	u32 gx;
+	u32 gy;
+	u32 w;
+	u8 idx;
+};
+
+/* Match real blobs to real active slots globally. Unmatched blobs are left for
+ * the caller to allocate; dummy and out-of-radius edges never map to a slot. */
+static void heatmap_assign_active_slots(struct spi_hid *shid,
+		const struct heatmap_blob_candidate *blobs, u8 blob_count,
+		u8 assigned_slot[HEATMAP_MAX_BLOBS])
+{
+	int cost[HEATMAP_MAX_BLOBS][HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS];
+	int u[HEATMAP_MAX_BLOBS + 1] = {};
+	int v[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1] = {};
+	int p[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1] = {};
+	int way[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1] = {};
+	u8 active_slots[HEATMAP_MAX_SLOTS];
+	int row_to_column[HEATMAP_MAX_BLOBS];
+	u32 max_distance_squared = (u32)blob_max_distance * blob_max_distance;
+	int active_count = 0;
+	int columns;
+	u8 i, j;
+
+	for (i = 0; i < HEATMAP_MAX_BLOBS; i++)
+		assigned_slot[i] = 0xFF;
+	if (!blob_count)
+		return;
+
+	for (i = 0; i < HEATMAP_MAX_SLOTS; i++)
+		if (shid->blob_slot_state[i] >= 1)
+			active_slots[active_count++] = i;
+	if (!active_count)
+		return;
+
+	columns = active_count + blob_count;
+	for (i = 0; i < blob_count; i++) {
+		for (j = 0; j < active_count; j++) {
+			s32 dx = (s32)(blobs[i].gx >> 8) - (s32)(shid->blob_slot_gx[active_slots[j]] >> 8);
+			s32 dy = (s32)(blobs[i].gy >> 8) - (s32)(shid->blob_slot_gy[active_slots[j]] >> 8);
+			u32 distance_squared = dx * dx + dy * dy;
+
+			cost[i][j] = distance_squared <= max_distance_squared ?
+				int_sqrt(distance_squared) : 1000000;
+		}
+		for (; j < columns; j++)
+			cost[i][j] = 1000;
+		row_to_column[i] = -1;
+	}
+
+	/* Rectangular Hungarian assignment with rows <= columns. */
+	for (i = 1; i <= blob_count; i++) {
+		int minv[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1];
+		bool used[HEATMAP_MAX_SLOTS + HEATMAP_MAX_BLOBS + 1] = {};
+		int j0 = 0;
+
+		for (j = 1; j <= columns; j++)
+			minv[j] = 1000000;
+		p[0] = i;
+		do {
+			int i0 = p[j0];
+			int delta = 1000000;
+			int j1 = 0;
+
+			used[j0] = true;
+			for (j = 1; j <= columns; j++) {
+				int cur;
+
+				if (used[j])
+					continue;
+				cur = cost[i0 - 1][j - 1] - u[i0] - v[j];
+				if (cur < minv[j]) {
+					minv[j] = cur;
+					way[j] = j0;
+				}
+				if (minv[j] < delta) {
+					delta = minv[j];
+					j1 = j;
+				}
+			}
+			for (j = 0; j <= columns; j++) {
+				if (used[j]) {
+					u[p[j]] += delta;
+					v[j] -= delta;
+				} else if (j) {
+					minv[j] -= delta;
+				}
+			}
+			j0 = j1;
+		} while (p[j0]);
+		do {
+			int j1 = way[j0];
+
+			p[j0] = p[j1];
+			j0 = j1;
+		} while (j0);
+	}
+
+	for (j = 1; j <= columns; j++)
+		if (p[j])
+			row_to_column[p[j] - 1] = j - 1;
+	for (i = 0; i < blob_count; i++)
+		if (row_to_column[i] >= 0 && row_to_column[i] < active_count &&
+		    cost[i][row_to_column[i]] < 1000000)
+			assigned_slot[i] = active_slots[row_to_column[i]];
+}
 
 static void release_all_slots(struct input_dev *input, u8 *slot_state,
 		unsigned int max_slots)
@@ -1874,7 +2068,6 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 {
 	struct device *dev = &shid->spi->dev;
 	u32 i, cell_count, ncols, nrows;
-	u16 nlabels;
 	int data_offset;
 	int configured_cols, configured_rows;
 	int touched_count = 0;
@@ -1893,7 +2086,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 	if (ema_alpha < 0 || ema_alpha > 10000) ema_alpha = 3;
 	if (blob_debounce < 1) blob_debounce = 3;
 	if (blob_lift_frames < 1) blob_lift_frames = 2;
-	if (blob_max_distance < 1) blob_max_distance = 50;
+	if (blob_max_distance < 1 || blob_max_distance > 1000) blob_max_distance = 3;
 	if (ghost_dist < 1) ghost_dist = 15;
 	if (touch_threshold_pct < 0) touch_threshold_pct = 0;
 	if (touch_threshold_pct > 100) touch_threshold_pct = 100;
@@ -2006,220 +2199,169 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 
 	if (!shid->touch_input) return;
 
-	/* Mark cells whose signal rise exceeds the selected threshold. */
-	memset(shid->heatmap_touched, 0, cell_count);
+	/* Surface frame-gap reset: if >5 frames skipped, release all slots.
+	 * FUN_180600ad0 + FUN_1805ffd00:107-112. */
 	{
-		s32 c590_range = shid->c590_lut[0]; /* full-scale signal = 4000 */
-		s32 threshold;
+		u32 frame_id = shid->heatmap_frame_id + 1;
+		s32 gap = (s32)frame_id - (s32)shid->heatmap_frame_id;
+		if (shid->heatmap_frame_id && gap > 5) {
+			for (i = 0; i < HEATMAP_MAX_SLOTS; i++)
+				shid->blob_slot_state[i] = 0;
+			memset(shid->blob_slot_duration, 0, sizeof(shid->blob_slot_duration));
+			memset(shid->blob_slot_missed, 0, sizeof(shid->blob_slot_missed));
+			memset(shid->blob_slot_hpos, 0, sizeof(shid->blob_slot_hpos));
+		}
+		shid->heatmap_frame_id = frame_id;
+	}
 
-		if (touch_signal_mode == 2)
-			threshold = (c590_range * touch_threshold_pct) / 100;
-		else if (touch_signal_mode == 1)
-			threshold = (c590_range * 10) / 100; /* reasonable default */
-		else
-			threshold = 0; /* any change */
+/* Surface peak detection (FUN_1805fba00): find local maxima with 5-cell
+ * neighbour radius, using c590 fixed-point signal rise.
+ * Minimum peak rise threshold 500 filters noise (c590 ~22-326),
+ * keeping genuine touch signals (c590 ~1448-1912). */
+	#define PEAK_MAX_CANDIDATES 16
+	#define PEAK_MIN_RISE 500
+	{
+		struct { u32 cell; u32 rise; } peaks[PEAK_MAX_CANDIDATES];
+		u32 peak_count = 0;
+		u32 pi;
 
 		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
 			u8 raw = data[data_offset + i];
-			u8 baseline_raw = shid->heatmap_baseline[i];
-			s16 baseline_signal = shid->c590_lut[baseline_raw];
-			s16 signal = shid->c590_lut[raw];
-			s32 rise = (s32)signal - (s32)baseline_signal;
-
-			if (touch_signal_mode == 0) {
-				if (rise > 0)
-					shid->heatmap_touched[i] = 1;
-			} else {
-				if (rise >= threshold)
-					shid->heatmap_touched[i] = 1;
-			}
-		}
-	}
-
-	/* Temporal consistency: cells must be active for 2+ consecutive frames
-	 * to be considered stable touches. Single-frame spikes are suppressed. */
-	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-		if (shid->heatmap_touched[i]) {
-			if (shid->heatmap_frame_persistence[i] < 255)
-				shid->heatmap_frame_persistence[i]++;
-		} else {
-			shid->heatmap_frame_persistence[i] = 0;
-		}
-		/* Only promote cells that have persisted for 2+ frames */
-		if (shid->heatmap_frame_persistence[i] < 2)
-			shid->heatmap_touched[i] = 0;
-	}
-
-	/* Morphological dilation: expand high-confidence touched region by 1 cell
-	 * to merge nearby clusters. Only applied to cells with persistence >= 3
-	 * (strong confidence) to avoid amplifying noise. */
-	{
-		u8 *expanded = shid->heatmap_expanded;
-		memcpy(expanded, shid->heatmap_touched, cell_count);
-		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-			/* Only dilate cells with strong persistence */
-			if (!shid->heatmap_touched[i] || shid->heatmap_frame_persistence[i] < 3)
-				continue;
-			u16 col = i % ncols, row = i / ncols;
-			if (col > 0 && i > 0) expanded[i - 1] = 1;
-			if (col + 1 < ncols && i + 1 < cell_count && i + 1 < HEATMAP_MAX_CELLS) expanded[i + 1] = 1;
-			if (row > 0 && i >= ncols) {
-				expanded[i - ncols] = 1;
-				if (col > 0) expanded[i - ncols - 1] = 1;
-				if (col + 1 < ncols && i - ncols + 1 < cell_count) expanded[i - ncols + 1] = 1;
-			}
-			if (row + 1 < nrows) {
-				u32 idx = i + ncols;
-				if (idx < cell_count && idx < HEATMAP_MAX_CELLS) {
-					expanded[idx] = 1;
-					if (col > 0 && idx > 0) expanded[idx - 1] = 1;
-					if (col + 1 < ncols && idx + 1 < cell_count) expanded[idx + 1] = 1;
-				}
-			}
-		}
-		memcpy(shid->heatmap_touched, expanded, cell_count);
-	}
-
-	/* Step 2: two-pass connected-component labeling (8-way) */
-	memset(shid->heatmap_label, 0xFF, cell_count * 2);
-	memset(shid->label_equiv, 0, sizeof(shid->label_equiv));
-	nlabels = 0;
-
-	for (i = 0; i < cell_count; i++) {
-		u16 col, row, new_label;
-		u16 neighbors[4];
-		int n_neigh = 0;
-
-		if (!shid->heatmap_touched[i]) continue;
-		col = i % ncols;
-		row = i / ncols;
-		if (row >= nrows) break;
-
-		new_label = 0xFFFF;
-		if (col > 0 && shid->heatmap_touched[i - 1])
-			neighbors[n_neigh++] = shid->heatmap_label[i - 1];
-		if (row > 0) {
-			if (col > 0 && shid->heatmap_touched[i - ncols - 1])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols - 1];
-			if (shid->heatmap_touched[i - ncols])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols];
-			if (col + 1 < ncols && shid->heatmap_touched[i - ncols + 1])
-				neighbors[n_neigh++] = shid->heatmap_label[i - ncols + 1];
-		}
-
-		if (n_neigh > 0) {
-			new_label = neighbors[0];
-			for (int j = 0; j < n_neigh; j++) {
-				u16 min_label = new_label, nj = neighbors[j];
-				u16 a = min_label < nj ? min_label : nj;
-				u16 b = a == min_label ? nj : min_label;
-				if (a < 256 && b < 256) {
-					while (shid->label_equiv[a]) a = shid->label_equiv[a];
-					while (shid->label_equiv[b]) b = shid->label_equiv[b];
-					if (a != b) shid->label_equiv[b] = a;
-				}
-			}
-		} else {
-			new_label = nlabels++;
-			if (nlabels >= 256) new_label = 255;
-		}
-		shid->heatmap_label[i] = new_label;
-	}
-
-	/* Resolve label equivalence */
-	for (i = 0; i < nlabels && i < 256; i++) {
-		u16 r = shid->label_equiv[i];
-		while (r && r < 256 && shid->label_equiv[r]) r = shid->label_equiv[r];
-		shid->label_equiv[i] = r;
-	}
-
-	/* Step 3: accumulate blob sums (weighted by signal drop from baseline) */
-	memset(shid->blob_xsum, 0, sizeof(shid->blob_xsum));
-	memset(shid->blob_ysum, 0, sizeof(shid->blob_ysum));
-	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
-	memset(shid->blob_active, 0, sizeof(shid->blob_active));
-
-	for (i = 0; i < cell_count; i++) {
-		u16 label, col, row;
-		u32 weight;
-
-		if (!shid->heatmap_touched[i]) continue;
-		label = shid->heatmap_label[i];
-		while (label < 256 && shid->label_equiv[label]) label = shid->label_equiv[label];
-		if (label >= HEATMAP_MAX_BLOBS) continue;
-
-		col = i % ncols;
-		row = i / ncols;
-		if (row >= nrows) break;
-
-		/* Weight = current_signal - baseline_signal (touch increases c590 value) */
-		{
+			s16 curr = shid->c590_lut[raw];
 			s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
-			s16 curr = shid->c590_lut[data[data_offset + i]];
-			s16 rise = curr - base;
-			weight = rise > 0 ? (u32)rise : 0;
-		}
-		shid->blob_xsum[label] += (u32)col * weight;
-		shid->blob_ysum[label] += (u32)row * weight;
-		shid->blob_wsum[label] += weight;
-		shid->blob_active[label] = true;
-		touched_count++;
-	}
+			s32 rise = (s32)curr - (s32)base;
+			u32 col, row;
+			bool is_peak;
 
-	/* Step 4: compute centroids and emit */
-	for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
-		if (!shid->blob_active[i] || shid->blob_wsum[i] < blob_min_weight)
-			continue;
-		shid->blob_x[i] = (u16)(shid->blob_xsum[i] / shid->blob_wsum[i]);
-		shid->blob_y[i] = (u16)(shid->blob_ysum[i] / shid->blob_wsum[i]);
-	}
+			if (rise < PEAK_MIN_RISE)
+				continue;
+			col = i % ncols;
+			row = i / ncols;
 
-	/* Estimate ellipse parameters for the heaviest blob. */
-	{
-		u32 best_idx = 0;
-		u32 best_w = 0;
-		s64 sum_xx = 0, sum_yy = 0, sum_xy = 0;
-
-		for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
-			if (shid->blob_active[i] && shid->blob_wsum[i] > best_w) {
-				best_w = shid->blob_wsum[i];
-				best_idx = i;
+			/* 5-cell neighbour comparison */
+			is_peak = true;
+			if (col >= 5) {
+				u32 ni = i - 5;
+				s16 nc = shid->c590_lut[data[data_offset + ni]];
+				s16 nb = shid->c590_lut[shid->heatmap_baseline[ni]];
+				if ((s32)nc - (s32)nb > rise)
+					is_peak = false;
 			}
-		}
-		if (best_w >= (u32)blob_min_weight) {
-			s32 cx = (s32)shid->blob_x[best_idx];
-			s32 cy = (s32)shid->blob_y[best_idx];
+			if (is_peak && col + 5 < ncols) {
+				u32 ni = i + 5;
+				s16 nc = shid->c590_lut[data[data_offset + ni]];
+				s16 nb = shid->c590_lut[shid->heatmap_baseline[ni]];
+				if ((s32)nc - (s32)nb > rise)
+					is_peak = false;
+			}
+			if (is_peak && row >= 5) {
+				u32 ni = i - 5 * ncols;
+				s16 nc = shid->c590_lut[data[data_offset + ni]];
+				s16 nb = shid->c590_lut[shid->heatmap_baseline[ni]];
+				if ((s32)nc - (s32)nb > rise)
+					is_peak = false;
+			}
+			if (is_peak && row + 5 < nrows) {
+				u32 ni = i + 5 * ncols;
+				s16 nc = shid->c590_lut[data[data_offset + ni]];
+				s16 nb = shid->c590_lut[shid->heatmap_baseline[ni]];
+				if ((s32)nc - (s32)nb > rise)
+					is_peak = false;
+			}
+
+			if (is_peak) {
+				/* Insertion sort by rise descending */
+				u32 pos;
+				for (pos = peak_count; pos > 0 && peaks[pos-1].rise < (u32)rise; pos--)
+					peaks[pos] = peaks[pos-1];
+				peaks[pos].cell = i;
+				peaks[pos].rise = (u32)rise;
+				if (peak_count < PEAK_MAX_CANDIDATES)
+					peak_count++;
+			}
+		} /* end peak scan */
+
+		/* Surface Stage 9e centroid (FUN_180602e60): signal-weighted
+		 * over full connected component via flood-fill from each peak.
+		 * Noise-floor subtraction (baseline c590), per-blob eigenellipsis. */
+		memset(shid->blob_active, 0, sizeof(shid->blob_active));
+		memset(shid->heatmap_label, 0, cell_count * sizeof(shid->heatmap_label[0]));
+		memset(shid->eigmaj, 0, sizeof(shid->eigmaj));
+		memset(shid->eigmin, 0, sizeof(shid->eigmin));
+		memset(shid->eigori, 0, sizeof(shid->eigori));
+		for (pi = 0; pi < peak_count; pi++) {
+			u32 pcell = peaks[pi].cell;
+			u32 queue[HEATMAP_MAX_CELLS];
+			u32 qhead = 0, qtail = 0;
+			u64 fxsum = 0, fysum = 0, fwsum = 0;
+			u16 blob_label = (u16)(pi + 1);
+			s32 blob_cx_cell, blob_cy_cell;
+			s64 sum_xx = 0, sum_yy = 0, sum_xy = 0;
+			s32 blob_pixel_count = 0;
+
+			if (shid->heatmap_label[pcell] != 0)
+				continue;
+
+			queue[qtail++] = pcell;
+			shid->heatmap_label[pcell] = blob_label;
+
+			while (qhead < qtail) {
+				u32 ci = queue[qhead++];
+				s32 c = (s32)(ci % ncols);
+				s32 r = (s32)(ci / ncols);
+				s16 curr = shid->c590_lut[data[data_offset + ci]];
+				s16 base = shid->c590_lut[shid->heatmap_baseline[ci]];
+				s32 rise = (s32)curr - (s32)base;
+
+				if (rise > 0) {
+					fxsum += (u64)c * (u64)rise * 256;
+					fysum += (u64)r * (u64)rise * 256;
+					fwsum += (u64)rise;
+					blob_pixel_count++;
+
+					if (c > 0) { u32 ni = ci - 1; if (!shid->heatmap_label[ni]) { shid->heatmap_label[ni] = blob_label; queue[qtail++] = ni; } }
+					if (c + 1 < (s32)ncols) { u32 ni = ci + 1; if (!shid->heatmap_label[ni]) { shid->heatmap_label[ni] = blob_label; queue[qtail++] = ni; } }
+					if (r > 0) { u32 ni = ci - ncols; if (!shid->heatmap_label[ni]) { shid->heatmap_label[ni] = blob_label; queue[qtail++] = ni; } }
+					if (r + 1 < (s32)nrows) { u32 ni = ci + ncols; if (!shid->heatmap_label[ni]) { shid->heatmap_label[ni] = blob_label; queue[qtail++] = ni; } }
+				}
+			}
+
+			if (fwsum == 0 || fwsum < (u32)blob_min_weight)
+				continue;
+
+			shid->blob_x[pi] = (u32)(fxsum / fwsum);
+			shid->blob_y[pi] = (u32)(fysum / fwsum);
+			shid->blob_wsum[pi] = (u32)fwsum;
+			shid->blob_active[pi] = true;
+
+			if (blob_pixel_count < 2)
+				continue;
+
+			blob_cx_cell = (s32)(shid->blob_x[pi] >> 8);
+			blob_cy_cell = (s32)(shid->blob_y[pi] >> 8);
 
 			for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-				u16 label;
-				s32 dx, dy, w;
+				s32 rise, dx, dy;
 				s16 base, curr;
 
-				if (!shid->heatmap_touched[i])
+				if (shid->heatmap_label[i] != blob_label)
 					continue;
-				label = shid->heatmap_label[i];
-				while (label < 256 && shid->label_equiv[label])
-					label = shid->label_equiv[label];
-				if (label != best_idx)
-					continue;
-
 				base = shid->c590_lut[shid->heatmap_baseline[i]];
 				curr = shid->c590_lut[data[data_offset + i]];
-				w = (s32)curr - (s32)base;
-				if (w <= 0)
+				rise = (s32)curr - (s32)base;
+				if (rise <= 0)
 					continue;
 
-				dx = (s32)(i % ncols) - cx;
-				dy = (s32)(i / ncols) - cy;
-				sum_xx += dx * dx * w;
-				sum_yy += dy * dy * w;
-				sum_xy += dx * dy * w;
+				dx = (s32)(i % (u32)ncols) - blob_cx_cell;
+				dy = (s32)(i / (u32)ncols) - blob_cy_cell;
+				sum_xx += (s64)dx * (s64)dx * (s64)rise;
+				sum_yy += (s64)dy * (s64)dy * (s64)rise;
+				sum_xy += (s64)dx * (s64)dy * (s64)rise;
 			}
 
 			{
-				s64 trace = (s64)sum_xx + (s64)sum_yy;
-				s64 det = (s64)sum_xx * (s64)sum_yy -
-					  (s64)sum_xy * (s64)sum_xy;
+				s64 trace = sum_xx + sum_yy;
+				s64 det = sum_xx * sum_yy - sum_xy * sum_xy;
 				s64 disc = trace * trace - 4 * det;
 				s32 sq;
 
@@ -2227,8 +2369,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					disc = 0;
 				sq = (s32)int_sqrt((u64)disc);
 
-				shid->eigmaj[0] = (s32)((trace + sq) / 2);
-				shid->eigmin[0] = (s32)((trace - sq) / 2);
+				shid->eigmaj[pi] = (s32)((trace + sq) / 2);
+				shid->eigmin[pi] = (s32)((trace - sq) / 2);
 
 				{
 					s32 num = 2 * sum_xy;
@@ -2237,25 +2379,25 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 
 					if (den != 0 || num != 0) {
 						deg = atan2_approx(num, den) / 2;
-						/* Signed range [-90.00°, +89.99°] */
 						if (deg >= 18000)
 							deg -= 18000;
 						else if (deg <= -18000)
 							deg += 18000;
-						shid->eigori[0] = deg;
+						shid->eigori[pi] = deg;
 					} else {
-						shid->eigori[0] = 0;
+						shid->eigori[pi] = 0;
 					}
 				}
 			}
 		}
+		touched_count = peak_count;
 	}
 
 	/* Emit multitouch events with smoothing and slot tracking. */
 	{
 		struct input_dev *input = shid->touch_input;
 		bool any_touch = false;
-		struct { u16 gx; u16 gy; u32 w; u8 idx; } sorted[HEATMAP_MAX_BLOBS];
+		struct heatmap_blob_candidate sorted[HEATMAP_MAX_BLOBS];
 		u8 sorted_count = 0;
 		const u32 SCREEN_MAX = 32767;
 		u32 scale_x, scale_y;
@@ -2284,18 +2426,18 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 		for (i = 0; i + 1 < sorted_count; i++)
 			for (u8 j = i + 1; j < sorted_count; j++)
 				if (sorted[j].w > sorted[i].w) {
-					typeof(sorted[0]) t = sorted[i];
+					struct heatmap_blob_candidate t = sorted[i];
 					sorted[i] = sorted[j]; sorted[j] = t;
 				}
 		if (sorted_count > HEATMAP_MAX_SLOTS)
 			sorted_count = HEATMAP_MAX_SLOTS;
 
 		for (i = 0; i < sorted_count; i++) {
-			u16 screen_gx = swap_xy ? sorted[i].gy : sorted[i].gx;
-			u16 screen_gy = swap_xy ? sorted[i].gx : sorted[i].gy;
+			u32 screen_gx = swap_xy ? sorted[i].gy >> 8 : sorted[i].gx >> 8;
+			u32 screen_gy = swap_xy ? sorted[i].gx >> 8 : sorted[i].gy >> 8;
 
 			seq_dbg(shid, 2, "CALIB: blob[%u] grid=(%u,%u) screen=(%u,%u) weight=%u scale=(%ux%u)\n",
-				 i, sorted[i].gx, sorted[i].gy,
+				 i, sorted[i].gx >> 8, sorted[i].gy >> 8,
 				 (screen_gx * scale_x + 500) / 1000,
 				 (screen_gy * scale_y + 500) / 1000,
 				 sorted[i].w, scale_x, scale_y);
@@ -2304,7 +2446,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 			seq_dbg(shid, 2, "CALIB: blobs=%u cells_touched=%d\n",
 				 sorted_count, touched_count);
 
-		/* Merge nearby blobs, retaining the heavier candidate. */
+		/* Pre-assignment blob merging: Surface coalesces within 6 cells. */
 		{
 			u8 a, b, j;
 
@@ -2312,19 +2454,20 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 				if (sorted[a].w == 0)
 					continue;
 				for (b = a + 1; b < sorted_count; b++) {
-					u16 dx, dy;
+					s32 dx, dy;
 
 					if (sorted[b].w == 0)
 						continue;
-					dx = abs((s16)sorted[a].gx - (s16)sorted[b].gx);
-					dy = abs((s16)sorted[a].gy - (s16)sorted[b].gy);
-					if (dx <= (u16)ghost_dist && dy <= (u16)ghost_dist) {
+					dx = (s32)(sorted[a].gx >> 8) - (s32)(sorted[b].gx >> 8);
+					dy = (s32)(sorted[a].gy >> 8) - (s32)(sorted[b].gy >> 8);
+					/* Surface coalesces within 6 grid cells (dx^2+dy^2 < 36). */
+					if (dx * dx + dy * dy < 36) {
 						if (sorted[b].w > sorted[a].w) {
 							sorted[a].w = 0;
 							break;
 						} else {
 							sorted[b].w = 0;
-						}
+					}
 					}
 				}
 			}
@@ -2343,7 +2486,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 
 		{
 			u8 assigned_slot[HEATMAP_MAX_BLOBS];
-			u16 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
+			u32 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
 			bool new_active[HEATMAP_MAX_SLOTS];
 
 			memset(new_active, 0, sizeof(new_active));
@@ -2352,35 +2495,26 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 			for (i = 0; i < sorted_count; i++)
 				assigned_slot[i] = 0xFF;
 
-			/* Slot assignment: match detected blobs to existing slots by distance */
+			heatmap_assign_active_slots(shid, sorted, sorted_count, assigned_slot);
 			for (i = 0; i < sorted_count; i++) {
-				u16 best_dist = 0xFFFF;
-				u8 best_slot = 0xFF;
-
+				if (assigned_slot[i] != 0xFF)
+					continue;
 				for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
 					bool taken = false;
 					u8 k;
 
+					if (shid->blob_slot_state[s] != 0)
+						continue;
 					for (k = 0; k < i; k++)
-						if (assigned_slot[k] == s) { taken = true; break; }
-					if (taken) continue;
-
-					if (shid->blob_slot_state[s] >= 1) { /* prefer claimed or debouncing slots */
-						u16 dx = abs((s16)sorted[i].gx - (s16)shid->blob_slot_gx[s]);
-						u16 dy = abs((s16)sorted[i].gy - (s16)shid->blob_slot_gy[s]);
-						if (dx <= (u16)blob_max_distance && dy <= (u16)blob_max_distance) {
-							u16 dist = dx + dy;
-							if (dist < best_dist) {
-								best_dist = dist;
-								best_slot = s;
-							}
+						if (assigned_slot[k] == s) {
+							taken = true;
+							break;
 						}
-					} else if (shid->blob_slot_state[s] == 0) {
-						if (best_slot == 0xFF) best_slot = s;
+					if (!taken) {
+						assigned_slot[i] = s;
+						break;
 					}
 				}
-				if (best_slot != 0xFF)
-					assigned_slot[i] = best_slot;
 			}
 
 			/* States: empty, new, claimed, lift. */
@@ -2392,8 +2526,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 				}
 
 				if (bi != 0xFF) {
-					u16 gx = sorted[bi].gx;
-					u16 gy = sorted[bi].gy;
+					u32 gx = sorted[bi].gx;
+					u32 gy = sorted[bi].gy;
 					u32 w  = sorted[bi].w;
 					bool was_claimed = (shid->blob_slot_state[s] >= 2);
 
@@ -2401,11 +2535,27 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					case 0:
 						shid->blob_slot_state[s] = 1;
 						shid->blob_slot_duration[s] = 1;
+						shid->blob_slot_hpos[s] = 0;
+						shid->blob_slot_hcount[s] = 0;
+						memset(shid->blob_slot_hx[s], 0, sizeof(shid->blob_slot_hx[s]));
+						memset(shid->blob_slot_hy[s], 0, sizeof(shid->blob_slot_hy[s]));
 						break;
 					case 1:
 						shid->blob_slot_duration[s]++;
-						if (shid->blob_slot_duration[s] >= (u32)blob_debounce)
-							shid->blob_slot_state[s] = 2;
+						if (shid->blob_slot_duration[s] >= (u32)blob_debounce) {
+							u32 hmin = gx, hmax = gx;
+							u8 hc = shid->blob_slot_hcount[s];
+							u8 hp;
+							for (hp = 0; hp < hc; hp++) {
+								u32 hx = shid->blob_slot_hx[s][hp];
+								if (hx && hx < hmin) hmin = hx;
+								if (hx > hmax) hmax = hx;
+							}
+							if (hmax - hmin <= 768)
+								shid->blob_slot_state[s] = 2;
+							else
+								shid->blob_slot_duration[s] = 1;
+						}
 						break;
 					case 2:
 						shid->blob_slot_duration[s]++;
@@ -2415,23 +2565,60 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 						shid->blob_slot_duration[s] = 1;
 						break;
 					}
-					u16 old_gx = shid->blob_slot_gx[s];
-					u16 old_gy = shid->blob_slot_gy[s];
-
+					shid->blob_slot_blob[s] = sorted[bi].idx;
+					/* Push to history ring (10-entry circular buffer). */
+				{
+						u8 hp = shid->blob_slot_hpos[s];
+						shid->blob_slot_hx[s][hp] = gx;
+						shid->blob_slot_hy[s][hp] = gy;
+						shid->blob_slot_hpos[s] = (hp + 1) % SLOT_HISTORY_DEPTH;
+						if (shid->blob_slot_hcount[s] < SLOT_HISTORY_DEPTH)
+							shid->blob_slot_hcount[s]++;
+					}
 					shid->blob_slot_missed[s] = 0;
+					/* Surface stationary detection (FUN_180608000):
+					 * lock position if movement < 1 cell for 5+ frames. */
+					{
+						u32 ox = shid->blob_slot_gx[s];
+						u32 oy = shid->blob_slot_gy[s];
+						u32 dx = gx > ox ? gx - ox : ox - gx;
+						u32 dy = gy > oy ? gy - oy : oy - gy;
+						if (dx <= 256 && dy <= 256 &&
+						    shid->blob_slot_state[s] == 2)
+							shid->blob_slot_stationary[s]++;
+						else
+							shid->blob_slot_stationary[s] = 0;
+					}
+					/* Surface EMA weight filter (FUN_180608000):
+					 * weight[s] = (1-α) * old + α * new, α=1/8. */
+					shid->blob_slot_weight[s] = (shid->blob_slot_weight[s] * 7 + w) / 8;
 					shid->blob_slot_gx[s] = gx;
 					shid->blob_slot_gy[s] = gy;
-					shid->blob_slot_weight[s] = w;
 
 					new_active[s] = (shid->blob_slot_state[s] >= 2);
 
 					if (new_active[s]) {
 						if (was_claimed && shid->blob_slot_state[s] == 2) {
-							new_gx[s] = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
-							new_gy[s] = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
+							u8 hc = shid->blob_slot_hcount[s];
+							u8 n = hc > 3 ? 3 : (hc > 0 ? hc : 1);
+							u8 hp = shid->blob_slot_hpos[s];
+							u64 sx = 0, sy = 0;
+							u8 k;
+							for (k = 0; k < n; k++) {
+								u8 idx = (hp + SLOT_HISTORY_DEPTH - 1 - k) % SLOT_HISTORY_DEPTH;
+								sx += shid->blob_slot_hx[s][idx];
+								sy += shid->blob_slot_hy[s][idx];
+							}
+							new_gx[s] = (u32)(sx / n);
+							new_gy[s] = (u32)(sy / n);
 						} else {
 							new_gx[s] = gx;
 							new_gy[s] = gy;
+						}
+						/* Lock position when stationary (Surface still detection). */
+						if (shid->blob_slot_stationary[s] >= 5) {
+							new_gx[s] = shid->blob_slot_gx[s];
+							new_gy[s] = shid->blob_slot_gy[s];
 						}
 						shid->blob_slot_gx[s] = new_gx[s];
 						shid->blob_slot_gy[s] = new_gy[s];
@@ -2441,6 +2628,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					case 1:
 						shid->blob_slot_state[s] = 0;
 						shid->blob_slot_duration[s] = 0;
+						new_active[s] = false;
 						break;
 					case 2:
 						shid->blob_slot_missed[s]++;
@@ -2448,38 +2636,81 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 							shid->blob_slot_state[s] = 3;
 							shid->blob_slot_missed[s] = 0;
 						}
+						new_active[s] = true;
+						new_gx[s] = shid->blob_slot_gx[s];
+						new_gy[s] = shid->blob_slot_gy[s];
 						break;
-					case 3:
-						shid->blob_slot_missed[s]++;
+				case 3:
+					shid->blob_slot_missed[s]++;
+					/* Surface lift history lookback (FUN_180601dd0):
+					 * emit lift at position from N frames ago. */
+				{
+						u8 hc = shid->blob_slot_hcount[s];
+						u8 hp = shid->blob_slot_hpos[s];
+							u8 lb = shid->blob_slot_missed[s];
+							if (lb > hc || lb < 1)
+								lb = (hc > 0) ? 1 : 0;
+							if (lb > 0) {
+								u8 idx = (hp + SLOT_HISTORY_DEPTH - lb) % SLOT_HISTORY_DEPTH;
+								new_gx[s] = shid->blob_slot_hx[s][idx];
+								new_gy[s] = shid->blob_slot_hy[s][idx];
+							} else {
+								new_gx[s] = shid->blob_slot_gx[s];
+								new_gy[s] = shid->blob_slot_gy[s];
+							}
+						}
+						new_active[s] = true;
 						if (shid->blob_slot_missed[s] >= 2) {
 							shid->blob_slot_state[s] = 0;
 							shid->blob_slot_missed[s] = 0;
+							new_active[s] = false;
 						}
 						break;
 					case 0:
+						new_active[s] = false;
 						break;
 					}
-
-				new_active[s] = false;
 		}
 	}
+
+	/* Surface post-emission coalescence (FUN_1806025c0, Stage 10):
+		 * suppress weaker contacts within 6 cells (squared dist < 36). */
+		{
+			u8 sa, sb;
+			for (sa = 0; sa < HEATMAP_MAX_SLOTS; sa++) {
+				if (!new_active[sa])
+					continue;
+				for (sb = sa + 1; sb < HEATMAP_MAX_SLOTS; sb++) {
+					s32 dx, dy;
+					if (!new_active[sb])
+						continue;
+					dx = (s32)(new_gx[sa] >> 8) - (s32)(new_gx[sb] >> 8);
+					dy = (s32)(new_gy[sa] >> 8) - (s32)(new_gy[sb] >> 8);
+					if (dx * dx + dy * dy < 36) {
+						if (shid->blob_slot_weight[sa] <
+						    shid->blob_slot_weight[sb])
+							new_active[sa] = false;
+						else
+							new_active[sb] = false;
+					}
+				}
+			}
+		}
 
 			for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
 				input_mt_slot(input, s);
 				input_mt_report_slot_state(input, MT_TOOL_FINGER, new_active[s]);
 				if (new_active[s]) {
-					s64 fx, fy, tmp;
-					u16 screen_gx = new_gx[s];
-					u16 screen_gy = new_gy[s];
+					s64 fx, fy;
+					u32 raw_gx = swap_xy ? new_gy[s] : new_gx[s];
+					u32 raw_gy = swap_xy ? new_gx[s] : new_gy[s];
+					u32 cell_x = raw_gx >> 8, frac_x = raw_gx & 0xFF;
+					u32 cell_y = raw_gy >> 8, frac_y = raw_gy & 0xFF;
 
-					/* Orient first: scales and offsets always address final X/Y. */
-					if (swap_xy) {
-						tmp = screen_gx;
-						screen_gx = screen_gy;
-						screen_gy = tmp;
-					}
-					fx = ((s64)screen_gx * scale_x + 500) / 1000;
-					fy = ((s64)screen_gy * scale_y + 500) / 1000;
+					fx = ((s64)cell_x * scale_x + 500) / 1000;
+					fx += ((s64)frac_x * scale_x) / (1000 * 256);
+					fy = ((s64)cell_y * scale_y + 500) / 1000;
+					fy += ((s64)frac_y * scale_y) / (1000 * 256);
 					fx += calib_offset_x;
 					fy += calib_offset_y;
 					if (invert_x) fx = (s64)SCREEN_MAX - fx;
@@ -2492,8 +2723,10 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 					input_report_abs(input, ABS_MT_POSITION_Y, (u16)fy);
 					any_touch = true;
 
-					/* Emit orientation and touch ellipse for slot 0 (heaviest blob) */
-					if (s == 0 && shid->eigmaj[0] > 0) {
+				/* Emit per-slot eigenellipsis from flood-fill blob. */
+				{
+					u8 bi = shid->blob_slot_blob[s];
+					if (shid->blob_active[bi] && shid->eigmaj[bi] > 0) {
 						u32 major, minor;
 						s32 ori;
 
@@ -2501,9 +2734,9 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 						 * grid-cell² units; project the std-dev onto
 						 * screen units using the per-axis scale so the
 						 * major/minor reflect the real X/Y pitch. */
-						major = ((u32)int_sqrt(shid->eigmaj[0]) * scale_x + 500) / 1000;
-						minor = ((u32)int_sqrt(shid->eigmin[0]) * scale_y + 500) / 1000;
-						ori = shid->eigori[0] / 100;
+						major = ((u32)int_sqrt(shid->eigmaj[bi]) * scale_x + 500) / 1000;
+						minor = ((u32)int_sqrt(shid->eigmin[bi]) * scale_y + 500) / 1000;
+						ori = shid->eigori[bi] / 100;
 						if (swap_xy) {
 							u32 t = major; major = minor; minor = t;
 							ori = -ori;
@@ -2523,6 +2756,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data,
 						input_report_abs(input, ABS_MT_ORIENTATION, ori);
 					}
 				}
+			}
 			}
 		}
 
@@ -2607,6 +2841,35 @@ static void spi_hid_handle_raw_body(struct spi_hid *shid, const u8 *body,
 			      SPI_HID_RAW_CAPTURE_CONTENT_ID);
 }
 
+static void spi_hid_isolated_set_capture(struct spi_hid *shid, int type,
+		const u8 *body, u32 body_length, u16 transport_length)
+{
+	struct spi_hid_isolated_set_frame *frame;
+	u32 copied;
+
+	if (shid->isolated_set_state != SPI_HID_ISOLATED_SET_OBSERVING)
+		return;
+	if (shid->isolated_set_count >= SPI_HID_ISOLATED_SET_RING_SLOTS)
+		shid->isolated_set_overflow++;
+
+	frame = &shid->isolated_set_ring[shid->isolated_set_next];
+	frame->timestamp_ns = ktime_get_ns();
+	frame->transport_length = transport_length;
+	frame->body_length = min_t(u32, body_length,
+		SPI_HID_ISOLATED_SET_BODY_LENGTH);
+	frame->type = type;
+	frame->truncated = body_length > SPI_HID_ISOLATED_SET_BODY_LENGTH;
+	memcpy(frame->header, shid->isolated_set_header, sizeof(frame->header));
+	copied = frame->body_length;
+	if (copied)
+		memcpy(frame->body, body, copied);
+	if (copied < sizeof(frame->body))
+		memset(frame->body + copied, 0, sizeof(frame->body) - copied);
+	shid->isolated_set_count++;
+	shid->isolated_set_next = (shid->isolated_set_next + 1) %
+		SPI_HID_ISOLATED_SET_RING_SLOTS;
+}
+
 /* The binary file is a fixed eight-slot ring of complete 4304-byte V0 bodies.
  * Consult raw_capture_status for slot sequence numbers and timestamps. */
 static ssize_t raw_capture_read(struct file *filp, struct kobject *kobj,
@@ -2644,6 +2907,32 @@ static struct bin_attribute raw_capture_bin_attr = {
 	},
 	.size = SPI_HID_RAW_CAPTURE_SLOTS * SPI_HID_RAW_CAPTURE_BODY_LENGTH,
 	.read = raw_capture_read,
+};
+
+static ssize_t isolated_set_ring_read(struct file *filp, struct kobject *kobj,
+		const struct bin_attribute *attr, char *buf, loff_t off, size_t count)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct spi_hid *shid = dev_get_drvdata(dev);
+	const size_t total = sizeof(shid->isolated_set_ring);
+
+	if (off < 0 || off >= total)
+		return 0;
+	count = min(count, total - (size_t)off);
+	mutex_lock(&shid->seq_lock);
+	memcpy(buf, (u8 *)shid->isolated_set_ring + off, count);
+	mutex_unlock(&shid->seq_lock);
+	return count;
+}
+
+static struct bin_attribute isolated_set_ring_bin_attr = {
+	.attr = {
+		.name = "isolated_set_ring",
+		.mode = 0400,
+	},
+	.size = SPI_HID_ISOLATED_SET_RING_SLOTS *
+		sizeof(struct spi_hid_isolated_set_frame),
+	.read = isolated_set_ring_read,
 };
 
 static ssize_t raw_capture_status_show(struct device *dev,
@@ -2734,6 +3023,31 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	blen *= 4;
 	if (blen > sizeof(shid->input.content))
 		blen = sizeof(shid->input.content);
+	memcpy(shid->isolated_set_header, &hdr[5],
+	       sizeof(shid->isolated_set_header));
+	if (shid->isolated_set_armed && type == SPI_HID_REPORT_TYPE_RESET_RESP) {
+		u32 rblen = min_t(u32, blen + 5, shid->data_buf_len);
+
+		if (!spi_hid_seq_read(shid, shid->data_buf, rblen))
+			spi_hid_isolated_set_capture(shid, type, shid->data_buf, rblen,
+						     blen);
+		shid->isolated_set_reset++;
+		shid->isolated_set_state = SPI_HID_ISOLATED_SET_RESET;
+		cancel_delayed_work(&shid->isolated_set_timeout_work);
+		cancel_delayed_work(&shid->isolated_set_work);
+		/* Reset is terminal after the harness arms: never recover or retry. */
+		goto out;
+	}
+	if (shid->isolated_set_state == SPI_HID_ISOLATED_SET_OBSERVING &&
+	    (type == SPI_HID_REPORT_TYPE_COMMAND_RESP ||
+	     type == SPI_HID_REPORT_TYPE_GET_FEATURE_RESP)) {
+		u32 rblen = min_t(u32, blen + 5, shid->data_buf_len);
+
+		if (!spi_hid_seq_read(shid, shid->data_buf, rblen))
+			spi_hid_isolated_set_capture(shid, type, shid->data_buf, rblen,
+						     blen);
+		goto out;
+	}
 
 	switch (shid->seq_state) {
 	case 0: seq_handle_reset(shid, type, blen, &shid->seq_dbg_expect_fast); break;
@@ -2897,7 +3211,18 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			bool queued = schedule_work(&shid->create_device_work);
 			seq_dbg(shid, 1, "SEQ: scheduled create_device_work, queued=%d\n", queued);
 		}
-		if (raw_transition_once && !shid->raw_transition_attempted) {
+		if (isolated_set_test && !shid->isolated_set_attempted) {
+			shid->isolated_set_attempted = true;
+			shid->isolated_set_armed = true;
+			shid->isolated_set_state = SPI_HID_ISOLATED_SET_WAIT_GET;
+			/* Keep normal input dispatch live while the isolated worker waits
+			 * for both HID creation and the Windows-observed settle interval. */
+			spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
+			dev_info(&shid->spi->dev,
+				 "ISOLATED_SET: GET ID6 scheduled; recovery is disabled for this test\n");
+			schedule_delayed_work(&shid->isolated_set_work,
+				msecs_to_jiffies(RAW_TRANSITION_DELAY_MS));
+		} else if (raw_transition_once && !shid->raw_transition_attempted) {
 			/* One exact, delayed Windows-observed request. There is no retry if
 			 * the device resets or remains silent after the later SET_FEATURE. */
 			shid->raw_transition_attempted = true;
@@ -3010,6 +3335,40 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 			seq_dbg(shid, 3, "  GET_FEAT_RESP[%u..%u]: %*ph\n",
 				 off, off + chunk - 1, chunk, body + off);
 		}
+		if (isolated_set_test &&
+		    shid->isolated_set_state == SPI_HID_ISOLATED_SET_WAIT_GET) {
+			/* This is the sole SET in the harness. The controller consumes the
+			 * first byte, leaving the exact 14-byte Windows FIFO vector. */
+			static const u8 set_vector[15] = {
+				0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
+				0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00,
+			};
+
+			shid->isolated_set_state = SPI_HID_ISOLATED_SET_WAIT_SET;
+			usleep_range(4500, 5500);
+			if (spi_hid_seq_write(shid, set_vector, sizeof(set_vector), NULL, 0)) {
+				shid->isolated_set_write_failed++;
+				shid->isolated_set_state = SPI_HID_ISOLATED_SET_FAILED;
+				goto out_done;
+			}
+			shid->isolated_set_set_sent++;
+			shid->isolated_set_state = SPI_HID_ISOLATED_SET_OBSERVING;
+			spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
+			schedule_delayed_work(&shid->isolated_set_timeout_work,
+				msecs_to_jiffies(ISOLATED_SET_OBSERVATION_TIMEOUT_MS));
+			return;
+		}
+		if (raw_transition_once && shid->raw_transition_attempted) {
+			/* A GET response proves only that GET reached the device. SET has
+			 * no verified completion contract and must remain a separate test. */
+			memcpy(shid->raw_transition_get_body, body, rblen);
+			shid->raw_transition_get_body_len = rblen;
+			cancel_delayed_work(&shid->raw_transition_timeout_work);
+			dev_info(&shid->spi->dev,
+				 "RAW_TRANSITION: GET-only transaction complete; SET is disabled\n");
+			spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
+			return;
+		}
 		{
 			u8 selector = raw_transition_once ? 4 : probe_raw_id & 0xff;
 			u8 sf[15] = {
@@ -3054,6 +3413,15 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_reset_rsp++;
+		if (isolated_set_test && shid->isolated_set_armed) {
+			if (rblen)
+				spi_hid_seq_read(shid, body, rblen);
+			shid->isolated_set_reset++;
+			shid->isolated_set_state = SPI_HID_ISOLATED_SET_RESET;
+			cancel_delayed_work(&shid->isolated_set_timeout_work);
+			/* A reset is terminal for this harness: do not send recovery. */
+			return;
+		}
 		if (raw_transition_once && shid->raw_transition_attempted &&
 		    !shid->raw_transition_get_response)
 			shid->raw_transition_reset_before_response++;
@@ -3062,6 +3430,9 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in state 5, sending DESCREQ directly\n");
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
+
+out_done:
+	return;
 }
 
 /* ── State handler: VENDOR_INIT (state 3) ────────────────────────── */
@@ -3094,12 +3465,20 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		seq_dbg(shid, 1, "SEQ: Device reset detected in state 4. Re-initializing sequencer...\n");
 		if (spi_hid_seq_read(shid, body, sizeof(body)))
 			return;
+		spi_hid_isolated_set_capture(shid, type, body, sizeof(body), blen);
+		if (shid->isolated_set_state == SPI_HID_ISOLATED_SET_OBSERVING) {
+			shid->isolated_set_reset++;
+			shid->isolated_set_state = SPI_HID_ISOLATED_SET_RESET;
+			cancel_delayed_work(&shid->isolated_set_timeout_work);
+			return;
+		}
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_DEVICE_RESET);
 		return;
 	}
 	if (type != 1)
 		return;
-	if (!shid->hid && !(shid->raw_mode_active && shid->touch_input))
+	if (!shid->hid && !(shid->raw_mode_active && shid->touch_input) &&
+	    shid->isolated_set_state != SPI_HID_ISOLATED_SET_OBSERVING)
 		return;
 
 	shid->stat_data++;
@@ -3125,6 +3504,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			shid->stat_frames_dropped++;
 			return;
 		}
+		spi_hid_isolated_set_capture(shid, type, body, rblen, blen);
 		rl = body[5] | (body[6] << 8);
 		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[7], rl);
 
@@ -3274,6 +3654,8 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
 
 	if (!len)
 		return -EINVAL;
+	if (READ_ONCE(shid->isolated_set_state) == SPI_HID_ISOLATED_SET_OBSERVING)
+		return -EBUSY;
 
 	if (!shid->ready) {
 		dev_err(&shid->spi->dev, "%s called in unready state\n", __func__);
@@ -3343,6 +3725,8 @@ static int spi_hid_ll_output_report(struct hid_device *hid,
 
 	if (!len || len > U16_MAX - 3)
 		return -EMSGSIZE;
+	if (READ_ONCE(shid->isolated_set_state) == SPI_HID_ISOLATED_SET_OBSERVING)
+		return -EBUSY;
 
 	report.content_type = SPI_HID_CONTENT_TYPE_OUTPUT_REPORT;
 	report.content_length = len + 2;
@@ -3515,11 +3899,12 @@ static ssize_t raw_transition_status_show(struct device *dev,
 
 	mutex_lock(&shid->seq_lock);
 	len = sysfs_emit(buf,
-		"enabled=%u\nattempted=%u\ncurrent_state=%d\nscheduled=%u\nget_sent=%u\nget_write_failed=%u\nget_response=%u\nset_sent=%u\nset_write_failed=%u\nstate_skipped=%u\nreset_before_response=%u\n",
+		"enabled=%u\nattempted=%u\ncurrent_state=%d\nscheduled=%u\nget_sent=%u\nget_write_failed=%u\nget_response=%u\ntimeout=%u\nset_sent=%u\nset_write_failed=%u\nstate_skipped=%u\nreset_before_response=%u\n",
 		raw_transition_once, shid->raw_transition_attempted, shid->seq_state,
 		shid->raw_transition_scheduled, shid->raw_transition_get_sent,
 		shid->raw_transition_get_write_failed,
-		shid->raw_transition_get_response, shid->raw_transition_set_sent,
+		shid->raw_transition_get_response, shid->raw_transition_timeout,
+		shid->raw_transition_set_sent,
 		shid->raw_transition_set_write_failed,
 		shid->raw_transition_state_skipped,
 		shid->raw_transition_reset_before_response);
@@ -3528,6 +3913,47 @@ static ssize_t raw_transition_status_show(struct device *dev,
 	return len;
 }
 static DEVICE_ATTR_RO(raw_transition_status);
+
+static ssize_t raw_transition_response_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct spi_hid *shid = dev_get_drvdata(dev);
+	ssize_t len;
+
+	mutex_lock(&shid->seq_lock);
+	len = sysfs_emit(buf, "length=%u\nbody=%*ph\n",
+		shid->raw_transition_get_body_len,
+		(int)shid->raw_transition_get_body_len,
+		shid->raw_transition_get_body);
+	mutex_unlock(&shid->seq_lock);
+
+	return len;
+}
+static DEVICE_ATTR_RO(raw_transition_response);
+
+static ssize_t isolated_set_status_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct spi_hid *shid = dev_get_drvdata(dev);
+
+	mutex_lock(&shid->seq_lock);
+	{
+		ssize_t len = sysfs_emit(buf,
+			"enabled=%u\narmed=%u\nattempted=%u\nstate=%u\nget_sent=%u\nset_sent=%u\nwrite_failed=%u\ntimeout=%u\nreset=%u\ncaptured=%u\noverflow=%u\nnext_slot=%u\nring_record_size=%zu\n",
+			isolated_set_test, shid->isolated_set_armed,
+			shid->isolated_set_attempted, shid->isolated_set_state,
+			shid->isolated_set_get_sent, shid->isolated_set_set_sent,
+			shid->isolated_set_write_failed, shid->isolated_set_timeout,
+			shid->isolated_set_reset, shid->isolated_set_count,
+			shid->isolated_set_overflow,
+			shid->isolated_set_next,
+			sizeof(struct spi_hid_isolated_set_frame));
+
+		mutex_unlock(&shid->seq_lock);
+		return len;
+	}
+}
+static DEVICE_ATTR_RO(isolated_set_status);
 
 static ssize_t baseline_status_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -3565,6 +3991,8 @@ static const struct attribute *const spi_hid_attributes[] = {
 	&dev_attr_heatmap_debug.attr,
 	&dev_attr_raw_capture_status.attr,
 	&dev_attr_raw_transition_status.attr,
+	&dev_attr_raw_transition_response.attr,
+	&dev_attr_isolated_set_status.attr,
 	&dev_attr_seq_state.attr,
 	&dev_attr_protocol_stats.attr,
 	&dev_attr_baseline_status.attr,
@@ -3627,6 +4055,9 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 	cancel_delayed_work_sync(&shid->poll_work);
 	cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
 	cancel_delayed_work_sync(&shid->feat_delay_work);
+	cancel_delayed_work_sync(&shid->raw_transition_timeout_work);
+	cancel_delayed_work_sync(&shid->isolated_set_timeout_work);
+	cancel_delayed_work_sync(&shid->isolated_set_work);
 	cancel_delayed_work_sync(&shid->stream_watchdog);
 	cancel_work_sync(&shid->reset_work);
 	cancel_work_sync(&shid->create_device_work);
@@ -3641,12 +4072,17 @@ static int spi_hid_probe(struct spi_device *spi)
 	unsigned long irqflags;
 	int ret;
 
-	dev_info(dev, "TRACE[hid] probe begin irq=%d raw_capture_only=%u raw_transition_once=%u acpi_power_cycle=%u\n",
-		 spi->irq, raw_capture_only, raw_transition_once, acpi_probe_power_cycle);
+	dev_info(dev, "TRACE[hid] probe begin irq=%d raw_capture_only=%u raw_transition_once=%u isolated_set_test=%u acpi_power_cycle=%u\n",
+		 spi->irq, raw_capture_only, raw_transition_once, isolated_set_test,
+		 acpi_probe_power_cycle);
 	if (raw_mode)
 		dev_warn(dev, "raw_mode=1 is deprecated and inert; no mode-switch command will be sent\n");
 	if ((raw_transition_once || raw_input_beta) && !raw_capture_only) {
 		dev_err(dev, "raw_transition_once and raw_input_beta require raw_capture_only=1\n");
+		return -EINVAL;
+	}
+	if (isolated_set_test && (!raw_capture_only || raw_transition_once)) {
+		dev_err(dev, "isolated_set_test requires raw_capture_only=1 and raw_transition_once=0\n");
 		return -EINVAL;
 	}
 
@@ -3679,6 +4115,11 @@ static int spi_hid_probe(struct spi_device *spi)
 	ret = sysfs_create_bin_file(&dev->kobj, &raw_capture_bin_attr);
 	if (ret) {
 		dev_err(dev, "Unable to create raw capture file\n");
+		goto err1;
+	}
+	ret = sysfs_create_bin_file(&dev->kobj, &isolated_set_ring_bin_attr);
+	if (ret) {
+		dev_err(dev, "Unable to create isolated set ring file\n");
 		goto err1;
 	}
 
@@ -3760,6 +4201,11 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_DELAYED_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
 	INIT_DELAYED_WORK(&shid->raw_handshake_watchdog, spi_hid_raw_handshake_watchdog);
 	INIT_DELAYED_WORK(&shid->feat_delay_work, spi_hid_feat_delay_work);
+	INIT_DELAYED_WORK(&shid->raw_transition_timeout_work,
+			  spi_hid_raw_transition_timeout_work);
+	INIT_DELAYED_WORK(&shid->isolated_set_timeout_work,
+			  spi_hid_isolated_set_timeout_work);
+	INIT_DELAYED_WORK(&shid->isolated_set_work, spi_hid_isolated_set_work);
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	/* raw_mode is disabled. */
@@ -3866,7 +4312,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	if (raw_input_beta && raw_capture_only) {
 		shid->touch_input = input_allocate_device();
 		if (shid->touch_input) {
-			shid->touch_input->name = "MSHW0231 Touchscreen";
+			shid->touch_input->name = "Surface Touchscreen";
 			shid->touch_input->phys = "spi-hid/input1";
 			shid->touch_input->id.bustype = BUS_SPI;
 			shid->touch_input->id.vendor = 0x045E;
@@ -3934,6 +4380,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		input_free_device(shid->touch_input);
 		shid->touch_input = NULL;
 	}
+	sysfs_remove_bin_file(&dev->kobj, &isolated_set_ring_bin_attr);
 	sysfs_remove_bin_file(&dev->kobj, &raw_capture_bin_attr);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 	return ret;
@@ -3962,6 +4409,7 @@ err1:
 	}
 	kfree(shid->heatmap_buf);
 	shid->heatmap_buf = NULL;
+	sysfs_remove_bin_file(&dev->kobj, &isolated_set_ring_bin_attr);
 	sysfs_remove_bin_file(&dev->kobj, &raw_capture_bin_attr);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 
@@ -4000,6 +4448,7 @@ static void spi_hid_remove(struct spi_device *spi)
 	kfree(shid->heatmap_buf);
 	if (shid->gpiod)
 		gpiod_put(shid->gpiod);
+	sysfs_remove_bin_file(&dev->kobj, &isolated_set_ring_bin_attr);
 	sysfs_remove_bin_file(&dev->kobj, &raw_capture_bin_attr);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 	dev_info(dev, "TRACE[hid] remove complete\n");

@@ -326,6 +326,16 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		amd_spi_set_opcode(amd_spi, opcode);
 
 	wmb();
+	if (debug_trace >= 1 && opcode == 0x02)
+		pr_info("spi-amd: DIAG write pre-trigger tx=%u fifo=[%*ph] ctrl0=0x%08x cs=0x%02x ena=0x%08x speed44=0x%04x op45=0x%02x txc=%u rxc=%u\n",
+			tx_len, (int)min_t(u32, tx_len, 16), tx_data,
+			amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG),
+			amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG),
+			amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG),
+			amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG),
+			amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG),
+			amd_spi_readreg8(amd_spi, AMD_SPI_TX_COUNT_REG),
+			amd_spi_readreg8(amd_spi, AMD_SPI_RX_COUNT_REG));
 
 	if (opcode == 0x02) {
 		u32 c0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
@@ -348,6 +358,12 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		writew(saved_0x22, base + 0x22);
 		return ret;
 	}
+	if (debug_trace >= 1 && opcode == 0x02)
+		pr_info("spi-amd: DIAG write post-trigger ctrl0=0x%08x status=0x%02x cs=0x%02x op45=0x%02x\n",
+			amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG),
+			amd_spi_readreg8(amd_spi, AMD_SPI_STATUS_REG),
+			amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG),
+			amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG));
 
 	/* execute_opcode already polls CTRL0 bit31 (real busy indicator).
 	 * STATUS (0x4C) is an 8-bit register, so bit31 is always 0 —

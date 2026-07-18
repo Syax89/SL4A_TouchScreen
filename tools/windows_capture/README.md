@@ -1,16 +1,19 @@
-# Windows capture kit — historical power-sequence research
+# Windows capture kit — historical research reference
 
 ## Purpose
-Standard HID initialization now works on Linux. This kit remains useful for raw-mode
-calibration and for comparing Windows ACPI, power, PnP, and Surface/SAM activity.
-It does not establish that an external Windows component is required for standard
-HID initialization. The existing SPI traces cover SPB, GPIO-interrupt, and HIDCLASS,
-but not ACPI/SAM/power activity.
+
+The Surface multitouch pipeline now implements native Linux tracking
+(see `docs/PIPELINE.md`). This kit is a historical research reference
+for comparing Windows ACPI, power, PnP, and Surface/SAM activity against
+the Linux driver. It does not establish that an external Windows component
+is required for standard HID initialization. The existing SPI traces cover
+SPB, GPIO-interrupt, and HIDCLASS, but not ACPI/SAM/power activity.
 
 ## What this kit captures (that the old traces did NOT)
 - **ACPI** (power methods, _PS0/_INI/_RST, the 2 `AcpiEventMethod`s seen before touch init)
 - **Kernel-Power** (the device's Dx transitions: who brings the touch to D0, and when)
 - **Kernel-PnP** (device start order: what starts before the touch)
+- **Kernel-Process** (maps an SPB request's submitter PID/TID to its image)
 - **Surface/SAM** (Surface Aggregator requests: whether Windows sends a SAM command for the
   touch)
 
@@ -67,12 +70,21 @@ wpr -boottrace -stopboot %SystemDrive%\touch_boot.etl
 ```
 Produces `touch_boot.csv` (+ possibly `touch_boot.txt`). Send me that.
 
+### Submitter attribution
+
+The profile records process start/stop events in addition to the SPB request
+events. Preserve the ETL and CSV from the same boot. The offline analyzer will
+map the submitter of every observed SET_FEATURE to its PID, TID, and process
+image. Do not send manual Feature reports during this capture: normal boot is
+the target behavior.
+
 ## What I'll look for in the log
 - A SAM/Surface Serial Hub event around the touch's power-up (a specific TC/command).
 - Which ACPI method the 2 `AcpiEventMethod`s are, and whether a _PS0/M009/M010 precedes the
   first RESET_RSP.
 - PnP ordering: whether a companion/SAM device starts and enables something before the touch.
 - D0/Dx transitions of the touch and any related devices.
+- The process that submits ID5 and ID56, if the normal boot emits them.
 
 ## In parallel (optional, Linux side)
 If your kernel has the `ssam_*` ftrace events, we can log what SAM does on Linux and compare.

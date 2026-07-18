@@ -2,35 +2,43 @@
 
 ## Current State
 
-- Standard HID touch and pen are the supported runtime path.
-- `raw_capture_only=1` only preserves complete independently arriving V0 `0x0c`
-  bodies; it does not request raw mode.
-- `raw_input_beta=1` can decode a validated CapImg 72 by 48 raster only when
-  such a body arrives. No live raw stream is currently available after normal
-  Linux startup.
-- The exact Windows GET_FEATURE vector was sent in a controlled one-shot test
-  and produced no GET_FEATURE response. No SET_FEATURE was sent.
+- Standard HID touch e pen funzionano via IRQ-driven sequencer.
+- Pipeline multitouch Surface completa implementata nel driver (`spi-hid-core.c`):
+  peak detection, flood-fill centroid, Hungarian assignment, EMA weight,
+  stationary lock, lift history lookback, post-emission coalescence.
+- Nome dispositivo: "Surface Touchscreen" (riconosciuto da KDE).
+- `raw_mode=1` di default (passivo, osserva frame in arrivo).
+- `raw_capture_only=1` + `raw_input_beta=1` attivi.
+- DKMS: `sl4a-touch/1.0.0~standard6rawsafe9`, kernel `7.1.3-2-cachyos`.
 
-## Priorities
+## Pipeline implementata
 
-1. Compare the Linux `spi_hid_seq_write` and AMD controller transaction path
-   with the recorded Windows transaction at the controller boundary. The
-   software feature buffer now matches the frozen Windows vector, but the
-   device does not respond.
-2. Keep raw transition work diagnostic-only. A future authorized one-shot must
-   read `raw_transition_status` and preserve its capture ring before any
-   recovery. Do not scan selectors, retry feature commands, or use direct GPIO.
-3. Move CapImg contact extraction into deterministic offline tests. Validate
-   baseline, thresholding, connected components, slot assignment, lift decay,
-   and coordinate error against the retained labelled captures before treating
-   beta output as usable input.
-4. Keep the passive beta separate from standard HID until duplicate events,
-   coordinate error, and false contacts are measured on a live raw stream.
-5. Continue cleanup and upstream preparation only for the stable HID transport
-   and controller paths.
+Vedi [`docs/PIPELINE.md`](PIPELINE.md) per il mapping completo degli stadi
+Windows Surface TouchPenProcessor0C19 nel driver kernel.
 
-## Historical Research
+## Priorita'
 
-The chronological reverse-engineering record and retained experiments remain in
-`GROUND_TRUTH.md`, `RAW_TRANSITION_EVIDENCE.md`, `decomp/`, and capture-analysis
-reports. They are evidence, not current runtime instructions.
+1. **Classificatore quadratico discriminante** — `FUN_180601690`:
+   10 feature, 4 classi di contatto, medie e matrici di covarianza.
+   Migliora la qualita' del tracking distinguendo tocchi validi da edge/ghost.
+
+2. **Split suppression** — `FUN_180603510`:
+   Rilevamento overlap tra track nello stesso blob fisico.
+   Gia' parzialmente coperto dalla coalescenza post-emission.
+
+3. **Risoluzione del warning stack frame** — `spi-hid-core.c:2068`:
+   Migrare il BFS queue da stack allocation a heap per ridurre
+   lo stack frame sotto il limite di 2048 byte.
+
+4. **Ellissi per-slot** — completare l'emissione di touch major/minor/orientation
+   per ogni slot attivo (attualmente emesso per tutti, ma i dati blob
+   potrebbero essere raffinati).
+
+5. **Testing esteso multi-dito** — validazione con 2-5 dita simultanee,
+   misurazione latenza e accuratezza.
+
+## Documentazione
+
+- `docs/PIPELINE.md` — documento canonico della pipeline
+- `docs/decomp/SURFACE_TRACKER_DECOMP.md` — specifica tracker Surface originale
+- `docs/decomp/WINDOWS_CONTACT_ABI.md` — ABI contatti Windows

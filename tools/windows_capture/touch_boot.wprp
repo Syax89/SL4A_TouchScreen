@@ -27,6 +27,8 @@
     <EventProvider Id="Kernel-Processor-Power" Name="0f67e49f-fe51-4e9f-b490-6f2948cc6027"/>
     <EventProvider Id="Kernel-PnP"             Name="9c205a39-1250-487d-abd7-e831c6290539"/>
     <EventProvider Id="UserPnp"                Name="96f4a050-7e31-453c-88be-9634f4e02139"/>
+    <!-- Resolves SPB submitter PID/TID values to an image in the same ETL. -->
+    <EventProvider Id="Kernel-Process"         Name="22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716"/>
 
     <!-- Surface: Serial Hub (SAM transport), SMF core/client, service, panel, power, HID mini -->
     <EventProvider Id="Surface-SerialHub"   Name="8ddb06d0-a54b-4014-b119-5a09fb550d18"/>
@@ -58,6 +60,7 @@
             <EventProviderId Value="Kernel-Processor-Power"/>
             <EventProviderId Value="Kernel-PnP"/>
             <EventProviderId Value="UserPnp"/>
+            <EventProviderId Value="Kernel-Process"/>
             <EventProviderId Value="Surface-SerialHub"/>
             <EventProviderId Value="Surface-SmfCore"/>
             <EventProviderId Value="Surface-SmfClient"/>

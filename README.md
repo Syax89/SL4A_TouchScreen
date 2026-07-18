@@ -14,22 +14,27 @@
 ## Status
 
 The driver successfully initializes the MSHW0231 touchscreen on the Surface Laptop 4 AMD.
-**Single-touch and pen work** via standard HID mode (Report IDs 0x40 and 0x01).
-KDE/Wayland recognizes touches correctly — tap, drag, and single-finger gestures all work.
+**Single-touch, pen, and multitouch work** via standard HID mode (Report IDs 0x40 and 0x01)
+plus a passive CapImg multitouch pipeline. KDE/Wayland recognizes touches correctly.
 
 | Feature | Status |
 |---------|--------|
 | Device initialization (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
 | HID report descriptor (936 bytes, read from device) | Complete |
-| Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
-| BTN_TOUCH (tap/lift detection) | **Working** |
-| Stylus/Pen (Report ID 0x01) | **Working** |
-| Passive CapImg decoder | Conditional: only processes independently arriving `0x0c` frames |
-| Multitouch input | Not available: no live raw stream after normal Linux startup |
+| Single-touch X/Y coordinates (Report ID 0x40) | Working |
+| BTN_TOUCH (tap/lift detection) | Working |
+| Stylus/Pen (Report ID 0x01) | Working |
+| Multitouch (Surface pipeline, up to 10 contacts) | **Beta** |
+| Touch major/minor/orientation (per-slot eigenellipsis) | Beta |
 
-`raw_mode=1` is deprecated and inert. `raw_capture_only=1` remains passive.
-`raw_input_beta=1` decodes only independently arriving validated CapImg `0x0c`
-frames and can create a second input device; it is not a usable multitouch mode.
+The multitouch pipeline is a replica of the Windows Surface TouchPenProcessor0C19
+tracker: peak detection, flood-fill centroid, Hungarian assignment, EMA weight filter,
+stationary lock, lift history lookback, and post-emission coalescence.
+See [`docs/PIPELINE.md`](docs/PIPELINE.md).
+
+`raw_mode=1` (default) passively observes arriving CapImg frames.
+`raw_capture_only=1` and `raw_input_beta=1` enable the multitouch input device.
+The device appears as **"Surface Touchscreen"** in KDE/evdev.
 
 ---
 
@@ -59,6 +64,7 @@ frames and can create a second input device; it is not a usable multitouch mode.
 │  · DESCREQ → DEVICE_DESC → RPT_DESC  │
 │  · IRQ-driven seq_thread (states 0-5)│
 │  · Standard HID mode (Report 0x40)   │
+│  · Surface multitouch pipeline        │
 │  · Passive raw-frame capture          │
 └──────────────┬───────────────────────┘
                │ Linux SPI framework
@@ -159,7 +165,8 @@ documented MOK process if the module is rejected after reboot.
 ### After installing
 
 The touchscreen appears as:
-- `/dev/input/eventN` — `spi 045E:0C19` (ABS_X, ABS_Y, BTN_TOUCH) for touch
+- `/dev/input/eventN` — `Surface Touchscreen` for multitouch (beta, requires `raw_input_beta=1 raw_capture_only=1`)
+- `/dev/input/eventN` — `spi 045E:0C19` for single-touch via standard HID
 - `/dev/input/eventN` — `spi 045E:0C19 Stylus` for pen
 
 For a boot freeze or initialization failure, use the opt-in trace procedure in
@@ -249,9 +256,9 @@ Windows-side capture utilities are in `tools/windows_capture/`.
 
 | File | Contents |
 |------|----------|
+| [`docs/PIPELINE.md`](docs/PIPELINE.md) | Surface multitouch pipeline: stage-by-stage Windows-to-Linux mapping |
+| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Current roadmap and priorities |
 | [`docs/DEBUGGING.md`](docs/DEBUGGING.md) | Boot-freeze trace collection |
-| [`docs/TESTING.md`](docs/TESTING.md) | Portable protocol tests and kernel-test scope |
-| [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) | Current raw-mode and calibration roadmap |
 | [`docs/AMD_CONTROLLER_VALIDATION.md`](docs/AMD_CONTROLLER_VALIDATION.md) | AMD FCH SPI controller validation boundary |
 | [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 protocol reference |
 | [`docs/STANDARD_BOOT_EVIDENCE.md`](docs/STANDARD_BOOT_EVIDENCE.md) | Evidence boundary for supported standard boot behavior |

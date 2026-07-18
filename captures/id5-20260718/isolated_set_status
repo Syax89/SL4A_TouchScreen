@@ -1,0 +1,13 @@
+enabled=1
+armed=1
+attempted=1
+state=4
+get_sent=1
+set_sent=1
+write_failed=0
+timeout=1
+reset=0
+captured=10
+overflow=2
+next_slot=2
+ring_record_size=530

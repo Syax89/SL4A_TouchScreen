@@ -22,6 +22,7 @@ PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SRC_DEST="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 SERVICE_PATH="/etc/systemd/system/sl4a-touch.service"
 MODPROBE_CONF="/etc/modprobe.d/spi-hid.conf"
+RAW_CAPTURE_ONLY="${RAW_CAPTURE_ONLY:-0}"
 
 if [[ "$PKG_VERSION" == *-* ]]; then
 	echo "FAIL: VERSION ('$PKG_VERSION') contains '-', which breaks Arch/CachyOS's"
@@ -139,10 +140,19 @@ info "Step 3: Leaving active modules untouched..."
 pass "Active modules left untouched; reboot will load the new modules"
 
 info "Step 4: Creating modprobe.d config (standard HID mode)..."
-cat > "$MODPROBE_CONF" <<'EOF'
-# SL4A_TouchScreen — standard HID mode (single-touch + pen, stable)
-options spi_hid raw_mode=N
+if [ "$RAW_CAPTURE_ONLY" = "1" ]; then
+	cat > "$MODPROBE_CONF" <<'EOF'
+# SL4A_TouchScreen — passive raw capture; no feature writes or beta input.
+options spi_hid raw_mode=N raw_capture_only=Y raw_input_beta=N raw_transition_once=N isolated_set_test=N debug_level=2
+options spi_amd debug_trace=0
 EOF
+else
+	cat > "$MODPROBE_CONF" <<'EOF'
+# SL4A_TouchScreen — standard HID mode (single-touch + pen, stable)
+options spi_hid raw_mode=N raw_capture_only=N raw_input_beta=N raw_transition_once=N isolated_set_test=N
+options spi_amd debug_trace=0
+EOF
+fi
 pass "Created $MODPROBE_CONF"
 
 info "Step 5: Installing driver sources via DKMS ($SRC_DEST)..."

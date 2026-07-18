@@ -4,6 +4,37 @@
 > Sources: hidspi.sys decomp (PDB), amdspi.sys (no PDB, objdump), ETW CSV,
 > DSDT/SSDT ACPI, Linux tests on a Surface Laptop 4 AMD (Cezanne), kernel 7.1.2-3-cachyos,
 > Windows MMIO dump via RWEverything, Windows PCI config space dump via RWEverything
+
+## 2026-07-18: Surface TouchPenProcessor0C19 Pipeline Port
+
+The complete Surface multitouch pipeline has been ported to the kernel driver
+(`driver/spi-hid-core.c`, function `heatmap_process_frame`). The pipeline
+replicates every stage of the decompiled Windows TouchPenProcessor0C19 DLL:
+
+| Stage | Windows Function | Kernel Implementation |
+|-------|-----------------|----------------------|
+| Peak detection | FUN_1805fba00 | 5-cell radius, min rise 500, insertion sort |
+| Centroid | FUN_180602e60 (Stage 9e) | Flood-fill BFS, signal-weighted, noise-floor subtraction, x256 |
+| Eigenellipsis | FUN_180602e60 | Per-blob second moments, eigenvalue decomposition, atan2 |
+| Hungarian | FUN_1805fd090 / FUN_1805fd230 | 3-cell association, primal-dual solver |
+| Track update | FUN_180608000 | EMA weight a=1/8, history ring, stationary lock |
+| Frame-gap reset | FUN_180600ad0 | >5 frames: release all slots |
+| Lift debounce | FUN_180601dd0 | History lookback on lift, 2-frame hold |
+| Coalescence | FUN_1806025c0 (Stage 10) | Post-emission proximity suppression (6 cells) |
+
+Parameters verified from decomp:
+- Association: 0.545 grid units -> 3 cells (sq dist < 9)
+- Coalescence: 36.0 grid units^2 -> 6 cells (sq dist < 36)
+- Peak rise threshold: 500 (c590 fixed-point x10000)
+- EMA smoothing: a = 1/8
+- History depth: 10 samples
+- Frame-gap reset: >5 frames
+
+Device renamed to "Surface Touchscreen" for KDE.
+raw_mode=1 now default.
+
+See docs/PIPELINE.md for the complete specification.
+
 > (11 devices), WPP tracing internal to hidspi.sys (tracepdb/traceview/tracefmt).
 >
 > **Research journal, not an operating guide.** Entries are chronological and

@@ -35,6 +35,8 @@ class Transaction:
     index: int
     activity: str
     start_time: int
+    submitter_pid: int = 0
+    submitter_tid: int = 0
     total_len: int = 0
     transfer_count: int = 0
     connection: str = ""
@@ -71,6 +73,7 @@ def parse_csv(path: Path) -> tuple[list[Transaction], list[tuple[int, str, list[
     current: Transaction | None = None
     current_td: Transfer | None = None
     last_connection_by_activity: dict[str, str] = {}
+    last_submitter_by_activity: dict[str, tuple[int, int]] = {}
 
     with path.open(newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.reader(f, skipinitialspace=True)
@@ -95,12 +98,15 @@ def parse_csv(path: Path) -> tuple[list[Transaction], list[tuple[int, str, list[
                 # UserData: handle, connection-id, ...
                 if fields[1].startswith('"') or re.fullmatch(r"[0-9a-fA-F]+", fields[1].strip('"')):
                     last_connection_by_activity[activity] = fields[1].strip('"')
+                last_submitter_by_activity[activity] = (parse_int(row[9]), parse_int(row[10]))
 
             elif event_type == "IoSpbPayloadStart":
                 current = Transaction(
                     index=len(transactions),
                     activity=activity,
                     start_time=clock,
+                    submitter_pid=last_submitter_by_activity.get(activity, (0, 0))[0],
+                    submitter_tid=last_submitter_by_activity.get(activity, (0, 0))[1],
                     total_len=parse_int(fields[0]) if fields else 0,
                     transfer_count=parse_int(fields[1]) if len(fields) > 1 else 0,
                     connection=last_connection_by_activity.get(activity, ""),
@@ -136,6 +142,8 @@ def summarize(txn: Transaction) -> str:
     parts = [
         f"#{txn.index:04d}",
         f"t={txn.start_time}",
+        f"pid={txn.submitter_pid or '?'}",
+        f"tid={txn.submitter_tid or '?'}",
         f"conn={txn.connection or '?'}",
         f"xfers={txn.transfer_count}",
         f"op={tx_opcode(tx_data)}",

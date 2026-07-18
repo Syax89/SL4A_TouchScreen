@@ -16,6 +16,10 @@ protocol_test: protocol_test.c ../driver/spi-hid-protocol.h
 
 test: protocol_test raw_corpus_test raw_capture_export_test v0_capimg_decoder_test
 	./protocol_test
+	$(PYTHON) raw_transition_safety_test.py
+	$(PYTHON) isolated_set_safety_test.py
+	$(PYTHON) post_set_timeline_test.py
+	$(PYTHON) surface_tracker_oracle_test.py
 	$(PYTHON) raw_corpus_test.py
 	$(PYTHON) raw_capture_export_test.py
 	$(PYTHON) v0_capimg_decoder_test.py

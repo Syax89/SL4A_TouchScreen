@@ -1,5 +1,5 @@
 [Unit]
-Description=Surface Laptop 4 Touchscreen Driver (spi-amd + spi-hid, standard HID mode)
+Description=Surface Touchscreen Driver (spi-amd + spi-hid, standard HID mode)
 After=local-fs.target
 
 [Service]

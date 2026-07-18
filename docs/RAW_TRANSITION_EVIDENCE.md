@@ -20,6 +20,50 @@ the one-byte duplicated-opcode bug in the one-shot buffer as the immediate
 cause of the missing response; it does not prove the Linux controller path is
 wire-equivalent to the historical Windows transaction.
 
+### 2026-07-18 Controller-Boundary Correction
+
+The first Linux controller trace proved that the ten-byte source buffer was
+not the ten-byte FIFO payload observed on Windows. `spi-amd` consumes byte zero
+as controller opcode `0x02`; it logged only these nine FIFO bytes:
+
+```text
+00 00 03 42 00 04 03 00 06
+```
+
+The normal DESCREQ succeeds because its source buffer duplicates that opcode:
+the controller consumes the first byte and its FIFO receives the Windows
+payload starting with `02`. The GET-only transaction now uses the same
+controller-boundary form, an eleven-byte source buffer whose FIFO payload is:
+
+```text
+02 00 00 03 42 00 04 03 00 06
+```
+
+This corrects a local framing defect. It does not prove selector semantics or
+authorize SET_FEATURE.
+
+### 2026-07-18 GET Response Decoding
+
+With the corrected FIFO, GET_FEATURE_RESP arrived about 2 ms after the write.
+Its 129-byte transport body has five prefix bytes followed by semantic length
+`0x007a`, content ID `0x06`, and 119 bytes of content. The report descriptor
+defines Report ID `0x06` as the 119-byte `DeviceMode` Feature report.
+
+The observed Windows SET vector is a different report: its output body decodes
+as SET_FEATURE with content ID `0x05` and three data bytes `01 00 00`; the
+descriptor defines Report ID `0x05` as vendor Usage `0xc8`. Therefore GET ID 6
+and SET ID 5 are correlated in time but are not a request/response pair. The
+meaning and post-SET completion contract of Report ID 5 remain unproven, so
+SET_FEATURE remains disabled.
+
+### Isolated SET Harness Template Correction
+
+The first isolated harness run sent a malformed SET body with semantic length
+`0x0000` because its local source template omitted the captured `0x04` byte.
+The run must not be interpreted as a SET result, even though standard `0x08`
+DATA frames followed. The template is now checked against the complete Windows
+FIFO payload `02 00 00 03 82 00 03 04 00 05 01 00 00 00` before any future run.
+
 The explicitly authorized one-shot experiment booted with:
 
 ```text

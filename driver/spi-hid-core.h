@@ -127,6 +127,28 @@
 /* Eight fixed-size V0 bodies keep capture bounded to roughly 34 KiB. */
 #define SPI_HID_RAW_CAPTURE_SLOTS 8
 #define SPI_HID_RAW_CAPTURE_BODY_LENGTH 4304
+#define SPI_HID_ISOLATED_SET_RING_SLOTS 8
+#define SPI_HID_ISOLATED_SET_BODY_LENGTH 512
+
+enum spi_hid_isolated_set_state {
+	SPI_HID_ISOLATED_SET_DISABLED,
+	SPI_HID_ISOLATED_SET_WAIT_GET,
+	SPI_HID_ISOLATED_SET_WAIT_SET,
+	SPI_HID_ISOLATED_SET_OBSERVING,
+	SPI_HID_ISOLATED_SET_COMPLETE,
+	SPI_HID_ISOLATED_SET_RESET,
+	SPI_HID_ISOLATED_SET_FAILED,
+};
+
+struct spi_hid_isolated_set_frame {
+	__u64 timestamp_ns;
+	__u16 transport_length;
+	__u16 body_length;
+	__u8 type;
+	__u8 truncated;
+	__u8 header[SPI_HID_INPUT_HEADER_LEN];
+	__u8 body[SPI_HID_ISOLATED_SET_BODY_LENGTH];
+} __packed;
 
 struct spi_hid_device_desc_raw {
 	__le16 wDeviceDescLength;
@@ -316,22 +338,34 @@ struct spi_hid {
 	u8  heatmap_frame_persistence[HEATMAP_MAX_CELLS];
 	u16 heatmap_label[HEATMAP_MAX_CELLS];
 
-	/* Blob state. */
-	u16 blob_x[HEATMAP_MAX_BLOBS];
-	u16 blob_y[HEATMAP_MAX_BLOBS];
+	/* Blob state. Coordinates are fixed-point with 8 fractional bits. */
+	u32 blob_x[HEATMAP_MAX_BLOBS];
+	u32 blob_y[HEATMAP_MAX_BLOBS];
 	u32 blob_wsum[HEATMAP_MAX_BLOBS];
-	u32 blob_xsum[HEATMAP_MAX_BLOBS];
-	u32 blob_ysum[HEATMAP_MAX_BLOBS];
+	u64 blob_xsum[HEATMAP_MAX_BLOBS];
+	u64 blob_ysum[HEATMAP_MAX_BLOBS];
 	bool blob_active[HEATMAP_MAX_BLOBS];
 	u16 label_equiv[256];
 
 	/* Slot state, duration, and coordinate history. */
 	u8 blob_slot_state[HEATMAP_MAX_SLOTS];      /* 0=empty 1=new 2=claimed 3=lift */
 	u32 blob_slot_duration[HEATMAP_MAX_SLOTS];  /* frames in current state */
-	u16 blob_slot_gx[HEATMAP_MAX_SLOTS];        /* last grid X */
-	u16 blob_slot_gy[HEATMAP_MAX_SLOTS];        /* last grid Y */
+	u32 blob_slot_gx[HEATMAP_MAX_SLOTS];        /* last grid X, fixed-point */
+	u32 blob_slot_gy[HEATMAP_MAX_SLOTS];        /* last grid Y, fixed-point */
 	u32 blob_slot_weight[HEATMAP_MAX_SLOTS];    /* last blob weight */
 	u32 blob_slot_missed[HEATMAP_MAX_SLOTS];    /* consecutive frames missed */
+	u8 blob_slot_stationary[HEATMAP_MAX_SLOTS]; /* stationary frame counter */
+	u8 blob_slot_blob[HEATMAP_MAX_SLOTS];       /* associated blob index */
+
+	/* Per-slot history ring for sway and velocity (Surface: 10 samples). */
+	#define SLOT_HISTORY_DEPTH 10
+	u32 blob_slot_hx[HEATMAP_MAX_SLOTS][SLOT_HISTORY_DEPTH];
+	u32 blob_slot_hy[HEATMAP_MAX_SLOTS][SLOT_HISTORY_DEPTH];
+	u8 blob_slot_hpos[HEATMAP_MAX_SLOTS];
+	u8 blob_slot_hcount[HEATMAP_MAX_SLOTS];  /* valid entries */
+
+	/* Frame counter for gap detection (Surface: >5 frames → reset all). */
+	u32 heatmap_frame_id;
 
 	/* Eigenvalue/ellipsis tracking */
 	s32 eigmaj[HEATMAP_MAX_SLOTS];
@@ -357,10 +391,29 @@ struct spi_hid {
 	u32 raw_transition_get_sent;
 	u32 raw_transition_get_write_failed;
 	u32 raw_transition_get_response;
+	u32 raw_transition_get_body_len;
+	u8 raw_transition_get_body[256];
+	u32 raw_transition_timeout;
 	u32 raw_transition_set_sent;
 	u32 raw_transition_set_write_failed;
 	u32 raw_transition_state_skipped;
 	u32 raw_transition_reset_before_response;
+
+	/* Separately gated, boot-time-only GET ID6 / SET observation harness. */
+	bool isolated_set_armed;
+	bool isolated_set_attempted;
+	u32 isolated_set_get_sent;
+	u32 isolated_set_set_sent;
+	u32 isolated_set_write_failed;
+	u32 isolated_set_timeout;
+	u32 isolated_set_reset;
+	u32 isolated_set_count;
+	u32 isolated_set_overflow;
+	u32 isolated_set_next;
+	enum spi_hid_isolated_set_state isolated_set_state;
+	u8 isolated_set_header[SPI_HID_INPUT_HEADER_LEN];
+	struct spi_hid_isolated_set_frame
+		isolated_set_ring[SPI_HID_ISOLATED_SET_RING_SLOTS];
 
 	/* Retained legacy raw-handshake state; raw_mode remains disabled. */
 	struct delayed_work raw_handshake_watchdog;
@@ -370,6 +423,9 @@ struct spi_hid {
 
 	struct delayed_work feat_delay_work;	/* GET_FEATURE delay (Windows: ~5900ms) */
 	bool feat_delay_pending;
+	struct delayed_work raw_transition_timeout_work;
+	struct delayed_work isolated_set_timeout_work;
+	struct delayed_work isolated_set_work;
 
 	struct delayed_work stream_watchdog;
 	u32 stream_watchdog_data;
