@@ -121,7 +121,7 @@
 
 /* Heatmap blob detection limits */
 #define HEATMAP_MAX_CELLS   4300
-#define HEATMAP_MAX_BLOBS   10
+#define HEATMAP_MAX_BLOBS   20
 #define HEATMAP_MAX_SLOTS   47   /* match Windows DLL blob slot count */
 
 /* Eight fixed-size V0 bodies keep capture bounded to roughly 34 KiB. */
