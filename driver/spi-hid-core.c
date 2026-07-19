@@ -1739,10 +1739,10 @@ static int blob_lift_frames = 3;
 module_param(blob_lift_frames, int, 0644);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting (after hold expires)");
 
-static int hold_frames = 0;
+static int hold_frames = 3;
 module_param(hold_frames, int, 0644);
 MODULE_PARM_DESC(hold_frames,
-	"Hold grace frames before lifting (state 4). Default 0 (disabled). Set to 3-5 to prevent flickering during slow lift-off.");
+	"Hold grace frames before lifting (state 4). Default 3 (~30ms). Prevents flickering during slow lift-off and brief signal drops.");
 
 static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0644);
@@ -2092,7 +2092,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		blob_debounce = val;
 		val = READ_ONCE(blob_lift_frames); if (val < 1) val = 3;
 		blob_lift_frames = val;
-		val = READ_ONCE(hold_frames); if (val < 0) val = 0;
+		val = READ_ONCE(hold_frames); if (val < 1) val = 3;
 		hold_frames = val;
 		val = READ_ONCE(blob_max_distance); if (val < 1) val = 3;
 		blob_max_distance = val;
