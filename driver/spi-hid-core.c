@@ -2243,130 +2243,169 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		shid->heatmap_touched[i] = (rise >= 200) ? 1 : 0;
 	}
 
-	/* Step 2: peak detection — cross-shaped 5-cell check
-	 * (matching Python oracle / Windows FUN_1805fba00).
-	 * A cell is a peak if no neighbor at ±5 in N/S/E/W has a
-	 * HIGHER signal rise. Min rise = 500. Max 16 peaks. */
+	/* Step 2+3: Connected-component labeling + centroid + eigenvalues
+	 * (matching Windows FUN_180600c40 CCL pipeline).
+	 * 4-connected flood-fill replaces peak detection — each connected
+	 * region of signal-above-baseline becomes one blob candidate.
+	 * Centroid and eigenvalues span the full component extent
+	 * instead of a fixed 5×5 window. */
 	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
 	memset(shid->blob_active, 0, sizeof(shid->blob_active));
+	memset(shid->heatmap_label, 0, cell_count * sizeof(shid->heatmap_label[0]));
 	nlabels = 0;
+	touched_count = 0;
 
 	{
-		struct { u16 col; u16 row; u16 rise; } peaks[16];
-		s16 npeaks = 0, pi, ci;
+		u16 queue[512]; /* BFS flood-fill queue */
+		u16 next_label = 1;
+		u32 ci;
 
-		for (i = 0; i < cell_count && npeaks < 16; i++) {
-			u16 col, row;
-			s16 rise;
+		for (ci = 0; ci < (u32)cell_count; ci++) {
+			u32 col, row;
 
-			if (!shid->heatmap_touched[i]) continue;
-			col = i % ncols; row = i / ncols;
-			if (row >= nrows) break;
-			rise = shid->heatmap_signal[i];
-			if (rise < 300) continue;
+			if (!shid->heatmap_touched[ci]) continue;
+			if (shid->heatmap_signal[ci] <= 0) continue;
+			if (shid->heatmap_label[ci] != 0) continue;
+			if (nlabels >= HEATMAP_MAX_BLOBS) break;
 
-			/* Cross-shaped: check ±5 in N,S,E,W directions only */
 			{
-				bool ok = true;
-				if (col >= 5 && shid->heatmap_touched[i - 5] &&
-				    shid->heatmap_signal[i - 5] > rise) ok = false;
-				if (col + 5 < ncols && shid->heatmap_touched[i + 5] &&
-				    shid->heatmap_signal[i + 5] > rise) ok = false;
-				if (row >= 5 && shid->heatmap_touched[i - 5 * ncols] &&
-				    shid->heatmap_signal[i - 5 * ncols] > rise) ok = false;
-				if (row + 5 < nrows && shid->heatmap_touched[i + 5 * ncols] &&
-				    shid->heatmap_signal[i + 5 * ncols] > rise) ok = false;
-				if (!ok) continue;
-			}
+				u16 head = 0, tail = 0;
+				s64 sx = 0, sy = 0, sw = 0;
+				s64 sxx = 0, syy = 0, sxy = 0;
+				s32 min_r = 9999, max_r = -1, min_c = 9999, max_c = -1;
+				u32 pixel_count = 0;
+				u16 label = next_label;
 
-			peaks[npeaks].col = col;
-			peaks[npeaks].row = row;
-			peaks[npeaks].rise = rise;
-			npeaks++;
-		}
+				queue[tail++] = ci;
+				shid->heatmap_label[ci] = label;
 
-		/* Sort by signal strength (strongest first). */
-		for (pi = 0; pi + 1 < npeaks; pi++)
-			for (ci = pi + 1; ci < npeaks; ci++)
-				if (peaks[ci].rise > peaks[pi].rise) {
-					typeof(peaks[0]) t = peaks[pi];
-					peaks[pi] = peaks[ci]; peaks[ci] = t;
-				}
-
-		/* Step 3: 5×5 local centroid + eigenvalue per peak
-		 * (matching Python oracle _centroid function).
-		 * Only cells within ±2 of the peak contribute to
-		 * the weighted centroid and second moments. */
-		for (pi = 0; pi < npeaks; pi++) {
-			s64 sx = 0, sy = 0, sw = 0;
-			s64 sxx = 0, syy = 0, sxy = 0;
-			s32 pr, pc, r, c;
-			u32 cx, cy;
-
-			pc = peaks[pi].col;
-			pr = peaks[pi].row;
-			for (r = max(0, pr - 2); r <= min((s32)nrows - 1, pr + 2); r++) {
-				for (c = max(0, pc - 2); c <= min((s32)ncols - 1, pc + 2); c++) {
-					u32 idx = (u32)r * ncols + (u32)c;
+				while (head < tail) {
+					u32 idx = queue[head++];
 					s16 w;
+					u16 r, c;
+					u32 nxt;
 
-					if (idx >= cell_count || !shid->heatmap_touched[idx]) continue;
+					col = idx % ncols; row = idx / ncols;
+					if (row >= nrows) continue;
 					w = shid->heatmap_signal[idx];
 					if (w <= 0) continue;
-					sx += (s64)c * w;
-					sy += (s64)r * w;
+
+					sx += (s64)col * w;
+					sy += (s64)row * w;
 					sw += w;
-				}
-			}
-			if (sw >= blob_min_weight) {
-				shid->blob_x[pi] = (u32)(sx * 100 / sw);
-				shid->blob_y[pi] = (u32)(sy * 100 / sw);
-				shid->blob_wsum[pi] = (u32)sw;
-				shid->blob_active[pi] = true;
-				nlabels++;
-				touched_count++;
+					pixel_count++;
+					r = (u16)row; c = (u16)col;
+					if (r < min_r) min_r = r;
+					if (r > max_r) max_r = r;
+					if (c < min_c) min_c = c;
+					if (c > max_c) max_c = c;
 
-				/* Eigenvalues: second moments around the centroid. */
-				cx = shid->blob_x[pi] / 100;
-				cy = shid->blob_y[pi] / 100;
-				for (r = max(0, pr - 2); r <= min((s32)nrows - 1, pr + 2); r++) {
-					for (c = max(0, pc - 2); c <= min((s32)ncols - 1, pc + 2); c++) {
-						u32 idx = (u32)r * ncols + (u32)c;
-						s32 dx, dy;
-						s16 w;
-
-						if (idx >= cell_count || !shid->heatmap_touched[idx]) continue;
-						w = shid->heatmap_signal[idx];
-						if (w <= 0) continue;
-						dx = (s32)c - (s32)cx;
-						dy = (s32)r - (s32)cy;
-						sxx += (s64)dx * dx * w;
-						syy += (s64)dy * dy * w;
-						sxy += (s64)dx * dy * w;
+					/* 4-connected neighbors */
+					if (col > 0) {
+						nxt = idx - 1;
+						if (shid->heatmap_touched[nxt] &&
+						    shid->heatmap_signal[nxt] > 0 &&
+						    shid->heatmap_label[nxt] == 0 &&
+						    tail < 512) {
+							shid->heatmap_label[nxt] = label;
+							queue[tail++] = nxt;
+						}
+					}
+					if (col + 1 < ncols) {
+						nxt = idx + 1;
+						if (shid->heatmap_touched[nxt] &&
+						    shid->heatmap_signal[nxt] > 0 &&
+						    shid->heatmap_label[nxt] == 0 &&
+						    tail < 512) {
+							shid->heatmap_label[nxt] = label;
+							queue[tail++] = nxt;
+						}
+					}
+					if (row > 0) {
+						nxt = idx - ncols;
+						if (shid->heatmap_touched[nxt] &&
+						    shid->heatmap_signal[nxt] > 0 &&
+						    shid->heatmap_label[nxt] == 0 &&
+						    tail < 512) {
+							shid->heatmap_label[nxt] = label;
+							queue[tail++] = nxt;
+						}
+					}
+					if (row + 1 < nrows) {
+						nxt = idx + ncols;
+						if (shid->heatmap_touched[nxt] &&
+						    shid->heatmap_signal[nxt] > 0 &&
+						    shid->heatmap_label[nxt] == 0 &&
+						    tail < 512) {
+							shid->heatmap_label[nxt] = label;
+							queue[tail++] = nxt;
+						}
 					}
 				}
+
+				/* Filter noise: at least 2 pixels and min weight. */
+				if (pixel_count < 2 || sw < blob_min_weight)
+					continue;
+
 				{
-					s64 trace = sxx + syy;
-					s64 det = sxx * syy - sxy * sxy;
-					s64 disc = trace * trace - 4 * det;
-					s32 sq;
+					s32 bi = nlabels;
+					u32 cx, cy;
 
-					if (disc < 0) disc = 0;
-					sq = (s32)int_sqrt((u64)disc);
-					shid->eigmaj[pi] = (s32)((trace + sq) / 2);
-					shid->eigmin[pi] = (s32)((trace - sq) / 2);
-					if (syy - sxx != 0 || sxy != 0) {
-						s32 deg = atan2_approx((s32)(2 * sxy), (s32)(syy - sxx)) / 2;
-						if (deg >= 18000) deg -= 18000;
-						else if (deg <= -18000) deg += 18000;
-						shid->eigori[pi] = deg;
-					} else {
-						shid->eigori[pi] = 0;
+					shid->blob_x[bi] = (u32)(sx * 100 / sw);
+					shid->blob_y[bi] = (u32)(sy * 100 / sw);
+					shid->blob_wsum[bi] = (u32)sw;
+					shid->blob_active[bi] = true;
+					nlabels++;
+					touched_count++;
+
+					/* Eigenvalues: second moments around centroid.
+					 * Use the blob's bounding box instead of the
+					 * full grid scan for performance. */
+					cx = shid->blob_x[bi] / 100;
+					cy = shid->blob_y[bi] / 100;
+					{
+						s32 r, c;
+						for (r = min_r; r <= max_r; r++) {
+							for (c = min_c; c <= max_c; c++) {
+								u32 idx = (u32)r * ncols + (u32)c;
+								s16 w;
+								s32 dx, dy;
+
+								if (shid->heatmap_label[idx] != label) continue;
+								w = shid->heatmap_signal[idx];
+								if (w <= 0) continue;
+								dx = c - (s32)cx;
+								dy = r - (s32)cy;
+								sxx += (s64)dx * dx * w;
+								syy += (s64)dy * dy * w;
+								sxy += (s64)dx * dy * w;
+							}
+						}
+					}
+					{
+						s64 trace = sxx + syy;
+						s64 det = sxx * syy - sxy * sxy;
+						s64 disc = trace * trace - 4 * det;
+						s32 sq;
+
+						if (disc < 0) disc = 0;
+						sq = (s32)int_sqrt((u64)disc);
+						shid->eigmaj[bi] = (s32)((trace + sq) / 2);
+						shid->eigmin[bi] = (s32)((trace - sq) / 2);
+						if (syy - sxx != 0 || sxy != 0) {
+							s32 deg = atan2_approx((s32)(2 * sxy), (s32)(syy - sxx)) / 2;
+							if (deg >= 18000) deg -= 18000;
+							else if (deg <= -18000) deg += 18000;
+							shid->eigori[bi] = deg;
+						} else {
+							shid->eigori[bi] = 0;
+						}
 					}
 				}
 			}
+			next_label++;
 		}
-	}
+		}
 
 	/* Step 5: emit multitouch events with EMA smoothing and slot tracking.
 	 * Grid → screen mapping per GROUND_TRUTH.md §22.8.  Calibration

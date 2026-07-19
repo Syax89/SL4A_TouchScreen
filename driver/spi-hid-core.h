@@ -331,6 +331,7 @@ struct spi_hid {
 	u32 heatmap_baseline_frames;
 	u8  heatmap_touched[HEATMAP_MAX_CELLS];
 	s16 heatmap_signal[HEATMAP_MAX_CELLS];   /* precomputed c590 signal rise */
+	u16 heatmap_label[HEATMAP_MAX_CELLS];    /* CCL component labels */
 
 	/* Blob state. Coordinates are fixed-point grid ×100. */
 	u32 blob_x[HEATMAP_MAX_BLOBS];
