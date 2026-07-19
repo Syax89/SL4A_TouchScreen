@@ -2238,34 +2238,17 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 	if (!shid->touch_input) return;
 
-	/* Step 1: compute signal rise per cell, track max for adaptive
-	 * touch threshold (Windows DLL config+0x958=0.17: touch_detect_pct
-	 * = 17% of max signal rise). */
+	/* Step 1: compute signal rise per cell once, reuse everywhere. */
 	memset(shid->heatmap_touched, 0, cell_count);
-	{
-		s16 max_rise = 0;
-		for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-			s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
-			s16 curr = shid->c590_lut[data[data_offset + i]];
-			s16 rise = curr - base;
-			shid->heatmap_signal[i] = rise;
-			if (rise > max_rise) max_rise = rise;
-		}
-		/* Adaptive threshold: 17% of max frame signal, floor at 200.
-		 * Light touch (max ~500): threshold = 200 (floor)
-		 * Heavy touch (max ~2000): threshold = 340
-		 * Matches Windows 0x958=0.17 touch detection percentage. */
-		{
-			s16 ath = (s16)((s32)max_rise * 17 / 100);
-			if (ath < 200) ath = 200;
-			for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
-				s16 rise = shid->heatmap_signal[i];
-				/* Noise floor: absolute c590 < 400 → suppressed
-				 * (Windows DAT_1806c08c8=0.04, config+0xecc). */
-				s16 curr = shid->c590_lut[data[data_offset + i]];
-				shid->heatmap_touched[i] = (rise >= ath && curr >= 400) ? 1 : 0;
-			}
-		}
+	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
+		s16 base = shid->c590_lut[shid->heatmap_baseline[i]];
+		s16 curr = shid->c590_lut[data[data_offset + i]];
+		s16 rise = curr - base;
+		shid->heatmap_signal[i] = rise;
+		/* Noise floor (Windows DAT_1806c08c8 = 0.04):
+		 * absolute c590 < 400 → class 5 (suppressed).
+		 * DLL config table +0xecc = 0.04 confirms. */
+		shid->heatmap_touched[i] = (rise >= 200 && curr >= 400) ? 1 : 0;
 	}
 
 	/* Step 2+3: Connected-component labeling + centroid + eigenvalues
