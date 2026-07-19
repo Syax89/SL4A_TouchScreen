@@ -1744,10 +1744,10 @@ module_param(hold_frames, int, 0644);
 MODULE_PARM_DESC(hold_frames,
 	"Hold grace frames before lifting (state 4). Default 1 (~10ms). Windows enabled (config+0x8D8=0xB3). Anti-flickering without perceptible scroll brake.");
 
-static int pre_assoc_ratio = 0;
+static int pre_assoc_ratio = 611;
 module_param(pre_assoc_ratio, int, 0644);
 MODULE_PARM_DESC(pre_assoc_ratio,
-	"Pre-association blob weight ratio threshold (0=disabled). Discard blobs weaker than (max_weight * ratio/1000). Windows DLL +0x8C0-0x8CC: 0.611, 0.755, 0.831, 0.871. Set to 611 to match Windows weakest filter.");
+	"Pre-association blob weight ratio (x1000). Default 611 (= 0.611x max blob weight — Windows DLL +0x8C0). Discard blobs weaker than threshold. 0=disabled.");
 
 static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0644);
