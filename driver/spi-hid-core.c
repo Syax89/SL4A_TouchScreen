@@ -1702,10 +1702,10 @@ module_param(touch_threshold_pct, int, 0644);
 MODULE_PARM_DESC(touch_threshold_pct,
 	"Percentage of c590 full-scale (4000) used as the touch rise threshold when touch_signal_mode=2. Default 10% (=400); observed touch peaks reach a rise of ~2300");
 
-static int ghost_dist = 6;
+static int ghost_dist = 4;
 module_param(ghost_dist, int, 0644);
 MODULE_PARM_DESC(ghost_dist,
-	"Coalescence radius in grid cells (Surface: distance < 6 cells)");
+	"Coalescence radius in grid cells (Surface: distance < 6 cells). Default 4 (tighter for 3+ finger density; peak gate handles noise).");
 
 static int grid_cols = 0;  /* 0 = default 72 */
 module_param(grid_cols, int, 0444);
@@ -2096,7 +2096,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		hold_frames = val;
 		val = READ_ONCE(blob_max_distance); if (val < 1) val = 3;
 		blob_max_distance = val;
-		val = READ_ONCE(ghost_dist); if (val < 1) val = 6;
+		val = READ_ONCE(ghost_dist); if (val < 1) val = 4;
 		ghost_dist = val;
 		val = READ_ONCE(touch_threshold_pct); if (val < 0) val = 0;
 		if (val > 100) val = 100;
