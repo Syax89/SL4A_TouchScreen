@@ -1737,7 +1737,12 @@ MODULE_PARM_DESC(blob_debounce, "Frames before claiming a new blob (debounce)");
 
 static int blob_lift_frames = 3;
 module_param(blob_lift_frames, int, 0644);
-MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting");
+MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting (after hold expires)");
+
+static int hold_frames = 10;
+module_param(hold_frames, int, 0644);
+MODULE_PARM_DESC(hold_frames,
+	"Hold grace frames before lifting (state 4). Default 10 (= ~100-200ms). Prevents flickering during slow lift-off and brief signal drops.");
 
 static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0644);
@@ -2087,6 +2092,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		blob_debounce = val;
 		val = READ_ONCE(blob_lift_frames); if (val < 1) val = 3;
 		blob_lift_frames = val;
+		val = READ_ONCE(hold_frames); if (val < 1) val = 10;
+		hold_frames = val;
 		val = READ_ONCE(blob_max_distance); if (val < 1) val = 3;
 		blob_max_distance = val;
 		val = READ_ONCE(ghost_dist); if (val < 1) val = 6;
@@ -2618,7 +2625,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					u16 gx = sorted[bi].gx;
 					u16 gy = sorted[bi].gy;
 					u32 w  = sorted[bi].w;
-					bool was_claimed = (shid->blob_slot_state[s] >= 2);
+					u8 old_state = shid->blob_slot_state[s];
+					bool was_claimed = (old_state >= 2);
 					u8 blob_idx = sorted[bi].idx;
 
 					/* Sanity: reject jumps beyond association radius
@@ -2662,12 +2670,19 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						shid->blob_slot_duration[s] = 1;
 						shid->blob_slot_stationary[s] = 0;
 						break;
+					case 4:
+						/* Recovered during hold — re-claim immediately. */
+						shid->blob_slot_state[s] = 2;
+						shid->blob_slot_duration[s] = 1;
+						shid->blob_slot_stationary[s] = 0;
+						break;
 					}
 					shid->blob_slot_missed[s] = 0;
 					shid->blob_slot_gx[s] = gx;
 					shid->blob_slot_gy[s] = gy;
-					/* EMA on blob weight (matching Windows: weight_smoothed = (old*7+new)/8) */
-					if (was_claimed && shid->blob_slot_state[s] == 2)
+					/* EMA on blob weight (matching Windows: weight_smoothed = (old*7+new)/8).
+					 * Only for continuously-claimed slots — reset weight after hold/lift. */
+					if (old_state == 2)
 						shid->blob_slot_weight[s] = (shid->blob_slot_weight[s] * 7 + w) / 8;
 					else
 						shid->blob_slot_weight[s] = w;
@@ -2681,7 +2696,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						 * antenna-noise jitter during slow holds.
 						 * After 6 consecutive stationary frames the
 						 * position is frozen until a real move occurs. */
-						if (was_claimed && shid->blob_slot_state[s] == 2) {
+						if (old_state == 2) {
 							u32 old_gx = shid->blob_slot_gx[s];
 							u32 old_gy = shid->blob_slot_gy[s];
 							u32 egx = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
@@ -2732,8 +2747,16 @@ slot_unassigned:				switch (shid->blob_slot_state[s]) {
 						shid->blob_slot_duration[s] = 0;
 						break;
 					case 2:
+						/* Claimed slot missed — enter hold (state 4)
+						 * instead of immediately starting lift countdown.
+						 * Holds the last known position for hold_frames
+						 * before transitioning to lift. */
+						shid->blob_slot_state[s] = 4;
+						shid->blob_slot_missed[s] = 1;
+						break;
+					case 4:
 						shid->blob_slot_missed[s]++;
-						if (shid->blob_slot_missed[s] >= (u32)blob_lift_frames) {
+						if (shid->blob_slot_missed[s] >= (u32)hold_frames) {
 							/* Lift lookback: use position from 2 frames
 							 * ago (when the finger was still fully down). */
 							u8 hc = shid->blob_slot_hcount[s];
@@ -2758,7 +2781,16 @@ slot_unassigned:				switch (shid->blob_slot_state[s]) {
 						break;
 					}
 
-				new_active[s] = false;
+				/* Hold and lift states remain active — emit last
+				 * known position (hold) or lookback position (lift). */
+				if (shid->blob_slot_state[s] == 4 ||
+				    shid->blob_slot_state[s] == 3) {
+					new_active[s] = true;
+					new_gx[s] = shid->blob_slot_gx[s];
+					new_gy[s] = shid->blob_slot_gy[s];
+				} else {
+					new_active[s] = false;
+				}
 		}
 	}
 
