@@ -2433,6 +2433,41 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 							shid->eigori[bi] = deg;
 						} else {
 							shid->eigori[bi] = 0;
+					}
+				}
+
+					/* Candidate classification (matching Windows
+					 * FUN_180601690 + FUN_180606370 quality checks):
+					 *
+					 * 1. Eigenratio filter (Windows: major/minor > 4.0
+					 *    is too elongated — noise or edge artifact).
+					 * 2. Edge-contact suppression: blobs touching the
+					 *    grid edge require higher quality (more pixels
+					 *    and higher signal) — edge artifacts are common
+					 *    and usually not real fingers. */
+					{
+						bool reject = false;
+
+						/* Eigenratio: major/minor > 4.0 → too elongated. */
+						if (shid->eigmaj[bi] > 0 && shid->eigmin[bi] > 0 &&
+						    (s64)shid->eigmaj[bi] * 10 > (s64)shid->eigmin[bi] * 40)
+							reject = true;
+
+						/* Edge contact: blob touches grid boundary. */
+						{
+							bool edge = (min_r <= 1 || max_r >= (s32)nrows - 2 ||
+								     min_c <= 1 || max_c >= (s32)ncols - 2);
+							if (edge) {
+								/* Edge blobs need more evidence. */
+								if (pixel_count < 12 || max_rise < 500 || sw < 5000)
+									reject = true;
+							}
+						}
+
+						if (reject) {
+							shid->blob_active[bi] = false;
+							nlabels--;
+							touched_count--;
 						}
 					}
 				}
