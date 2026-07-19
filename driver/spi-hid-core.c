@@ -1739,10 +1739,10 @@ static int blob_lift_frames = 3;
 module_param(blob_lift_frames, int, 0644);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting (after hold expires)");
 
-static int hold_frames = 3;
+static int hold_frames = 0;
 module_param(hold_frames, int, 0644);
 MODULE_PARM_DESC(hold_frames,
-	"Hold grace frames before lifting (state 4). Default 3 (~30ms). Prevents flickering during slow lift-off and brief signal drops.");
+	"Hold grace frames before lifting. Default 0 (disabled). The peak-detection gate already prevents flickering — hold is only needed for brief signal-drop bridging during fast movement.");
 
 static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0644);
@@ -2826,8 +2826,16 @@ slot_unassigned:				switch (shid->blob_slot_state[s]) {
 						shid->blob_slot_duration[s] = 0;
 						break;
 					case 2:
-						/* Enter hold (state 4) unless disabled (hold_frames=0). */
 						if (hold_frames < 1) {
+							/* Lift lookback: use position from 2 frames
+							 * ago when the finger was still fully down. */
+							u8 hc = shid->blob_slot_hcount[s];
+							if (hc >= 2) {
+								u8 hp = shid->blob_slot_hpos[s];
+								u8 back = (hp + SLOT_HISTORY_DEPTH - 2) % SLOT_HISTORY_DEPTH;
+								shid->blob_slot_gx[s] = shid->blob_slot_hx[s][back];
+								shid->blob_slot_gy[s] = shid->blob_slot_hy[s][back];
+							}
 							shid->blob_slot_state[s] = 3;
 							shid->blob_slot_missed[s] = 0;
 						} else {
