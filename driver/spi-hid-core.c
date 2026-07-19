@@ -2419,6 +2419,76 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					shid->blob_y[bi] = (u32)(sy * 100 / sw);
 					shid->blob_wsum[bi] = (u32)sw;
 
+					/* Blob splitting: if this CCL blob contains
+					 * 2+ peaks at >= 4 cells apart, it's likely
+					 * two merged fingers. Split them into separate
+					 * blobs using the peak positions (Windows
+					 * FUN_180602770 per-neighbor sub-centroids). */
+					if (npeaks >= 2 && pixel_count >= 8) {
+						u8 p, split_count = 0;
+						u8 split_peaks[16];
+						for (p = 0; p < npeaks && split_count < 16; p++) {
+							u32 pix = (u32)peaks[p].row * ncols + (u32)peaks[p].col;
+							if (shid->heatmap_label[pix] == label)
+								split_peaks[split_count++] = p;
+						}
+						if (split_count >= 2 && split_count <= 4) {
+							bool too_close = true;
+							for (p = 1; p < split_count && too_close; p++) {
+								u8 q;
+								for (q = 0; q < p; q++) {
+									s32 dx = (s32)peaks[split_peaks[p]].col -
+										 (s32)peaks[split_peaks[q]].col;
+									s32 dy = (s32)peaks[split_peaks[p]].row -
+										 (s32)peaks[split_peaks[q]].row;
+									if (dx < 0) dx = -dx;
+									if (dy < 0) dy = -dy;
+									if ((u32)dx >= 4 || (u32)dy >= 4) {
+										too_close = false;
+										break;
+									}
+								}
+							}
+							if (!too_close) {
+								/* Replace merged blob with split blobs. */
+								shid->blob_active[bi] = false;
+								nlabels--;
+								touched_count--;
+								for (p = 0; p < split_count && nlabels < HEATMAP_MAX_BLOBS; p++) {
+									s32 pr = peaks[split_peaks[p]].row;
+									s32 pc = peaks[split_peaks[p]].col;
+									s64 ssx = 0, ssy = 0, ssw = 0;
+									s32 r, c;
+									for (r = max(0, pr - 2); r <= min((s32)nrows - 1, pr + 2); r++) {
+										for (c = max(0, pc - 2); c <= min((s32)ncols - 1, pc + 2); c++) {
+											u32 idx = (u32)r * ncols + (u32)c;
+											s16 w;
+											if (shid->heatmap_label[idx] != label) continue;
+											w = shid->heatmap_signal[idx];
+											if (w <= 0) continue;
+											ssx += (s64)c * w;
+											ssy += (s64)r * w;
+											ssw += w;
+										}
+									}
+									if (ssw > 0) {
+										s32 sbi = nlabels;
+										shid->blob_x[sbi] = (u32)(ssx * 100 / ssw);
+										shid->blob_y[sbi] = (u32)(ssy * 100 / ssw);
+										shid->blob_wsum[sbi] = (u32)ssw;
+										shid->blob_active[sbi] = true;
+										shid->eigmaj[sbi] = 0;
+										shid->eigmin[sbi] = 0;
+										shid->eigori[sbi] = 0;
+										nlabels++;
+										touched_count++;
+									}
+								}
+								continue; /* skip normal single-blob path */
+							}
+						}
+					}
+
 					/* Edge-contact weight penalty (Windows:
 					 * config[0x8d0]/[0x8d4] edge penalties).
 					 * Reduce weight by 50% for blobs touching any
