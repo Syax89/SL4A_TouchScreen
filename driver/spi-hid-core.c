@@ -2458,10 +2458,16 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		}
 
 		/* Hungarian global assignment (matching Windows TouchPenProcessor0C19).
-		 * Replaces the old greedy nearest-neighbor with minimum-cost bipartite
-		 * matching.  Each blob is assigned to exactly one slot, minimizing
-		 * Euclidean squared distance. Empty slots receive a uniform penalty
-		 * so that new slots are only created when no claimed slot is nearby. */
+			 * Replaces the old greedy nearest-neighbor with minimum-cost bipartite
+			 * matching.  Each blob is assigned to exactly one slot, minimizing
+			 * Euclidean squared distance. Empty slots receive a uniform penalty
+			 * so that new slots are only created when no claimed slot is nearby.
+			 *
+			 * Windows config values (per-device, from decomp):
+			 *   Normal association radius:  config+0x8dc = 0.545 grid units
+			 *   Continuity radius (1 track): config+0x8e0 = 1.218 grid units
+			 *   Coalesce threshold squared: frame_data+0x0c = 36.0
+			 * blob_max_distance=3 maps to ~0.545; single-track uses 2.2x. */
 		{
 			u8 assigned_slot[HEATMAP_MAX_BLOBS];
 			u32 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
@@ -2472,8 +2478,10 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			u8 row_cover[HEATMAP_MAX_BLOBS], col_cover[HEATMAP_MAX_SLOTS];
 			s32 dx, dy;
 			u8 n_blobs = sorted_count;
+			u8 active_slots = 0;
 			u8 round, row, col;
 			u16 min_val;
+			u32 bmd;
 
 			memset(new_active, 0, sizeof(new_active));
 			memset(new_gx, 0, sizeof(new_gx));
@@ -2483,21 +2491,32 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			memset(row_val, 0, sizeof(row_val));
 			memset(col_val, 0, sizeof(col_val));
 
+			/* Count claimed slots for single-track continuity radius. */
+			for (col = 0; col < HEATMAP_MAX_SLOTS; col++)
+				if (shid->blob_slot_state[col] >= 2)
+					active_slots++;
+
+			/* Single-track continuity: use ~2.2x wider radius when only
+			 * one finger is active, preventing track loss during fast
+			 * movement or brief signal attenuation (Windows: 1.218 vs
+			 * 0.545 grid units — matches decomp config+0x8e0). */
+			bmd = (u32)blob_max_distance * 100;
+			if (active_slots == 1)
+				bmd = bmd * 22 / 10;   /* 2.2x */
+
 			/* Build cost matrix: matching Python oracle Hungarian.
 			 * In-range: 10*sqrt(dx²+dy²), out-of-range: 100,
 			 * empty/new slot: 1000. */
 			for (row = 0; row < n_blobs; row++) {
 				row_val[row] = U16_MAX;
 				for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
-					u32 max_d, bmd;
+					s32 dx, dy;
 
 					if (shid->blob_slot_state[col] >= 1) {
-						s32 dx = (s32)sorted[row].gx - (s32)shid->blob_slot_gx[col];
-						s32 dy = (s32)sorted[row].gy - (s32)shid->blob_slot_gy[col];
+						dx = (s32)sorted[row].gx - (s32)shid->blob_slot_gx[col];
+						dy = (s32)sorted[row].gy - (s32)shid->blob_slot_gy[col];
 						if (dx < 0) dx = -dx;
 						if (dy < 0) dy = -dy;
-						bmd = (u32)blob_max_distance * 100;
-						max_d = bmd > bmd + 1 ? 0 : bmd;
 						if ((u32)dx <= bmd && (u32)dy <= bmd) {
 							u32 d = (u32)dx * (u32)dx + (u32)dy * (u32)dy;
 							shid->cost[row][col] = (u16)(int_sqrt((u64)d) / 10);
@@ -2602,15 +2621,17 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					bool was_claimed = (shid->blob_slot_state[s] >= 2);
 					u8 blob_idx = sorted[bi].idx;
 
-					/* Sanity: reject jumps beyond 5 grid cells for
-					 * claimed slots — noise blobs can't steal
-					 * existing finger assignments (3-finger). */
+					/* Sanity: reject jumps beyond association radius
+					 * + 2 cells for claimed slots — noise blobs can't
+					 * steal existing finger assignments (3+ finger).
+					 * Single-track continuity uses the same wider radius. */
 					if (was_claimed) {
 						s32 jdx = (s32)gx - (s32)shid->blob_slot_gx[s];
 						s32 jdy = (s32)gy - (s32)shid->blob_slot_gy[s];
+						u32 jmax = bmd + 200;
 						if (jdx < 0) jdx = -jdx;
 						if (jdy < 0) jdy = -jdy;
-						if (jdx > 500 || jdy > 500)
+						if ((u32)jdx > jmax || (u32)jdy > jmax)
 							goto slot_unassigned;
 					}
 
