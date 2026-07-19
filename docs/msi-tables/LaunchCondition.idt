@@ -1,4 +1,0 @@
-Condition	Description
-s255	l255
-LaunchCondition	Condition
-NOT WIX_DOWNGRADE_DETECTED	A newer version is already installed.

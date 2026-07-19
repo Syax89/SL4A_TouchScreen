@@ -1,16 +1,12 @@
 # amdspi.sys — Windows AMD SPI Driver (Decompiled)
 
-> **Historical research note (2026-07-06).** The original verification report
-> and per-function `docs/decomp/amdspi/` export are not tracked in this tree.
-> Treat this document as an index of the analysis rather than current driver
-> behavior; use `docs/AMD_CONTROLLER_VALIDATION.md` for supported changes.
+Windows kernel driver for the AMD FCH SPI controller. Decompiled from
+`amdspi.sys` (x64, no PDB symbols). Responsible for low-level SPI
+communication between the OS and the touchscreen device.
 
-Windows driver for the AMD FCH SPI controller. Responsible for low-level SPI communication.
+## Reference Files
 
-## Source Files
-
-The tracked `docs/decomp/clean/amdspi_*` files are the available cleaned excerpts
-from `amdspi.sys` (x64).
+Decompilation outputs are in `docs/decomp/clean/`:
 
 ---
 

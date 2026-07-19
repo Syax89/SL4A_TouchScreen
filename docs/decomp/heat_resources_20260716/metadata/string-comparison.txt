@@ -1,2 +1,0 @@
-ascii_strings_identical=1
-utf16le_strings_identical=0

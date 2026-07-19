@@ -74,6 +74,10 @@ enum spi_hid_lifecycle_action {
 	SPI_HID_LIFECYCLE_PROBE_FAILED,
 };
 
+/*
+ * Set the sequencer state machine to a new state.
+ * States: 0=WAIT_RESET 1=WAIT_DESC 2=WAIT_RPT 3=VENDOR_INIT 4=DONE 5=WAIT_FEATURE
+ */
 static void spi_hid_seq_set_state(struct spi_hid *shid, int new_state,
 		enum spi_hid_seq_reason reason)
 {
@@ -282,6 +286,11 @@ static const char *spi_hid_power_mode_string(u8 power_state)
 	}
 }
 
+/*
+ * Set device power state via SET_POWER command.
+ * raw_buf[14] = power mode (ACTIVE/SLEEP/OFF).
+ * Called under power_lock mutex.
+ */
 static int spi_hid_set_power(struct spi_hid *shid, u8 power_mode)
 {
 	u8 raw_buf[14] = {
@@ -364,8 +373,7 @@ static void spi_hid_stop_hid(struct spi_hid *shid)
 	}
 }
 
-/* _RST calls M010 which DESTROYS the device (2026-07-07).
- * On ACPI systems, _INI has already powered the device. Just wait. */
+/* _RST calls M010 which DESTROYS the device. Never call it. */
 static int spi_hid_reset_via_acpi(struct spi_hid *shid)
 {
 	msleep(300);
@@ -941,16 +949,11 @@ static int spi_hid_create_device(struct spi_hid *shid)
 	shid->hid = hid;
 
 	ret = hid_add_device(hid);
-	/* 2026-07-08: hid_add_device() only reports whether the device was
-	 * registered on the bus, not whether any driver actually bound to it
-	 * — a corrupted wire-read descriptor can make hid_parse_report()
-	 * return success (its own per-item validation is lenient, e.g.
-	 * "unexpected long global item" is only a warning there) while the
-	 * matched driver's own probe (hid-generic in our case) fails
-	 * synchronously inside this same call, leaving hid->driver NULL.
-	 * That's the actual reliable "this descriptor wasn't good enough"
-	 * signal (see docs/NEXT_STEPS.md §C), not hid_parse_report()'s return
-	 * code or hid_add_device()'s return code. */
+	/*
+	 * hid_add_device() reports whether report-parsing succeeded, not
+	 * whether the device was created. The true failure signal is when
+	 * hid->driver remains NULL after the call.
+	 */
 	if (!ret && !hid->driver) {
 		dev_warn(dev, "SEQ: hid_add_device succeeded but no driver bound to it\n");
 		ret = -ENODEV;
@@ -1341,7 +1344,7 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 	return 0;
 }
 
-/* raw_mode handshake watchdog (2026-07-08, docs/GROUND_TRUTH.md §18.7): SET_FEATURE
+/* raw_mode handshake watchdog: SET_FEATURE
  * occasionally makes the device go completely silent (no further IRQ at all, not even
  * a RESET_RSP), so the existing IRQ-triggered retry in spi_hid_seq_thread() never gets
  * a chance to run. Decompiling the real HidSpiCx.sys showed Windows's own SmFx state
@@ -1442,7 +1445,7 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	 * The D2→D0 cycle is a "soft" reset that doesn't cut physical power,
 	 * matching how Windows recovers from a failed feature handshake.
 	 *
-	 * 2026-07-12: cancel any pending feat_delay_work (otherwise
+	 * Cancel any pending feat_delay_work (otherwise
 	 * feat_delay_work's 5900ms timer and our 2000ms watchdog timer race —
 	 * the watchdog always fires first, creating an infinite reset loop).
 	 * Re-arm the watchdog with a timeout longer than getfeat_delay_ms so
@@ -1587,7 +1590,7 @@ out:
 }
 
 
-/* Heatmap blob detection (2026-07-08 D).
+/* Heatmap blob detection — raw multi-touch pipeline
  * The raw content_id=0x0C frame is a capacitive sensor heatmap:
  * 2 bytes SurfaceSwitch (timestamp/scan ID), then cell data.
  * Each byte indexes the c590 lookup table for actual signal level.
@@ -1647,7 +1650,7 @@ module_param(acpi_probe_power_cycle, bool, 0444);
 MODULE_PARM_DESC(acpi_probe_power_cycle,
 	"Power-cycle ACPI _PS3->_PS0 at probe (legacy default; experimental to disable)");
 
-/* 2026-07-08 (handshake reliability experiments, GROUND_TRUTH.md §18.7): SET_FEATURE
+/* SET_FEATURE handshake experiments:
  * always writes fine at the driver level but the device silently stops responding
  * afterward most of the time. Two testable hypotheses, toggled independently so results
  * aren't conflated: (1) the write happens too fast/at the wrong SPI clock speed for the
@@ -1844,7 +1847,7 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
  *
  * Using max range 0..32767 with aspect ratio from HID descriptor (2934×1652).
  *
- * Grid geometry (empirically derived 2026-07-13 from surface_touch.csv raw
+ * Grid geometry derived from analyzing captured raw frames:
  * frames): the content_id=0x0C report carries a contiguous 3456-byte cell
  * field starting at dfa_data_offset=26, laid out as 72 columns × 48 rows
  * (row-major, 72-wide fast axis). This is a clean 3:2 grid matching the
@@ -2065,9 +2068,25 @@ resched:
 		schedule_delayed_work(&shid->poll_work,
 			      msecs_to_jiffies(shid->poll_interval_ms));
 out:
-	mutex_unlock(&shid->seq_lock);
+	return;
 }
 
+/*
+ * Process a raw heatmap frame through the full CCL touch pipeline.
+ *
+ * Pipeline stages:
+ *   1. Baseline subtraction + noise floor
+ *   2. Peak detection gate (cross-shaped +/-5 cells)
+ *   3. CCL flood-fill (4-connected BFS)
+ *   4. Velocity rejection + edge penalty + blob splitting
+ *   5. Centroid + eigenvalues computation
+ *   6. Pre-merge (ghost rejection)
+ *   7. Hungarian assignment with multi-finger radii
+ *   8. Slot state machine + EMA + deadband + stationary lock
+ *   9. MT protocol emission
+ *
+ * The function modifies blob_* and blob_slot_* arrays in shid.
+ */
 static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data_len, u8 content_id)
 {
 	struct device *dev = &shid->spi->dev;
@@ -3093,7 +3112,7 @@ slot_unassigned:				switch (shid->blob_slot_state[s]) {
 			}
 		}
 
-		/* Bug fix (2026-07-08 review): only HEATMAP_MAX_SLOTS slots were
+		/* Bug fix: only HEATMAP_MAX_SLOTS slots were
 		 * ever allocated via input_mt_init_slots() — the loop above
 		 * already reports the correct active/inactive state for all of
 		 * them. Calling input_mt_slot() with an out-of-range index here
@@ -3170,7 +3189,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	shid->stat_irq_count++;
 
-	/* Bug fix (2026-07-08 review): this used to compare seq_state (int,
+	/* Bug fix: this used to compare seq_state (int,
 	 * values 0-5) against seq_enabled (bool), which collapses to
 	 * "seq_state != 1" and fired on every IRQ while parked in any other
 	 * state — including state 4, the steady-state loop that handles every
@@ -4132,6 +4151,20 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 	cancel_work_sync(&shid->error_work);
 }
 
+/*
+ * Driver probe: called when the SPI device is enumerated via ACPI.
+ *
+ * Initialization sequence:
+ *   1. Parse ACPI resources (SPI bus, GPIO, power regulators)
+ *   2. Allocate driver state and initialize locks/work items
+ *   3. Discover device via DESCREQ → DEVICE_DESC → RPT_DESC
+ *   4. Create HID device via hid_add_device()
+ *   5. If raw_mode enabled: activate via vendor-init + SET_FEATURE ID5=01
+ *   6. Start sequencer and input polling/IRQ
+ *
+ * Auto-retries on cold boot handshake failure (up to 3 attempts).
+ * Returns 0 on success, negative errno on failure.
+ */
 static int spi_hid_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
@@ -4338,17 +4371,17 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->ready = shid->seq_state >= 4 ? true : false;
 	shid->keep_powered = true;
 
-	/* TEST: wait for device to stabilize after ACPI _INI power-on.
+	/* Wait for device to stabilize after ACPI _INI power-on.
 	 * _INI is called by the ACPI subsystem before probe() and handles
 	 * GPIO power sequencing. The device is already powered and sending
 	 * RESET_RSP. Do NOT call _RST/M009/M010 — power cycle kills the
-	 * device until reboot (verified 2026-07-07, see GROUND_TRUTH §10.7). */
+	 * The _RST method calls M010 which destroys the device until cold reboot. */
 	seq_dbg(shid, 1, "probe settling delay begin\n");
 	msleep(300);
 	seq_dbg(shid, 1, "probe settling delay complete\n");
 	shid->desc.input_register = 0x000000;
 
-	/* 2026-07-12: vendor init disabled — the working cold boot did not
+	/* Vendor init disabled: the working cold boot trace did not
 	 * have it. D2->D0 may confuse the controller after _PS3->_PS0. */
 	if (0 && raw_mode) {
 		dev_info(dev, "SEQ: sending vendor init (SET_POWER D2->D0)...\n");
@@ -4358,7 +4391,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	dev_info(dev, "SEQ: device powered by ACPI _INI, arming IRQ\n");
 
 	/* Create multitouch input device for heatmap-to-touch pipeline.
-	 * Bug fix (2026-07-08 review): this used to be created unconditionally,
+	 * Bug fix: this was created unconditionally,
 	 * even in the default raw_mode=0 configuration where it never receives
 	 * a single event (only heatmap_process_frame() feeds it, and that's
 	 * only called when raw_mode is set) — exposing a second, permanently

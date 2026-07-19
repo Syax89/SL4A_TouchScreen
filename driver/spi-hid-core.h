@@ -222,107 +222,108 @@ struct latency_instance {
 };
 
 struct spi_hid {
-	struct spi_device	*spi;
-	struct hid_device	*hid;
+	struct spi_device	*spi;         /* SPI bus controller device */
+	struct hid_device	*hid;         /* HID subsystem device handle */
 
-	struct spi_transfer	input_transfer[2];
-	struct spi_message	input_message;
+	struct spi_transfer	input_transfer[2];  /* 2-phase SPI transfer descriptors */
+	struct spi_message	input_message;      /* SPI message aggregating transfers */
 
-	struct spi_hid_device_descriptor desc;
-	struct spi_hid_output_buf output;
-	struct spi_hid_input_buf input;
-	struct spi_hid_input_buf response;
+	struct spi_hid_device_descriptor desc;    /* Parsed hardware descriptor */
+	struct spi_hid_output_buf output;         /* Output report buffer (host→device) */
+	struct spi_hid_input_buf input;           /* Main input buffer (device→host) */
+	struct spi_hid_input_buf response;        /* Output response buffer */
 
-	spinlock_t		input_lock;
+	spinlock_t		input_lock;   /* Protects input transfer and buffer access */
 
-	u32 device_descriptor_register;
-	u32 input_transfer_pending;
-	u32 input_stage;
+	u32 device_descriptor_register;    /* Register address for device descriptor */
+	u32 input_transfer_pending;        /* Non-zero when async input transfer active */
+	u32 input_stage;                   /* 0=IDLE (header), 1=BODY (payload) */
 
-	u16 hid_desc_addr;
-	u8 power_state;
-	u8 attempts;
+	u16 hid_desc_addr;                 /* HID descriptor register address from ACPI */
+	u8 power_state;                    /* D0 (1 active), D2 (2 doze), D3 (3 off) */
+	u8 attempts;                       /* Probe retry counter */
 
 	/*
-	* ready flag indicates that the FW is ready to accept commands and requests.
-	* The FW becomes ready after sending the report descriptor.
-	*/
+	 * ready flag indicates that the FW is ready to accept commands and requests.
+	 * The FW becomes ready after sending the report descriptor.
+	 */
 	bool ready;
 	/*
-	* refresh_in_progress is set to true while the refresh_device worker thread
-	* is destroying and recreating the hidraw device. When this flag is set to
-	* true, the ll_close and ll_open functions will not cause power state changes
-	*/
+	 * refresh_in_progress is set to true while the refresh_device worker thread
+	 * is destroying and recreating the hidraw device. When this flag is set to
+	 * true, the ll_close and ll_open functions will not cause power state changes
+	 */
 	bool refresh_in_progress;
 
-	bool irq_enabled;
-	bool removing;
-	bool works_initialized;
-	int irq;
-	struct gpio_desc *gpiod;
-	struct delayed_work descreq_work;
+	bool irq_enabled;           /* Whether the GPIO interrupt is enabled */
+	bool removing;              /* Driver removal in progress */
+	bool works_initialized;      /* Work items have been initialized */
+	int irq;                    /* GPIO interrupt line number */
+	struct gpio_desc *gpiod;    /* GPIO descriptor for device interrupt */
+	struct delayed_work descreq_work; /* DESCREQ retry work */
 
-	struct regulator *supply;
-	struct pinctrl *pinctrl;
-	struct pinctrl_state *pinctrl_reset;
-	struct pinctrl_state *pinctrl_active;
-	struct pinctrl_state *pinctrl_sleep;
-	struct work_struct reset_work;
-	struct work_struct create_device_work;
-	struct work_struct refresh_device_work;
-	struct work_struct error_work;
+	struct regulator *supply;    /* Power supply regulator */
+	struct pinctrl *pinctrl;     /* Pin control state container */
+	struct pinctrl_state *pinctrl_reset;   /* Reset pin state */
+	struct pinctrl_state *pinctrl_active;  /* Active (default) pin state */
+	struct pinctrl_state *pinctrl_sleep;   /* Sleep pin state */
+	struct work_struct reset_work;          /* Software reset work */
+	struct work_struct create_device_work;  /* HID device creation work */
+	struct work_struct refresh_device_work; /* HID device refresh work */
+	struct work_struct error_work;          /* Error handling work */
 
-	struct mutex lock;
+	struct mutex lock;            /* Top-level driver state mutex */
 	/* Serializes sequencer SPI transfers and sequencer-owned state. */
 	struct mutex seq_lock;
-	struct mutex power_lock;
-	struct mutex output_lock;
-	struct mutex raw_capture_lock;
-	struct completion output_done;
-	u8 expected_response_type;
-	u8 expected_response_id;
-	bool output_pending;
+	struct mutex power_lock;      /* Serializes power state transitions */
+	struct mutex output_lock;     /* Serializes output report access */
+	struct mutex raw_capture_lock; /* Serializes raw capture buffer access */
+	struct completion output_done; /* Signaled when output report completes */
+	u8 expected_response_type;    /* Expected response report type */
+	u8 expected_response_id;      /* Expected response content ID */
+	bool output_pending;          /* Output report sent, awaiting response */
 
-	__u8 read_approval[SPI_HID_READ_APPROVAL_MAX];
+	__u8 read_approval[SPI_HID_READ_APPROVAL_MAX]; /* Read-approval buffer */
 
-	u32 report_descriptor_crc32;
+	u32 report_descriptor_crc32;  /* CRC32 of wire-read report descriptor */
 
-	u32 bus_error_count;
-	int bus_last_error;
+	u32 bus_error_count;          /* Cumulative SPI bus error counter */
+	int bus_last_error;           /* Last bus error code */
 
-	u32 dir_count;
-	u32 powered;
-	bool keep_powered;
+	u32 dir_count;                /* Counter for descriptor reads */
+	u32 powered;                  /* Power state transitions completed */
+	bool keep_powered;           /* Prevent suspend power-off */
 
 	/*
-	 * Experimental IRQ-driven startup sequencer (mirrors HidSpiCx WDF
-	 * automaton: reset-resp -> body read -> ConfiguringDescriptor ->
-	 * ack -> descriptor request). Bypasses the blind probe RAW tests.
+	 * IRQ-driven startup sequencer state machine. Mirrors HidSpiCx WDF
+	 * automaton: reset-response → body read → ConfiguringDescriptor →
+	 * acknowledge → descriptor request.
+	 * States: 0=WAIT_RESET 1=WAIT_DESC 2=WAIT_RPT 3=VENDOR_INIT 4=DONE 5=WAIT_FEATURE
 	 */
 	int seq_state;
-	bool seq_enabled;
-	unsigned long seq_last_valid_jiffies;
-	u32 seq_storm_count;
+	bool seq_enabled;               /* Sequencer is active */
+	unsigned long seq_last_valid_jiffies; /* Last valid IRQ timestamp */
+	u32 seq_storm_count;           /* Consecutive invalid IRQ count (storm detection) */
 
-	u64 interrupt_time_stamps[2];
-	struct latency_instance latencies[SPI_HID_MAX_LATENCIES];
-	u8 latency_index;
-	u8 perf_mode;
-	u16 touch_signature_index;
+	u64 interrupt_time_stamps[2];  /* Ring buffer: last two IRQ timestamps */
+	struct latency_instance latencies[SPI_HID_MAX_LATENCIES]; /* IRQ-to-report latency ring */
+	u8 latency_index;              /* Current slot in latency ring */
+	u8 perf_mode;                  /* Performance mode flag */
+	u16 touch_signature_index;     /* Touch signature for latency tracking */
 
 	/* Report descriptor read from the device during standard discovery. */
 	u8 wire_report_descriptor[1024];
 	u32 wire_report_descriptor_len;
-	bool wire_report_descriptor_rejected;
+	bool wire_report_descriptor_rejected; /* Parse rejected by hid_parse_report */
 
-	/* Optional input state for validated passive CapImg frames. */
+	/* Multi-touch input device created for raw heatmap mode. */
 	struct input_dev *touch_input;
-	bool raw_mode_active;
-	u8 *heatmap_buf;          /* last captured frame buffer, kmalloc'd */
-	u32 heatmap_len;
-	u32 heatmap_content_id;
-	u16 heatmap_grid_cols;    /* determined from frame analysis */
-	u16 heatmap_grid_rows;
+	bool raw_mode_active;           /* Device is in raw heatmap mode */
+	u8 *heatmap_buf;                /* Last captured raw frame buffer, kmalloc'd */
+	u32 heatmap_len;                /* byte length of heatmap_buf */
+	u32 heatmap_content_id;         /* content_id from the captured frame */
+	u16 heatmap_grid_cols;          /* Heatmap columns (72) */
+	u16 heatmap_grid_rows;          /* Heatmap rows (48) */
 
 	/* Per-device blob detection buffers. */
 	u8  heatmap_baseline[HEATMAP_MAX_CELLS];
@@ -409,29 +410,29 @@ struct spi_hid {
 	struct spi_hid_isolated_set_frame
 		isolated_set_ring[SPI_HID_ISOLATED_SET_RING_SLOTS];
 
-	/* Retained legacy raw-handshake state; raw_mode remains disabled. */
-	struct delayed_work raw_handshake_watchdog;
-	int raw_handshake_retries_left;
-	u8 raw_handshake_state5_defers;
-	bool raw_handshake_confirmed;
-	u8 raw_probe_attempts;                /* deferred probe retry count */
+	/* Raw-mode handshake state for auto-retry on cold boot. */
+	struct delayed_work raw_handshake_watchdog; /* Handshake timeout/retry watchdog */
+	int raw_handshake_retries_left;            /* Remaining handshake attempts */
+	u8 raw_handshake_state5_defers;           /* State-5 deferral counter */
+	bool raw_handshake_confirmed;             /* Handshake successfully completed */
+	u8 raw_probe_attempts;                    /* Deferred probe retry counter */
 
-	struct delayed_work feat_delay_work;	/* GET_FEATURE delay (Windows: ~5900ms) */
-	bool feat_delay_pending;
-	struct delayed_work raw_transition_timeout_work;
-	struct delayed_work isolated_set_timeout_work;
-	struct delayed_work isolated_set_work;
+	struct delayed_work feat_delay_work;      /* GET_FEATURE delay work (matches Windows ~5900ms) */
+	bool feat_delay_pending;                  /* Delay work is scheduled */
+	struct delayed_work raw_transition_timeout_work;  /* Raw transition timeout */
+	struct delayed_work isolated_set_timeout_work;    /* Isolated set timeout */
+	struct delayed_work isolated_set_work;            /* Isolated set scheduling */
 
-	struct delayed_work stream_watchdog;
-	u32 stream_watchdog_data;
-	u32 stream_watchdog_misses;
-	u32 stream_watchdog_reinits;
-	bool stream_watchdog_active;
+	struct delayed_work stream_watchdog;      /* Input stream monitoring watchdog */
+	u32 stream_watchdog_data;                 /* Frames since last data */
+	u32 stream_watchdog_misses;               /* Missed frame counter */
+	u32 stream_watchdog_reinits;              /* Stream reinit counter */
+	bool stream_watchdog_active;              /* Watchdog is active */
 
-	struct delayed_work poll_work;		/* active polling work */
-	bool poll_active;			/* whether polling loop is running */
-	u32 poll_interval_ms;			/* polling interval, default 10 */
-	u32 poll_missed;			/* consecutive empty polls */
+	struct delayed_work poll_work;            /* Active polling work item */
+	bool poll_active;                         /* Polling loop running */
+	u32 poll_interval_ms;                     /* Polling interval (default 10 ms) */
+	u32 poll_missed;                          /* Consecutive empty polls */
 
 	u32 stat_reset_rsp;
 	u32 stat_device_desc;
