@@ -2492,14 +2492,19 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						}
 					}
 
-					/* Edge-contact weight penalty (Windows:
-					 * config[0x8d0]/[0x8d4] edge penalties).
-					 * Reduce weight by 50% for blobs touching any
-					 * grid edge — bezel artifacts have lower
-					 * priority in Hungarian assignment. */
+					/* Edge-contact weight penalty (Windows DLL config):
+					 * +0x8D0=0.967 top edge — mild penalty
+					 * +0x8D4=0.228 bottom edge — harsh penalty
+					 * (panel connector bezel produces false touches).
+					 * Top/left/right: keep ~97% weight.
+					 * Bottom (max_r near nrows): keep ~23% weight. */
 					if (min_r <= 1 || max_r >= (s32)nrows - 2 ||
-					    min_c <= 1 || max_c >= (s32)ncols - 2)
-						shid->blob_wsum[bi] = shid->blob_wsum[bi] / 2;
+					    min_c <= 1 || max_c >= (s32)ncols - 2) {
+						if (max_r >= (s32)nrows - 2)
+							shid->blob_wsum[bi] = shid->blob_wsum[bi] * 23 / 100;
+						else
+							shid->blob_wsum[bi] = shid->blob_wsum[bi] * 97 / 100;
+					}
 
 					shid->blob_active[bi] = true;
 					nlabels++;
