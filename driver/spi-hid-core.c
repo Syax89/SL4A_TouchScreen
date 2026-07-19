@@ -2690,13 +2690,24 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				if (shid->blob_slot_state[col] >= 2)
 					active_slots++;
 
-			/* Single-track continuity: use ~2.2x wider radius when only
-			 * one finger is active, preventing track loss during fast
-			 * movement or brief signal attenuation (Windows: 1.218 vs
-			 * 0.545 grid units — matches decomp config+0x8e0). */
+			/* Scale association radius by finger count
+			 * (matching DLL config table DAT_1808e0460):
+			 *   1 finger: 1.218 / 0.545 = 2.23x (continuity +0x8E0)
+			 *   2 fingers: 0.545 = 1.00x (normal +0x8DC)
+			 *   3 fingers: 1.549 / 0.545 = 2.84x (+0x8E4)
+			 *   4 fingers: 1.845 / 0.545 = 3.39x (+0x8E8)
+			 *   5+ fingers: 2.161 / 0.545 = 3.97x (+0x8EC)
+			 * More fingers → each blob has lower signal → wider
+			 * search needed for Hungarian to maintain tracking. */
 			bmd = (u32)blob_max_distance * 100;
 			if (active_slots == 1)
-				bmd = bmd * 22 / 10;   /* 2.2x */
+				bmd = bmd * 22 / 10;   /* ×2.2 */
+			else if (active_slots == 3)
+				bmd = bmd * 28 / 10;   /* ×2.8 */
+			else if (active_slots == 4)
+				bmd = bmd * 34 / 10;   /* ×3.4 */
+			else if (active_slots >= 5)
+				bmd = bmd * 40 / 10;   /* ×4.0 */
 
 			/* Build cost matrix: matching Python oracle Hungarian.
 			 * In-range: 10*sqrt(dx²+dy²), out-of-range: 100,
@@ -2816,11 +2827,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					bool was_claimed = (old_state >= 2);
 					u8 blob_idx = sorted[bi].idx;
 
-					/* Sanity: reject jumps beyond association radius
-					 * + 2 cells for claimed slots — noise blobs can't
-					 * steal existing finger assignments (3+ finger).
-					 * Single-track continuity uses the same wider radius. */
-					if (was_claimed) {
+			/* Sanity: reject jumps beyond association radius
+				 * + 2 cells for claimed slots — noise blobs can't
+				 * steal existing finger assignments (3+ finger).
+				 * Scales with the per-finger-count radius. */
+				if (was_claimed) {
 						s32 jdx = (s32)gx - (s32)shid->blob_slot_gx[s];
 						s32 jdy = (s32)gy - (s32)shid->blob_slot_gy[s];
 						u32 jmax = bmd + 200;
