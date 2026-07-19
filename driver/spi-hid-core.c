@@ -2245,17 +2245,46 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 	/* Step 2+3: Connected-component labeling + centroid + eigenvalues
 	 * (matching Windows FUN_180600c40 CCL pipeline).
-	 * 4-connected flood-fill replaces peak detection — each connected
-	 * region of signal-above-baseline becomes one blob candidate.
-	 * Centroid and eigenvalues span the full component extent
-	 * instead of a fixed 5×5 window. */
+	 * 4-connected flood-fill — each connected region of signal-above-
+	 * baseline becomes one blob candidate.
+	 *
+	 * Pre-filter: peak-detection gate (Windows FUN_1805fba00).  If no
+	 * peak is found at all, the entire CCL pass is skipped — residual
+	 * noise after finger lift never creates phantom blobs. */
 	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
 	memset(shid->blob_active, 0, sizeof(shid->blob_active));
 	memset(shid->heatmap_label, 0, cell_count * sizeof(shid->heatmap_label[0]));
 	nlabels = 0;
 	touched_count = 0;
 
+	/* Peak-detection gate: cross-shaped ±5, min_rise=300.
+	 * If no peak passes, skip CCL entirely. */
 	{
+		bool have_peak = false;
+		for (i = 0; i < cell_count; i++) {
+			u16 col, row;
+			s16 rise;
+			bool ok;
+
+			if (!shid->heatmap_touched[i]) continue;
+			col = i % ncols; row = i / ncols;
+			if (row >= nrows) break;
+			rise = shid->heatmap_signal[i];
+			if (rise < 300) continue;
+
+			ok = true;
+			if (col >= 5 && shid->heatmap_touched[i - 5] &&
+			    shid->heatmap_signal[i - 5] > rise) ok = false;
+			if (col + 5 < ncols && shid->heatmap_touched[i + 5] &&
+			    shid->heatmap_signal[i + 5] > rise) ok = false;
+			if (row >= 5 && shid->heatmap_touched[i - 5 * ncols] &&
+			    shid->heatmap_signal[i - 5 * ncols] > rise) ok = false;
+			if (row + 5 < nrows && shid->heatmap_touched[i + 5 * ncols] &&
+			    shid->heatmap_signal[i + 5 * ncols] > rise) ok = false;
+			if (ok) { have_peak = true; break; }
+		}
+
+		if (have_peak) {
 		u16 queue[512]; /* BFS flood-fill queue */
 		u16 next_label = 1;
 		u32 ci;
@@ -2411,6 +2440,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			next_label++;
 		}
 		}
+	} /* have_peak */
 
 	/* Step 5: emit multitouch events with EMA smoothing and slot tracking.
 	 * Grid → screen mapping per GROUND_TRUTH.md §22.8.  Calibration
