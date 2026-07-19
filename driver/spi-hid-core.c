@@ -3035,6 +3035,33 @@ slot_unassigned:				switch (shid->blob_slot_state[s]) {
 		}
 	}
 
+			/* Post-emission coalescing (Windows FUN_1806025c0):
+			 * merge active slot pairs within ghost_dist to suppress
+			 * ghost contacts from blob splitting artifacts. Keep
+			 * the heavier slot, deactivate the lighter one.
+			 * Threshold: distance² < 36 grid cells (config+0xC98). */
+			if (ghost_dist > 0) {
+				u8 a, b;
+				u32 gdsq = (u32)ghost_dist * (u32)ghost_dist * 10000;
+				for (a = 0; a < HEATMAP_MAX_SLOTS; a++) {
+					if (!new_active[a]) continue;
+					for (b = a + 1; b < HEATMAP_MAX_SLOTS; b++) {
+						s32 dx, dy;
+						if (!new_active[b]) continue;
+						dx = (s32)new_gx[a] - (s32)new_gx[b];
+						dy = (s32)new_gy[a] - (s32)new_gy[b];
+						if ((u32)(dx * dx) + (u32)(dy * dy) <= gdsq) {
+							if (shid->blob_slot_weight[b] >
+							    shid->blob_slot_weight[a]) {
+								new_active[a] = false;
+							} else {
+								new_active[b] = false;
+							}
+						}
+					}
+				}
+			}
+
 			for (u8 s = 0; s < HEATMAP_MAX_SLOTS; s++) {
 				input_mt_slot(input, s);
 				input_mt_report_slot_state(input, MT_TOOL_FINGER, new_active[s]);
