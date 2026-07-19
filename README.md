@@ -11,26 +11,28 @@
 
 ---
 
-## Status: beta — standard HID + raw multi-touch
+## Status: beta — raw multi-touch ~85% Windows alignment
 
-Standard HID (single-touch + pen, Report IDs 0x40 and 0x01) is stable.
-**Raw multi-touch mode** (`raw_mode=1`) is functional: 2-finger tracking is very
-good, 3-finger mostly works, 4-finger is unstable. The driver activates raw mode
-automatically on boot via `/etc/modprobe.d/spi-hid.conf` and auto-retries the
-handshake if needed.
+Standard HID (single-touch + pen) is stable. Raw multi-touch mode (`raw_mode=1`)
+is the default and is functional: 2-finger very good, 3-finger good, 4-finger
+improved. The pipeline matches Windows `TouchPenProcessor0C19.dll` at ~85%
+fidelity with config values extracted from the DLL data segment.
 
 | Feature | Status |
 |---------|--------|
 | Device initialization (DESCREQ, DEVICE_DESC, RPT_DESC) | Complete |
 | HID report descriptor (936 bytes, 100% wire-read) | Complete |
-| Single-touch X/Y coordinates (Report ID 0x40) | **Working** |
-| BTN_TOUCH (tap/lift detection) | **Working** |
-| Stylus/Pen (Report ID 0x01) | **Working** |
-| Multi-touch (raw heatmap, peak+centroid+Hungarian) | **Working** |
+| Single-touch + pen (Report ID 0x40 and 0x01) | **Working** |
+| Multi-touch CCL pipeline (peak gate + flood-fill + Hungarian) | **Working** |
 | Auto-retry on cold boot handshake failure | **Working** |
 | Touch ellipse (per-blob eigenvalues) | **Working** |
 | Stationary lock (no pinch-to-zoom jitter) | **Working** |
-| 3+ finger tracking | Gradual contact loss |
+| Velocity rejection (Windows dist² ≤ 36.0) | **Working** |
+| Edge penalty (Windows config+0x8D0/0x8D4) | **Working** |
+| Multi-finger association radii (Windows +0x8DC-0x8EC) | **Working** |
+| 3+ finger tracking | Improved (min_rise=200) |
+| Candidate classification | Not implemented |
+| 4+ finger tracking | Partial contact loss |
 
 ---
 
@@ -214,18 +216,21 @@ and a full D2→D0 power cycle between each, then falls back to standard HID.
 
 ### Raw Heatmap Pipeline
 
-The pipeline replicates the Windows `TouchPenProcessor0C19.dll` processing chain
-(verified against Python oracle in `tools/surface_tracker.py`):
+The pipeline matches the Windows `TouchPenProcessor0C19.dll` processing chain
+(config values extracted from DLL data segment at `0x1808E0460`):
 
-1. **c590 LUT**: maps raw 16-bit to fixed-point `c590[i] = max(0, 10000 - (i*0.0222 + 6000))`
-2. **Baseline** (30 frames): asymmetric per-cell EMA (7/8 upward), cells under touch protected
-3. **Peak detection**: cross-shaped (±5 cells N/S/E/W), min rise 300, max 16 candidates
-4. **5×5 local centroid**: signal-weighted average, fixed-point ×100 sub-cell precision
-5. **Pre-merge**: coalesce neighbors within distance² < 36 cells, keep strongest
-6. **Hungarian assignment**: cost matrix matching Windows oracle; jump rejection (>5 cells) prevents noise-blob slot theft
-7. **EMA + deadband + stationary lock**: alpha=7 smoothing, ±0.8-cell deadband, position frozen after 6 still frames — eliminates pinch-to-zoom jitter
-8. **Lift lookback**: emit lift at history position from 2 frames ago
-9. **Per-blob eigenvalues**: touch major/minor and orientation via second-moment decomposition
+1. **c590 LUT**: maps raw 16-bit to fixed-point `c590[i] = max(0, 10000 - (i*22 + 6000))`
+2. **Baseline** (30 frames): asymmetric EMA, noise floor c590 < 400 (Windows 0.04)
+3. **Peak detection gate** (Windows FUN_1805fba00): cross-shaped ±5 cells, min_rise=200
+4. **CCL flood-fill** (Windows FUN_180600c40): 4-connected BFS, pixel_count≥2, max_rise≥200
+5. **Velocity rejection**: blob within 6 cells of peak (Windows dist² ≤ 36.0)
+6. **Edge penalty**: bottom edge ×23%, other edges ×97% (Windows config+0x8D0/0x8D4)
+7. **Blob splitting**: multi-peak blobs split by internal peak positions
+8. **5×5 / full-blob centroid** ×100 fixed-point, eigenvalues on bounding box
+9. **Pre-merge**: ghost_dist=6, distance²<36 (Windows config+0xC98=36.0)
+10. **Hungarian assignment** with multi-finger radii (1×2.2, 2×1.0, 3×2.8, 4×3.4, 5+×4.0)
+11. **EMA + deadband + stationary lock**: alpha=7, ±80 deadband, 6-frame lock
+12. **Lift lookback**: 2-frame history position on lift
 
 Module parameters for tuning: `blob_max_distance`, `blob_min_weight`, `blob_debounce`,
 `blob_lift_frames`, `ema_alpha`, `grid_cols`, `grid_rows`, `calib_scale_x/y`,

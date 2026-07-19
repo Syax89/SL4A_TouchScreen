@@ -1,205 +1,123 @@
 # Surface TouchPenProcessor0C19 — Kernel Pipeline
 
-Documento canonico della pipeline multitouch implementata nel driver Linux
-per MSHW0231, allineata al tracker Surface TouchPenProcessor0C19 decompilato
-e al Python oracle (`tools/surface_tracker.py`).
+Canonical pipeline document for the Linux kernel multitouch driver
+matching the Windows `TouchPenProcessor0C19.dll` processing chain.
 
-## Panoramica
+File: `driver/spi-hid-core.c`, entry point `heatmap_process_frame()`.
 
-La pipeline replica il flusso Windows validato dal tracker Python con mapping
-~85% fedele al DLL Surface. Una heatmap 72×48 (3456 celle) viene convertita da
-raw 16-bit a segnale c590, poi processata in 9 stage per produrre contatti
-multi-touch Linux.
-
-File sorgente: `driver/spi-hid-core.c`, funzione `heatmap_process_frame()`.
-
-## Pipeline completa
-
-### Stage 1 — c590 LUT
-
-Mappa gli i valori raw 16-bit della cella in fixed-point ×10000:
-```
-c590[i] = max(0, 10000 - (i * 22 / 1000 + 6000) / 1000)
-```
-
-Definizioni: `C590_BASE=10000`, `C590_STEP_NUM=22204`, `C590_STEP_DEN=1000`,
-`C590_OFFSET=6000`.
-
-**Kernel:** `spi-hid-core.c` definizioni c590, applicato a ogni cella in ingresso.
-
----
-
-### Stage 2 — Baseline
-
-Baseline asimmetrica per-cell: EMA 7/8 verso l'alto su celle non toccate,
-le celle sotto contatto sono protette (non aggiornate). 30 frame di warm-up,
-poi `baseline_ready = true`.
-
-**Kernel:** `spi-hid-core.c` baseline tracking (pre-pipeline, ~60 linee)
-
----
-
-### Stage 3 — Peak Detection
-
-**Windows:** `FUN_1805fba00`
-
-Croce a 5 celle nelle direzioni N/S/E/W a distanza ±5, min_rise=350 (c590 units),
-max 16 candidati, ordinati per signal rise decrescente.
-
-Una cella è un picco se il suo signal rise > 350 e nessuna delle quattro celle a distanza ±5
-ha un rise SUPERIORE.
-
-**Kernel:** `spi-hid-core.c:2260-2307`
+## Pipeline Overview
 
 ```
-min_rise = 350
-max_peaks = 16
-direction = 5 (cross, cardinal axes only)
+Frame (72x48 heatmap, 3456 cells)
+  │
+  ├─ c590 LUT + baseline →
+  │   signal rise per cell
+  │
+  ├─ noise floor (c590 < 400 → suppressed, Windows DAT_1806c08c8=0.04)
+  │   heatmap_touched[i] = (rise >= 200)
+  │
+  ├─ Peak Detection GATE (cross ±5, min_rise=200, Windows FUN_1805fba00)
+  │   ├─ no peak → CCL SKIPPED → 0 blobs → lift all slots
+  │   └─ peaks found → run CCL
+  │
+  ├─ CCL Flood-Fill (4-connected BFS, Windows FUN_180600c40)
+  │   │  Each connected component → blob candidate
+  │   │  Filters: pixel_count≥2, max_rise≥200, w≥1000
+  │   │
+  │   ├─ Velocity rejection (blob within 6 cells of a peak, Windows dist²≤36.0)
+  │   ├─ Edge penalty (bottom edge ×23%, other edges ×97%, config+0x8D0/0x8D4)
+  │   ├─ Blob splitting (2+ peaks within blob ≥4 cells apart → split)
+  │   ├─ Eigenvalues (second moments on blob bounding box)
+  │   └─ Centroid (×100 fixed-point, signal-weighted on full blob extent)
+  │
+  ├─ Pre-merge (ghost_dist=6, distance²<36, Windows config+0xC98=36.0)
+  │
+  ├─ Hungarian Assignment (Windows FUN_1805fd090)
+  │   │  Cost matrix: sqrt(dx²+dy²) in-range, 100 out, 1000 empty
+  │   │  Multi-finger radii (config+0x8DC-0x8EC):
+  │   │    1 finger ×2.2, 2×1.0, 3×2.8, 4×3.4, 5+×4.0
+  │   └─ Jump rejection (beyond radius+2 cells → rejected)
+  │
+  ├─ Slot State Machine
+  │   │  0=empty, 1=new(debounce 3), 2=claimed, 3=lift, 4=hold
+  │   └─ hold_frames=0 (disabled, direct 2→3 lift)
+  │
+  ├─ EMA + Deadband + Stationary Lock
+  │   │  EMA alpha=7 (weight 1/8), deadband ±80 (±0.8 cells)
+  │   │  Stationary lock after 6 frames
+  │   └─ Lift lookback (2 frames history)
+  │
+  └─ MT Emission (ABS_MT_POSITION, ABS_MT_TOUCH_MAJOR/MINOR/ORIENTATION)
 ```
 
----
+## Windows Alignment Status
 
-### Stage 4 — 5×5 Local Centroid (fixed-point ×100)
+| Stage | Windows Function | Alignment | Notes |
+|-------|-----------------|-----------|-------|
+| Peak gate | FUN_1805fba00 | ~90% | Cross ±5, min_rise=200 (adapted from Windows 500) |
+| CCL | FUN_180600c40 | ~70% | 4-connected BFS vs per-pixel slot records |
+| Centroid | FUN_180602e60 | ~85% | Full blob extent, ×100 fixed-point |
+| Velocity rejection | FUN_180600c40 | 100% | dist² ≤ 36.0 confirmed |
+| Edge penalty | config+0x8D0/0x8D4 | 90% | 0.967/0.228 from DLL |
+| Coalescing | FUN_1806025c0 | ~60% | Pre-merge only (post-emission reverted) |
+| Hungarian | FUN_1805fd090 | ~90% | Cost matrix matches |
+| Association radii | config+0x8DC-0x8EC | 100% | DLL values: 0.545, 1.218, 1.549, 1.845, 2.161 |
+| EMA smoothing | FUN_180608000 | ~80% | alpha=7, weight=1/8 |
+| Hold/lift | FUN_180606370 | ~40% | Simplified (hold_frames=0, Windows: history-based) |
+| Candidate classif. | FUN_180601690 | 0% | Blocked — needs Mahalanobis matrix from DLL runtime |
+| Per-cycle gain | FUN_180600820 | 0% | Blocked — runtime-populated config |
 
-**Windows:** `FUN_180602e60`
+## Config Table Values Extracted (DLL DAT_1808e0460)
 
-Per ogni picco: finestra ±2 celle (5×5), media pesata sul segnale:
-```
-cx = Σ(w · x) / Σw  (in fixed-point ×100)
-cy = Σ(w · y) / Σw
-```
+| Offset | Value | Usage |
+|--------|-------|-------|
+| +0x8DC | 0.545009 | Normal association radius (2 fingers) |
+| +0x8E0 | 1.218098 | Single-track continuity radius |
+| +0x8E4 | 1.549246 | 3-finger radius |
+| +0x8E8 | 1.845492 | 4-finger radius |
+| +0x8EC | 2.161228 | 5+ finger radius |
+| +0x8D0 | 0.966512 | Top edge penalty |
+| +0x8D4 | 0.228140 | Bottom edge penalty |
+| +0x8D8 | 0xB3 (enabled) | Hold policy enable |
+| +0xC98 | 36.0 | Coalescing threshold (distance²) |
+| +0xECC | 0.04 | Noise floor |
+| +0x8C0 | 0.611209 | Pre-assoc filter (disabled for us) |
+| +0x958 | 0.17 | Touch detection pct (not standalone — needs gain pipeline) |
 
-Solo celle con segnale > baseline contribuiscono. La risoluzione sub-cella
-(×100) elimina lo "scalino" visibile tra celle adiacenti, portando la
-granularità effettiva da ~461 px a ~4.6 px sul pannello 2256×1504.
+## Module Parameters
 
-**Kernel:** `spi-hid-core.c:2310-2370`
+| Param | Default | Description |
+|-------|---------|-------------|
+| `raw_mode` | 1 | Enable heatmap + multitouch |
+| `skip_getfeat` | 1 | Vendor-init + SET_FEATURE activation |
+| `ema_alpha` | 7 | EMA smoothing weight |
+| `blob_max_distance` | 3 | Hungarian association radius (cells) |
+| `blob_min_weight` | 1000 | Minimum blob weight |
+| `blob_debounce` | 3 | Debounce frames |
+| `blob_lift_frames` | 3 | Missed frames before lift |
+| `hold_frames` | 0 | Hold grace frames (0=disabled) |
+| `ghost_dist` | 6 | Pre-merge radius (cells) |
+| `pre_assoc_ratio` | 0 | Pre-assoc weight filter (0=disabled) |
+| `grid_cols/rows` | 72/48 | Grid dimensions |
+| `calib_scale_x/y` | 0 | Scale ×1000 (0=auto) |
+| `calib_offset_x/y` | 0 | Screen offset |
+| `invert_x/y` | 0 | Invert axis |
+| `swap_xy` | 0 | Swap axes |
 
-```
-window = 2 (5×5 window)
-fixed_point_scale = 100
-```
+## Differences from Windows (deliberate)
 
----
+1. **4-connected BFS** vs per-pixel CCL with 10-neighbor graph: ours is simpler but
+   functionally equivalent for finger detection on 72×48 grid.
 
-### Stage 5 — Eigenellipsis (per-blob)
+2. **Pre-merge** vs post-emission coalescing: ours merges at blob level before Hungarian;
+   Windows merges at contact level after emission. Similar outcome.
 
-**Windows:** interno a `FUN_180602e60`
+3. **No Mahalanobis classifier**: requires 10×11 float matrix from DLL runtime data
+   segment — not present in the static binary.
 
-Second moments sulla finestra 5×5 del picco:
-```
-Mxx = Σ(dx² · w), Myy = Σ(dy² · w), Mxy = Σ(dx · dy · w)
-```
-Decomposizione autovalori per touch major/minor e orientazione (gradi×100).
-Solo blob con ≥2 pixel contribuenti.
+4. **No per-cycle gain**: requires runtime callback from device firmware — not
+   available on Linux.
 
-**Kernel:** `spi-hid-core.c:2370-2390`
-
----
-
-### Stage 6 — Pre-Merge
-
-Coalesce blob entro distanza² < 36 celle (6 celle di raggio), mantiene il più
-pesante (signal weight maggiore). Sort per peso decrescente prima del merge.
-
-**Kernel:** `spi-hid-core.c:2392-2441`
-
----
-
-### Stage 7 — Hungarian Assignment
-
-**Windows:** `FUN_1805fd090` (cost matrix) / `FUN_1805fd230` (Hungarian solver)
-
-Cost matrix matching Windows oracle:
-- In-radius (dist² ≤ max_dist²): `cost = int_sqrt(dx² + dy²)` 
-- Out-of-radius: 1000000
-- Dummy per slot vuoto: 1000
-
-`blob_max_distance = 3` (default, match Windows ~0.545 grid units).
-
-**Kernel:** `spi-hid-core.c:2450-2560`
-
-HEATMAP_MAX_BLOBS = 20 (previene buffer overflow con 3+ dita).
-
-La cost matrix è allocata nello struct `spi_hid` (non nello stack della
-funzione) per evitare stack overflow (~2968 byte rimanenti dopo lo spostamento).
-
----
-
-### Stage 8 — Track Update (State Machine)
-
-**Windows:** `FUN_180608000` (track update) / `FUN_180607c60` (track allocation)
-
-| Stato | Significato |
-|-------|-------------|
-| 0 | Empty |
-| 1 | New (debounce, 3 frame) |
-| 2 | Claimed (active) |
-| 3 | Lift (history lookback, 2 frame hold) |
-
-Feature per-slot:
-- **Light EMA:** `pos = (old · alpha + new) / (alpha + 1)`, alpha=3
-- **History ring:** 10-sample per position lookback
-- **Lift lookback:** emette lift a posizione di 2 frame fa (matching Windows `FUN_180601dd0`)
-- **Frame-gap reset:** gap > 5 frame rilascia tutti gli slot
-
-**Kernel:** `spi-hid-core.c:2627-2764`
-
----
-
-### Stage 9 — MT Emission
-
-Protocollo Linux MT:
-```
-input_mt_slot(dev, slot)
-input_mt_report_slot_state(dev, MT_TOOL_FINGER, active)
-input_report_abs(dev, ABS_MT_POSITION_X, gx * scale_x + offset_x)
-input_report_abs(dev, ABS_MT_POSITION_Y, gy * scale_y + offset_y)
-input_report_abs(dev, ABS_MT_TOUCH_MAJOR, sqrt(eigmaj * scale))
-input_report_abs(dev, ABS_MT_TOUCH_MINOR, sqrt(eigmin * scale))
-input_report_abs(dev, ABS_MT_ORIENTATION, eigori)
-input_mt_sync_frame(dev)
-input_sync(dev)
-```
-
-**Kernel:** `spi-hid-core.c:2766-2800`
-
----
-
-## Parametri configurabili (module params)
-
-| Parametro | Default | Descrizione |
-|-----------|---------|-------------|
-| `raw_mode` | 1 | Attiva heatmap + pipeline multi-touch |
-| `skip_getfeat` | 1 | Vendor-init + SET_FEATURE (via più affidabile) |
-| `getfeat_delay_ms` | 0 | Ritardo prima del GET_FEATURE (Windows: 5900) |
-| `blob_max_distance` | 3 | Raggio associazione celle Hungarian |
-| `blob_min_weight` | 1000 | Peso minimo blob per emissione |
-| `blob_debounce` | 3 | Frame debounce prima del claim (state 1→2) |
-| `blob_lift_frames` | 2 | Frame persi prima del lift (state 2→3) |
-| `ema_alpha` | 3 | Fattore smoothing posizione |
-| `grid_cols` | 72 | Colonne griglia (override) |
-| `grid_rows` | 48 | Righe griglia (override) |
-| `calib_scale_x/y` | 0 | Fattore scala ×1000 (0=auto) |
-| `calib_offset_x/y` | 0 | Offset schermo in logical coords |
-| `invert_x/y` | 0 | Inverti asse |
-| `swap_xy` | 0 | Scambia assi X/Y |
-
-## Differenze dal Python Oracle
-
-La pipeline kernel omette deliberatamente:
-- **DFT processing**: rielaborazione antenna Short/Long (manca l'antenna geometry, ~16+16 antenne)
-- **CCL flood-fill**: sostituita da peak detection a croce (più veloce, risultati comparabili)
-- **Blob splitting**: causava splitting di dita singole, rimosso
-- **Kalman tracking**: sostituito da EMA leggero (alpha=3) + history lookback
-- **Dilation**: non necessario con la finestra 5×5 del centroide
-- **Ghost rejection**: la pre-merge + Hungarian gestiscono i duplicati
-
-Il Python oracle è in `tools/surface_tracker.py` e serve come ground truth
-per validare le modifiche alla pipeline.
-
-## Riferimenti
-
-- `docs/decomp/WINDOWS_CONTACT_ABI.md` — ABI contatti Windows
-- `docs/decomp/MULTITOUCH_STATIC_DECOMP.md` — decomp statica HeatCore + TouchPenProcessor
-- `tools/surface_tracker.py` — oracolo Python validato
+5. **No hold state**: Windows enables it (config+0x8D8=0xB3) but only for tracks
+   meeting strict history quality checks (duration≤2, pixel count bounds,
+   eigenratio<4.0, signal>0.095). Our simplified hold caused scroll brake.
