@@ -2258,10 +2258,14 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	touched_count = 0;
 
 	/* Peak-detection gate: cross-shaped ±5, min_rise=300.
+	 * Collect all peaks for velocity rejection — each CCL blob
+	 * must be within 6 cells of at least one peak (matching
+	 * Windows FUN_180600c40: centroid distance² <= 36.0).
 	 * If no peak passes, skip CCL entirely. */
 	{
-		bool have_peak = false;
-		for (i = 0; i < cell_count; i++) {
+		struct { u16 col; u16 row; } peaks[16];
+		u8 npeaks = 0;
+		for (i = 0; i < cell_count && npeaks < 16; i++) {
 			u16 col, row;
 			s16 rise;
 			bool ok;
@@ -2281,10 +2285,14 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			    shid->heatmap_signal[i - 5 * ncols] > rise) ok = false;
 			if (row + 5 < nrows && shid->heatmap_touched[i + 5 * ncols] &&
 			    shid->heatmap_signal[i + 5 * ncols] > rise) ok = false;
-			if (ok) { have_peak = true; break; }
+			if (ok) {
+				peaks[npeaks].col = col;
+				peaks[npeaks].row = row;
+				npeaks++;
+			}
 		}
 
-		if (have_peak) {
+		if (npeaks > 0) {
 		u16 queue[512]; /* BFS flood-fill queue */
 		u16 next_label = 1;
 		u32 ci;
@@ -2381,6 +2389,28 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				if (pixel_count < 2 || max_rise < 300 || sw < blob_min_weight)
 					continue;
 
+				/* Velocity rejection (Windows FUN_180600c40):
+				 * blob centroid must be within 6 grid cells of at
+				 * least one detected peak. Rejects CCL artifacts
+				 * far from any genuine signal maximum. */
+				{
+					u32 gx = (u32)(sx / sw); /* integer cell */
+					u32 gy = (u32)(sy / sw);
+					u8 p;
+					bool near_peak = false;
+					for (p = 0; p < npeaks; p++) {
+						s32 dx = (s32)gx - (s32)peaks[p].col;
+						s32 dy = (s32)gy - (s32)peaks[p].row;
+						if (dx < 0) dx = -dx;
+						if (dy < 0) dy = -dy;
+						if ((u32)dx <= 6 && (u32)dy <= 6) {
+							near_peak = true;
+							break;
+						}
+					}
+					if (!near_peak) continue;
+				}
+
 				{
 					s32 bi = nlabels;
 					u32 cx, cy;
@@ -2388,6 +2418,16 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					shid->blob_x[bi] = (u32)(sx * 100 / sw);
 					shid->blob_y[bi] = (u32)(sy * 100 / sw);
 					shid->blob_wsum[bi] = (u32)sw;
+
+					/* Edge-contact weight penalty (Windows:
+					 * config[0x8d0]/[0x8d4] edge penalties).
+					 * Reduce weight by 50% for blobs touching any
+					 * grid edge — bezel artifacts have lower
+					 * priority in Hungarian assignment. */
+					if (min_r <= 1 || max_r >= (s32)nrows - 2 ||
+					    min_c <= 1 || max_c >= (s32)ncols - 2)
+						shid->blob_wsum[bi] = shid->blob_wsum[bi] / 2;
+
 					shid->blob_active[bi] = true;
 					nlabels++;
 					touched_count++;
