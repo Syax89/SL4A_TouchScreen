@@ -1744,6 +1744,11 @@ module_param(hold_frames, int, 0644);
 MODULE_PARM_DESC(hold_frames,
 	"Hold grace frames before lifting (state 4). Default 1 (~10ms). Windows enabled (config+0x8D8=0xB3). Anti-flickering without perceptible scroll brake.");
 
+static int pre_assoc_ratio = 0;
+module_param(pre_assoc_ratio, int, 0644);
+MODULE_PARM_DESC(pre_assoc_ratio,
+	"Pre-association blob weight ratio threshold (0=disabled). Discard blobs weaker than (max_weight * ratio/1000). Windows DLL +0x8C0-0x8CC: 0.611, 0.755, 0.831, 0.871. Set to 611 to match Windows weakest filter.");
+
 static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0644);
 MODULE_PARM_DESC(blob_max_distance,
@@ -2601,6 +2606,24 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				}
 		if (sorted_count > HEATMAP_MAX_SLOTS)
 			sorted_count = HEATMAP_MAX_SLOTS;
+
+		/* Pre-association filter (Windows DLL:
+		 * +0x8C0=0.611, +0x8C4=0.755, +0x8C8=0.831, +0x8CC=0.871).
+		 * Discards blobs weaker than (max_weight * pre_assoc_ratio/1000)
+		 * before Hungarian assignment — catches noise blobs that survived
+		 * initial filtering but are order-of-magnitude weaker than real
+		 * fingers. Disabled by default (pre_assoc_ratio=0). */
+		if (pre_assoc_ratio > 0 && sorted_count >= 2) {
+			u32 min_w = (u64)sorted[0].w * (u32)pre_assoc_ratio / 1000;
+			u8 keep = 0;
+			for (i = 0; i < sorted_count; i++) {
+				if (sorted[i].w >= min_w) {
+					if (i != keep) sorted[keep] = sorted[i];
+					keep++;
+				}
+			}
+			sorted_count = keep;
+		}
 
 		for (i = 0; i < sorted_count; i++) {
 			u16 screen_gx = swap_xy ? sorted[i].gy : sorted[i].gx;
