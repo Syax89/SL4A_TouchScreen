@@ -1739,10 +1739,10 @@ static int blob_lift_frames = 3;
 module_param(blob_lift_frames, int, 0644);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting (after hold expires)");
 
-static int hold_frames = 10;
+static int hold_frames = 5;
 module_param(hold_frames, int, 0644);
 MODULE_PARM_DESC(hold_frames,
-	"Hold grace frames before lifting (state 4). Default 10 (= ~100-200ms). Prevents flickering during slow lift-off and brief signal drops.");
+	"Hold grace frames before lifting (state 4). Default 5 (~50-100ms). Prevents flickering during slow lift-off and brief signal drops.");
 
 static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0644);
@@ -2092,7 +2092,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		blob_debounce = val;
 		val = READ_ONCE(blob_lift_frames); if (val < 1) val = 3;
 		blob_lift_frames = val;
-		val = READ_ONCE(hold_frames); if (val < 1) val = 10;
+		val = READ_ONCE(hold_frames); if (val < 1) val = 5;
 		hold_frames = val;
 		val = READ_ONCE(blob_max_distance); if (val < 1) val = 3;
 		blob_max_distance = val;
@@ -2715,7 +2715,12 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						shid->blob_slot_stationary[s] = 0;
 						break;
 					case 4:
-						/* Recovered during hold — re-claim immediately. */
+						/* Hold recovery: only accept a substantial blob.
+						 * Noise after finger lift produces low-weight
+						 * blobs (w < 4000) that should not re-claim the
+						 * slot. Let them expire through hold→lift instead. */
+						if (w < 4000 || shid->blob_slot_missed[s] < 2)
+							goto slot_unassigned;
 						shid->blob_slot_state[s] = 2;
 						shid->blob_slot_duration[s] = 1;
 						shid->blob_slot_stationary[s] = 0;
