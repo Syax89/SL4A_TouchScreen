@@ -1,7 +1,0 @@
-            ; XREFS(38)
-┌ 13: fcn.1400019c0 (uint32_t arg1);
-│ `- args(rcx) vars(1:sp[0x20..0x20])
-│           0x1400019c0      48894c2408     mov qword [var_8h], rcx    ; arg1
-│           0x1400019c5      488b442408     mov rax, qword [var_8h]
-│           0x1400019ca      8a00           mov al, byte [rax]
-└           0x1400019cc      c3             ret

@@ -42,3 +42,10 @@ traces/*.csv
 
 # Diagnostics build artifacts
 tools/diagnostics/
+
+# Microsoft proprietary data (not redistributable)
+windrivers/
+docs/decomp/clean/
+docs/decomp/uefi/
+docs/decomp/hidspi_symbols.txt
+docs/decomp/GenericCliDescriptor.xml

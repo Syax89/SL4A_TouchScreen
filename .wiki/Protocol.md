@@ -152,6 +152,4 @@ hardware and requires a physical power cycle.
 ## References
 
 - `docs/HIDSPI_PROTOCOL.md` — Full protocol specification
-- `docs/decomp/clean/FINDINGS-hidspi-V0-DECODED.md` — V0 protocol decoded from decomp
-- `docs/decomp/uefi/SurfaceTouchHidDxe.c` — UEFI driver reference
-- Windows `hidspi.sys` decompilation (PDB: `b00863b38d904fcbbd2bf2db07f88cff2`)
+- Decompilation notes retained locally (excluded from repository)

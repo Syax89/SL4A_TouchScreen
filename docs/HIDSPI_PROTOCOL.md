@@ -148,7 +148,5 @@ Linux driver replicates this via a deferred work item when
 
 ## References
 
-- `docs/decomp/clean/FINDINGS-hidspi-V0-DECODED.md` — V0 protocol reverse engineering
-- `docs/decomp/clean/hidspi_*.txt` — hidspi.sys decompilation
-- `docs/decomp/clean/hidspicx_*.txt` — HidSpiCx.sys decompilation
-- `docs/decomp/uefi/SurfaceTouchHidDxe.c` — UEFI DXE driver reference
+- `docs/ACTIVATION.md` — Raw mode activation protocol
+- `docs/decomp/` — Decompilation notes (local only, excluded from repo)

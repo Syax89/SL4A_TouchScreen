@@ -110,7 +110,5 @@ Larger reads must be split into 64-byte chunks.
 ## References
 
 - `docs/SPI_REGISTERS.md` — Complete register map and bit definitions
-- `docs/decomp/clean/0x4bac.txt` — AMD SPI read handler decomp
-- `docs/decomp/clean/0x3c20_transfer.txt` — Main transfer function decomp
-- `docs/decomp/uefi/AmdSpiHcProtocolDxe.c` — UEFI AMD SPI driver
+Reverse-engineering source material retained locally. See `docs/SPI_REGISTERS.md`.
 - AMD Cezanne FCH BIOS Specification (NDA)

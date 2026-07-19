@@ -6,7 +6,7 @@ communication between the OS and the touchscreen device.
 
 ## Reference Files
 
-Decompilation outputs are in `docs/decomp/clean/`:
+Decompilation outputs are retained locally and excluded from the repository.
 
 ---
 

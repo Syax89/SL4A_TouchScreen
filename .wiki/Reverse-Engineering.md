@@ -25,11 +25,11 @@ Kernel mode
 
 | Component | Status | Documentation |
 |-----------|--------|---------------|
-| `amdspi.sys` | Fully decompiled | `docs/decomp/clean/0x4bac.txt` (read), `0x3c20_transfer.txt` (transfer), `0x54d0_submit_handler.txt` (write) |
-| `hidspi.sys` | Protocol layer decompiled | `docs/decomp/clean/hidspi_*.txt` (V0 protocol, descriptors) |
-| `HidSpiCx.sys` | Orchestrator decompiled | `docs/decomp/clean/hidspicx_*.txt` (descriptor handling, reset) |
-| `TouchPenProcessor0C19.dll` | Partially decompiled | `docs/decomp/SURFACE_TRACKER_DECOMP.md`, `docs/decomp/MULTITOUCH_STATIC_DECOMP.md` |
-| UEFI DXE drivers | Fully decompiled | `docs/decomp/uefi/` (7 files: AmdSpiHcProtocolDxe, SurfaceTouchHidDxe, et al.) |
+| `amdspi.sys` | Fully decompiled | AMD FCH SPI controller driver |
+| `hidspi.sys` | Protocol layer decompiled | HID-over-SPI V0 protocol |
+| `HidSpiCx.sys` | Orchestrator decompiled | Class extension framework |
+| `TouchPenProcessor0C19.dll` | Partially decompiled | Core touch pipeline (config table, CCL, tracking) |
+| UEFI DXE drivers | Fully decompiled | Platform initialization drivers |
 
 ## Methodology
 
@@ -121,6 +121,7 @@ less gracefully than on Windows.
 - `docs/HIDSPI_PROTOCOL.md` — HID-over-SPI V0 protocol specification
 - `docs/CSV_SEQUENCE.md` — ETW CSV trace format
 - `docs/SPI_REGISTERS.md` — AMD FCH SPI controller register map
-- `docs/decomp/clean/` — Cleaned decompilation outputs (42 files)
-- `docs/decomp/uefi/` — UEFI DXE driver decompilation (7 files)
 - `docs/acpi/` — DSDT and SSDT ACPI tables (ASL source)
+
+Reverse-engineering source material (decompilations, traces, binaries) is
+retained locally and excluded from this public repository.

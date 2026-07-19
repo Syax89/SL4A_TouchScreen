@@ -134,8 +134,5 @@ PSP owns the bus, the driver cannot safely touch it.
 ## References
 
 - AMD Cezanne FCH BIOS Specification (NDA, register definitions)
-- `docs/decomp/clean/0x4bac.txt` — Windows read handler decompilation
-- `docs/decomp/clean/0x3c20_transfer.txt` — Main transfer function decomp
-- `docs/decomp/clean/0x54d0_submit_handler.txt` — Write handler decomp
-- `docs/decomp/clean/0x6fc0_read_register_prefix.txt` — Register prefix setup
-- `docs/decomp/clean/0x6f84_restore_register_prefix.txt` — Register restore
+Reverse-engineering source material is retained locally but excluded from
+this repository. See `docs/decomp/` for decompilation notes.
