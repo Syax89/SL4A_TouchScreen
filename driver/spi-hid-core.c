@@ -1739,10 +1739,10 @@ static int blob_lift_frames = 3;
 module_param(blob_lift_frames, int, 0644);
 MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting (after hold expires)");
 
-static int hold_frames = 5;
+static int hold_frames = 0;
 module_param(hold_frames, int, 0644);
 MODULE_PARM_DESC(hold_frames,
-	"Hold grace frames before lifting (state 4). Default 5 (~50-100ms). Prevents flickering during slow lift-off and brief signal drops.");
+	"Hold grace frames before lifting (state 4). Default 0 (disabled). Set to 3-5 to prevent flickering during slow lift-off.");
 
 static int blob_max_distance = 3;
 module_param(blob_max_distance, int, 0644);
@@ -2092,7 +2092,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		blob_debounce = val;
 		val = READ_ONCE(blob_lift_frames); if (val < 1) val = 3;
 		blob_lift_frames = val;
-		val = READ_ONCE(hold_frames); if (val < 1) val = 5;
+		val = READ_ONCE(hold_frames); if (val < 0) val = 0;
 		hold_frames = val;
 		val = READ_ONCE(blob_max_distance); if (val < 1) val = 3;
 		blob_max_distance = val;
@@ -2796,12 +2796,14 @@ slot_unassigned:				switch (shid->blob_slot_state[s]) {
 						shid->blob_slot_duration[s] = 0;
 						break;
 					case 2:
-						/* Claimed slot missed — enter hold (state 4)
-						 * instead of immediately starting lift countdown.
-						 * Holds the last known position for hold_frames
-						 * before transitioning to lift. */
-						shid->blob_slot_state[s] = 4;
-						shid->blob_slot_missed[s] = 1;
+						/* Enter hold (state 4) unless disabled (hold_frames=0). */
+						if (hold_frames < 1) {
+							shid->blob_slot_state[s] = 3;
+							shid->blob_slot_missed[s] = 0;
+						} else {
+							shid->blob_slot_state[s] = 4;
+							shid->blob_slot_missed[s] = 1;
+						}
 						break;
 					case 4:
 						shid->blob_slot_missed[s]++;
