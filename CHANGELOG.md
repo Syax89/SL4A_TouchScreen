@@ -1,11 +1,68 @@
 # Changelog
 
-## v1.1.0 (2026-07-19)
+## v1.2.0 (2026-07-19)
 
 > [!WARNING]
 > **Beta software.** This is an experimental, reverse-engineered kernel driver.
 > It may cause touchscreen failure, system instability, or data loss.
 > Use entirely at your own risk. No warranty of any kind.
+
+### Windows pipeline alignment (~85%)
+
+CCL flood-fill pipeline replacing the old 5×5 local centroid approach,
+matching the `TouchPenProcessor0C19.dll` chain:
+
+- **c590 LUT** — raw 16-bit → fixed-point signal conversion
+- **Peak detection gate** — cross-shaped ±5 cells, min_rise=200, collects peaks for velocity rejection
+- **CCL flood-fill** — 4-connected BFS component labeling on touched cells
+- **Velocity rejection** — blob centroid must be within 6 cells of peak (dist² ≤ 36.0)
+- **Edge penalty** — bottom edge ×0.23, other edges ×0.97 (DLL config+0x8D0/0x8D4)
+- **Blob splitting** — multi-peak blobs (≥4 cells apart, pixel_count≥8) split by internal peak positions
+- **Full-blob centroid** — signal-weighted ×100 fixed-point over blob extent
+- **Eigenvalues** — second moments on blob bounding box → touch major/minor/orientation
+- **Pre-merge** — ghost_dist=6 cells, keep strongest
+- **Hungarian assignment** — multi-finger association radii from DLL config:
+  1 finger ×2.2, 2×1.0, 3×2.8, 4×3.4, 5+×4.0
+- **EMA + deadband + stationary lock** — alpha=7, ±0.8-cell deadband, 6-frame lock
+- **Lift lookback** — 2-frame history position on lift
+
+### DLL config table integration
+
+20+ values extracted from `TouchPenProcessor0C19.dll` data segment
+(VA 0x1808E0460, file offset 0x8DF060): association radii, edge weights,
+coalescing threshold, noise floor, pre-assoc ratio, hold policy, touch
+detection threshold. See `docs/CONFIG_TABLE.md`.
+
+### Parameter tuning
+
+- `min_rise` 300→200 for weak fingers at 3+ density
+- `hold_frames=0` (disabled — caused scroll brake)
+- `pre_assoc_ratio=0` (disabled — too aggressive without classifier)
+- `ghost_dist=6` (matches DLL +0xC98=36.0)
+
+### Documentation overhaul
+
+- **GitHub Wiki** — 7-page technical wiki: protocol, pipeline, config table,
+  hardware, build & install, reverse engineering
+- **Source code** — per-field comments on `struct spi_hid`, kerneldoc for
+  major functions, removed 10+ date-stamped developer diary entries
+- **docs/** — 556 stale files deleted (diary, evidence, snapshot directories),
+  7 technical docs rewritten, 4 new references created
+- **README.md** — rewritten as project page with architecture diagram,
+  feature table, module parameters, troubleshooting
+
+### Repository cleanup
+
+Removed 556 diary/research/evidence files including GROUND_TRUTH (3006-line
+research journal), all GHIDRA snapshot directories, MSI database exports,
+SESSION_HANDOFF, and experimental configs. Kept decomp/clean/, decomp/uefi/,
+and acpi/ as technical reference.
+
+Touch quality: 2-finger excellent, 3-finger good, 4-finger improved.
+
+---
+
+## v1.1.0 (2026-07-19)
 
 ### Multi-touch (active by default)
 
