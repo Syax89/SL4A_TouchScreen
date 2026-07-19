@@ -2345,11 +2345,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					}
 				}
 
-				/* Filter noise: minimum 10 pixels, peak signal >= 300,
-				 * and total weight >= blob_min_weight. A real finger
-				 * on 72×48 grid occupies 20-100+ pixels. Residual
-				 * noise after lift is 2-5 pixels with low signal. */
-				if (pixel_count < 10 || max_rise < 300 || sw < blob_min_weight)
+				/* Filter noise: at least 2 pixels, peak signal >= 300,
+				 * and total weight >= blob_min_weight. The max_rise check
+				 * alone rejects residual noise after lift (typically
+				 * 2-5 pixels at <200 rise). */
+				if (pixel_count < 2 || max_rise < 300 || sw < blob_min_weight)
 					continue;
 
 				{
