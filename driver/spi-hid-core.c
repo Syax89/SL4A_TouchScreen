@@ -2274,6 +2274,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				s64 sxx = 0, syy = 0, sxy = 0;
 				s32 min_r = 9999, max_r = -1, min_c = 9999, max_c = -1;
 				u32 pixel_count = 0;
+				s16 max_rise = 0;
 				u16 label = next_label;
 
 				queue[tail++] = ci;
@@ -2289,6 +2290,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					if (row >= nrows) continue;
 					w = shid->heatmap_signal[idx];
 					if (w <= 0) continue;
+					if (w > max_rise) max_rise = w;
 
 					sx += (s64)col * w;
 					sy += (s64)row * w;
@@ -2343,8 +2345,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					}
 				}
 
-				/* Filter noise: at least 2 pixels and min weight. */
-				if (pixel_count < 2 || sw < blob_min_weight)
+				/* Filter noise: minimum 10 pixels, peak signal >= 300,
+				 * and total weight >= blob_min_weight. A real finger
+				 * on 72×48 grid occupies 20-100+ pixels. Residual
+				 * noise after lift is 2-5 pixels with low signal. */
+				if (pixel_count < 10 || max_rise < 300 || sw < blob_min_weight)
 					continue;
 
 				{
