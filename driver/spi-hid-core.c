@@ -2265,11 +2265,11 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	nlabels = 0;
 	touched_count = 0;
 
-	/* Peak-detection gate: cross-shaped ±5, min_rise=300.
-	 * Collect all peaks for velocity rejection — each CCL blob
-	 * must be within 6 cells of at least one peak (matching
-	 * Windows FUN_180600c40: centroid distance² <= 36.0).
-	 * If no peak passes, skip CCL entirely. */
+	/* Peak-detection gate: cross-shaped ±5, min_rise=200.
+	 * Lowered from 300 to catch weaker fingers at 3+ density.
+	 * The cross-check (±5, higher neighbor) naturally suppresses
+	 * flat noise — only genuine signal maxima pass through.
+	 * Collect all peaks for velocity rejection. */
 	{
 		struct { u16 col; u16 row; } peaks[16];
 		u8 npeaks = 0;
@@ -2282,7 +2282,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 			col = i % ncols; row = i / ncols;
 			if (row >= nrows) break;
 			rise = shid->heatmap_signal[i];
-			if (rise < 300) continue;
+			if (rise < 200) continue;
 
 			ok = true;
 			if (col >= 5 && shid->heatmap_touched[i - 5] &&
@@ -2394,7 +2394,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				 * and total weight >= blob_min_weight. The max_rise check
 				 * alone rejects residual noise after lift (typically
 				 * 2-5 pixels at <200 rise). */
-				if (pixel_count < 2 || max_rise < 300 || sw < blob_min_weight)
+				if (pixel_count < 2 || max_rise < 200 || sw < blob_min_weight)
 					continue;
 
 				/* Velocity rejection (Windows FUN_180600c40):
