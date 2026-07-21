@@ -121,6 +121,16 @@
 #define SPI_HID_ISOLATED_SET_RING_SLOTS 8
 #define SPI_HID_ISOLATED_SET_BODY_LENGTH 512
 
+
+enum spi_hid_seq_state {
+	SPI_HID_SEQ_WAIT_RESET,
+	SPI_HID_SEQ_WAIT_DESC,
+	SPI_HID_SEQ_WAIT_RPT,
+	SPI_HID_SEQ_VENDOR_INIT,
+	SPI_HID_SEQ_DONE,
+	SPI_HID_SEQ_WAIT_FEATURE,
+};
+
 enum spi_hid_isolated_set_state {
 	SPI_HID_ISOLATED_SET_DISABLED,
 	SPI_HID_ISOLATED_SET_WAIT_GET,
@@ -298,9 +308,8 @@ struct spi_hid {
 	 * IRQ-driven startup sequencer state machine. Mirrors HidSpiCx WDF
 	 * automaton: reset-response → body read → ConfiguringDescriptor →
 	 * acknowledge → descriptor request.
-	 * States: 0=WAIT_RESET 1=WAIT_DESC 2=WAIT_RPT 3=VENDOR_INIT 4=DONE 5=WAIT_FEATURE
 	 */
-	int seq_state;
+	enum spi_hid_seq_state seq_state;
 	bool seq_enabled;               /* Sequencer is active */
 	unsigned long seq_last_valid_jiffies; /* Last valid IRQ timestamp */
 	u32 seq_storm_count;           /* Consecutive invalid IRQ count (storm detection) */
