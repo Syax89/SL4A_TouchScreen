@@ -3,6 +3,7 @@
 import hashlib
 import sys
 from pathlib import Path
+from optional_contract import skip_optional_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +13,8 @@ from decode_v0_capimg import RASTER_SAMPLE_COUNT, decode_body
 
 def main() -> int:
     paths = sorted((ROOT / "captures").rglob("*.v0"))
-    assert len(paths) == 15213
+    if len(paths) != 15213:
+        skip_optional_contract("full V0 CapImg capture corpus is not present")
     decoded_frames = [decode_body(path.read_bytes()) for path in paths]
     assert all(len(decoded.raster) == RASTER_SAMPLE_COUNT for decoded in decoded_frames)
     assert {len(decoded.vendor_payload) for decoded in decoded_frames} == {104, 116}

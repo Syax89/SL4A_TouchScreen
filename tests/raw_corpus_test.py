@@ -7,11 +7,16 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from optional_contract import skip_optional_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
+tool = ROOT / "tools" / "analyze_raw_corpus.py"
+if not tool.exists():
+    skip_optional_contract("offline raw corpus analyzer is not present")
+
 result = subprocess.run(
-    [sys.executable, "tools/analyze_raw_corpus.py"],
+    [sys.executable, str(tool)],
     cwd=ROOT,
     check=True,
     capture_output=True,

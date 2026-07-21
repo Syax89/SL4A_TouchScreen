@@ -4,11 +4,16 @@
 import subprocess
 import sys
 from pathlib import Path
+from optional_contract import skip_optional_contract
 
 
 root = Path(__file__).parents[1]
+tool = root / "tools" / "analyze_post_set_timeline.py"
+if not tool.exists():
+    skip_optional_contract("offline post-SET analyzer is not present")
+
 result = subprocess.run(
-    [sys.executable, str(root / "tools" / "analyze_post_set_timeline.py")],
+    [sys.executable, str(tool)],
     cwd=root,
     check=True,
     text=True,

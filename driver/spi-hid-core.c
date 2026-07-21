@@ -28,7 +28,6 @@
 #include <linux/workqueue.h>
 #include <linux/dma-mapping.h>
 #include <linux/crc32.h>
-#include <linux/kernel.h>
 #include <linux/input/mt.h>
 #include <linux/math.h>
 
@@ -74,22 +73,68 @@ enum spi_hid_lifecycle_action {
 	SPI_HID_LIFECYCLE_PROBE_FAILED,
 };
 
-/*
- * Set the sequencer state machine to a new state.
- * States: 0=WAIT_RESET 1=WAIT_DESC 2=WAIT_RPT 3=VENDOR_INIT 4=DONE 5=WAIT_FEATURE
- */
-static void spi_hid_seq_set_state(struct spi_hid *shid, int new_state,
-		enum spi_hid_seq_reason reason)
+static const char *spi_hid_seq_reason_name(enum spi_hid_seq_reason reason)
 {
-	int old_state = shid->seq_state;
+	switch (reason) {
+	case SPI_HID_SEQ_PROBE:
+		return "PROBE";
+	case SPI_HID_SEQ_RESET_RESPONSE:
+		return "RESET_RESPONSE";
+	case SPI_HID_SEQ_DEVICE_DESCRIPTOR:
+		return "DEVICE_DESCRIPTOR";
+	case SPI_HID_SEQ_REPORT_DESCRIPTOR:
+		return "REPORT_DESCRIPTOR";
+	case SPI_HID_SEQ_FEATURE_REQUEST:
+		return "FEATURE_REQUEST";
+	case SPI_HID_SEQ_FEATURE_RESPONSE:
+		return "FEATURE_RESPONSE";
+	case SPI_HID_SEQ_DEVICE_RESET:
+		return "DEVICE_RESET";
+	case SPI_HID_SEQ_WATCHDOG:
+		return "WATCHDOG";
+	case SPI_HID_SEQ_FALLBACK:
+		return "FALLBACK";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+static const char *spi_hid_seq_state_name(enum spi_hid_seq_state state)
+{
+	switch (state) {
+	case SPI_HID_SEQ_WAIT_RESET:
+		return "WAIT_RESET";
+	case SPI_HID_SEQ_WAIT_DESC:
+		return "WAIT_DESC";
+	case SPI_HID_SEQ_WAIT_RPT:
+		return "WAIT_RPT";
+	case SPI_HID_SEQ_VENDOR_INIT:
+		return "VENDOR_INIT";
+	case SPI_HID_SEQ_DONE:
+		return "DONE";
+	case SPI_HID_SEQ_WAIT_FEATURE:
+		return "WAIT_FEATURE";
+	case SPI_HID_SEQ_INVALID:
+	default:
+		return "INVALID";
+	}
+}
+
+/* Set the sequencer state machine to a new state. */
+static void spi_hid_seq_set_state(struct spi_hid *shid,
+		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason)
+{
+	enum spi_hid_seq_state old_state = shid->seq_state;
 
 	if (old_state == new_state)
 		return;
 
 	shid->seq_state = new_state;
 	trace_spi_hid_seq_state(shid, old_state, new_state, reason);
-	seq_dbg(shid, 1, "SEQ: state %d -> %d (reason=%d)\n",
-		old_state, new_state, reason);
+	seq_dbg(shid, 1, "SEQ: state %s(%d) -> %s(%d) reason=%s(%d)\n",
+		spi_hid_seq_state_name(old_state), old_state,
+		spi_hid_seq_state_name(new_state), new_state,
+		spi_hid_seq_reason_name(reason), reason);
 }
 
 static struct hid_ll_driver spi_hid_ll_driver;
@@ -1267,30 +1312,50 @@ static int spi_hid_set_request(struct spi_hid *shid,
 
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {
-	u8 tx[5]; struct spi_transfer xf[2]; struct spi_message msg;
+	u8 tx[5];
+	struct spi_transfer xf[2];
+	struct spi_message msg;
 	int ret;
 
 	lockdep_assert_held(&shid->seq_lock);
-	tx[0]=0x0B; tx[1]=(reg>>16)&0xff; tx[2]=(reg>>8)&0xff; tx[3]=reg&0xff;
-	tx[4]=0xFF;
-	memset(rx,0,rx_len); memset(xf,0,sizeof(xf));
-	xf[0].tx_buf=tx; xf[0].len=5; xf[1].rx_buf=rx; xf[1].len=rx_len;
-	spi_message_init(&msg); spi_message_add_tail(&xf[0],&msg); spi_message_add_tail(&xf[1],&msg);
-	seq_dbg(shid, 2, "read begin reg=0x%06x len=%d state=%d\n",
-		reg, rx_len, shid->seq_state);
+
+	tx[0] = 0x0B;
+	tx[1] = (reg >> 16) & 0xff;
+	tx[2] = (reg >> 8) & 0xff;
+	tx[3] = reg & 0xff;
+	tx[4] = 0xFF;
+
+	memset(rx, 0, rx_len);
+	memset(xf, 0, sizeof(xf));
+	xf[0].tx_buf = tx;
+	xf[0].len = 5;
+	xf[1].rx_buf = rx;
+	xf[1].len = rx_len;
+
+	spi_message_init(&msg);
+	spi_message_add_tail(&xf[0], &msg);
+	spi_message_add_tail(&xf[1], &msg);
+	seq_dbg(shid, 2, "read begin reg=0x%06x len=%d state=%s(%d)\n",
+		reg, rx_len, spi_hid_seq_state_name(shid->seq_state),
+		shid->seq_state);
+
 	ret = spi_sync(shid->spi, &msg);
 	seq_dbg(shid, 2, "read complete reg=0x%06x ret=%d\n", reg, ret);
 	seq_dbg(shid, 3, "SEQ: read reg=0x%06x len=%d ret=%d raw=[%*ph]\n",
-		 reg, rx_len, ret, min(rx_len, 16), rx);
+		reg, rx_len, ret, min(rx_len, 16), rx);
 	return ret;
 }
+
 static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
-{ return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len); }
+{
+	return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len);
+}
 static int spi_hid_seq_write_speed(struct spi_hid *shid, const u8 *buf, int len,
 				    u8 *rx, int rx_len, u32 speed_hz)
 {
 	struct spi_transfer xf[2];
 	struct spi_message msg;
+	int ret;
 
 	lockdep_assert_held(&shid->seq_lock);
 	seq_dbg(shid, 3, "SEQ: write op=0x%02x len=%d rx=%d raw=[%*ph]\n",
@@ -1312,14 +1377,13 @@ static int spi_hid_seq_write_speed(struct spi_hid *shid, const u8 *buf, int len,
 		spi_message_add_tail(&xf[1], &msg);
 	}
 
-	seq_dbg(shid, 2, "write begin op=0x%02x len=%d rx=%d speed=%u state=%d\n",
-		buf[0], len, rx_len, speed_hz, shid->seq_state);
-	{
-		int ret = spi_sync(shid->spi, &msg);
+	seq_dbg(shid, 2, "write begin op=0x%02x len=%d rx=%d speed=%u state=%s(%d)\n",
+		buf[0], len, rx_len, speed_hz,
+		spi_hid_seq_state_name(shid->seq_state), shid->seq_state);
 
-		seq_dbg(shid, 2, "write complete op=0x%02x ret=%d\n", buf[0], ret);
-		return ret;
-	}
+	ret = spi_sync(shid->spi, &msg);
+	seq_dbg(shid, 2, "write complete op=0x%02x ret=%d\n", buf[0], ret);
+	return ret;
 }
 
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len)
@@ -1340,7 +1404,7 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 		dev_warn(&shid->spi->dev, "SEQ: DESCREQ recovery write failed: %d\n", ret);
 		return ret;
 	}
-	spi_hid_seq_set_state(shid, 1, reason);
+	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, reason);
 	return 0;
 }
 
@@ -1379,8 +1443,8 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 			cancel_delayed_work(&shid->feat_delay_work);
 			shid->feat_delay_pending = false;
 			/* Reset state and let the IRQ thread re-discover. */
-			spi_hid_seq_set_state(shid, 0, SPI_HID_SEQ_WATCHDOG);
-			shid->raw_handshake_state5_defers = 0;
+			spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_WATCHDOG);
+			shid->raw_handshake_wait_feature_defers = 0;
 			mutex_unlock(&shid->seq_lock);
 			msleep(5000);
 			mutex_lock(&shid->seq_lock);
@@ -1397,7 +1461,7 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 				mutex_unlock(&shid->seq_lock);
 				return;
 			}
-			spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_WATCHDOG);
+			spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
 			mutex_unlock(&shid->seq_lock);
 			return;
 		}
@@ -1420,23 +1484,23 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 			else
 				dev_info(dev, "SEQ: raw handshake failed; using standard HID\n");
 		}
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_WATCHDOG);
-		shid->raw_handshake_state5_defers = 0;
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_WATCHDOG);
+		shid->raw_handshake_wait_feature_defers = 0;
 		goto out;
 	}
 
 	/* Don't interrupt an in-progress GET_FEATURE/SET_FEATURE handshake.
 	 * Defer up to 3 times (6 seconds total), then force retry. */
-	if (shid->seq_state == 5) {
-		shid->raw_handshake_state5_defers++;
-		seq_dbg(shid, 1, "SEQ: watchdog found state 5 active, defer #%u\n",
-			shid->raw_handshake_state5_defers);
-		if (shid->raw_handshake_state5_defers <= 3) {
+	if (shid->seq_state == SPI_HID_SEQ_WAIT_FEATURE) {
+		shid->raw_handshake_wait_feature_defers++;
+		seq_dbg(shid, 1, "SEQ: watchdog found WAIT_FEATURE active, defer #%u\n",
+			shid->raw_handshake_wait_feature_defers);
+		if (shid->raw_handshake_wait_feature_defers <= 3) {
 			schedule_delayed_work(&shid->raw_handshake_watchdog,
 					      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 			goto out;
 		}
-		shid->raw_handshake_state5_defers = 0;
+		shid->raw_handshake_wait_feature_defers = 0;
 	}
 	shid->raw_handshake_retries_left--;
 	dev_warn(dev, "SEQ: raw_mode handshake watchdog: no heatmap data after %dms, retrying (%d left)\n",
@@ -1464,7 +1528,7 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 		goto out;
 	}
-	spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_WATCHDOG);
+	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
 	schedule_delayed_work(&shid->raw_handshake_watchdog,
 			      msecs_to_jiffies(getfeat_delay_ms + RAW_HANDSHAKE_TIMEOUT_MS + 1000));
 out:
@@ -1488,7 +1552,7 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		goto out;
 	shid->feat_delay_pending = false;
 
-	if (shid->seq_state != 2) {
+	if (shid->seq_state != SPI_HID_SEQ_WAIT_RPT) {
 		seq_dbg(shid, 1, "SEQ: feat_delay_work: state changed to %d, skipping\n",
 			shid->seq_state);
 		goto out;
@@ -1511,17 +1575,17 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		usleep_range(36000, 39000);
 		if (spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0))
 			goto retry_watchdog;
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_REQUEST);
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FEATURE_REQUEST);
 		mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
 			msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 		goto out;
 	}
 
-	seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE after delay, state 5\n");
+	seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE after delay, WAIT_FEATURE\n");
 	if (spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0)) {
 		goto retry_watchdog;
 	}
-	spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
+	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_FEATURE, SPI_HID_SEQ_FEATURE_REQUEST);
 	mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
 			 msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 	goto out;
@@ -1541,7 +1605,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 	int type, hdr_off;
 
 	mutex_lock(&shid->seq_lock);
-	if (READ_ONCE(shid->removing) || shid->seq_state != 1)
+	if (READ_ONCE(shid->removing) || shid->seq_state != SPI_HID_SEQ_WAIT_DESC)
 		goto out;
 
 	seq_dbg(shid, 1, "SEQ: poll-work: reading for DEVICE_DESC...\n");
@@ -1564,7 +1628,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
 		seq_dbg(shid, 1, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FALLBACK);
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		shid->keep_powered = true;
 		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
@@ -1745,7 +1809,7 @@ MODULE_PARM_DESC(blob_lift_frames, "Consecutive missed frames before lifting (af
 static int hold_frames = 0;
 module_param(hold_frames, int, 0644);
 MODULE_PARM_DESC(hold_frames,
-	"Hold grace frames before lifting (state 4). Default 0 (disabled — lift immediate). Windows enabled (config+0x8D8=0xB3) but only for tracked contacts with history.");
+	"Hold grace frames before lifting (slot state 4). Default 0 (disabled — lift immediate). Windows enabled (config+0x8D8=0xB3) but only for tracked contacts with history.");
 
 static int pre_assoc_ratio = 0;
 module_param(pre_assoc_ratio, int, 0644);
@@ -1914,7 +1978,7 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || !shid->stream_watchdog_active)
 		goto out;
-	if (shid->seq_state != 4)
+	if (shid->seq_state != SPI_HID_SEQ_DONE)
 		goto out;
 
 	if (shid->stat_data != shid->stream_watchdog_data) {
@@ -1938,7 +2002,7 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 
 			shid->raw_handshake_confirmed = false;
 			shid->raw_handshake_retries_left = 3;
-			spi_hid_seq_set_state(shid, 0, SPI_HID_SEQ_WATCHDOG);
+			spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_WATCHDOG);
 			shid->seq_enabled = true;
 			heatmap_reset_baseline(shid);
 
@@ -1946,7 +2010,7 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 			if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
 				dev_warn(dev, "SEQ: stream watchdog DESCREQ failed\n");
 			} else {
-				spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_WATCHDOG);
+				spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
 			}
 		}
 		} else {
@@ -1975,7 +2039,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing))
 		goto out;
-	if (!shid->poll_active || shid->seq_state != 4)
+	if (!shid->poll_active || shid->seq_state != SPI_HID_SEQ_DONE)
 		goto resched;
 	if (!shid->raw_handshake_confirmed)
 		goto resched;
@@ -3189,13 +3253,13 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	shid->stat_irq_count++;
 
-	/* Bug fix: this used to compare seq_state (int,
-	 * values 0-5) against seq_enabled (bool), which collapses to
-	 * "seq_state != 1" and fired on every IRQ while parked in any other
-	 * state — including state 4, the steady-state loop that handles every
-	 * touch report — defeating the point of only logging on transitions. */
+	/* Bug fix: this used to compare seq_state's numeric value against
+	 * seq_enabled (bool), which collapsed to "not WAIT_DESC" and fired on
+	 * every IRQ while parked in any other state — including DONE, the
+	 * steady-state loop that handles every touch report. */
 	if (shid->seq_state != shid->seq_dbg_last_state) {
-		seq_dbg(shid, 1, "SEQ: thread seq_state=%d\n", shid->seq_state);
+		seq_dbg(shid, 1, "SEQ: thread seq_state=%s(%d)\n",
+			spi_hid_seq_state_name(shid->seq_state), shid->seq_state);
 		shid->seq_dbg_last_state = shid->seq_state;
 	}
 
@@ -3211,21 +3275,22 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	seq_dbg(shid, 2, "SEQ[state=%d] type=%d hdr=[%*ph] dt=%lld us%s\n",
-		 shid->seq_state, type, 4, &hdr[5], dbg_dt_us,
+	seq_dbg(shid, 2, "SEQ[state=%s(%d)] type=%d hdr=[%*ph] dt=%lld us%s\n",
+		 spi_hid_seq_state_name(shid->seq_state), shid->seq_state,
+		 type, 4, &hdr[5], dbg_dt_us,
 		 shid->seq_dbg_expect_fast ? (dbg_dt_us >= 0 && dbg_dt_us < 5000 ?
 		 " <<< FAST IRQ AFTER DESCREQ: WRITE REACHED DEVICE" :
 		 " <<< slow IRQ: DESCREQ ignored (device just re-reset)") : "");
 	shid->seq_dbg_expect_fast = false;
 	if (type < 0) {
 		seq_dbg(shid, 1, "SEQ: no header found\n");
-		/* In state 0, drain any body data and send DESCREQ anyway */
-		if (shid->seq_state == 0) {
+		/* In WAIT_RESET, drain any body data and send DESCREQ anyway */
+		if (shid->seq_state == SPI_HID_SEQ_WAIT_RESET) {
 			u8 body_drain[64];
 			spi_hid_seq_read(shid, body_drain, sizeof(body_drain));
 			seq_dbg(shid, 1, "SEQ: body drain done, forcing DESCREQ@0x000001...\n");
 			spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
-			spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_FALLBACK);
+			spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_FALLBACK);
 		} else {
 			goto out;
 		}
@@ -3248,19 +3313,31 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		blen = sizeof(shid->input.content);
 
 	switch (shid->seq_state) {
-	case 0: seq_handle_reset(shid, type, blen, &shid->seq_dbg_expect_fast); break;
-	case 1: seq_handle_desc(shid, type, blen);   break;
-	case 2: seq_handle_rpt(shid, type, blen);    break;
-	case 3: seq_handle_vendor(shid, type, blen); break;
-	case 4: seq_handle_data(shid, type, blen);   break;
-	case 5: seq_handle_feat(shid, type, blen);   break;
+	case SPI_HID_SEQ_WAIT_RESET:
+		seq_handle_reset(shid, type, blen, &shid->seq_dbg_expect_fast);
+		break;
+	case SPI_HID_SEQ_WAIT_DESC:
+		seq_handle_desc(shid, type, blen);
+		break;
+	case SPI_HID_SEQ_WAIT_RPT:
+		seq_handle_rpt(shid, type, blen);
+		break;
+	case SPI_HID_SEQ_VENDOR_INIT:
+		seq_handle_vendor(shid, type, blen);
+		break;
+	case SPI_HID_SEQ_DONE:
+		seq_handle_data(shid, type, blen);
+		break;
+	case SPI_HID_SEQ_WAIT_FEATURE:
+		seq_handle_feat(shid, type, blen);
+		break;
 	}
 out:
 	mutex_unlock(&shid->seq_lock);
 	return result;
 }
 
-/* ── State handler: WAIT_RESET (state 0) ─────────────────────────── */
+/* ── State handler: WAIT_RESET ───────────────────────────────────── */
 static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *expect_fast)
 {
 	if (type == 3) {
@@ -3269,31 +3346,31 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 		shid->stat_reset_rsp++;
 		if (spi_hid_seq_read(shid, body, sizeof(body)))
 			return;
-		seq_dbg(shid, 3, "SEQ[state0]: RESET_RSP body-drain=[%*ph], sending DESCREQ\n",
+		seq_dbg(shid, 3, "SEQ[WAIT_RESET]: RESET_RSP body-drain=[%*ph], sending DESCREQ\n",
 			 20, body);
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
-		seq_dbg(shid, 1, "SEQ[state0]: DESCREQ sent, waiting for DEVICE_DESC IRQ\n");
+		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: DESCREQ sent, waiting for DEVICE_DESC IRQ\n");
 		*expect_fast = true;
 	} else if (type == 7) {
-		seq_dbg(shid, 1, "SEQ[state0]: DEVICE_DESC without RESET_RSP, handing to desc handler\n");
+		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: DEVICE_DESC without RESET_RSP, handing to desc handler\n");
 		seq_handle_desc(shid, type, blen);
 	} else if (type == 8) {
-		seq_dbg(shid, 1, "SEQ[state0]: RPT_DESC without RESET_RSP, handing to rpt handler\n");
+		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: RPT_DESC without RESET_RSP, handing to rpt handler\n");
 		seq_handle_rpt(shid, type, blen);
 	} else {
-		seq_dbg(shid, 1, "SEQ[state0]: unexpected type=%d in state 0, forcing DESCREQ\n",
+		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: unexpected type=%d in WAIT_RESET, forcing DESCREQ\n",
 			type);
 		{
 			u8 body_drain[64];
 			spi_hid_seq_read(shid, body_drain, sizeof(body_drain));
 		}
 		spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
-		spi_hid_seq_set_state(shid, 1, SPI_HID_SEQ_FALLBACK);
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_FALLBACK);
 	}
 }
 
-/* ── State handler: WAIT_DESC (state 1) ──────────────────────────── */
+/* ── State handler: WAIT_DESC ────────────────────────────────────── */
 static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 7) {
@@ -3348,7 +3425,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 				return;
 			}
 		}
-		spi_hid_seq_set_state(shid, 2, SPI_HID_SEQ_DEVICE_DESCRIPTOR);
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RPT, SPI_HID_SEQ_DEVICE_DESCRIPTOR);
 	} else if (type == 3) {
 		u8 body[16];
 		u32 rblen = min_t(u32, blen + 5, sizeof(body));
@@ -3356,14 +3433,14 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
-		seq_dbg(shid, 1, "SEQ: RESET_RSP in state 1, sending DESCREQ directly\n");
+		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_DESC, sending DESCREQ directly\n");
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 		seq_dbg(shid, 1, "SEQ: DESCREQ sent synchronously, waiting for next IRQ\n");
 	}
 }
 
-/* ── State handler: WAIT_RPT (state 2) ───────────────────────────── */
+/* ── State handler: WAIT_RPT ─────────────────────────────────────── */
 static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 8) {
@@ -3441,7 +3518,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 							0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
 							0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
 						};
-						seq_dbg(shid, 1, "SEQ: SET_FEATURE -> state 4\n");
+						seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
 						if (spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0)) {
 							dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
 							schedule_delayed_work(&shid->raw_handshake_watchdog,
@@ -3449,7 +3526,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 							return;
 						}
 					}
-					spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
+					spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 				}
 			} else {
 				static const u8 vendor_init[] = {
@@ -3484,13 +3561,13 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 						return;
 					}
-					spi_hid_seq_set_state(shid, 5, SPI_HID_SEQ_FEATURE_REQUEST);
+					spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_FEATURE, SPI_HID_SEQ_FEATURE_REQUEST);
 					schedule_delayed_work(&shid->raw_handshake_watchdog,
 							      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 				}
 			}
 		} else {
-			spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_REPORT_DESCRIPTOR);
+			spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 		}
 	} else if (type == 3) {
 		u8 body[16];
@@ -3499,12 +3576,12 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
-		seq_dbg(shid, 1, "SEQ: RESET_RSP in state 2, sending DESCREQ directly\n");
+		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_RPT, sending DESCREQ directly\n");
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
 }
 
-/* ── State handler: WAIT_FEAT_RESP (state 5) ─────────────────────── */
+/* ── State handler: WAIT_FEAT_RESP / WAIT_FEATURE ────────────────── */
 static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 5) {
@@ -3548,7 +3625,7 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 				return;
 			}
 		}
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FEATURE_RESPONSE);
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FEATURE_RESPONSE);
 	} else if (type == 3) {
 		u8 body[16];
 		u32 rblen = min_t(u32, blen + 5, sizeof(body));
@@ -3556,17 +3633,17 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		shid->stat_reset_rsp++;
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
-		seq_dbg(shid, 1, "SEQ: RESET_RSP in state 5, sending DESCREQ directly\n");
+		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_FEATURE, sending DESCREQ directly\n");
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
 }
 
-/* ── State handler: VENDOR_INIT (state 3) ────────────────────────── */
+/* ── State handler: VENDOR_INIT ──────────────────────────────────── */
 static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 1) {
 		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: got DATA! Creating HID device...\n");
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FALLBACK);
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		shid->keep_powered = true;
 		if (!shid->hid)
@@ -3586,7 +3663,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		shid->desc.vendor_id = 0x045E;
 		shid->desc.product_id = 0x0C19;
 		shid->desc.version_id = 0x0100;
-		spi_hid_seq_set_state(shid, 4, SPI_HID_SEQ_FALLBACK);
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		shid->keep_powered = true;
 		if (!shid->hid) {
@@ -3596,7 +3673,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 	}
 }
 
-/* ── State handler: DONE (state 4) ───────────────────────────────── */
+/* ── State handler: DONE ─────────────────────────────────────────── */
 static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 {
 	struct device *dev = &shid->spi->dev;
@@ -3605,7 +3682,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		u8 body[20];
 
 		shid->stat_reset_rsp++;
-		seq_dbg(shid, 1, "SEQ: Device reset detected in state 4. Re-initializing sequencer...\n");
+		seq_dbg(shid, 1, "SEQ: Device reset detected in DONE. Re-initializing sequencer...\n");
 		if (spi_hid_seq_read(shid, body, sizeof(body)))
 			return;
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_DEVICE_RESET);
@@ -3639,7 +3716,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			return;
 		}
 		rl = body[5] | (body[6] << 8);
-		seq_dbg(shid, 2, "SEQ: state4 cid=0x%02x len=%u\n", body[7], rl);
+		seq_dbg(shid, 2, "SEQ: DONE cid=0x%02x len=%u\n", body[7], rl);
 		if (rl >= 3 && rl - 3 > avail) {
 			dev_warn_ratelimited(dev,
 				"SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
@@ -4284,7 +4361,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	shid->raw_probe_attempts = 0;
 	shid->raw_mode_active = raw_mode; /* false → heatmap/raw code dead; infrastructure stays zeroed for mode switch */
-	shid->seq_dbg_last_state = -1;
+	shid->seq_dbg_last_state = SPI_HID_SEQ_INVALID;
 
 	INIT_DELAYED_WORK(&shid->stream_watchdog, spi_hid_stream_watchdog_work);
 	shid->stream_watchdog_active = false;
@@ -4367,8 +4444,8 @@ static int spi_hid_probe(struct spi_device *spi)
 	}
 
 	shid->seq_enabled = true;
-	spi_hid_seq_set_state(shid, 0, SPI_HID_SEQ_PROBE);
-	shid->ready = shid->seq_state >= 4 ? true : false;
+	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_PROBE);
+	shid->ready = shid->seq_state >= SPI_HID_SEQ_DONE ? true : false;
 	shid->keep_powered = true;
 
 	/* Wait for device to stabilize after ACPI _INI power-on.
@@ -4510,8 +4587,9 @@ static void spi_hid_remove(struct spi_device *spi)
 	struct device *dev = &spi->dev;
 
 	dev_info(dev, "removing driver instance\n");
-	seq_dbg(shid, 1, "remove begin irq_enabled=%u ready=%u state=%d\n",
-		shid->irq_enabled, shid->ready, shid->seq_state);
+	seq_dbg(shid, 1, "remove begin irq_enabled=%u ready=%u state=%s(%d)\n",
+		shid->irq_enabled, shid->ready,
+		spi_hid_seq_state_name(shid->seq_state), shid->seq_state);
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_REMOVE, 0);
 	mutex_lock(&shid->seq_lock);
 	WRITE_ONCE(shid->removing, true);
@@ -4584,7 +4662,7 @@ static int spi_hid_resume(struct device *dev)
 	shid->feat_delay_pending = false;
 	heatmap_reset_baseline(shid);
 	WRITE_ONCE(shid->seq_enabled, true);
-	shid->seq_state = 0;
+	shid->seq_state = SPI_HID_SEQ_WAIT_RESET;
 	mutex_unlock(&shid->seq_lock);
 
 	if (!shid->irq_enabled) {

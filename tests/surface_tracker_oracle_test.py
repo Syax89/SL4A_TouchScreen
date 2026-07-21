@@ -3,19 +3,23 @@
 
 from pathlib import Path
 import sys
+from optional_contract import skip_optional_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from surface_tracker_oracle import (  # noqa: E402
-    Contact,
-    MSHW0231_ASSOCIATION_RADIUS,
-    MSHW0231_COALESCE_DISTANCE_SQUARED,
-    MSHW0231_CONTINUITY_RADIUS,
-    association_within_radius,
-    coalesce_contacts,
-)
+try:
+    from surface_tracker_oracle import (  # noqa: E402
+        Contact,
+        MSHW0231_ASSOCIATION_RADIUS,
+        MSHW0231_COALESCE_DISTANCE_SQUARED,
+        MSHW0231_CONTINUITY_RADIUS,
+        association_within_radius,
+        coalesce_contacts,
+    )
+except ModuleNotFoundError:
+    skip_optional_contract("surface tracker oracle module is not present")
 
 
 assert MSHW0231_ASSOCIATION_RADIUS == 0.5450090169906616

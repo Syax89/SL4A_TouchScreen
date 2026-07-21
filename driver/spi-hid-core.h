@@ -121,6 +121,17 @@
 #define SPI_HID_ISOLATED_SET_RING_SLOTS 8
 #define SPI_HID_ISOLATED_SET_BODY_LENGTH 512
 
+
+enum spi_hid_seq_state {
+	SPI_HID_SEQ_INVALID = -1,
+	SPI_HID_SEQ_WAIT_RESET = 0,
+	SPI_HID_SEQ_WAIT_DESC = 1,
+	SPI_HID_SEQ_WAIT_RPT = 2,
+	SPI_HID_SEQ_VENDOR_INIT = 3,
+	SPI_HID_SEQ_DONE = 4,
+	SPI_HID_SEQ_WAIT_FEATURE = 5,
+};
+
 enum spi_hid_isolated_set_state {
 	SPI_HID_ISOLATED_SET_DISABLED,
 	SPI_HID_ISOLATED_SET_WAIT_GET,
@@ -272,6 +283,15 @@ struct spi_hid {
 	struct work_struct refresh_device_work; /* HID device refresh work */
 	struct work_struct error_work;          /* Error handling work */
 
+	/*
+	 * Locking hierarchy for code that needs more than one lock:
+	 *
+	 *   power_lock -> lock -> seq_lock -> output_lock -> raw_capture_lock
+	 *
+	 * input_lock is a leaf spinlock for input-transfer buffer state. Do not
+	 * take sleeping locks while holding input_lock. Keep this comment in sync
+	 * with future lockdep assertions as the refactor splits the core file.
+	 */
 	struct mutex lock;            /* Top-level driver state mutex */
 	/* Serializes sequencer SPI transfers and sequencer-owned state. */
 	struct mutex seq_lock;
@@ -298,9 +318,8 @@ struct spi_hid {
 	 * IRQ-driven startup sequencer state machine. Mirrors HidSpiCx WDF
 	 * automaton: reset-response → body read → ConfiguringDescriptor →
 	 * acknowledge → descriptor request.
-	 * States: 0=WAIT_RESET 1=WAIT_DESC 2=WAIT_RPT 3=VENDOR_INIT 4=DONE 5=WAIT_FEATURE
 	 */
-	int seq_state;
+	enum spi_hid_seq_state seq_state;
 	bool seq_enabled;               /* Sequencer is active */
 	unsigned long seq_last_valid_jiffies; /* Last valid IRQ timestamp */
 	u32 seq_storm_count;           /* Consecutive invalid IRQ count (storm detection) */
@@ -413,7 +432,7 @@ struct spi_hid {
 	/* Raw-mode handshake state for auto-retry on cold boot. */
 	struct delayed_work raw_handshake_watchdog; /* Handshake timeout/retry watchdog */
 	int raw_handshake_retries_left;            /* Remaining handshake attempts */
-	u8 raw_handshake_state5_defers;           /* State-5 deferral counter */
+	u8 raw_handshake_wait_feature_defers;  /* WAIT_FEATURE deferral counter */
 	bool raw_handshake_confirmed;             /* Handshake successfully completed */
 	u8 raw_probe_attempts;                    /* Deferred probe retry counter */
 
@@ -443,7 +462,7 @@ struct spi_hid {
 	u32 stat_irq_count;
 	u32 stat_wire_patches; /* descriptor bytes patched (0 = 100% wire-read) */
 	ktime_t seq_dbg_last_irq;
-	int seq_dbg_last_state;
+	enum spi_hid_seq_state seq_dbg_last_state;
 	bool seq_dbg_expect_fast;
 };
 

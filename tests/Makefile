@@ -24,7 +24,7 @@ test: protocol_test raw_corpus_test raw_capture_export_test v0_capimg_decoder_te
 	$(PYTHON) raw_capture_export_test.py
 	$(PYTHON) v0_capimg_decoder_test.py
 
-raw_corpus_test: ../tools/analyze_raw_corpus.py ../tools/parse_spb_csv.py
+raw_corpus_test:
 
 raw_capture_export_test: ../tools/extract_raw_capture.py
 
