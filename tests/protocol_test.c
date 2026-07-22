@@ -162,6 +162,35 @@ static void test_find_header(void)
 	CHECK(spi_hid_protocol_find_header(trailing, 6, NULL) == 3, "search: NULL offset ok");
 }
 
+/* ── Content parser ────────────────────────────────────────────── */
+
+static void test_parse_content(void)
+{
+	struct spi_hid_protocol_content content;
+	spi_hid_proto_u8 valid_body[] = {0x03, 0x00, 0x0c};
+	spi_hid_proto_u8 too_short[] = {0x03, 0x00};
+	spi_hid_proto_u8 total_below_three[] = {0x02, 0x00, 0x0c};
+	spi_hid_proto_u8 total_exceeds_body[] = {0x05, 0x00, 0x0c, 0xaa};
+	spi_hid_proto_u8 payload_body[] = {0x06, 0x00, 0x0c, 0xaa, 0xbb, 0xcc};
+
+	CHECK(spi_hid_protocol_parse_content(valid_body, sizeof(valid_body), &content) == 0,
+	      "content: valid body accepted");
+	CHECK(spi_hid_protocol_parse_content(too_short, sizeof(too_short), &content) < 0,
+	      "content: too-short body rejected");
+	CHECK(spi_hid_protocol_parse_content(total_below_three, sizeof(total_below_three), &content) < 0,
+	      "content: total length below 3 rejected");
+	CHECK(spi_hid_protocol_parse_content(total_exceeds_body, sizeof(total_exceeds_body), &content) < 0,
+	      "content: total length exceeding body rejected");
+
+	CHECK(spi_hid_protocol_parse_content(payload_body, sizeof(payload_body), &content) == 0,
+	      "content: payload body accepted");
+	CHECK(content.total_length == 6, "content: total length");
+	CHECK(content.content_id == 0x0c, "content: content ID");
+	CHECK(content.data == payload_body + 3, "content: payload pointer");
+	CHECK(content.data_length == 3, "content: payload length");
+	CHECK(!memcmp(content.data, "\xaa\xbb\xcc", 3), "content: payload data");
+}
+
 /* ── Fuzz roundtrip: encode → decode → verify ─────────────────── */
 
 static void test_fuzz_roundtrip(void)
@@ -300,6 +329,7 @@ int main(void)
 	test_encode_output();
 	test_encode_read();
 	test_find_header();
+	test_parse_content();
 	test_find_header_null_offset();
 	test_find_header_too_short();
 	test_output_length_boundaries();

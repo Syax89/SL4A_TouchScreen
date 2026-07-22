@@ -56,21 +56,14 @@
 #define SPI_HID_BUS_ERROR_STOP			7
 
 /* Protocol constants */
-#define SPI_HID_READ_APPROVAL_CONSTANT		0xff
-#define SPI_HID_INPUT_HEADER_SYNC_BYTE		0x5a
-
-#define SPI_HID_INPUT_HEADER_VERSION		0x02
 #define SPI_HID_OUTPUT_HEADER_VERSION		0x02
 
-#define SPI_HID_READ_APPROVAL_OPCODE_READ	0x0b
 #define SPI_HID_OUTPUT_HEADER_OPCODE_WRITE	0x02
 
 #define SPI_HID_DEFAULT_INPUT_REGISTER		0x0000
 #define SPI_HID_SUPPORTED_VERSION		0x0100
 
 /* Protocol message size constants */
-#define SPI_HID_READ_APPROVAL_LEN		5
-#define SPI_HID_READ_APPROVAL_MAX		9
 #define SPI_HID_INPUT_HEADER_LEN		4
 #define SPI_HID_INPUT_BODY_LEN			3
 
@@ -106,9 +99,6 @@
 #define SPI_HID_LEFT_SCREEN_TOUCH_HEAT_MAP_REPORT_ID 0X3C
 
 #define SPI_HID_MAX_LATENCIES			64
-
-#define SPI_HID_INPUT_STAGE_IDLE	0
-#define SPI_HID_INPUT_STAGE_BODY	1
 
 /* Heatmap blob detection limits */
 #define HEATMAP_MAX_CELLS   4300
@@ -197,32 +187,11 @@ struct spi_hid_output_buf {
 	u8 content[SZ_8K];
 };
 
-struct spi_hid_input_report {
-	u8 report_type;
-	u16 content_length;
-	u8 content_id;
-	u8 *content;
-};
-
 struct spi_hid_output_report {
 	u8 content_type;
 	u16 content_length;
 	u8 content_id;
 	u8 *content;
-};
-
-struct spi_hid_input_header {
-	u8 version;
-	u8 report_type;
-	u8 fragment_id;
-	u8 length_reserved;
-	u16 report_length;
-	u8 sync_const;
-};
-
-struct spi_hid_input_body {
-	u16 content_length;
-	u8 content_id;
 };
 
 struct latency_instance {
@@ -236,19 +205,13 @@ struct spi_hid {
 	struct spi_device	*spi;         /* SPI bus controller device */
 	struct hid_device	*hid;         /* HID subsystem device handle */
 
-	struct spi_transfer	input_transfer[2];  /* 2-phase SPI transfer descriptors */
-	struct spi_message	input_message;      /* SPI message aggregating transfers */
-
 	struct spi_hid_device_descriptor desc;    /* Parsed hardware descriptor */
 	struct spi_hid_output_buf output;         /* Output report buffer (host→device) */
-	struct spi_hid_input_buf input;           /* Main input buffer (device→host) */
 	struct spi_hid_input_buf response;        /* Output response buffer */
 
-	spinlock_t		input_lock;   /* Protects input transfer and buffer access */
+	spinlock_t		input_lock;   /* Protects IRQ-shared performance data */
 
 	u32 device_descriptor_register;    /* Register address for device descriptor */
-	u32 input_transfer_pending;        /* Non-zero when async input transfer active */
-	u32 input_stage;                   /* 0=IDLE (header), 1=BODY (payload) */
 
 	u16 hid_desc_addr;                 /* HID descriptor register address from ACPI */
 	u8 power_state;                    /* D0 (1 active), D2 (2 doze), D3 (3 off) */
@@ -259,6 +222,8 @@ struct spi_hid {
 	 * The FW becomes ready after sending the report descriptor.
 	 */
 	bool ready;
+	bool hid_creating;            /* HID exists but hid_add_device() is in progress */
+	bool reset_pending;           /* Reject HID creation until a new descriptor arrives */
 	/*
 	 * refresh_in_progress is set to true while the refresh_device worker thread
 	 * is destroying and recreating the hidraw device. When this flag is set to
@@ -266,7 +231,9 @@ struct spi_hid {
 	 */
 	bool refresh_in_progress;
 
-	bool irq_enabled;           /* Whether the GPIO interrupt is enabled */
+	bool irq_requested;         /* request_threaded_irq() succeeded */
+	bool irq_enabled;           /* Driver has not disabled the requested IRQ */
+	bool suspended;             /* PM has quiesced driver I/O */
 	bool removing;              /* Driver removal in progress */
 	bool works_initialized;      /* Work items have been initialized */
 	int irq;                    /* GPIO interrupt line number */
@@ -288,9 +255,9 @@ struct spi_hid {
 	 *
 	 *   power_lock -> lock -> seq_lock -> output_lock -> raw_capture_lock
 	 *
-	 * input_lock is a leaf spinlock for input-transfer buffer state. Do not
-	 * take sleeping locks while holding input_lock. Keep this comment in sync
-	 * with future lockdep assertions as the refactor splits the core file.
+	 * response_lock is a leaf spinlock and only protects response transaction
+	 * metadata.
+	 * response_mutex serializes requests and is acquired without lock held.
 	 */
 	struct mutex lock;            /* Top-level driver state mutex */
 	/* Serializes sequencer SPI transfers and sequencer-owned state. */
@@ -298,12 +265,14 @@ struct spi_hid {
 	struct mutex power_lock;      /* Serializes power state transitions */
 	struct mutex output_lock;     /* Serializes output report access */
 	struct mutex raw_capture_lock; /* Serializes raw capture buffer access */
+	struct mutex response_mutex;  /* Serializes synchronous response transactions */
 	struct completion output_done; /* Signaled when output report completes */
+	spinlock_t response_lock;      /* Protects the synchronous response transaction */
 	u8 expected_response_type;    /* Expected response report type */
 	u8 expected_response_id;      /* Expected response content ID */
 	bool output_pending;          /* Output report sent, awaiting response */
-
-	__u8 read_approval[SPI_HID_READ_APPROVAL_MAX]; /* Read-approval buffer */
+	bool response_valid;          /* response contains the current transaction */
+	u64 response_generation;      /* Rejects late responses from prior requests */
 
 	u32 report_descriptor_crc32;  /* CRC32 of wire-read report descriptor */
 
@@ -339,7 +308,8 @@ struct spi_hid {
 	struct input_dev *touch_input;
 	bool raw_mode_active;           /* Device is in raw heatmap mode */
 	u8 *heatmap_buf;                /* Last captured raw frame buffer, kmalloc'd */
-	u32 heatmap_len;                /* byte length of heatmap_buf */
+	u32 heatmap_len;                /* byte length of the last raw frame */
+	u32 heatmap_capacity;           /* allocated byte capacity of heatmap_buf */
 	u32 heatmap_content_id;         /* content_id from the captured frame */
 	u16 heatmap_grid_cols;          /* Heatmap columns (72) */
 	u16 heatmap_grid_rows;          /* Heatmap rows (48) */
@@ -352,12 +322,16 @@ struct spi_hid {
 	u8  heatmap_touched[HEATMAP_MAX_CELLS];
 	s16 heatmap_signal[HEATMAP_MAX_CELLS];   /* precomputed c590 signal rise */
 	u16 heatmap_label[HEATMAP_MAX_CELLS];    /* CCL component labels */
+	u16 heatmap_queue[HEATMAP_MAX_CELLS];    /* CCL flood-fill queue */
 
 	/* Blob state. Coordinates are fixed-point grid ×100. */
 	u32 blob_x[HEATMAP_MAX_BLOBS];
 	u32 blob_y[HEATMAP_MAX_BLOBS];
 	u32 blob_wsum[HEATMAP_MAX_BLOBS];
 	bool blob_active[HEATMAP_MAX_BLOBS];
+	s32 blob_eigmaj[HEATMAP_MAX_BLOBS];
+	s32 blob_eigmin[HEATMAP_MAX_BLOBS];
+	s32 blob_eigori[HEATMAP_MAX_BLOBS];
 	u16 cost[HEATMAP_MAX_BLOBS][HEATMAP_MAX_SLOTS]; /* Hungarian cost matrix */
 
 	/* Slot state, duration, and coordinate history. */
@@ -377,9 +351,8 @@ struct spi_hid {
 	u8 blob_slot_hpos[HEATMAP_MAX_SLOTS];
 	u8 blob_slot_hcount[HEATMAP_MAX_SLOTS];  /* valid entries */
 
-	/* Frame counter for gap detection (Surface: >5 frames → reset all). */
-	u32 heatmap_frame_id;
-	u32 heatmap_last_consecutive;
+	/* Timestamp of the last raw frame for missed-frame release. */
+	unsigned long heatmap_last_frame_jiffies;
 
 	/* Eigenvalue/ellipsis tracking */
 	s32 eigmaj[HEATMAP_MAX_SLOTS];

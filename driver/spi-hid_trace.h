@@ -42,24 +42,6 @@ DECLARE_EVENT_CLASS(spi_hid_transfer,
 		__entry->ret)
 );
 
-DEFINE_EVENT(spi_hid_transfer, spi_hid_input_async,
-	TP_PROTO(struct spi_hid *shid, const void *tx_buf, int tx_len,
-			const void *rx_buf, u16 rx_len, int ret),
-	TP_ARGS(shid, tx_buf, tx_len, rx_buf, rx_len, ret)
-);
-
-DEFINE_EVENT(spi_hid_transfer, spi_hid_input_header_complete,
-	TP_PROTO(struct spi_hid *shid, const void *tx_buf, int tx_len,
-			const void *rx_buf, u16 rx_len, int ret),
-	TP_ARGS(shid, tx_buf, tx_len, rx_buf, rx_len, ret)
-);
-
-DEFINE_EVENT(spi_hid_transfer, spi_hid_input_body_complete,
-	TP_PROTO(struct spi_hid *shid, const void *tx_buf, int tx_len,
-			const void *rx_buf, u16 rx_len, int ret),
-	TP_ARGS(shid, tx_buf, tx_len, rx_buf, rx_len, ret)
-);
-
 DEFINE_EVENT(spi_hid_transfer, spi_hid_output_begin,
 	TP_PROTO(struct spi_hid *shid, const void *tx_buf, int tx_len,
 			const void *rx_buf, u16 rx_len, int ret),
@@ -106,9 +88,7 @@ DECLARE_EVENT_CLASS(spi_hid,
 	TP_STRUCT__entry(
 		__field(int, bus_num)
 		__field(int, chip_select)
-		__field(int, input_stage)
 		__field(int, power_state)
-		__field(u32, input_transfer_pending)
 		__field(bool, ready)
 
 		__field(int, vendor_id)
@@ -123,9 +103,7 @@ DECLARE_EVENT_CLASS(spi_hid,
 	TP_fast_assign(
 		__entry->bus_num = shid->spi->controller->bus_num;
 		__entry->chip_select = spi_get_chipselect(shid->spi, 0);
-		__entry->input_stage = shid->input_stage;
 		__entry->power_state = shid->power_state;
-		__entry->input_transfer_pending = shid->input_transfer_pending;
 		__entry->ready = shid->ready;
 
 		__entry->vendor_id = shid->desc.vendor_id;
@@ -137,30 +115,14 @@ DECLARE_EVENT_CLASS(spi_hid,
 		__entry->version_id = shid->desc.version_id;
 	),
 
-	TP_printk("spi%d.%d: (%04x:%04x v%d) HID v%d.%d state i:%d p:%d len i:%d o:%d r:%d flags %c:%d",
+	TP_printk("spi%d.%d: (%04x:%04x v%d) HID v%d.%d state p:%d len i:%d o:%d r:%d flags %c",
 		__entry->bus_num, __entry->chip_select, __entry->vendor_id,
 		__entry->product_id, __entry->version_id,
 		__entry->hid_version >> 8, __entry->hid_version & 0xff,
-		__entry->input_stage, __entry->power_state,
+		__entry->power_state,
 		__entry->max_input_length, __entry->max_output_length,
 		__entry->report_descriptor_length,
-		__entry->ready ? 'R' : 'r',
-		__entry->input_transfer_pending)
-);
-
-DEFINE_EVENT(spi_hid, spi_hid_bus_input_report,
-	TP_PROTO(struct spi_hid *shid),
-	TP_ARGS(shid)
-);
-
-DEFINE_EVENT(spi_hid, spi_hid_process_input_report,
-	TP_PROTO(struct spi_hid *shid),
-	TP_ARGS(shid)
-);
-
-DEFINE_EVENT(spi_hid, spi_hid_input_report_handler,
-	TP_PROTO(struct spi_hid *shid),
-	TP_ARGS(shid)
+		__entry->ready ? 'R' : 'r')
 );
 
 DEFINE_EVENT(spi_hid, spi_hid_reset_work,
@@ -174,11 +136,6 @@ DEFINE_EVENT(spi_hid, spi_hid_create_device_work,
 );
 
 DEFINE_EVENT(spi_hid, spi_hid_refresh_device_work,
-	TP_PROTO(struct spi_hid *shid),
-	TP_ARGS(shid)
-);
-
-DEFINE_EVENT(spi_hid, spi_hid_response_handler,
 	TP_PROTO(struct spi_hid *shid),
 	TP_ARGS(shid)
 );

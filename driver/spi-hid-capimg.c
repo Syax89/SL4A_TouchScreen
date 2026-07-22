@@ -29,6 +29,7 @@ int spi_hid_capimg_decode_v0(const u8 *body, size_t body_length,
 	container_length = get_unaligned_le32(payload);
 	if (get_unaligned_le16(payload + 4) != 0 || payload[6] != 0 ||
 	    container_length < CAPIMG_HEADER_LENGTH ||
+	    container_length > body_length - V0_USAGE_61_OFFSET ||
 	    container_length > V0_USAGE_61_LENGTH)
 		return -EINVAL;
 

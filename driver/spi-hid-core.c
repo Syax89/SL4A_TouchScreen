@@ -173,96 +173,11 @@ static int spi_hid_validate_dev_desc(const struct spi_hid_device_desc_raw *raw,
 	return 0;
 }
 
-static void spi_hid_populate_input_header(__u8 *buf,
-		struct spi_hid_input_header *header)
-{
-	struct spi_hid_protocol_header protocol_header;
-
-	spi_hid_protocol_decode_header(buf, &protocol_header);
-	header->version = protocol_header.version;
-	header->report_type = protocol_header.report_type;
-	header->fragment_id = protocol_header.fragment_id;
-	header->length_reserved = protocol_header.length_reserved;
-	header->report_length = protocol_header.report_length;
-	header->sync_const = protocol_header.sync_const;
-}
-
-static void spi_hid_populate_input_body(__u8 *buf,
-		struct spi_hid_input_body *body)
-{
-	body->content_length = (buf[0] | (buf[1] << 8)) -
-		(sizeof(body->content_length) + sizeof(body->content_id));
-	body->content_id = buf[2];
-}
-
-static void spi_hid_input_report_prepare(struct spi_hid_input_buf *buf,
-		struct spi_hid_input_report *report)
-{
-	struct spi_hid_input_header header;
-	struct spi_hid_input_body body;
-
-	spi_hid_populate_input_header(buf->header, &header);
-	spi_hid_populate_input_body(buf->body, &body);
-	report->report_type = header.report_type;
-	report->content_length = body.content_length;
-	report->content_id = body.content_id;
-	report->content = buf->content;
-}
-
 static int spi_hid_output_header(__u8 *buf,
 		u16 output_register, u16 output_report_length)
 {
 	return spi_hid_protocol_encode_output_header(buf, output_register,
 			output_report_length);
-}
-
-static void spi_hid_read_approval(u32 input_register, u8 *buf)
-{
-	spi_hid_protocol_encode_read_approval(buf, input_register);
-}
-
-static int spi_hid_input_async(struct spi_hid *shid, void *buf, u16 length,
-		void (*complete)(void*))
-{
-	int ret;
-
-	shid->input_transfer[0].tx_buf = shid->read_approval;
-	shid->input_transfer[0].len = SPI_HID_READ_APPROVAL_LEN;
-
-	shid->input_transfer[1].rx_buf = buf;
-	shid->input_transfer[1].len = length;
-
-	/*
-	 * Optimization opportunity: we really do not need the input_register
-	 * field in struct spi_hid; we can calculate the read_approval field
-	 * with default input_register value during probe and then re-calculate
-	 * from spi_hid_parse_dev_desc. And then we can get rid of the below
-	 * spi_hid_read_approval call which is run twice per interrupt.
-	 *
-	 * Long term, for spec v1.0, we'll be using the input_register value
-	 * from device tree, not from the device descriptor.
-	 */
-	spi_hid_read_approval(shid->desc.input_register,
-			shid->read_approval);
-	spi_message_init_with_transfers(&shid->input_message,
-			shid->input_transfer, 2);
-
-	shid->input_message.complete = complete;
-	shid->input_message.context = shid;
-
-	trace_spi_hid_input_async(shid,
-			shid->input_transfer[0].tx_buf,
-			shid->input_transfer[0].len,
-			shid->input_transfer[1].rx_buf,
-			shid->input_transfer[1].len, 0);
-
-	ret = spi_async(shid->spi, &shid->input_message);
-	if (ret) {
-		shid->bus_error_count++;
-		shid->bus_last_error = ret;
-	}
-
-	return ret;
 }
 
 static int spi_hid_output(struct spi_hid *shid, void *buf, u16 length)
@@ -375,21 +290,32 @@ static int spi_hid_power_down(struct spi_hid *shid)
 	struct device *dev = &shid->spi->dev;
 	int ret;
 
+	lockdep_assert_held(&shid->power_lock);
+
 	if (!shid->powered)
 		return 0;
 
 	ret = spi_hid_set_power(shid, SPI_HID_POWER_MODE_SLEEP);
-	if (ret)
+	if (ret) {
 		dev_err(dev, "failed to set power SLEEP: %d\n", ret);
+		return ret;
+	}
 
 	if (shid->spi->dev.of_node) {
-		pinctrl_select_state(shid->pinctrl, shid->pinctrl_sleep);
+		ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_sleep);
+		if (ret) {
+			dev_err(dev, "failed to select sleep pin state: %d\n", ret);
+			return ret;
+		}
 
 		ret = regulator_disable(shid->supply);
 		if (ret) {
 			dev_err(dev, "failed to disable regulator\n");
 			return ret;
 		}
+		shid->power_state = SPI_HID_POWER_MODE_OFF;
+	} else {
+		shid->power_state = SPI_HID_POWER_MODE_SLEEP;
 	}
 
 	shid->powered = false;
@@ -399,9 +325,13 @@ static int spi_hid_power_down(struct spi_hid *shid)
 
 static struct hid_device *spi_hid_disconnect_hid(struct spi_hid *shid)
 {
-	struct hid_device *hid = shid->hid;
+	struct hid_device *hid;
 
+	mutex_lock(&shid->seq_lock);
+	hid = shid->hid;
 	shid->hid = NULL;
+	shid->hid_creating = false;
+	mutex_unlock(&shid->seq_lock);
 
 	return hid;
 }
@@ -410,13 +340,17 @@ static void spi_hid_stop_hid(struct spi_hid *shid)
 {
 	struct hid_device *hid;
 
-	hid = spi_hid_disconnect_hid(shid);
-	if (hid) {
+	/* Stop possible publishers before detaching the sequencer-visible HID. */
+	if (shid->works_initialized) {
 		cancel_work_sync(&shid->create_device_work);
 		cancel_work_sync(&shid->refresh_device_work);
-		hid_destroy_device(hid);
 	}
+	hid = spi_hid_disconnect_hid(shid);
+	if (hid)
+		hid_destroy_device(hid);
 }
+
+static void spi_hid_disable_irq(struct spi_hid *shid);
 
 /* _RST calls M010 which DESTROYS the device. Never call it. */
 static int spi_hid_reset_via_acpi(struct spi_hid *shid)
@@ -461,16 +395,10 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 	}
 
 	shid->power_state = SPI_HID_POWER_MODE_OFF;
-	shid->input_stage = SPI_HID_INPUT_STAGE_IDLE;
-	shid->input_transfer_pending = 0;
-	cancel_work_sync(&shid->reset_work);
-
 	if (dev->of_node) {
 		/* Drive reset for at least 100 ms */
 		msleep(100);
 	}
-
-	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
 
 	if (dev->of_node) {
 		ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_active);
@@ -485,12 +413,26 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 			goto out;
 		}
 	}
+	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
 
 out:
 	mutex_unlock(&shid->power_lock);
 	if (terminal_failure) {
 		/* refresh_device_work also needs power_lock. Never wait for it while
 		 * holding that lock, otherwise exhausted recovery deadlocks. */
+		mutex_lock(&shid->seq_lock);
+		WRITE_ONCE(shid->seq_enabled, false);
+		shid->poll_active = false;
+		shid->stream_watchdog_active = false;
+		mutex_unlock(&shid->seq_lock);
+		spi_hid_disable_irq(shid);
+		if (shid->works_initialized) {
+			cancel_delayed_work_sync(&shid->descreq_work);
+			cancel_delayed_work_sync(&shid->poll_work);
+			cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
+			cancel_delayed_work_sync(&shid->feat_delay_work);
+			cancel_delayed_work_sync(&shid->stream_watchdog);
+		}
 		spi_hid_stop_hid(shid);
 		mutex_lock(&shid->power_lock);
 		spi_hid_power_down(shid);
@@ -551,7 +493,7 @@ static void spi_hid_error_work(struct work_struct *work)
 	struct device *dev = &shid->spi->dev;
 	int ret;
 
-	if (READ_ONCE(shid->removing))
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended))
 		return;
 
 	ret = spi_hid_error_handler(shid);
@@ -575,8 +517,13 @@ static void spi_hid_reset_work(struct work_struct *work)
 	trace_spi_hid_reset_work(shid);
 
 	dev_dbg(dev, "reset handler\n");
-	if (READ_ONCE(shid->removing))
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended))
 		return;
+	mutex_lock(&shid->seq_lock);
+	shid->reset_pending = true;
+	mutex_unlock(&shid->seq_lock);
+	/* A reset invalidates the descriptor used by a queued HID creation. */
+	cancel_work_sync(&shid->create_device_work);
 	if (shid->ready) {
 		dev_err(dev, "Spontaneous FW reset!");
 		shid->ready = false;
@@ -584,18 +531,8 @@ static void spi_hid_reset_work(struct work_struct *work)
 		sysfs_notify(&dev->kobj, NULL, "ready");
 	}
 
-	if (flush_work(&shid->create_device_work))
-		dev_dbg(dev, "reset handler waited for create_device_work\n");
-
-	if (shid->power_state == SPI_HID_POWER_MODE_OFF) {
-		return;
-	}
-
-	if (flush_work(&shid->refresh_device_work))
-		dev_dbg(dev, "reset handler waited for refresh_device_work\n");
-
-	mutex_lock(&shid->output_lock);
-	{
+	mutex_lock(&shid->power_lock);
+	if (shid->power_state != SPI_HID_POWER_MODE_OFF) {
 		u16 body_len = round_up(sizeof(buf->body) + 2, 4);
 
 		buf->body[0] = 0x00; /* content_type = COMMAND */
@@ -607,8 +544,9 @@ static void spi_hid_reset_work(struct work_struct *work)
 		ret = spi_hid_output_header(buf->header, shid->desc.command_register, body_len);
 		if (!ret)
 			ret = spi_hid_output(shid, buf, sizeof(buf->header) + body_len);
-	}
-	mutex_unlock(&shid->output_lock);
+	} else
+		ret = -ESHUTDOWN;
+	mutex_unlock(&shid->power_lock);
 	if (ret) {
 		dev_err(dev, "failed to send device reset request\n");
 		schedule_work(&shid->error_work);
@@ -616,85 +554,27 @@ static void spi_hid_reset_work(struct work_struct *work)
 	}
 }
 
-static int spi_hid_input_report_handler(struct spi_hid *shid,
-		struct spi_hid_input_buf *buf)
+static bool spi_hid_complete_response(struct spi_hid *shid, u8 report_type,
+		u8 content_id, u64 generation, bool generation_required)
 {
-	struct device *dev = &shid->spi->dev;
-	struct spi_hid_input_report r;
-	int ret;
+	unsigned long flags;
 
-	dev_dbg(dev, "input report handler\n");
-
-	trace_spi_hid_input_report_handler(shid);
-
-	if (!shid->ready) {
-		dev_dbg(dev, "discarding input report: device not ready\n");
-		return 0;
+	spin_lock_irqsave(&shid->response_lock, flags);
+	if (!shid->output_pending || shid->response_valid ||
+	    shid->expected_response_type != report_type ||
+	    shid->expected_response_id != content_id ||
+	    (generation_required && shid->response_generation != generation)) {
+		spin_unlock_irqrestore(&shid->response_lock, flags);
+		return false;
+	} else {
+		shid->response_valid = true;
+		/* A V0 response has no transaction ID. Close the transaction before
+		 * waking the caller so a duplicate IRQ cannot overwrite its payload. */
+		shid->output_pending = false;
+		complete(&shid->output_done);
 	}
-
-	if (shid->refresh_in_progress) {
-		dev_dbg(dev, "discarding input report: refresh in progress\n");
-		return 0;
-	}
-
-	if (!shid->hid) {
-		dev_dbg(dev, "discarding input report: no HID device\n");
-		return 0;
-	}
-
-	spi_hid_input_report_prepare(buf, &r);
-
-	if (shid->perf_mode &&
-			(r.content_id == SPI_HID_RIGHT_SCREEN_TOUCH_HEAT_MAP_REPORT_ID ||
-			r.content_id == SPI_HID_LEFT_SCREEN_TOUCH_HEAT_MAP_REPORT_ID)) {
-		r.content[1] = shid->touch_signature_index >> 8;
-		r.content[0] = shid->touch_signature_index++;
-	}
-
-	/*
-	 * content points into buf->content which is offset within a larger
-	 * struct — the -1 pointer arithmetic to prepend report ID is valid.
-	 */
-	ret = hid_input_report(shid->hid, HID_INPUT_REPORT,
-			r.content - 1,
-			r.content_length + 1, 1);
-
-	if (shid->perf_mode &&
-			(r.content_id == SPI_HID_HEARTBEAT_REPORT_ID ||
-			r.content_id == SPI_HID_RIGHT_SCREEN_TOUCH_HEAT_MAP_REPORT_ID ||
-			r.content_id == SPI_HID_LEFT_SCREEN_TOUCH_HEAT_MAP_REPORT_ID)) {
-		shid->latencies[shid->latency_index].end_time = ktime_get_ns();
-		shid->latencies[shid->latency_index].report_id = r.content_id;
-		shid->latencies[shid->latency_index].signature = (r.content[1] << 8) | r.content[0];
-		shid->latencies[shid->latency_index].start_time = shid->interrupt_time_stamps[0];
-
-		shid->latency_index = (shid->latency_index + 1) % SPI_HID_MAX_LATENCIES;
-	}
-
-	if (ret == -ENODEV || ret == -EBUSY) {
-		dev_err(dev, "ignoring report --> %d\n", ret);
-		return 0;
-	}
-
-	return ret;
-}
-
-static int spi_hid_response_handler(struct spi_hid *shid,
-		u8 report_type, u8 content_id)
-{
-	trace_spi_hid_response_handler(shid);
-	dev_dbg(&shid->spi->dev, "response handler\n");
-
-	if (!READ_ONCE(shid->output_pending) ||
-	    READ_ONCE(shid->expected_response_type) != report_type ||
-	    READ_ONCE(shid->expected_response_id) != content_id) {
-		dev_warn(&shid->spi->dev, "Unexpected response type 0x%x ID 0x%x\n",
-			report_type, content_id);
-		return -EPROTO;
-	}
-	complete(&shid->output_done);
-
-	return 0;
+	spin_unlock_irqrestore(&shid->response_lock, flags);
+	return true;
 }
 
 static int spi_hid_send_output_report(struct spi_hid *shid, u32 output_register,
@@ -769,19 +649,43 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 		struct spi_hid_output_report *report, u8 expected_response_type)
 {
 	struct device *dev = &shid->spi->dev;
+	unsigned long flags;
+	u64 generation;
+	bool response_valid;
 	int ret = 0;
 
+	/* The caller holds shid->lock. Drop it before waiting for the response
+	 * transaction mutex so another caller cannot block completion by holding
+	 * shid->lock while this request is waking from the IRQ thread. */
+	mutex_unlock(&shid->lock);
+	mutex_lock(&shid->response_mutex);
+	mutex_lock(&shid->lock);
+	if (!shid->ready) {
+		ret = -ENODEV;
+		goto out;
+	}
+
 	/* A completion is single-use: never let a prior response satisfy this request. */
+	spin_lock_irqsave(&shid->response_lock, flags);
+	generation = ++shid->response_generation;
 	reinit_completion(&shid->output_done);
-	WRITE_ONCE(shid->expected_response_type, expected_response_type);
-	WRITE_ONCE(shid->expected_response_id, report->content_id);
-	WRITE_ONCE(shid->output_pending, true);
+	shid->expected_response_type = expected_response_type;
+	shid->expected_response_id = report->content_id;
+	shid->output_pending = true;
+	shid->response_valid = false;
+	spin_unlock_irqrestore(&shid->response_lock, flags);
 	ret = spi_hid_send_output_report(shid, output_register,
 			report);
 	if (ret) {
-		WRITE_ONCE(shid->output_pending, false);
+		spin_lock_irqsave(&shid->response_lock, flags);
+		if (shid->response_generation == generation) {
+			shid->output_pending = false;
+			shid->response_valid = false;
+			shid->response_generation++;
+		}
+		spin_unlock_irqrestore(&shid->response_lock, flags);
 		dev_err(dev, "failed to transfer output report\n");
-		return ret;
+		goto out;
 	}
 
 	/*
@@ -793,16 +697,34 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	ret = wait_for_completion_interruptible_timeout(&shid->output_done,
 			msecs_to_jiffies(1000));
 	mutex_lock(&shid->lock);
-	WRITE_ONCE(shid->output_pending, false);
-	if (ret == 0) {
-		dev_err(dev, "response timed out\n");
-		schedule_work(&shid->error_work);
-		return -ETIMEDOUT;
+	spin_lock_irqsave(&shid->response_lock, flags);
+	response_valid = ret > 0 && shid->response_generation == generation &&
+		shid->response_valid;
+	if (shid->response_generation == generation) {
+		shid->output_pending = false;
+		shid->response_valid = false;
+		shid->response_generation++;
 	}
-	if (ret < 0)
-		return ret;
+	spin_unlock_irqrestore(&shid->response_lock, flags);
+	if (ret <= 0 || !response_valid) {
+		if (ret == 0)
+			dev_err(dev, "response timed out\n");
+		else if (ret > 0)
+			dev_err(dev, "response completed without valid data\n");
+		shid->ready = false;
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
+		schedule_work(&shid->error_work);
+		if (ret == 0)
+			ret = -ETIMEDOUT;
+		else if (ret > 0)
+			ret = -EPROTO;
+		goto out;
+	}
+	ret = 0;
 
-	return 0;
+out:
+	mutex_unlock(&shid->response_mutex);
+	return ret;
 }
 
 /*
@@ -839,131 +761,6 @@ out:
 	return ret;
 }
 
-static int spi_hid_process_input_report(struct spi_hid *shid,
-		struct spi_hid_input_buf *buf)
-{
-	struct spi_hid_input_header header;
-	struct spi_hid_input_body body;
-	struct device *dev = &shid->spi->dev;
-	struct spi_hid_device_desc_raw *raw;
-	int ret;
-
-	trace_spi_hid_process_input_report(shid);
-
-	spi_hid_populate_input_header(buf->header, &header);
-	spi_hid_populate_input_body(buf->body, &body);
-
-	{
-		u16 total_content_len = buf->body[0] | (buf->body[1] << 8);
-
-		if (total_content_len < SPI_HID_INPUT_BODY_LEN ||
-		    total_content_len > header.report_length) {
-			dev_err(dev, "Bad body length %u for report body %u\n",
-				total_content_len, header.report_length);
-			return -EINVAL;
-		}
-	}
-
-	if (body.content_id == SPI_HID_HEARTBEAT_REPORT_ID) {
-		dev_warn(dev, "Heartbeat ID 0x%x from device %u\n",
-			buf->content[1], buf->content[0]);
-	}
-
-	switch (header.report_type) {
-	case SPI_HID_REPORT_TYPE_DATA:
-		ret = spi_hid_input_report_handler(shid, buf);
-		break;
-	case SPI_HID_REPORT_TYPE_RESET_RESP:
-		schedule_work(&shid->reset_work);
-		ret = 0;
-		break;
-	case SPI_HID_REPORT_TYPE_DEVICE_DESC:
-		dev_dbg(dev, "received device descriptor\n");
-		if (body.content_length < sizeof(*raw)) {
-			dev_err(dev, "device descriptor too short: %u\n", body.content_length);
-			return -EPROTO;
-		}
-		/* Reset attempts at every device descriptor fetch */
-		shid->attempts = 0;
-		raw = (struct spi_hid_device_desc_raw *) buf->content;
-		ret = spi_hid_validate_dev_desc(raw, body.content_length);
-		if (ret) {
-			dev_err(dev, "invalid device descriptor: %d\n", ret);
-			return ret;
-		}
-		spi_hid_parse_dev_desc(raw, &shid->desc);
-		if (!shid->hid) {
-			schedule_work(&shid->create_device_work);
-		} else {
-			schedule_work(&shid->refresh_device_work);
-		}
-		ret = 0;
-		break;
-	case SPI_HID_REPORT_TYPE_COMMAND_RESP:
-	case SPI_HID_REPORT_TYPE_GET_FEATURE_RESP:
-		if (!shid->ready) {
-			dev_err(dev,
-				"Unexpected response report type while not ready: 0x%x\n",
-				header.report_type);
-			ret = -EINVAL;
-			break;
-		}
-		fallthrough;
-	case SPI_HID_REPORT_TYPE_REPORT_DESC:
-		ret = spi_hid_response_handler(shid, header.report_type, body.content_id);
-		break;
-	default:
-		dev_err(dev, "Unknown input report: 0x%x\n", header.report_type);
-		ret = -EINVAL;
-		break;
-	}
-
-
-	return ret;
-}
-
-static int spi_hid_bus_validate_header(struct spi_hid *shid, struct spi_hid_input_header *header)
-{
-	struct device *dev = &shid->spi->dev;
-	size_t body_capacity = sizeof(shid->input.body) + sizeof(shid->input.content);
-
-	if (header->sync_const != SPI_HID_INPUT_HEADER_SYNC_BYTE) {
-		dev_err(dev, "Invalid input report sync constant (0x%x)\n",
-				header->sync_const);
-		return -EINVAL;
-	}
-
-	if (header->version != SPI_HID_INPUT_HEADER_VERSION) {
-		dev_err(dev, "Unknown input report version (v 0x%x)\n",
-				header->version);
-		return -EINVAL;
-	}
-
-	if (header->length_reserved) {
-		dev_err(dev, "Invalid input report length reserved bits (0x%x)\n",
-			header->length_reserved);
-		return -EINVAL;
-	}
-	if (header->report_length < SPI_HID_INPUT_BODY_LEN) {
-		dev_err(dev, "Input report body too short: %u\n", header->report_length);
-		return -EMSGSIZE;
-	}
-
-	if (!shid->raw_mode_active && shid->desc.max_input_length != 0 &&
-	    header->report_length > shid->desc.max_input_length) {
-		dev_err(dev, "Report body of size %u larger than max expected of %u\n",
-				header->report_length, shid->desc.max_input_length);
-		return -EMSGSIZE;
-	}
-	if (header->report_length > body_capacity) {
-		dev_err(dev, "Report body of size %u exceeds input buffer capacity %zu\n",
-			header->report_length, body_capacity);
-		return -EMSGSIZE;
-	}
-
-	return 0;
-}
-
 static int spi_hid_create_device(struct spi_hid *shid)
 {
 	struct hid_device *hid;
@@ -991,7 +788,18 @@ static int spi_hid_create_device(struct spi_hid *shid)
 			hid->vendor, hid->product);
 	strscpy(hid->phys, dev_name(&shid->spi->dev), sizeof(hid->phys));
 
+	/* HID callbacks require shid->hid during registration, while the IRQ
+	 * sequencer must not feed reports until registration has completed. */
+	mutex_lock(&shid->seq_lock);
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    shid->reset_pending || shid->hid || shid->hid_creating) {
+		mutex_unlock(&shid->seq_lock);
+		hid_destroy_device(hid);
+		return -ESHUTDOWN;
+	}
 	shid->hid = hid;
+	shid->hid_creating = true;
+	mutex_unlock(&shid->seq_lock);
 
 	ret = hid_add_device(hid);
 	/*
@@ -1005,13 +813,8 @@ static int spi_hid_create_device(struct spi_hid *shid)
 	}
 	if (ret) {
 		dev_err(dev, "Failed to add hid device: %d\n", ret);
-		/*
-		* We likely got here because report descriptor request timed
-		* out. Let's disconnect and destroy the hid_device structure.
-		*/
-		hid = spi_hid_disconnect_hid(shid);
-		if (hid)
-			hid_destroy_device(hid);
+		spi_hid_disconnect_hid(shid);
+		hid_destroy_device(hid);
 
 		if (shid->wire_report_descriptor_len > 0 &&
 		    !shid->wire_report_descriptor_rejected) {
@@ -1028,6 +831,16 @@ static int spi_hid_create_device(struct spi_hid *shid)
 		return ret;
 	}
 
+	mutex_lock(&shid->seq_lock);
+	shid->hid_creating = false;
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended)) {
+		shid->hid = NULL;
+		mutex_unlock(&shid->seq_lock);
+		hid_destroy_device(hid);
+		return -ESHUTDOWN;
+	}
+	mutex_unlock(&shid->seq_lock);
+
 	return 0;
 }
 
@@ -1039,7 +852,7 @@ static void spi_hid_create_device_work(struct work_struct *work)
 	int ret;
 
 	trace_spi_hid_create_device_work(shid);
-	if (READ_ONCE(shid->removing))
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended))
 		return;
 
 	dev_dbg(dev, "create device work\n");
@@ -1071,7 +884,7 @@ static void spi_hid_refresh_device_work(struct work_struct *work)
 	u32 new_crc32;
 
 	trace_spi_hid_refresh_device_work(shid);
-	if (READ_ONCE(shid->removing))
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended))
 		return;
 
 	dev_dbg(dev, "refresh device work\n");
@@ -1129,153 +942,6 @@ out:
 	 * failed HID recreation must not leave input delivery permanently gated. */
 	shid->refresh_in_progress = false;
 	mutex_unlock(&shid->power_lock);
-}
-
-static void spi_hid_input_header_complete(void *_shid);
-
-static void spi_hid_input_body_complete(void *_shid)
-{
-	struct spi_hid *shid = _shid;
-	struct device *dev = &shid->spi->dev;
-	unsigned long flags;
-	int ret;
-	struct spi_hid_input_buf *buf;
-	struct spi_hid_input_header header;
-
-	spin_lock_irqsave(&shid->input_lock, flags);
-	if (!shid->powered)
-		goto out;
-
-	trace_spi_hid_input_body_complete(shid,
-			shid->input_transfer[0].tx_buf,
-			shid->input_transfer[0].len,
-			shid->input_transfer[1].rx_buf,
-			shid->input_transfer[1].len,
-			shid->input_message.status);
-
-	shid->input_stage = SPI_HID_INPUT_STAGE_IDLE;
-
-	if (shid->input_message.status < 0) {
-		dev_warn(dev, "error reading body, resetting %d\n",
-				shid->input_message.status);
-		shid->bus_error_count++;
-		shid->bus_last_error = shid->input_message.status;
-		schedule_work(&shid->error_work);
-		goto out;
-	}
-
-	if (shid->power_state == SPI_HID_POWER_MODE_OFF) {
-		dev_warn(dev, "input body complete called while device is "
-				"off\n");
-		goto out;
-	}
-
-	spi_hid_populate_input_header(shid->input.header, &header);
-	buf = &shid->input;
-	if (header.report_type == SPI_HID_REPORT_TYPE_COMMAND_RESP ||
-		header.report_type == SPI_HID_REPORT_TYPE_GET_FEATURE_RESP ||
-		header.report_type == SPI_HID_REPORT_TYPE_REPORT_DESC) {
-			buf = &shid->response;
-	}
-
-	ret = spi_hid_process_input_report(shid, buf);
-	if (ret) {
-		dev_err(dev, "failed input callback: %d\n", ret);
-		schedule_work(&shid->error_work);
-		goto out;
-	}
-
-	if (--shid->input_transfer_pending) {
-		buf = &shid->input;
-
-		// On interrupt, the old start value is stored at index 1. This replaces it back to 0 after the interrupt
-		shid->interrupt_time_stamps[0] = shid->interrupt_time_stamps[1];
-
-		ret = spi_hid_input_async(shid, buf->header,
-				sizeof(buf->header),
-				spi_hid_input_header_complete);
-		if (ret)
-			dev_err(dev, "failed to start header --> %d\n", ret);
-	}
-
-out:
-	spin_unlock_irqrestore(&shid->input_lock, flags);
-}
-
-static void spi_hid_input_header_complete(void *_shid)
-{
-	struct spi_hid *shid = _shid;
-	struct device *dev = &shid->spi->dev;
-	struct spi_hid_input_header header;
-	struct spi_hid_input_buf *buf;
-	unsigned long flags;
-	int ret = 0;
-
-	spin_lock_irqsave(&shid->input_lock, flags);
-	if (!shid->powered)
-		goto out;
-
-	trace_spi_hid_input_header_complete(shid,
-			shid->input_transfer[0].tx_buf,
-			shid->input_transfer[0].len,
-			shid->input_transfer[1].rx_buf,
-			shid->input_transfer[1].len,
-			shid->input_message.status);
-
-	if (shid->input_message.status < 0) {
-		dev_warn(dev, "error reading header, resetting %d\n",
-				shid->input_message.status);
-		shid->bus_error_count++;
-		shid->bus_last_error = shid->input_message.status;
-		schedule_work(&shid->error_work);
-		goto out;
-	}
-
-	if (shid->power_state == SPI_HID_POWER_MODE_OFF) {
-		dev_warn(dev, "input header complete called while device is "
-				"off\n");
-		goto out;
-	}
-
-	spi_hid_populate_input_header(shid->input.header, &header);
-
-	seq_dbg(shid, 3, "header: version=0x%02x, report_type=0x%02x, report_length=%u, fragment_id=0x%02x, sync_const=0x%02x\n",
-		header.version, header.report_type, header.report_length, header.fragment_id, header.sync_const);
-
-	ret = spi_hid_bus_validate_header(shid, &header);
-	if (ret) {
-		dev_err(dev, "failed to validate header: %d\n", ret);
-		print_hex_dump(KERN_ERR, "spi_hid: header buffer: ",
-						DUMP_PREFIX_NONE, 16, 1,
-						shid->input.header,
-						sizeof(shid->input.header),
-						false);
-		shid->bus_error_count++;
-		shid->bus_last_error = ret;
-		goto out;
-	}
-
-	buf = &shid->input;
-	if (header.report_type == SPI_HID_REPORT_TYPE_COMMAND_RESP ||
-		header.report_type == SPI_HID_REPORT_TYPE_GET_FEATURE_RESP ||
-		header.report_type == SPI_HID_REPORT_TYPE_REPORT_DESC) {
-			buf = &shid->response;
-			memcpy(shid->response.header, shid->input.header,
-					sizeof(shid->input.header));
-	}
-
-	shid->input_stage = SPI_HID_INPUT_STAGE_BODY;
-
-	ret = spi_hid_input_async(shid, buf->body, header.report_length,
-			spi_hid_input_body_complete);
-	if (ret)
-		dev_err(dev, "failed body async transfer: %d\n", ret);
-
-out:
-	if (ret)
-		shid->input_transfer_pending = 0;
-
-	spin_unlock_irqrestore(&shid->input_lock, flags);
 }
 
 static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
@@ -1350,6 +1016,63 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 {
 	return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len);
 }
+
+/* Drain and stage a synchronous HID response received by the active
+ * sequencer. The five-byte controller preamble is retained in data_buf. */
+static void spi_hid_seq_handle_sync_response(struct spi_hid *shid, int type,
+		u16 blen)
+{
+	struct spi_hid_protocol_content content;
+	unsigned long flags;
+	u64 generation;
+	u8 *body = shid->data_buf;
+	bool pending;
+	u32 read_len;
+
+	lockdep_assert_held(&shid->seq_lock);
+
+	spin_lock_irqsave(&shid->response_lock, flags);
+	pending = shid->output_pending && !shid->response_valid &&
+		shid->expected_response_type == type;
+	generation = shid->response_generation;
+	spin_unlock_irqrestore(&shid->response_lock, flags);
+
+	if (blen < SPI_HID_INPUT_BODY_LEN ||
+	    blen > sizeof(shid->response.body) + sizeof(shid->response.content)) {
+		dev_warn(&shid->spi->dev,
+			 "SEQ: invalid synchronous response length %u for type %d\n",
+			 blen, type);
+		return;
+	}
+
+	read_len = blen + 5;
+	if (read_len > shid->data_buf_len) {
+		dev_warn(&shid->spi->dev,
+			 "SEQ: synchronous response exceeds transport buffer (%u > %u)\n",
+			 read_len, shid->data_buf_len);
+		return;
+	}
+	if (spi_hid_seq_read(shid, body, read_len)) {
+		dev_warn(&shid->spi->dev, "SEQ: synchronous response read failed\n");
+		return;
+	}
+	if (!pending)
+		return;
+
+	if (spi_hid_protocol_parse_content(body + 5, blen, &content)) {
+		dev_warn(&shid->spi->dev,
+			 "SEQ: malformed synchronous response type %d\n", type);
+		return;
+	}
+	memcpy(shid->response.body, body + 5, SPI_HID_INPUT_BODY_LEN);
+	memcpy(shid->response.content, content.data, content.data_length);
+	if (!spi_hid_complete_response(shid, type, content.content_id,
+					generation, true))
+		dev_warn(&shid->spi->dev,
+			 "SEQ: stale synchronous response type %d ID 0x%x\n",
+			 type, content.content_id);
+}
+
 static int spi_hid_seq_write_speed(struct spi_hid *shid, const u8 *buf, int len,
 				    u8 *rx, int rx_len, u32 speed_hz)
 {
@@ -1423,10 +1146,10 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, raw_handshake_watchdog.work);
 	struct device *dev = &shid->spi->dev;
-	int ret;
 
 	mutex_lock(&shid->seq_lock);
-	if (READ_ONCE(shid->removing) || !shid->raw_mode_active ||
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    !READ_ONCE(shid->seq_enabled) || !shid->raw_mode_active ||
 	    shid->raw_handshake_confirmed)
 		goto out;
 
@@ -1448,7 +1171,8 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 			mutex_unlock(&shid->seq_lock);
 			msleep(5000);
 			mutex_lock(&shid->seq_lock);
-			if (READ_ONCE(shid->removing) || !shid->raw_mode_active) {
+			if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+			    !READ_ONCE(shid->seq_enabled) || !shid->raw_mode_active) {
 				mutex_unlock(&shid->seq_lock);
 				return;
 			}
@@ -1477,13 +1201,9 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 			input_unregister_device(shid->touch_input);
 			shid->touch_input = NULL;
 		}
-		if (!shid->hid) {
-			ret = spi_hid_create_device(shid);
-			if (ret)
-				dev_err(dev, "SEQ: standard HID fallback failed: %d\n", ret);
-			else
-				dev_info(dev, "SEQ: raw handshake failed; using standard HID\n");
-		}
+		if (!shid->hid)
+			schedule_work(&shid->create_device_work);
+		dev_info(dev, "SEQ: raw handshake failed; using standard HID\n");
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_WATCHDOG);
 		shid->raw_handshake_wait_feature_defers = 0;
 		goto out;
@@ -1548,7 +1268,8 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 	};
 
 	mutex_lock(&shid->seq_lock);
-	if (READ_ONCE(shid->removing) || !shid->feat_delay_pending)
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    !READ_ONCE(shid->seq_enabled) || !shid->feat_delay_pending)
 		goto out;
 	shid->feat_delay_pending = false;
 
@@ -1605,7 +1326,9 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 	int type, hdr_off;
 
 	mutex_lock(&shid->seq_lock);
-	if (READ_ONCE(shid->removing) || shid->seq_state != SPI_HID_SEQ_WAIT_DESC)
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    !READ_ONCE(shid->seq_enabled) ||
+	    shid->seq_state != SPI_HID_SEQ_WAIT_DESC)
 		goto out;
 
 	seq_dbg(shid, 1, "SEQ: poll-work: reading for DEVICE_DESC...\n");
@@ -1644,7 +1367,8 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		shid->desc.vendor_id = 0x045E;
 		shid->desc.product_id = 0x0C19;
 		shid->desc.version_id = 0x0100;
-		if (!shid->hid) spi_hid_create_device(shid);
+		if (!shid->hid)
+			schedule_work(&shid->create_device_work);
 	} else {
 		seq_dbg(shid, 1, "SEQ: poll-work: unexpected type=%d, retrying...\n", type);
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
@@ -1895,8 +1619,7 @@ static void heatmap_reset_baseline(struct spi_hid *shid)
 	memset(shid->blob_y, 0, sizeof(shid->blob_y));
 	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
 	memset(shid->blob_active, 0, sizeof(shid->blob_active));
-	shid->heatmap_frame_id = 0;
-	shid->heatmap_last_consecutive = 0;
+	shid->heatmap_last_frame_jiffies = 0;
 }
 
 /* Screen mapping: logical range 0..32767 for both X and Y.
@@ -1976,7 +1699,8 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 	struct device *dev = &shid->spi->dev;
 
 	mutex_lock(&shid->seq_lock);
-	if (READ_ONCE(shid->removing) || !shid->stream_watchdog_active)
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    !READ_ONCE(shid->seq_enabled) || !shid->stream_watchdog_active)
 		goto out;
 	if (shid->seq_state != SPI_HID_SEQ_DONE)
 		goto out;
@@ -2037,7 +1761,8 @@ static void spi_hid_poll_work(struct work_struct *work)
 	u16 blen;
 
 	mutex_lock(&shid->seq_lock);
-	if (READ_ONCE(shid->removing))
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    !READ_ONCE(shid->seq_enabled))
 		goto out;
 	if (!shid->poll_active || shid->seq_state != SPI_HID_SEQ_DONE)
 		goto resched;
@@ -2054,7 +1779,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 		shid->poll_missed++;
 		goto resched;
 	}
-	if (type == 1 && (shid->hid ||
+	if (type == 1 && !shid->hid_creating && (shid->hid ||
 			(shid->raw_mode_active && shid->touch_input))) {
 		u32 cap = shid->raw_mode_active ? shid->data_buf_len :
 			  (shid->desc.max_input_length ? shid->desc.max_input_length : 0x1000);
@@ -2132,6 +1857,7 @@ resched:
 		schedule_delayed_work(&shid->poll_work,
 			      msecs_to_jiffies(shid->poll_interval_ms));
 out:
+	mutex_unlock(&shid->seq_lock);
 	return;
 }
 
@@ -2158,12 +1884,16 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	u16 nlabels;
 	int data_offset;
 	int configured_cols, configured_rows;
+	int frame_ema_alpha;
 	int touched_count = 0;
 
 	/* Parameters are fixed at module load; validate the frame before caching geometry. */
 	data_offset = READ_ONCE(dfa_data_offset);
 	configured_cols = READ_ONCE(grid_cols);
 	configured_rows = READ_ONCE(grid_rows);
+	frame_ema_alpha = READ_ONCE(ema_alpha);
+	if (frame_ema_alpha < 0 || frame_ema_alpha > 10000)
+		frame_ema_alpha = 3;
 	if (data_offset < 0 || data_offset >= data_len)
 		return;
 
@@ -2232,27 +1962,42 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	ncols = shid->heatmap_grid_cols;
 	nrows = shid->heatmap_grid_rows;
 
-	/* Clamp to the candidate grid so trailing bytes cannot become cells. */
+	/* Every frame must cover the cached grid. Otherwise stale cells from a
+	 * larger prior frame could become phantom touches. */
 	if (!ncols || nrows > HEATMAP_MAX_CELLS / ncols) {
 		dev_warn(dev, "HEATMAP: invalid grid %ux%u\n", ncols, nrows);
 		return;
 	}
-	if (cell_count > ncols * nrows)
-		cell_count = ncols * nrows;
+	if (cell_count < ncols * nrows) {
+		dev_warn(dev, "HEATMAP: frame has %u cells, need %u for cached grid\n",
+			 cell_count, ncols * nrows);
+		heatmap_reset_baseline(shid);
+		return;
+	}
+	cell_count = ncols * nrows;
 
-	/* Frame-gap detection (Windows: >5 frames → release all contacts).
-	 * heatmap_frame_id is a monotonic counter; we detect gaps by
-	 * tracking the last consecutive value. */
-	shid->heatmap_frame_id++;
-	if (shid->heatmap_frame_id > 0 &&
-	    shid->heatmap_frame_id - shid->heatmap_last_consecutive > 6) {
+	/* At the default 100 Hz stream rate, six missing frames are roughly
+	 * 60 ms. Use elapsed time rather than a local counter that increments
+	 * only when a frame has already arrived. */
+	if (shid->heatmap_last_frame_jiffies &&
+	    time_after(jiffies, shid->heatmap_last_frame_jiffies +
+		       msecs_to_jiffies(60))) {
 		release_all_slots(shid->touch_input, shid->blob_slot_state,
 				  HEATMAP_MAX_SLOTS);
+		memset(shid->blob_slot_state, 0, sizeof(shid->blob_slot_state));
+		memset(shid->blob_slot_duration, 0, sizeof(shid->blob_slot_duration));
+		memset(shid->blob_slot_gx, 0, sizeof(shid->blob_slot_gx));
+		memset(shid->blob_slot_gy, 0, sizeof(shid->blob_slot_gy));
+		memset(shid->blob_slot_weight, 0, sizeof(shid->blob_slot_weight));
+		memset(shid->blob_slot_missed, 0, sizeof(shid->blob_slot_missed));
 		memset(shid->blob_slot_stationary, 0, sizeof(shid->blob_slot_stationary));
 		memset(shid->blob_slot_hcount, 0, sizeof(shid->blob_slot_hcount));
 		memset(shid->blob_slot_hpos, 0, sizeof(shid->blob_slot_hpos));
+		memset(shid->eigmaj, 0, sizeof(shid->eigmaj));
+		memset(shid->eigmin, 0, sizeof(shid->eigmin));
+		memset(shid->eigori, 0, sizeof(shid->eigori));
 	}
-	shid->heatmap_last_consecutive = shid->heatmap_frame_id;
+	shid->heatmap_last_frame_jiffies = jiffies;
 
 	if (cell_count > HEATMAP_MAX_CELLS) {
 		dev_warn(dev, "HEATMAP: frame too large (%u cells > %u max)\n", cell_count, HEATMAP_MAX_CELLS);
@@ -2260,15 +2005,16 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 	}
 
 	/* Store raw frame for sysfs debug */
-	if (!shid->heatmap_buf || shid->heatmap_len < data_len) {
-		u8 *old_buf = shid->heatmap_buf;
-		shid->heatmap_buf = kmalloc(data_len, GFP_KERNEL);
-		if (shid->heatmap_buf) {
-			kfree(old_buf);
-			shid->heatmap_len = data_len;
+	if (!shid->heatmap_buf || shid->heatmap_capacity < data_len) {
+		u8 *new_buf = kmalloc(data_len, GFP_KERNEL);
+
+		if (new_buf) {
+			kfree(shid->heatmap_buf);
+			shid->heatmap_buf = new_buf;
+			shid->heatmap_capacity = data_len;
 		}
 	}
-	if (shid->heatmap_buf) {
+	if (shid->heatmap_buf && shid->heatmap_capacity >= data_len) {
 		memcpy(shid->heatmap_buf, data, data_len);
 		shid->heatmap_len = data_len;
 		shid->heatmap_content_id = content_id;
@@ -2384,7 +2130,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 		}
 
 		if (npeaks > 0) {
-		u16 queue[512]; /* BFS flood-fill queue */
+		u16 *queue = shid->heatmap_queue;
 		u16 next_label = 1;
 		u32 ci;
 
@@ -2436,7 +2182,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						if (shid->heatmap_touched[nxt] &&
 						    shid->heatmap_signal[nxt] > 0 &&
 						    shid->heatmap_label[nxt] == 0 &&
-						    tail < 512) {
+						    tail < HEATMAP_MAX_CELLS) {
 							shid->heatmap_label[nxt] = label;
 							queue[tail++] = nxt;
 						}
@@ -2446,7 +2192,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						if (shid->heatmap_touched[nxt] &&
 						    shid->heatmap_signal[nxt] > 0 &&
 						    shid->heatmap_label[nxt] == 0 &&
-						    tail < 512) {
+						    tail < HEATMAP_MAX_CELLS) {
 							shid->heatmap_label[nxt] = label;
 							queue[tail++] = nxt;
 						}
@@ -2456,7 +2202,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						if (shid->heatmap_touched[nxt] &&
 						    shid->heatmap_signal[nxt] > 0 &&
 						    shid->heatmap_label[nxt] == 0 &&
-						    tail < 512) {
+						    tail < HEATMAP_MAX_CELLS) {
 							shid->heatmap_label[nxt] = label;
 							queue[tail++] = nxt;
 						}
@@ -2466,7 +2212,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						if (shid->heatmap_touched[nxt] &&
 						    shid->heatmap_signal[nxt] > 0 &&
 						    shid->heatmap_label[nxt] == 0 &&
-						    tail < 512) {
+						    tail < HEATMAP_MAX_CELLS) {
 							shid->heatmap_label[nxt] = label;
 							queue[tail++] = nxt;
 						}
@@ -2541,10 +2287,8 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 								}
 							}
 							if (!too_close) {
-								/* Replace merged blob with split blobs. */
-								shid->blob_active[bi] = false;
-								nlabels--;
-								touched_count--;
+								/* The current blob has not been committed yet: append
+								 * split blobs without decrementing the prior count. */
 								for (p = 0; p < split_count && nlabels < HEATMAP_MAX_BLOBS; p++) {
 									s32 pr = peaks[split_peaks[p]].row;
 									s32 pc = peaks[split_peaks[p]].col;
@@ -2568,9 +2312,9 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 										shid->blob_y[sbi] = (u32)(ssy * 100 / ssw);
 										shid->blob_wsum[sbi] = (u32)ssw;
 										shid->blob_active[sbi] = true;
-										shid->eigmaj[sbi] = 0;
-										shid->eigmin[sbi] = 0;
-										shid->eigori[sbi] = 0;
+										shid->blob_eigmaj[sbi] = 0;
+										shid->blob_eigmin[sbi] = 0;
+										shid->blob_eigori[sbi] = 0;
 										nlabels++;
 										touched_count++;
 									}
@@ -2623,22 +2367,26 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						}
 					}
 					{
-						s64 trace = sxx + syy;
-						s64 det = sxx * syy - sxy * sxy;
-						s64 disc = trace * trace - 4 * det;
-						s32 sq;
+						s64 cov_xx = div_s64(sxx, sw);
+						s64 cov_yy = div_s64(syy, sw);
+						s64 cov_xy = div_s64(sxy, sw);
+						s64 diff = cov_xx - cov_yy;
+						u64 disc = (u64)(diff * diff) +
+						4ULL * (u64)(cov_xy * cov_xy);
+						s32 sq = (s32)int_sqrt(disc);
+						s64 major = (cov_xx + cov_yy + sq) / 2;
+						s64 minor = (cov_xx + cov_yy - sq) / 2;
 
-						if (disc < 0) disc = 0;
-						sq = (s32)int_sqrt((u64)disc);
-						shid->eigmaj[bi] = (s32)((trace + sq) / 2);
-						shid->eigmin[bi] = (s32)((trace - sq) / 2);
-						if (syy - sxx != 0 || sxy != 0) {
-							s32 deg = atan2_approx((s32)(2 * sxy), (s32)(syy - sxx)) / 2;
+						shid->blob_eigmaj[bi] = clamp_t(s64, major, 0, S32_MAX);
+						shid->blob_eigmin[bi] = clamp_t(s64, minor, 0, S32_MAX);
+						if (diff != 0 || cov_xy != 0) {
+							s32 deg = atan2_approx((s32)(2 * cov_xy),
+									       (s32)(cov_yy - cov_xx)) / 2;
 							if (deg >= 18000) deg -= 18000;
 							else if (deg <= -18000) deg += 18000;
-							shid->eigori[bi] = deg;
+							shid->blob_eigori[bi] = deg;
 						} else {
-							shid->eigori[bi] = 0;
+							shid->blob_eigori[bi] = 0;
 						}
 					}
 				}
@@ -2913,8 +2661,7 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 					dy = (s32)sorted[row].gy - (s32)shid->blob_slot_gy[col];
 					if (dx < 0) dx = -dx;
 					if (dy < 0) dy = -dy;
-					if ((u32)dx <= (u32)blob_max_distance * 100 &&
-					    (u32)dy <= (u32)blob_max_distance * 100)
+					if ((u32)dx <= bmd && (u32)dy <= bmd)
 						assigned_slot[row] = col;
 				} else {
 					assigned_slot[row] = col;
@@ -2931,10 +2678,12 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 				}
 
 				if (bi != 0xFF) {
-					u16 gx = sorted[bi].gx;
-					u16 gy = sorted[bi].gy;
+					u32 gx = sorted[bi].gx;
+					u32 gy = sorted[bi].gy;
 					u32 w  = sorted[bi].w;
 					u8 old_state = shid->blob_slot_state[s];
+					u32 old_gx = shid->blob_slot_gx[s];
+					u32 old_gy = shid->blob_slot_gy[s];
 					bool was_claimed = (old_state >= 2);
 					u8 blob_idx = sorted[bi].idx;
 
@@ -2954,10 +2703,10 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 
 					/* Copy per-blob eigenvalues to the assigned slot. */
 					if (blob_idx < HEATMAP_MAX_BLOBS &&
-					    shid->eigmaj[blob_idx] > 0) {
-						shid->eigmaj[s] = shid->eigmaj[blob_idx];
-						shid->eigmin[s] = shid->eigmin[blob_idx];
-						shid->eigori[s] = shid->eigori[blob_idx];
+					    shid->blob_eigmaj[blob_idx] > 0) {
+						shid->eigmaj[s] = shid->blob_eigmaj[blob_idx];
+						shid->eigmin[s] = shid->blob_eigmin[blob_idx];
+						shid->eigori[s] = shid->blob_eigori[blob_idx];
 					}
 
 					switch (shid->blob_slot_state[s]) {
@@ -3011,10 +2760,10 @@ static void heatmap_process_frame(struct spi_hid *shid, const u8 *data, u32 data
 						 * After 6 consecutive stationary frames the
 						 * position is frozen until a real move occurs. */
 						if (old_state == 2) {
-							u32 old_gx = shid->blob_slot_gx[s];
-							u32 old_gy = shid->blob_slot_gy[s];
-							u32 egx = (old_gx * ema_alpha + gx) / (ema_alpha + 1);
-							u32 egy = (old_gy * ema_alpha + gy) / (ema_alpha + 1);
+							u32 egx = (old_gx * frame_ema_alpha + gx) /
+								  (frame_ema_alpha + 1);
+							u32 egy = (old_gy * frame_ema_alpha + gy) /
+								  (frame_ema_alpha + 1);
 							s32 ddx = (s32)egx - (s32)old_gx;
 							s32 ddy = (s32)egy - (s32)old_gy;
 
@@ -3096,7 +2845,8 @@ slot_unassigned:				switch (shid->blob_slot_state[s]) {
 						break;
 					case 3:
 						shid->blob_slot_missed[s]++;
-						if (shid->blob_slot_missed[s] >= 2) {
+						if (shid->blob_slot_missed[s] >=
+						    (u32)blob_lift_frames) {
 							shid->blob_slot_state[s] = 0;
 							shid->blob_slot_missed[s] = 0;
 						}
@@ -3309,8 +3059,8 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 
 	blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
 	blen *= 4;
-	if (blen > sizeof(shid->input.content))
-		blen = sizeof(shid->input.content);
+	if (blen > SZ_8K)
+		blen = SZ_8K;
 
 	switch (shid->seq_state) {
 	case SPI_HID_SEQ_WAIT_RESET:
@@ -3365,7 +3115,10 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 			u8 body_drain[64];
 			spi_hid_seq_read(shid, body_drain, sizeof(body_drain));
 		}
-		spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
+		if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
+			dev_warn(&shid->spi->dev, "SEQ: fallback DESCREQ write failed\n");
+			return;
+		}
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_FALLBACK);
 	}
 }
@@ -3402,7 +3155,12 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 			seq_dbg(shid, 2, "SEQ: parsing at rx+%u\n", off);
 			memcpy(&raw, body + off,
 			       min_t(u32, sizeof(raw), rblen > off ? rblen - off : 0));
+			if (spi_hid_validate_dev_desc(&raw, sizeof(raw))) {
+				dev_warn(&shid->spi->dev, "SEQ: invalid DEVICE_DESC\n");
+				return;
+			}
 			spi_hid_parse_dev_desc(&raw, &shid->desc);
+			shid->reset_pending = false;
 			seq_dbg(shid, 2, "SEQ: vid=0x%04X pid=0x%04X ver=0x%04X inp=0x%04X out=0x%04X cmd=0x%04X rpt_len=%u max_in=%u max_out=%u\n",
 				shid->desc.vendor_id, shid->desc.product_id,
 				shid->desc.version_id, shid->desc.input_register,
@@ -3678,6 +3436,12 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 {
 	struct device *dev = &shid->spi->dev;
 
+	if (type == SPI_HID_REPORT_TYPE_COMMAND_RESP ||
+	    type == SPI_HID_REPORT_TYPE_GET_FEATURE_RESP ||
+	    type == SPI_HID_REPORT_TYPE_REPORT_DESC) {
+		spi_hid_seq_handle_sync_response(shid, type, blen);
+		return;
+	}
 	if (type == 3) {
 		u8 body[20];
 
@@ -3690,7 +3454,8 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 	}
 	if (type != 1)
 		return;
-	if (!shid->hid && !(shid->raw_mode_active && shid->touch_input))
+	if (shid->hid_creating ||
+	    (!shid->hid && !(shid->raw_mode_active && shid->touch_input)))
 		return;
 
 	shid->stat_data++;
@@ -4005,6 +3770,7 @@ MODULE_DEVICE_TABLE(of, spi_hid_of_match);
 static const struct acpi_device_id spi_hid_acpi_match[] = {
 	{ "MSHW0134", 0 },	/* Surface Pro X (SQ1) */
 	{ "MSHW0162", 0 },	/* Surface Laptop 3 (AMD) */
+	{ "MSHW0231", 0 },	/* Surface touch controller */
 	{ "MSHW0235", 0 },	/* Surface Pro X (SQ2) */
 	{ "PNP0C51",  0 },	/* Generic HID-over-SPI */
 	{},
@@ -4146,8 +3912,9 @@ static ssize_t lifecycle_status_show(struct device *dev,
 	struct spi_hid *shid = dev_get_drvdata(dev);
 
 	return sysfs_emit(buf,
-		"removing=%u\nseq_enabled=%u\nirq_enabled=%u\nworks_initialized=%u\n",
-		READ_ONCE(shid->removing), READ_ONCE(shid->seq_enabled),
+		"removing=%u\nsuspended=%u\nseq_enabled=%u\nirq_requested=%u\nirq_enabled=%u\nworks_initialized=%u\n",
+		READ_ONCE(shid->removing), READ_ONCE(shid->suspended),
+		READ_ONCE(shid->seq_enabled), shid->irq_requested,
 		shid->irq_enabled, shid->works_initialized);
 }
 static DEVICE_ATTR_RO(lifecycle_status);
@@ -4228,6 +3995,22 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 	cancel_work_sync(&shid->error_work);
 }
 
+static void spi_hid_disable_irq(struct spi_hid *shid)
+{
+	if (shid->irq_requested && shid->irq_enabled) {
+		disable_irq(shid->irq);
+		shid->irq_enabled = false;
+	}
+}
+
+static void spi_hid_free_irq(struct spi_hid *shid)
+{
+	if (shid->irq_requested) {
+		free_irq(shid->irq, shid);
+		shid->irq_requested = false;
+	}
+}
+
 /*
  * Driver probe: called when the SPI device is enumerated via ACPI.
  *
@@ -4271,7 +4054,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	mutex_init(&shid->power_lock);
 	mutex_init(&shid->output_lock);
 	mutex_init(&shid->raw_capture_lock);
+	mutex_init(&shid->response_mutex);
 	spin_lock_init(&shid->input_lock);
+	spin_lock_init(&shid->response_lock);
 	spi_set_drvdata(spi, shid);
 
 	ret = sysfs_create_files(&dev->kobj, spi_hid_attributes);
@@ -4346,6 +4131,9 @@ static int spi_hid_probe(struct spi_device *spi)
 		}
 
 		msleep(100);
+	} else {
+		/* ACPI _INI has already powered the MSHW0231 before probe. */
+		shid->powered = true;
 	}
 
 	shid->hid_desc_addr = shid->device_descriptor_register;
@@ -4535,6 +4323,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		dev_err(dev, "TRACE[hid] request IRQ failed: %d\n", ret);
 		goto err1;
 	}
+	shid->irq_requested = true;
 	shid->irq_enabled = true;
 	dev_info(dev, "SEQ: IRQ armed (state=WAIT_RESET, zero touch)\n");
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_IRQ_ARMED, 0);
@@ -4542,14 +4331,13 @@ static int spi_hid_probe(struct spi_device *spi)
 		spi_hid_power_mode_string(shid->power_state));
 	return 0;
 
-	err1_touch:
+err1_touch:
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_PROBE_FAILED, ret);
 	if (shid->touch_input) {
 		input_free_device(shid->touch_input);
 		shid->touch_input = NULL;
 	}
-	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
-	return ret;
+	goto err1;
 
 err1:
 	dev_err(dev, "TRACE[hid] probe failed ret=%d\n", ret);
@@ -4560,22 +4348,25 @@ err1:
 	shid->poll_active = false;
 	shid->stream_watchdog_active = false;
 	mutex_unlock(&shid->seq_lock);
-	if (shid->irq_enabled) {
-		disable_irq(shid->irq);
-		spi_hid_cancel_workers(shid);
-		free_irq(shid->irq, shid);
-		shid->irq_enabled = false;
-	} else {
-		spi_hid_cancel_workers(shid);
-	}
+	spi_hid_disable_irq(shid);
+	spi_hid_cancel_workers(shid);
+	spi_hid_free_irq(shid);
+	mutex_lock(&shid->power_lock);
+	if (spi_hid_power_down(shid))
+		dev_warn(dev, "probe cleanup left device powered\n");
+	mutex_unlock(&shid->power_lock);
 	spi_hid_stop_hid(shid);
 	if (shid->touch_input) {
 		input_unregister_device(shid->touch_input);
 		shid->touch_input = NULL;
 	}
+	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
+	mutex_lock(&shid->seq_lock);
 	kfree(shid->heatmap_buf);
 	shid->heatmap_buf = NULL;
-	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
+	shid->heatmap_len = 0;
+	shid->heatmap_capacity = 0;
+	mutex_unlock(&shid->seq_lock);
 
 err0:
 	return ret;
@@ -4597,23 +4388,27 @@ static void spi_hid_remove(struct spi_device *spi)
 	shid->poll_active = false;
 	shid->stream_watchdog_active = false;
 	mutex_unlock(&shid->seq_lock);
-	if (shid->irq_enabled)
-		disable_irq(shid->irq);
+	spi_hid_disable_irq(shid);
 	spi_hid_cancel_workers(shid);
-	if (shid->irq_enabled) {
-		free_irq(shid->irq, shid);
-		shid->irq_enabled = false;
-	}
-	spi_hid_power_down(shid);
+	spi_hid_free_irq(shid);
+	mutex_lock(&shid->power_lock);
+	if (spi_hid_power_down(shid))
+		dev_warn(dev, "remove left device powered\n");
+	mutex_unlock(&shid->power_lock);
 	spi_hid_stop_hid(shid);
 	if (shid->touch_input) {
 		input_unregister_device(shid->touch_input);
 		shid->touch_input = NULL;
 	}
+	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
+	mutex_lock(&shid->seq_lock);
 	kfree(shid->heatmap_buf);
+	shid->heatmap_buf = NULL;
+	shid->heatmap_len = 0;
+	shid->heatmap_capacity = 0;
+	mutex_unlock(&shid->seq_lock);
 	if (shid->gpiod)
 		gpiod_put(shid->gpiod);
-	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 	dev_info(dev, "TRACE[hid] remove complete\n");
 }
 
@@ -4631,19 +4426,16 @@ static int spi_hid_suspend(struct device *dev)
 
 	seq_dbg(shid, 1, "PM: suspend\n");
 	mutex_lock(&shid->seq_lock);
+	WRITE_ONCE(shid->suspended, true);
 	WRITE_ONCE(shid->seq_enabled, false);
 	shid->poll_active = false;
+	shid->stream_watchdog_active = false;
 	shid->raw_handshake_confirmed = false;
 	shid->feat_delay_pending = false;
 	mutex_unlock(&shid->seq_lock);
 
-	cancel_delayed_work_sync(&shid->feat_delay_work);
-	cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
-
-	if (shid->irq_enabled) {
-		disable_irq(shid->irq);
-		shid->irq_enabled = false;
-	}
+	spi_hid_disable_irq(shid);
+	spi_hid_cancel_workers(shid);
 	return 0;
 }
 
@@ -4663,9 +4455,10 @@ static int spi_hid_resume(struct device *dev)
 	heatmap_reset_baseline(shid);
 	WRITE_ONCE(shid->seq_enabled, true);
 	shid->seq_state = SPI_HID_SEQ_WAIT_RESET;
+	WRITE_ONCE(shid->suspended, false);
 	mutex_unlock(&shid->seq_lock);
 
-	if (!shid->irq_enabled) {
+	if (shid->irq_requested && !shid->irq_enabled) {
 		enable_irq(shid->irq);
 		shid->irq_enabled = true;
 	}

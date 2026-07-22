@@ -8,7 +8,6 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
-#include <linux/pci.h>
 #include "spi-amd.h"
 
 #define AMD_SPI_CTRL0_REG	0x00
@@ -155,23 +154,23 @@ static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 		return;
 
 	amd_spi->speed_hz = amd_spi_freq[i].speed_hz;
-	amd_spi->speed_hz_index = i;
 
 	alt_spd = (amd_spi_freq[i].enable_val << AMD_SPI_ALT_SPD_SHIFT)
 		   & AMD_SPI_ALT_SPD_MASK;
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, alt_spd,
 			       AMD_SPI_ALT_SPD_MASK);
 
-	if (amd_spi->speed_hz == 100000000)
-		amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, 1,
-				       AMD_SPI_SPI100_MASK);
+	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG,
+			       amd_spi->speed_hz == 100000000 ?
+			       AMD_SPI_SPI100_MASK : 0, AMD_SPI_SPI100_MASK);
 
+	spd7_val = 0;
 	if (amd_spi_freq[i].spd7_val) {
 		spd7_val = (amd_spi_freq[i].spd7_val << AMD_SPI_SPD7_SHIFT) &
 			AMD_SPI_SPD7_MASK;
-		amd_spi_setclear_reg32(amd_spi, AMD_SPI_SPEED_REG, spd7_val,
-			       AMD_SPI_SPD7_MASK);
 	}
+	amd_spi_setclear_reg32(amd_spi, AMD_SPI_SPEED_REG, spd7_val,
+			       AMD_SPI_SPD7_MASK);
 }
 
 static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi)
@@ -233,7 +232,7 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
 
-	return 0;
+	return amd_spi_busy_wait(amd_spi);
 }
 
 /*
@@ -357,7 +356,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 
 	ret = amd_spi_execute_opcode(amd_spi);
 	if (ret) {
-		pr_err("spi-amd: TRACE segment trigger failed op=0x%02x ret=%d\n",
+		pr_err("spi-amd: TRACE segment execution failed op=0x%02x ret=%d\n",
 		       opcode, ret);
 		writew(saved_0x22, base + 0x22);
 		return ret;
@@ -369,7 +368,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 			amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG),
 			amd_spi_readreg8(amd_spi, AMD_SPI_OPCODE_REG));
 
-	/* execute_opcode already polls CTRL0 bit31 (real busy indicator).
+	/* execute_opcode polls CTRL0 bit31 after triggering (real busy indicator).
 	 * STATUS (0x4C) is an 8-bit register, so bit31 is always 0 —
 	 * matching Windows behavior where the STATUS poll is effectively a no-op. */
 
@@ -530,9 +529,11 @@ int amd_spi_probe_common(struct device *dev, struct spi_controller *host)
 {
 	int err;
 
-	host->num_chipselect = 4;
-	host->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH;
-	host->flags = 0;
+	/* The sole logical CS maps to the MSHW0231's physical CS1. */
+	host->num_chipselect = 1;
+	host->mode_bits = 0;
+	host->bits_per_word_mask = SPI_BPW_MASK(8);
+	host->flags = SPI_CONTROLLER_HALF_DUPLEX;
 	host->setup = amd_spi_host_setup;
 	host->transfer_one_message = amd_spi_host_transfer;
 	host->max_transfer_size = amd_spi_max_transfer_size;
@@ -567,35 +568,6 @@ static int amd_spi_probe(struct platform_device *pdev)
 	dev_info(dev, "spi-amd-v2-multi: io_remap=%p\n", amd_spi->io_remap_addr);
 	amd_trace(dev, 1, "probe mapped controller registers\n");
 
-	/* Set LPC bridge registers to enable 8-bit FIFO mode with Windows layout.
-	 * Without 8-bit FIFO mode, 8-bit MMIO accesses (writeb to trigger 0x47,
-	 * readb from FIFO 0x80+) may be translated incorrectly by the LPC bridge
-	 * in 16-bit mode, potentially causing FCH bus stall → hard system freeze.
-	 * Disabled by default; enable for systems that require LPC reconfiguration. */
-#if 0 /* Disabled — persistent state is restored on module remove. */
-	{
-		amd_spi->lpc = pci_get_device(PCI_VENDOR_ID_AMD, 0x790e, NULL);
-		if (amd_spi->lpc) {
-			u32 val, b4;
-			pci_read_config_dword(amd_spi->lpc, 0xB4, &b4);
-			pci_read_config_dword(amd_spi->lpc, 0xB8, &val);
-			amd_spi->lpc_b4 = b4;
-			amd_spi->lpc_b8 = val;
-			amd_trace(dev, 1, "LPC before b4=0x%08x b8=0x%08x\n", b4, val);
-			val &= ~0x80; // force 8-bit mode (bit7 = 0)
-			pci_write_config_dword(amd_spi->lpc, 0xB8, val);
-
-			pci_write_config_dword(amd_spi->lpc, 0xB4, 0x7DFFE000); // Windows FIFO layout
-			amd_spi->lpc_configured = true;
-			pci_read_config_dword(amd_spi->lpc, 0xB4, &b4);
-			pci_read_config_dword(amd_spi->lpc, 0xB8, &val);
-			amd_trace(dev, 1, "LPC after b4=0x%08x b8=0x%08x\n", b4, val);
-			dev_info(dev, "Configured LPC bridge 00:14.3 for 8-bit FIFO mode (0xB8&=~0x80, 0xB4=0x7DFFE000)\n");
-		} else {
-			dev_warn(dev, "LPC bridge 1022:790e not found, skipping 8-bit FIFO configuration\n");
-		}
-	}
-#endif
 	/* Dump initial CTRL0 value (BIOS/UEFI preset) */
 	{
 		u32 c0 = readl(amd_spi->io_remap_addr + 0x00);
@@ -612,26 +584,13 @@ static int amd_spi_probe(struct platform_device *pdev)
 	amd_spi->version = (uintptr_t)device_get_match_data(dev);
 	host->bus_num = 0;
 
-	/* Read SPI100_SPEED_CONFIG from MMIO+0x22 (amdspi.sys decomp: fcn.0x6fc0)
-	 * Windows reads 16-bit via fcn.0x1400019e0 (read16), not 8-bit.
-	 */
-	amd_spi->speed_cfg = ioread16(amd_spi->io_remap_addr + 0x22);
-	dev_info(dev, "SPI100_SPEED_CONFIG at MMIO+0x22 = 0x%04X\n", amd_spi->speed_cfg);
+	/* Windows reads SPI100_SPEED_CONFIG as a 16-bit MMIO value. */
+	dev_info(dev, "SPI100_SPEED_CONFIG at MMIO+0x22 = 0x%04X\n",
+		 ioread16(amd_spi->io_remap_addr + 0x22));
 
 	amd_trace(dev, 1, "probe registering SPI controller version=%u\n", amd_spi->version);
 	platform_set_drvdata(pdev, host);
 	ret = amd_spi_probe_common(dev, host);
-	if (ret) {
-		if (amd_spi->lpc_configured) {
-			pci_write_config_dword(amd_spi->lpc, 0xB4, amd_spi->lpc_b4);
-			pci_write_config_dword(amd_spi->lpc, 0xB8, amd_spi->lpc_b8);
-		}
-		if (amd_spi->lpc) {
-			pci_dev_put(amd_spi->lpc);
-			amd_spi->lpc = NULL;
-			amd_spi->lpc_configured = false;
-		}
-	}
 	amd_trace(dev, 1, "probe complete ret=%d\n", ret);
 	return ret;
 }
@@ -649,19 +608,10 @@ MODULE_DEVICE_TABLE(acpi, spi_acpi_match);
 static void amd_spi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *host = platform_get_drvdata(pdev);
-	struct amd_spi *amd_spi;
 
 	if (!host)
 		return;
-	amd_spi = spi_controller_get_devdata(host);
 	spi_unregister_controller(host);
-	if (amd_spi->lpc_configured) {
-		pci_write_config_dword(amd_spi->lpc, 0xB4, amd_spi->lpc_b4);
-		pci_write_config_dword(amd_spi->lpc, 0xB8, amd_spi->lpc_b8);
-		pci_dev_put(amd_spi->lpc);
-		amd_spi->lpc = NULL;
-		amd_spi->lpc_configured = false;
-	}
 	amd_trace(&pdev->dev, 1, "remove entered\n");
 }
 
