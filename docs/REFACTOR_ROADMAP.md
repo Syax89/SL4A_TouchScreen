@@ -44,8 +44,8 @@ when non-obvious, in the relevant documentation.
 ### Phase 0: Baseline And Evidence
 
 - [x] Preserve the current hardening batch on this branch.
-- [ ] Reconcile documents that disagree with code, ACPI, or capture data.
-- [ ] Create an evidence index linking each protocol claim to a tracked source.
+- [x] Reconcile release-facing documents with code, ACPI, and capture data; retain unresolved claims in the evidence ledger.
+- [x] Create an evidence index linking protocol claims to tracked sources.
 - [ ] Record the tested firmware, kernel, and distribution versions.
 
 Exit criteria: the supported hardware contract and all release defaults have an
@@ -53,21 +53,22 @@ E1, E2, E3, or E4 basis.
 
 ### Phase 1: Distribution Contract
 
-- [ ] Add `docs/SUPPORT.md` with the exact supported hardware and feature matrix.
-- [ ] Add `docs/COMPATIBILITY.md` with tested kernel, firmware, distro, and
-      Secure Boot results.
-- [ ] Add `docs/TESTING.md` with repeatable cold-boot, suspend, reload,
+- [x] Add `docs/SUPPORT.md` with the exact supported hardware and feature matrix.
+- [x] Add `docs/COMPATIBILITY.md` with the required tested kernel, firmware,
+      distro, and Secure Boot fields.
+- [ ] Record a release-qualified compatibility result.
+- [x] Add `docs/TESTING.md` with repeatable cold-boot, suspend, reload,
       pen, and multitouch procedures.
-- [ ] Make README installation claims point to those documents.
+- [x] Make README installation claims point to those documents.
 
 Exit criteria: a user can determine before installation whether their machine
 and kernel are supported.
 
 ### Phase 2: Safe DKMS Lifecycle
 
-- [ ] Split the installer into a read-only preflight and an explicit install.
-- [ ] Require `MSHW0231` and the expected controller by default.
-- [ ] Add `--check`, `--dry-run`, and an explicit `--force` escape hatch.
+- [x] Split the installer into a read-only preflight and an explicit install.
+- [x] Require `MSHW0231` and `AMDI0060` by default.
+- [x] Add `--check`, `--dry-run`, and an explicit `--force` escape hatch.
 - [ ] Document module signing and Secure Boot for each supported distribution.
 - [ ] Make uninstall remove only artifacts owned by this package.
 
@@ -111,7 +112,8 @@ removed using only repository documentation.
 
 | Date | Change | Evidence | Verification |
 | --- | --- | --- | --- |
-| 2026-07-22 | Created `refactor/sl4a-distribution`; preserved current hardening work and established this roadmap. | E3, E4 | Host protocol and CapImg tests previously passed, including ASan/UBSan. |
+| 2026-07-22 | Created `refactor/sl4a-distribution`; preserved current hardening work and established this roadmap. | E3 | Host protocol and CapImg tests previously passed, including ASan/UBSan. |
+| 2026-07-22 | Sprint 0: added support contract, evidence ledger, compatibility matrix, and validation procedure; added fail-closed ACPI/DMI preflight, ownership-safe install/uninstall behavior, and standard installer profile. | E2, E3 | Double-blind review; protocol and CapImg host tests passed with ASan/UBSan. |
 
 Update this table in the same commit as every completed refactor phase or
 evidence-backed behavioral change.

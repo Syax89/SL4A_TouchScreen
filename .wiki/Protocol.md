@@ -7,21 +7,15 @@ decompiled Windows `hidspi.sys` and `HidSpiCx.sys`.
 
 ## Protocol Discovery
 
-The HID-over-SPI protocol is discovered via ACPI. The DSDT table declares
-the device with ACPI ID `MSHW0231` and a `SPI1` resource descriptor.
-The driver reads `hid_desc_addr` from the ACPI device properties to
-locate the HID descriptor register.
+The HID-over-SPI protocol is discovered via ACPI. The runtime device identifies
+as `MSHW0231` and uses the `SPI1` resource descriptor. The driver reads
+`hid_desc_addr` from the ACPI device properties to locate the HID descriptor
+register.
 
 ### ACPI Resource
 
 ```
-Device (TPD0) {
-    Name (_HID, "MSHW0231")
-    Name (_CID, "PNP0C50")  // HID-over-SPI compatible
-    Method (_CRS) {
-        // SPI1: chip-select 0, 12 MHz, mode 0
-    }
-}
+Runtime resource: SPI1, logical chip-select 0, 33.33 MHz, mode 0.
 ```
 
 ## V0 Message Format
@@ -104,8 +98,8 @@ Device: responds with RPT_DESC (0x0B), body=936-byte HID report descriptor
 
 ### SET_FEATURE ID5 → Activation
 
-The raw multi-touch mode requires activation via a SET_FEATURE command
-sending the value `0x01` on Report ID 5:
+Observed raw-mode experiments include a SET_FEATURE command sending value
+`0x01` on Report ID 5:
 
 ```
 Host:  write SET_FEATURE frame
@@ -113,21 +107,24 @@ Host:  write SET_FEATURE frame
        [body: ID5, value=0x01]
 ```
 
-This must occur after reading the report descriptor. In the Windows driver
-there is a ~5900ms gap between RPT_DESC and GET_FEATURE; the Linux driver
-implements a matching delay via a deferred work item.
+This is not yet sufficient evidence that ID5 alone creates a reliable stream.
+Windows traces include a ~5900ms gap between RPT_DESC and GET_FEATURE; Linux
+delay behavior is configuration-dependent and remains experimental.
 
 ### INPUT_REPORT → Touch Data
 
-After activation, the device continuously produces input reports.
-In raw mode, a single frame is 3528 bytes containing:
+Older trace notes describe a 3528-byte frame containing:
 
 ```
 [0..5]      Input header (content_id=0x11)
 [6]         Frame type (0x00 = standard touch)
 [7..11]     Frame metadata
-[12..11+3456]  Heatmap data (72×48 grid, 16-bit per cell)
+[12..11+3456]  Heatmap data (older 16-bit interpretation)
 ```
+
+The current parser instead handles byte-indexed CapImg bodies around 4304
+bytes. Neither layout is a release contract until a labelled replay fixture
+resolves the discrepancy; see `docs/EVIDENCE.md`.
 
 ## Power Management
 

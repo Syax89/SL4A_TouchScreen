@@ -1,16 +1,19 @@
 # Touch Pipeline
 
-The raw multi-touch pipeline processes the 72×48 heatmap (3456 cells) into
-HID multitouch contacts. The pipeline mirrors the Windows
-`TouchPenProcessor0C19.dll` processing chain, with ~85% functional alignment.
+> Historical research notes. The byte-indexed CapImg layout and release claims
+> are governed by `docs/EVIDENCE.md` and `docs/COMPATIBILITY.md`.
+
+The experimental raw multitouch pipeline processes the current 72×48 fallback
+grid into HID contacts. Its Windows comparison and frame layout remain under
+validation.
 
 ## Pipeline Diagram
 
 ```
-Frame (72×48 heatmap, 3456 cells, 16-bit raw)
+Frame (current 72×48 fallback grid, byte-indexed CapImg samples)
   │
   ├─ 1. c590 LUT
-  │     Maps raw 16-bit to fixed-point signal:
+   │     Maps byte-indexed CapImg samples to fixed-point signal:
   │     c590[i] = max(0, 10000 - (i*22 + 6000))
   │
   ├─ 2. Baseline Subtraction (EMA, 30-frame init)

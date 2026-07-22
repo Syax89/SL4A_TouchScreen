@@ -12,12 +12,12 @@ on the AMD Cezanne (Ryzen 4000/5000 Mobile) FCH.
 | HID Vendor ID | 0x045E (Microsoft) |
 | HID Product ID | 0x0C19 |
 | ACPI ID | MSHW0231 |
-| Touch grid | 72 columns × 48 rows (3456 cells) |
+| Touch grid | Current experimental fallback: 72 columns × 48 rows |
 | Technology | Mutual-capacitance projective touch |
 | Report rate | ~100 Hz (raw mode) |
-| SPI clock | 12 MHz (initial), configurable |
+| SPI clock | ACPI requests 33.33 MHz; controller-speed validation remains open |
 | SPI mode | 0 (CPOL=0, CPHA=0) |
-| Chip select | 0 |
+| Chip select | ACPI logical CS0; controller physical mapping requires target validation |
 
 ### SPI Wiring
 
@@ -26,7 +26,7 @@ The touch controller sits on the AMD FCH SPI bus 1:
 ```
 AMD Cezanne FCH (SPI1)               MSHW0231
 ───────────────────────               ────────
-CS#0        ─────────────────────── → CS
+Logical CS0  ─────────────────────── → controller-selected CS
 SCLK        ─────────────────────── → SCLK
 MOSI (SDO)  ─────────────────────── → MOSI
 MISO (SDI)  ─────────────────────── → MISO
@@ -75,7 +75,7 @@ PIO (Programmed I/O) and DMA modes. The Linux driver uses V2 PIO mode.
 
 ### PIO Mode Transfer Sequence (V2)
 
-1. **Select chip** — set CS#0, configure CTRL1 with speed index
+1. **Select chip** — select logical CS0, configure CTRL1 with speed index
 2. **Write opcodes** — program opcode FIFO with read/write commands
 3. **Set TX_COUNT** — program PIO byte count for write phase
 4. **Write TX FIFO** — push data to transmit
@@ -93,7 +93,9 @@ PIO (Programmed I/O) and DMA modes. The Linux driver uses V2 PIO mode.
 | 1 | 25 MHz | Requires SPI100 mode |
 | Higher | Up to 100 MHz | Requires evaluation |
 
-The Windows driver uses speed index 0 (12 MHz nominal) for normal
+Older notes describe speed index 0 (12 MHz nominal), but the tracked ACPI
+resource requests 33.33 MHz. Do not use either as a release guarantee until
+target hardware evidence is recorded.
 operation. The Linux driver follows this.
 
 ### TX_COUNT Quirk (PIO)

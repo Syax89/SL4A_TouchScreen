@@ -76,13 +76,14 @@ TX: GET_FEATURE [0F 00 ...]
 RX: FEATURE_RESP [0F 00 ...]
 TX: SET_FEATURE ID5=01 [0F 00 ...]
 RX: FEATURE_ACK [0F 00 ...]
---- raw mode active ---
-RX: INPUT_REPORT [11 00 ... 3528 bytes raw frame]
+--- raw-mode behavior requires capture-specific validation ---
 ```
 
 ### Touch Frame (surface_touch.csv)
 
-Each raw input report follows this structure:
+The following is an older trace interpretation, retained for investigation. It
+conflicts with the current byte-indexed CapImg parser and is not a release
+contract; see `docs/EVIDENCE.md`.
 
 ```
 [0..1]   content_id = 0x0011 (INPUT_REPORT, little-endian)

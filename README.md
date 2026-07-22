@@ -1,11 +1,11 @@
 # SL4A TouchScreen
 
 Linux kernel driver for the Microsoft Surface Laptop 4 (AMD) touchscreen,
-providing standard HID single-touch, pen, and raw multi-touch via a
-V0 HID-over-SPI transport on the AMD Cezanne FCH SPI controller.
+implementing the MSHW0231 V0 HID-over-SPI transport and an experimental raw
+multitouch pipeline on the AMD Cezanne FCH SPI controller.
 
 [![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/Syax89/SL4A_TouchScreen)
-[![Release](https://img.shields.io/badge/release-1.1.0-brightgreen)](VERSION)
+[![Release](https://img.shields.io/badge/release-1.2.0-brightgreen)](VERSION)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue)](LICENSE)
 
 > [!WARNING]
@@ -20,27 +20,18 @@ V0 HID-over-SPI transport on the AMD Cezanne FCH SPI controller.
 | Touch ACPI ID | `MSHW0231` (HID VID/PID: 0x045E/0x0C19) |
 | SPI Controller | `AMDI0060` (AMD FCH SPI V2 at MMIO 0xFEC10000) |
 | Protocol | HID-over-SPI Version 0 |
-| Touch grid | 72×48 mutual-capacitance (3456 cells) |
+| Touch grid | Current experimental raw-pipeline fallback: 72×48 cells |
 | Report rate | ~100 Hz (raw mode) |
 
 ## Feature Status
 
-| Feature | Status |
-|---------|--------|
-| HID report descriptor (936 bytes, read live from device) | Complete |
-| Single-touch + pen (Report ID 0x40 and 0x01) | Stable |
-| Multi-touch CCL pipeline (peak gate → flood-fill → Hungarian) | Working |
-| Touch ellipse (per-blob eigenvalues, major/minor/orientation) | Working |
-| Stationary lock (eliminates pinch-to-zoom jitter) | Working |
-| Velocity rejection (Windows dist² ≤ 36.0) | Working |
-| Edge penalty (Windows config+0x8D0/0x8D4) | Working |
-| Multi-finger association radii (Windows +0x8DC-0x8EC) | Working |
-| Cold boot auto-retry handshake | Working |
-| 2-finger tracking | Excellent |
-| 3-finger tracking | Good |
-| 4-finger tracking | Partial |
-| Candidate classification (Mahalanobis) | Not implemented |
-| Per-cycle gain adaptation | Not implemented |
+| Feature | Implementation status | Release qualification |
+|---------|-----------------------|-----------------------|
+| HID descriptor discovery | Implemented, with a hardcoded fallback | Hardware matrix required |
+| Standard HID report forwarding | Implemented | Contact behavior requires hardware evidence |
+| Raw CCL and multitouch pipeline | Implemented | Experimental |
+| Cold-boot retry and recovery | Implemented | Hardware matrix required |
+| Candidate classification and per-cycle gain | Not implemented | Not planned for v1.2.0 |
 
 ## Architecture
 
@@ -66,14 +57,13 @@ V0 HID-over-SPI transport on the AMD Cezanne FCH SPI controller.
 
 ### Raw Touch Pipeline
 
-The raw multi-touch pipeline processes the 72×48 heatmap into HID contacts,
-matching the Windows `TouchPenProcessor0C19.dll` processing chain at ~85%
-fidelity. Config values are extracted from the DLL data segment at
-`0x1808E0460`.
+The raw multitouch pipeline is an experimental implementation that processes
+the current 72×48 fallback grid into HID contacts. Its comparison targets and
+unresolved frame-layout assumptions are recorded in `docs/EVIDENCE.md`.
 
 | Stage | Function |
 |-------|----------|
-| **c590 LUT** | Raw 16-bit → fixed-point: `max(0, 10000 - (i·22 + 6000))` |
+| **c590 LUT** | Byte-indexed CapImg sample → fixed-point: `max(0, 10000 - (i·22 + 6000))` |
 | **Baseline** | 30-frame asymmetric EMA per cell |
 | **Noise floor** | c590 < 400 → suppressed (Windows DAT_1806c08c8 = 0.04) |
 | **Peak gate** | Cross-shaped ±5 cells, min_rise=200, max 16 peaks |
@@ -90,27 +80,43 @@ fidelity. Config values are extracted from the DLL data segment at
 
 ## Install
 
+Read [`docs/SUPPORT.md`](docs/SUPPORT.md) before installing. This repository is
+only for the Surface Laptop 4 AMD `AMDI0060` + `MSHW0231` hardware contract.
+The installer now uses the standard profile by default; raw mode requires an
+explicit `--raw` option. See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)
+before treating a setup as supported.
+
 ```bash
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
+./tools/install.sh --check
 sudo ./tools/install.sh
 sudo reboot
 ```
 
-The DKMS installer supports Arch/CachyOS, Ubuntu/Debian, Fedora, openSUSE.
-After reboot the driver auto-loads via udev and `/etc/modprobe.d/spi-hid.conf`.
+Use `sudo ./tools/install.sh --raw` only for the experimental raw heatmap
+profile. `--check` performs a read-only ACPI and build-prerequisite preflight;
+use `--force` only to investigate unsupported hardware.
+
+The DKMS installer contains dependency guidance for Arch/CachyOS,
+Ubuntu/Debian, Fedora, and openSUSE. It installs a modprobe configuration;
+the kernel binds the modules through their ACPI aliases. Secure Boot remains
+unqualified until recorded in the compatibility matrix.
 
 ## Module Parameters
 
 ```
 /etc/modprobe.d/spi-hid.conf:
-  options spi_hid raw_mode=Y skip_getfeat=Y
+  options spi_hid raw_mode=N
 ```
 
-| Parameter | Default | Description |
+The explicit raw profile written by `install.sh --raw` uses
+`raw_mode=Y skip_getfeat=Y`.
+
+| Parameter | Module default | Description |
 |-----------|---------|-------------|
-| `raw_mode` | 1 | Raw heatmap + multi-touch mode |
-| `skip_getfeat` | 1 | Internal: skip GET_FEATURE handshake, use vendor-init path |
+| `raw_mode` | 0 | Raw heatmap + multi-touch mode; enabled only by `install.sh --raw` |
+| `skip_getfeat` | 1 | Skip GET_FEATURE handshake; raw profile sets `Y` explicitly |
 | `ema_alpha` | 7 | EMA smoothing (1-10) |
 | `blob_max_distance` | 3 | Hungarian base radius in cells |
 | `blob_min_weight` | 1000 | Minimum blob signal weight |
@@ -119,7 +125,7 @@ After reboot the driver auto-loads via udev and `/etc/modprobe.d/spi-hid.conf`.
 | `hold_frames` | 0 | Hold grace period (0 = disabled) |
 | `ghost_dist` | 6 | Pre-merge radius in cells |
 | `pre_assoc_ratio` | 0 | Pre-association filter (0 = disabled) |
-| `grid_cols/rows` | 72/48 | Heatmap grid dimensions |
+| `grid_cols/rows` | 0/0 | Uses the current 72×48 fallback grid when unset |
 | `calib_scale_x/y` | 0 | Scale ×1000 (0 = auto from descriptor) |
 | `calib_offset_x/y` | 0 | Screen offset |
 | `invert_x/y` | 0 | Invert axis |
@@ -138,8 +144,8 @@ After reboot the driver auto-loads via udev and `/etc/modprobe.d/spi-hid.conf`.
 ## Build from Source
 
 ```bash
-make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
-sudo cp driver/spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
+make -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
+sudo cp driver/spi-amd.ko driver/spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
 sudo depmod -a
 sudo reboot
 ```
@@ -157,6 +163,10 @@ sudo reboot
 | [`docs/CONTACT_ABI.md`](docs/CONTACT_ABI.md) | Contact struct ABI |
 | [`docs/ETW_CSV_FORMAT.md`](docs/ETW_CSV_FORMAT.md) | Windows ETW trace format |
 | [`docs/decomp/`](docs/decomp/) | Windows driver decompilation reference |
+| [`docs/SUPPORT.md`](docs/SUPPORT.md) | Supported hardware and release profiles |
+| [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) | Hardware validation matrix |
+| [`docs/TESTING.md`](docs/TESTING.md) | Reproducible validation procedure |
+| [`docs/EVIDENCE.md`](docs/EVIDENCE.md) | Evidence ledger and open discrepancies |
 
 ## License
 

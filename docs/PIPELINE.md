@@ -92,7 +92,7 @@ Extracted from DLL `DAT_1808e0460` (file offset `0x8DF060`):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `raw_mode` | 1 | Raw heatmap + multi-touch |
+| `raw_mode` | 0 | Raw heatmap + multi-touch; `install.sh --raw` enables it experimentally |
 | `skip_getfeat` | 1 | Vendor-init activation path |
 | `ema_alpha` | 7 | EMA smoothing weight |
 | `blob_max_distance` | 3 | Hungarian base radius (cells) |
@@ -102,7 +102,7 @@ Extracted from DLL `DAT_1808e0460` (file offset `0x8DF060`):
 | `hold_frames` | 0 | Hold grace period (0=disabled) |
 | `ghost_dist` | 6 | Pre-merge radius (cells) |
 | `pre_assoc_ratio` | 0 | Pre-assoc filter (0=disabled) |
-| `grid_cols/rows` | 72/48 | Heatmap dimensions |
+| `grid_cols/rows` | 0/0 | Current fallback is 72/48; layout remains under validation |
 | `calib_scale_x/y` | 0 | Coordinate scaling (0=auto) |
 | `calib_offset_x/y` | 0 | Screen offset |
 | `invert_x/y` | 0 | Invert axis |

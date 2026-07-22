@@ -1,8 +1,8 @@
 # Raw Mode Activation (SET_FEATURE ID5)
 
-The MSHW0231 touch controller requires a specific activation sequence
-to enter raw heatmap mode. Without this sequence, the device produces
-only pre-processed single-touch coordinates (Report ID 0x40).
+The MSHW0231 touch controller has an observed activation sequence for raw-mode
+experiments. Its sufficiency for a reliable raw stream is not yet release
+evidence; see `docs/EVIDENCE.md` before treating it as a protocol contract.
 
 ## Activation Sequence
 
@@ -22,39 +22,39 @@ This matches the Windows touch initialization trace
 
 ### 2. SET_FEATURE Handshake
 
-After reading the HID report descriptor, the driver waits for the
-device to stabilize (matching the Windows ~5900ms delay between
-RPT_DESC and GET_FEATURE), then sends the activation command:
+With `skip_getfeat=0`, the legacy path waits for the Windows-like ~5900ms gap
+between RPT_DESC and GET_FEATURE before sending the activation command. The
+experimental raw profile uses `skip_getfeat=1` and takes the direct vendor-init
+path instead.
 
 ```
 Host → Device:
   Report Type: Feature (0x03)
   Report ID:   5
-  Value:       0x01 (enable raw mode)
+  Value:       0x01 (observed raw-mode request)
 ```
 
 The SET_FEATURE frame is a standard HID feature report with:
 - Report type = 0x03 (SET_REPORT / Feature)
 - Feature report ID = 5
-- Data byte = 0x01 (enable)
+- Data byte = 0x01 (observed request value)
 
 ### 3. Mode Change
 
-After receiving SET_FEATURE ID5=01, the device switches from standard
-HID mode to raw heatmap mode. All subsequent input reports contain:
-
-- Headers containing frame type markers
-- 72×48 mutual-capacitance heatmap (3456 cells × 16-bit raw = 6912 bytes)
-- Frame metadata (timestamp, frame counter, touch state flags)
+SET_FEATURE ID5=01 is part of the observed activation sequence. The current
+driver recognizes byte-indexed CapImg frames of roughly 4304 bytes, while older
+documentation described a 16-bit 6912-byte raster. This discrepancy is tracked
+in `docs/EVIDENCE.md`; do not use either layout as a new protocol contract
+without a labelled replay fixture.
 
 ## Linux Driver Implementation
 
-### `skip_getfeat=1` (Default, Recommended)
+### `skip_getfeat=1` (Experimental Raw Profile)
 
 The driver uses a direct vendor-init path:
 1. Write vendor-init command (0xC2 opcode)
 2. After a short stabilization delay, write SET_FEATURE ID5=01
-3. Begin processing raw input reports
+3. Observe subsequent reports; reliable streaming remains unproven
 
 ### `skip_getfeat=0` (Legacy)
 
@@ -63,22 +63,17 @@ The original GET_FEATURE-based path:
 2. Read report descriptor
 3. Wait ~5900ms (Windows GET_FEATURE delay)
 4. Send GET_FEATURE → device returns current ID5 state
-5. Send SET_FEATURE ID5=01 → device enters raw mode
+5. Send SET_FEATURE ID5=01 → observe whether a stream follows
 
-The `skip_getfeat=1` path is preferred because it avoids the ~5.9s
-delay and matches the working cold boot trace more closely.
+The `skip_getfeat=1` path is selected only by `install.sh --raw`. The standard
+installer profile remains standard HID mode until the raw validation matrix is
+complete.
 
 ## Debug Validation
 
-The activation can be confirmed by reading the raw mode flag:
-
-```bash
-cat /sys/module/spi_hid/parameters/raw_enabled
-# 1 = raw mode active, 0 = standard mode
-```
-
-Without activation, only single-touch coordinates are produced and
-`raw_enabled` reads 0.
+There is no `raw_enabled` parameter. Inspect the SPI HID device's `ready`,
+`protocol_stats`, `baseline_status`, and `heatmap_debug` sysfs attributes as
+described in `docs/TESTING.md`.
 
 ## References
 

@@ -6,7 +6,8 @@ mode with the register layout documented below.
 
 ## MMIO Register Map
 
-Base address: `0xFEC10000` (SPI bus 1, chip select 0).
+Base address: `0xFEC10000` (SPI bus 1, ACPI logical chip select 0). The current
+driver's physical ALT_CS mapping is an unresolved board-specific quirk.
 
 ### Core Registers
 
@@ -70,7 +71,7 @@ Bit 0     : reserved
 ### Read Transfer (PIO)
 
 ```
-1. Select chip (CS#0, configure CTRL1 speed index)
+1. Select logical CS0 and configure CTRL1 speed index
 2. Program opcode FIFO (read command + register address)
 3. Set TX_COUNT = 3                     ← PIO quirk: must be 3, not 0
 4. Write TX FIFO (3 dummy bytes)
@@ -117,8 +118,9 @@ Bit 0     : reserved
 | 4 | 66 MHz | NORM[2:0] = 2 |
 | 5 | 100 MHz | NORM[2:0] = 6 |
 
-The driver uses speed index 0 (12 MHz) for normal operation. The
-Windows driver uses the same speed.
+This table is historical controller research, not the current MSHW0231 release
+clock contract. The tracked ACPI resource requests 33.33 MHz; see
+`docs/EVIDENCE.md` for the unresolved speed-validation status.
 
 ## SPI_MISC_CNTRL (0xFC) Semaphore
 

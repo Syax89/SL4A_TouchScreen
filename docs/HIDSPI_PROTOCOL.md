@@ -98,18 +98,18 @@ Host sends: [0F 00] [length] [type=03, id=05, value=01]
             content_id  COMND  SET_FEATURE frame
 ```
 
-This activates the raw heatmap mode. Without it, the device produces
-only pre-processed single-touch coordinates (Report ID 0x40).
-
-In raw mode, input reports contain the full 72×48 mutual-capacitance
-heatmap (3456 cells × 16 bits = 6912 bytes of raw data per frame).
+This command is part of the observed raw-mode sequence. It is not yet proven
+that ID5 alone establishes a reliable stream, and the frame layout is still
+under reconciliation. The current parser accepts byte-indexed CapImg bodies of
+roughly 4304 bytes; older documentation described a 16-bit 6912-byte raster.
+See `docs/EVIDENCE.md` before using either interpretation as a protocol change.
 
 ### 5. Input Report Processing
 
-After activation, the device asserts a GPIO interrupt when data is available.
-The driver reads the frame header (content_id=0x11), validates the
-heatmap header, and forwards the raw data to the processing pipeline
-or the HID subsystem depending on mode.
+After an observed raw-mode sequence, the device can assert a GPIO interrupt
+when data is available. The driver reads and validates the input before routing
+it to the raw pipeline or HID subsystem. Release behavior requires an E1 result
+for the exact firmware and profile.
 
 ## V0 vs V1.0 Differences
 
@@ -136,15 +136,15 @@ trigger the read phase. This matches Windows `amdspi.sys` decompilation.
 
 ### Cold Boot Handshake
 
-After a cold boot, the first DESCREQ attempt may fail. The driver
-retries up to 3 times with 1-second delays and D2→D0 power cycles.
+After a cold boot, the first DESCREQ attempt may fail. Recovery timing and
+power sequencing are experimental and require target-machine evidence.
 
 ### GET_FEATURE Delay
 
-Windows inserts a ~5900ms gap between RPT_DESC and GET_FEATURE. The
-Linux driver replicates this via a deferred work item when
-`skip_getfeat=0`. With `skip_getfeat=1`, the vendor-init path
-(0xC2 opcode) is used instead, avoiding the delay.
+Windows traces include a ~5900ms gap between RPT_DESC and GET_FEATURE. The
+Linux delay is configuration-dependent; with `skip_getfeat=1`, the experimental
+vendor-init path (0xC2 opcode) bypasses GET_FEATURE. Neither path is a
+release-qualified activation contract.
 
 ## References
 

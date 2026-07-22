@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Linux kernel 6.x+ with headers installed
-- AMD Cezanne (Ryzen 4000/5000 Mobile) platform
+- Microsoft Surface Laptop 4 AMD with `AMDI0060` and `MSHW0231`
 - `make`, `clang` or `gcc`, DKMS
 
 ## DKMS Installation (Recommended)
@@ -16,11 +16,14 @@ sudo reboot
 ```
 
 The installer:
-1. Copies the driver source to `/usr/src/sl4a-touch-1.1.0/`
+1. Copies the driver source to `/usr/src/sl4a-touch-<version>/`
 2. Registers with DKMS
-3. Builds and signs the kernel module
+3. Builds the two kernel modules
 4. Creates `/etc/modprobe.d/spi-hid.conf`
-5. Installs a udev rule for auto-loading
+
+Module signing is delegated to the distribution DKMS configuration. The
+installer does not install a udev rule; the kernel binds modules through ACPI
+aliases.
 
 After reboot, the driver loads automatically when the MSHW0231 ACPI
 device is enumerated.
@@ -35,11 +38,12 @@ sudo ./tools/uninstall.sh
 
 ```bash
 cd driver
-make LLVM=1 -C /lib/modules/$(uname -r)/build M=$PWD modules
+make -C /lib/modules/$(uname -r)/build M=$PWD modules
 
 # Manual install
-sudo cp spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
+sudo cp spi-amd.ko spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
 sudo depmod -a
+sudo modprobe spi-amd
 sudo modprobe spi-hid
 ```
 
@@ -48,13 +52,16 @@ sudo modprobe spi-hid
 Load-time parameters in `/etc/modprobe.d/spi-hid.conf`:
 
 ```
-options spi_hid raw_mode=Y skip_getfeat=Y
+options spi_hid raw_mode=N
 ```
 
-| Parameter | Default | Description |
+`sudo ./tools/install.sh --raw` writes the experimental raw profile:
+`options spi_hid raw_mode=Y skip_getfeat=Y`.
+
+| Parameter | Module default | Description |
 |-----------|---------|-------------|
-| `raw_mode` | Y | Enable raw heatmap + multi-touch mode |
-| `skip_getfeat` | Y | Internal: skip redundant GET_FEATURE handshake |
+| `raw_mode` | N | Enable experimental raw heatmap + multi-touch mode with `install.sh --raw` |
+| `skip_getfeat` | Y | Skip GET_FEATURE handshake |
 | `ema_alpha` | 7 | EMA smoothing coefficient (1-10) |
 | `blob_max_distance` | 3 | Hungarian association base radius (cells) |
 | `blob_min_weight` | 1000 | Minimum blob signal weight |
@@ -63,8 +70,8 @@ options spi_hid raw_mode=Y skip_getfeat=Y
 | `hold_frames` | 0 | Hold grace period (0 = disabled) |
 | `ghost_dist` | 6 | Pre-merge radius in cells |
 | `pre_assoc_ratio` | 0 | Pre-association weight filter (0 = disabled) |
-| `grid_cols` | 72 | Columns in heatmap grid |
-| `grid_rows` | 48 | Rows in heatmap grid |
+| `grid_cols` | 0 | Current fallback is 72 columns |
+| `grid_rows` | 0 | Current fallback is 48 rows |
 | `calib_scale_x` | 0 | X scale ×1000 (0 = auto from descriptor) |
 | `calib_scale_y` | 0 | Y scale ×1000 (0 = auto) |
 | `calib_offset_x` | 0 | X offset in screen pixels |
@@ -79,12 +86,12 @@ options spi_hid raw_mode=Y skip_getfeat=Y
 # Check driver loaded
 lsmod | grep spi_hid
 
-# Check touch device created
+# Observe HID reports if the device emits them
 ls /sys/class/hidraw/
-sudo evtest  # select touch device, verify single-touch events
+sudo evtest  # select the device and record emitted events
 
-# Check raw multi-touch active
-cat /sys/module/spi_hid/parameters/raw_enabled  # should be 1
+# Inspect protocol and raw-frame state
+find /sys/bus/spi/devices -name protocol_stats -o -name baseline_status
 
 # Monitor traces
 sudo cat /sys/kernel/debug/tracing/trace
@@ -100,18 +107,21 @@ The device may need a full power cycle after extended rmmod cycles:
 3. Wait 30 seconds
 4. Power on
 
-The driver retries the DESCREQ handshake 3 times with 1-second delays.
+Recovery timing is experimental; record the observed sequence in the hardware
+test matrix rather than relying on a fixed retry claim.
 
 ### No multi-touch, no contact
 
-Check that `skip_getfeat=Y` is set. The device needs vendor-init
-(register 0xC2) and SET_FEATURE ID5=01 to activate raw mode.
+Raw mode is experimental. Confirm that the `--raw` profile was selected and
+inspect `protocol_stats` and `baseline_status`; ID5 activation alone is not a
+reliable-stream guarantee.
 
 ### Slow touch or stuttering
 
 - Reduce `ema_alpha` for more responsive movement (trade-off: more jitter)
 - Increase `blob_lift_frames` if fingers are lost prematurely
-- Check SPI bus speed with `cat /sys/module/spi_amd/parameters/debug_trace`
+- Enable `debug_trace` only when collecting controller diagnostics; it does not
+  report or set SPI speed.
 
 ### Touch not using full screen
 
