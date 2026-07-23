@@ -189,6 +189,30 @@ static void test_parse_content(void)
 	CHECK(content.data == payload_body + 3, "content: payload pointer");
 	CHECK(content.data_length == 3, "content: payload length");
 	CHECK(!memcmp(content.data, "\xaa\xbb\xcc", 3), "content: payload data");
+
+	{
+		spi_hid_proto_u8 empty_payload[] = {0x03, 0x00, 0x0c};
+		CHECK(spi_hid_protocol_parse_content(empty_payload, sizeof(empty_payload), &content) == 0,
+		      "content: total_length=3 (empty payload) accepted");
+		CHECK(content.data_length == 0, "content: empty payload data_length=0");
+	}
+
+	{
+		spi_hid_proto_u8 max_ok[8192];
+		memset(max_ok, 0, sizeof(max_ok));
+		max_ok[0] = 0x00; max_ok[1] = 0x20;
+		CHECK(spi_hid_protocol_parse_content(max_ok, sizeof(max_ok), &content) == 0,
+		      "content: total_length=8192 accepted");
+
+		spi_hid_proto_u8 too_large[] = {0x01, 0x20, 0x00};
+		CHECK(spi_hid_protocol_parse_content(too_large, sizeof(too_large), &content) < 0,
+		      "content: total_length=8193 rejected (>8192 max)");
+	}
+
+	CHECK(spi_hid_protocol_parse_content(NULL, 10, &content) < 0,
+	      "content: NULL body rejected");
+	CHECK(spi_hid_protocol_parse_content(valid_body, sizeof(valid_body), NULL) < 0,
+	      "content: NULL content pointer rejected");
 }
 
 /* ── Fuzz roundtrip: encode → decode → verify ─────────────────── */
@@ -300,6 +324,15 @@ static void test_output_length_boundaries(void)
 	      "output length: overflow rejected");
 	CHECK(spi_hid_protocol_encode_output_header(raw, 0x123456, 0x1000) < 0,
 	      "output length: encoder rejects overflow");
+
+	CHECK(spi_hid_protocol_output_length_valid(0),
+	      "output length: zero accepted");
+	CHECK(spi_hid_protocol_output_length_valid(1),
+	      "output length: 1 accepted");
+	CHECK(spi_hid_protocol_output_length_valid(0x800),
+	      "output length: mid-range 0x800 accepted");
+	CHECK(spi_hid_protocol_output_length_valid(0xffe),
+	      "output length: max-1 accepted");
 }
 
 static void test_header_offsets(void)
