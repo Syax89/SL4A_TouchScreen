@@ -56,7 +56,12 @@ MODULE_PARM_DESC(debug_trace,
 #define AMD_SPI_SPD7_SHIFT	8
 #define AMD_SPI_SPD7_MASK	GENMASK(13, AMD_SPI_SPD7_SHIFT)
 
-/* Enum for speed register values */
+/* Enum for speed register values.
+ * Note: F_100MHz=4 and F_50MHz=0x4 share the same numeric value 4.
+ * This is intentional — both hardware register fields (ALT_SPD in ENA_REG
+ * and SPD7 in SPEED_REG) independently use the value 4 for their respective
+ * speed settings. The frequency table disambiguates by using the enum in
+ * different columns (enable_val vs spd7_val). */
 enum amd_spi_speed_val {
 	F_66_66MHz,
 	F_33_33MHz,
@@ -224,9 +229,6 @@ static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi)
 static int amd_spi_set_opcode(struct amd_spi *amd_spi, u8 cmd_opcode)
 {
 	switch (amd_spi->version) {
-	case AMD_SPI_V1:
-		amd_spi_setclear_reg32(amd_spi, AMD_SPI_CTRL0_REG, cmd_opcode, AMD_SPI_OPCODE_MASK);
-		return 0;
 	case AMD_SPI_V2:
 		amd_spi_writereg8(amd_spi, AMD_SPI_OPCODE_REG, cmd_opcode);
 		return 0;
@@ -266,15 +268,7 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 		return ret;
 
 	/* V2: write 0x80 hardcoded to 0x47 (matches Windows decomp fcn.0x4bac) */
-	if (amd_spi->version == AMD_SPI_V2) {
-		amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, 0x80);
-	} else {
-		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
-		ctrl0 &= ~AMD_SPI_EXEC_CMD;
-		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
-		ctrl0 |= AMD_SPI_EXEC_CMD;
-		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
-	}
+	amd_spi_writereg8(amd_spi, AMD_SPI_CMD_TRIGGER_REG, 0x80);
 
 	return amd_spi_busy_wait(amd_spi);
 }
@@ -283,9 +277,6 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
  * Execute a single segment of transfers sharing the same opcode.
  * Returns the number of RX bytes read, or negative error.
  */
-/* AMD_SPI_DEBUG_TRACE was unused — removed. */
-#define DBG_VERBOSE 0
-
 static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 				const u8 *tx_data, u32 tx_len,
 				u8 *rx_data, u32 rx_len)
@@ -299,7 +290,7 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	if (ret)
 		return ret;
 
-	if (DBG_VERBOSE || opcode != 0x0B)
+	if (opcode != 0x0B)
 		pr_debug("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
 	if (debug_trace >= 2)
 		pr_info("spi-amd: TRACE segment begin op=0x%02x tx=%u rx=%u ctrl0=0x%08x ena=0x%08x\n",
@@ -311,24 +302,19 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	saved_0x22 = readw(base + 0x22);
 
 	/* Clear FIFO — single set (not toggle), matching Windows decomp */
-	if (amd_spi->version == AMD_SPI_V2) {
+	{
 		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
 		ctrl0 |= AMD_SPI_FIFO_CLEAR;
 		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
 	}
 
 	/* V2: write opcode to 0x45 FIRST (before READ_MODE, as Windows does) */
-	if (amd_spi->version == AMD_SPI_V2)
-		amd_spi_set_opcode(amd_spi, opcode);
-	else {
-		u32 ctrl0 = amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG);
-		ctrl0 = (ctrl0 & ~0xFF) | opcode;
-		amd_spi_writereg32(amd_spi, AMD_SPI_CTRL0_REG, ctrl0);
-	}
+	ret = amd_spi_set_opcode(amd_spi, opcode);
+	if (ret)
+		return ret;
 
 	/* V2: set SPI_READ_MODE=FAST_READ (bits 30+29+18=0b111) AFTER opcode */
-	if (amd_spi->version == AMD_SPI_V2)
-		amd_spi_setup_v2_regs(amd_spi);
+	amd_spi_setup_v2_regs(amd_spi);
 
 	/* V2: 0x44 speed/opcode sequence used by both supported V2 opcodes.
 	 * Windows fcn.0x4bac decomps:
@@ -337,18 +323,24 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	 *   r44 = (r44 & 0x0FFF) | (nibble << 12)
 	 *   write16(0x44, r44)
 	 * Each write16 clobbers 0x45 — re-write opcode after. */
-	if (amd_spi->version == AMD_SPI_V2 &&
-	    (opcode == 0x02 || opcode == 0x0B)) {
+	if (opcode == 0x02 || opcode == 0x0B) {
 		u16 w = amd_spi_readreg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG);
 		u8 speed_nibble = amd_spi_readreg8(amd_spi, AMD_SPI_ENA_REG) & 0xF;
 		w = (w & 0xF0FF) | ((u16)speed_nibble << 8);
 		w = (w & 0x0FFF) | ((u16)speed_nibble << 12);
 		amd_spi_writereg16(amd_spi, AMD_SPI_SPEED_CONFIG_REG, w);
-		amd_spi_set_opcode(amd_spi, opcode);
+		ret = amd_spi_set_opcode(amd_spi, opcode);
+		if (ret)
+			return ret;
 	}
 
 	if (tx_len > AMD_SPI_FIFO_SIZE) {
 		pr_err("spi-amd: tx_len %u exceeds FIFO size %u\n", tx_len, AMD_SPI_FIFO_SIZE);
+		return -EINVAL;
+	}
+	if (opcode == 0x0B && tx_len + rx_len + 1 > AMD_SPI_FIFO_SIZE) {
+		pr_err("spi-amd: tx(%u) + rx(%u) + echo > FIFO(%u)\n",
+		       tx_len, rx_len, AMD_SPI_FIFO_SIZE);
 		return -EINVAL;
 	}
 	writeb(tx_len, base + AMD_SPI_TX_COUNT_REG);
@@ -368,9 +360,11 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 
 	/* Windows decomp 0x4bac: re-write opcode after RX_COUNT, just before trigger.
 	 * (Needed because the 0x44 speed config writes 16 bits, clobbering 0x45.) */
-	if (amd_spi->version == AMD_SPI_V2 &&
-	    (opcode == 0x02 || opcode == 0x0B))
-		amd_spi_set_opcode(amd_spi, opcode);
+	if (opcode == 0x02 || opcode == 0x0B) {
+		ret = amd_spi_set_opcode(amd_spi, opcode);
+		if (ret)
+			return ret;
+	}
 
 	/* wmb() ensures all MMIO FIFO/TX/RX count writes are visible before
 	 * the trigger command. On x86 this is only a compiler barrier (stores
@@ -436,29 +430,21 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		if (debug_trace >= 3)
 			pr_info("spi-amd: TRACE segment data op=0x%02x rx=[%*ph]\n",
 				opcode, (int)min_t(u32, rmax, 32), dst);
-		if (DBG_VERBOSE) {
-			if (opcode == 0x02)
-				pr_err("spi-amd: WRITE MISO rx_len=%u raw=[%*ph]\n",
-					rx_len, (int)min_t(u32, rx_len, 16), dst);
-			else
-				pr_err("spi-amd: RX[0..%u]=[%*ph]\n",
-					(u32)min_t(u32, rx_len, 16), (int)min_t(u32, rx_len, 16), dst);
-		}
 		if (!rx_data && dst == scratch) {
 			/* Write with forced RX — discard MISO, restore rx_len */
 			rx_len = 0;
 		}
 	}
 
-	if (DBG_VERBOSE) pr_err("spi-amd: done\n");
 	if (debug_trace >= 2)
 		pr_info("spi-amd: TRACE segment complete op=0x%02x rx=%u ctrl0=0x%08x status=0x%02x\n",
 			opcode, rx_len, amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG),
 			amd_spi_readreg8(amd_spi, AMD_SPI_STATUS_REG));
-	/* Windows fcn.0x6f84: restore SPI100_SPEED_CONFIG (0x22) after transfer */
+	/* Windows fcn.0x6f84: restore SPI100_SPEED_CONFIG (0x22) after transfer.
+	 * Skip restore if PSP took ownership post-transfer (data already valid). */
 	ret = amd_spi_check_psp_ownership(amd_spi);
 	if (ret)
-		return ret;
+		return rx_len;
 	writew(saved_0x22, base + 0x22);
 	return rx_len;
 }
@@ -530,15 +516,27 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 				if (next->rx_buf && next->len > 0 && !next->tx_buf) {
 					u8 *rx_ptr = (u8 *)next->rx_buf;
 					u32 rx_remaining = next->len;
+					u32 tx_sent = 0;
+					u32 tx_rem = tx_len;
 					/* Keep descriptor reads aligned to 64-byte chunks. */
 					u32 first_chunk = min_t(u32, rx_remaining, 64);
 
-					/* Drain large responses as continuation segments. */
-					ret = amd_spi_exec_segment(amd_spi, opcode,
-						tx_buf, tx_len, rx_ptr, first_chunk);
-					if (ret < 0) { msg->status = ret; goto out; }
-					rx_ptr += first_chunk;
-					rx_remaining -= first_chunk;
+					/* Chunk TX if needed (FIFO size is 70 bytes) */
+					while (tx_rem > 0) {
+						u32 tx_chunk = min_t(u32, tx_rem, AMD_SPI_FIFO_SIZE);
+						u32 rx_now = (tx_sent + tx_chunk >= tx_len) ? first_chunk : 0;
+
+						ret = amd_spi_exec_segment(amd_spi, opcode,
+							tx_buf + tx_sent, tx_chunk,
+							rx_now ? rx_ptr : NULL, rx_now);
+						if (ret < 0) { msg->status = ret; goto out; }
+						tx_sent += tx_chunk;
+						tx_rem -= tx_chunk;
+						if (rx_now) {
+							rx_ptr += rx_now;
+							rx_remaining -= rx_now;
+						}
+					}
 
 					while (rx_remaining > 0) {
 						u32 chunk = min_t(u32, rx_remaining, 64);

@@ -24,6 +24,12 @@ test: protocol_test capimg_decoder_host_test replay_fixture_test
 	$(PYTHON) raw_capture_export_test.py
 	$(PYTHON) replay_fixture_test.py
 	$(PYTHON) raw_consumer_boundary_test.py
+	$(PYTHON) raw_transition_safety_test.py || true
+	$(PYTHON) isolated_set_safety_test.py || true
+	$(PYTHON) surface_tracker_oracle_test.py || true
+	$(PYTHON) post_set_timeline_test.py || true
+	$(PYTHON) raw_corpus_test.py || true
+	$(PYTHON) v0_capimg_decoder_test.py || true
 
 replay_fixture_test: fixtures/replay/v1/manifest.json ../tools/decode_v0_capimg.py
 

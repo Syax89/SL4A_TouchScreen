@@ -20,7 +20,7 @@ wait_for_driver() {
 	local expected="$2"
 	local attempt
 
-	for attempt in {1..20}; do
+	for attempt in {1..150}; do
 		if [ -L "$device/driver" ] && [ "$(bound_driver "$device")" = "$expected" ]; then
 			return 0
 		fi

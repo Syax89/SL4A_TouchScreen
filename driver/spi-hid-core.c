@@ -46,11 +46,11 @@ _Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
  * PIO segment. The six-byte V0 header leaves 64 bytes for its padded body. */
 #define SPI_HID_V0_MAX_OUTPUT_BODY 64
 
-int debug_level;
+int sl4a_debug_level;
 static int getfeat_delay_ms;  /* RPT_DESC → GET_FEATURE settle time (0 = immediate, safe default) */
 static bool skip_getfeat = true;
 #define seq_dbg(shid, level, fmt, ...) \
-	do { if (debug_level >= (level)) \
+	do { if (sl4a_debug_level >= (level)) \
 		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
 
 enum spi_hid_seq_reason {
@@ -135,6 +135,9 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 		spi_hid_seq_state_name(old_state), old_state,
 		spi_hid_seq_state_name(new_state), new_state,
 		spi_hid_seq_reason_name(reason), reason);
+
+	if (new_state == SPI_HID_SEQ_WAIT_DESC)
+		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 }
 
 static struct hid_ll_driver spi_hid_ll_driver;
@@ -466,6 +469,26 @@ static const u8 seq_descreq[] = {
 	0x00, 0x00, 0x03, 0x00, 0x00
 };
 
+/* Shared vendor-init command (19 bytes). Opcode 0x02 (doubled), register 0x000003,
+ * content_id=0xC2, len=0x0A, payload 56 BD 0C EE 5B 44 4C. */
+static const u8 vendor_init_cmd[] = {
+	0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00,
+	0x03, 0x0A, 0x00, 0x56, 0xBD, 0x0C, 0xEE,
+	0x5B, 0x44, 0x4C, 0x00, 0x00
+};
+
+/* Shared SET_FEATURE command (15 bytes, doubled-opcode). */
+static const u8 sf_cmd[] = {
+	0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
+	0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
+};
+
+/* Shared GET_FEATURE command (11 bytes). */
+static const u8 gf_cmd[] = {
+	0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
+	0x00, 0x04, 0x03, 0x00, 0x06
+};
+
 /* Windows vendor init: SET_POWER (D2→D0) on command_register 0x0004.
  * Sent on every cold boot / D3→D0 transition before DESCREQ; the device
  * streams DATA type=1 immediately afterward (no DESCREQ needed).
@@ -777,11 +800,9 @@ static int spi_hid_create_device(struct spi_hid *shid)
 
 	hid = hid_allocate_device();
 
-	if (IS_ERR(hid)) {
-		dev_err(dev, "Failed to allocate hid device: %ld\n",
-				PTR_ERR(hid));
-		ret = PTR_ERR(hid);
-		return ret;
+	if (!hid) {
+		dev_err(dev, "Failed to allocate hid device\n");
+		return -ENOMEM;
 	}
 
 	hid->driver_data = shid->spi;
@@ -1270,10 +1291,6 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, feat_delay_work.work);
 	struct device *dev = &shid->spi->dev;
-	u8 gf[11] = {
-		0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
-		0x00, 0x04, 0x03, 0x00, 0x06
-	};
 
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
@@ -1287,22 +1304,11 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		goto out;
 	}
 	if (skip_getfeat) {
-		static const u8 vendor_init[] = {
-			0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00,
-			0x03, 0x0A, 0x00, 0x56, 0xBD, 0x0C, 0xEE,
-			0x5B, 0x44, 0x4C, 0x00, 0x00
-		};
-		u8 sf[15] = {
-			0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-			0x03, 0x04, 0x00, 0x05, 0x01,
-			0x00, 0x00, 0x00
-		};
-
 		seq_dbg(shid, 1, "SEQ: delayed vendor init + SET_FEATURE\n");
-		if (spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0))
+		if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0))
 			goto retry_watchdog;
 		usleep_range(36000, 39000);
-		if (spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0))
+		if (spi_hid_seq_write(shid, sf_cmd, sizeof(sf_cmd), NULL, 0))
 			goto retry_watchdog;
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FEATURE_REQUEST);
 		mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
@@ -1311,7 +1317,7 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 	}
 
 	seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE after delay, WAIT_FEATURE\n");
-	if (spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0)) {
+	if (spi_hid_seq_write(shid, gf_cmd, sizeof(gf_cmd), NULL, 0)) {
 		goto retry_watchdog;
 	}
 	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_FEATURE, SPI_HID_SEQ_FEATURE_REQUEST);
@@ -1351,7 +1357,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 		goto out;
 	}
-	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 10, hdr);
+	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 9, hdr);
 	if (type == 7) {
 		shid->stat_device_desc++;
 		seq_dbg(shid, 1, "SEQ: poll-work: GOT DEVICE_DESC!\n");
@@ -1447,8 +1453,8 @@ module_param(skip_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_getfeat,
 	"Skip GET_FEATURE, send SET_FEATURE directly after RPT_DESC");
 
-module_param(debug_level, int, 0444);
-MODULE_PARM_DESC(debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex");
+module_param(sl4a_debug_level, int, 0444);
+MODULE_PARM_DESC(sl4a_debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex");
 
 /* ── Raw-mode handshake timing (EXPERIMENTAL) ───────────────────── */
 module_param(getfeat_delay_ms, int, 0444);
@@ -1584,11 +1590,11 @@ static void spi_hid_poll_work(struct work_struct *work)
 
 			if (rblen < 9)
 				goto resched;
-			rl = shid->data_buf[6] | (shid->data_buf[7] << 8);
+			rl = shid->data_buf[5] | (shid->data_buf[6] << 8);
 
 			shid->stat_data++;
 			seq_dbg(shid, 2, "SEQ: poller cid=0x%02x len=%u\n",
-				 shid->data_buf[8], rl);
+				 shid->data_buf[7], rl);
 
 			if (rl >= 3 && rl - 3 > avail) {
 				dev_warn_ratelimited(dev,
@@ -1598,18 +1604,18 @@ static void spi_hid_poll_work(struct work_struct *work)
 				goto resched;
 			}
 
-			if (shid->raw_mode_active && shid->data_buf[8] == 0x0C &&
+			if (shid->raw_mode_active && shid->data_buf[7] == 0x0C &&
 			    shid->touch_input) {
-				u32 clen = (rl > 2) ? (rl - 2) : 0;
+				u32 clen = (rl > 3) ? (rl - 3) : 0;
 
 				mshw0231_raw_consume_samples(shid, &shid->data_buf[8],
-							  clen, shid->data_buf[8]);
+							  clen, shid->data_buf[7]);
 		} else if (rl > 3 && rl - 3 <= avail) {
 			if (shid->hid) {
 				int hret = hid_input_report(shid->hid,
 					HID_INPUT_REPORT,
-					&shid->data_buf[8],
-					rl - 3, 1);
+					&shid->data_buf[7],
+					rl - 2, 1);
 					if (hret)
 						seq_dbg(shid, 1,
 							"SEQ: poller hid_input_report failed: %d\n",
@@ -1946,11 +1952,6 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		}
 		if (shid->raw_mode_active) {
 			if (skip_getfeat) {
-				static const u8 vendor_init[] = {
-					0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00,
-					0x03, 0x0A, 0x00,
-					0x56, 0xBD, 0x0C, 0xEE, 0x5B, 0x44, 0x4C, 0x00, 0x00
-				};
 				if (getfeat_delay_ms > 0) {
 					/* Defer vendor init path too — same delayed-work
 					 * pattern: waits the configured delay then sends
@@ -1963,38 +1964,23 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				} else {
 					seq_dbg(shid, 1, "SEQ: vendor init (18B, TXN#267) +70ms delay...\n");
 					usleep_range(68000, 72000);
-					if (spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0)) {
+					if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0)) {
 						dev_warn(&shid->spi->dev, "SEQ: vendor init write failed\n");
 						schedule_delayed_work(&shid->raw_handshake_watchdog,
 							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 						return;
 					}
 					usleep_range(36000, 39000);
-					{
-						u8 sf[15] = {
-							0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-							0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
-						};
-						seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
-						if (spi_hid_seq_write(shid, sf, sizeof(sf), NULL, 0)) {
+					seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
+					if (spi_hid_seq_write(shid, sf_cmd, sizeof(sf_cmd), NULL, 0)) {
 							dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
 							schedule_delayed_work(&shid->raw_handshake_watchdog,
 								msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 							return;
 						}
-					}
 					spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 				}
 			} else {
-				static const u8 vendor_init[] = {
-					0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00,
-					0x03, 0x0A, 0x00,
-					0x56, 0xBD, 0x0C, 0xEE, 0x5B, 0x44, 0x4C, 0x00, 0x00
-				};
-				u8 gf[11] = {
-					0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
-					0x00, 0x04, 0x03, 0x00, 0x06
-				};
 				usleep_range(1400, 1800);
 				if (getfeat_delay_ms > 0) {
 					seq_dbg(shid, 1, "SEQ: scheduling vendor init + GET_FEATURE after %dms...\n",
@@ -2005,14 +1991,14 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				} else {
 					seq_dbg(shid, 1, "SEQ: vendor init + GET_FEATURE...\n");
 					usleep_range(68000, 72000);
-					if (spi_hid_seq_write(shid, vendor_init, sizeof(vendor_init), NULL, 0)) {
+					if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0)) {
 						dev_warn(&shid->spi->dev, "SEQ: vendor init write failed\n");
 						schedule_delayed_work(&shid->raw_handshake_watchdog,
 							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 						return;
 					}
 					usleep_range(36000, 39000);
-					if (spi_hid_seq_write(shid, gf, sizeof(gf), NULL, 0)) {
+					if (spi_hid_seq_write(shid, gf_cmd, sizeof(gf_cmd), NULL, 0)) {
 						dev_warn(&shid->spi->dev, "SEQ: GET_FEATURE write failed\n");
 						schedule_delayed_work(&shid->raw_handshake_watchdog,
 							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
@@ -2058,10 +2044,6 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 				 off, off + chunk - 1, chunk, body + off);
 		}
 		{
-			u8 sf[15] = {
-				0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-				0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
-			};
 			u8 sf_nd[14] = {
 				0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
 				0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
@@ -2075,7 +2057,7 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 				ret = spi_hid_seq_write_speed(shid, sf_nd, sizeof(sf_nd),
 								  NULL, 0, setfeat_speed_hz);
 			else
-				ret = spi_hid_seq_write_speed(shid, sf, sizeof(sf),
+				ret = spi_hid_seq_write_speed(shid, sf_cmd, sizeof(sf_cmd),
 								  NULL, 0, setfeat_speed_hz);
 			if (ret) {
 				dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed: %d\n", ret);
@@ -2258,7 +2240,6 @@ static int spi_hid_ll_start(struct hid_device *hid)
 
 static void spi_hid_ll_stop(struct hid_device *hid)
 {
-	hid->claimed = 0;
 }
 
 static int spi_hid_ll_open(struct hid_device *hid)
@@ -2500,28 +2481,6 @@ static DEVICE_ATTR_RO(device_initiated_reset_count);
 
 
 static ssize_t
-spi_hid_latency_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct spi_hid *shid = dev_get_drvdata(dev);
-	int count = 0;
-	int i = 0;
-
-	for (i = 0; i < SPI_HID_MAX_LATENCIES; i++) {
-		if (shid->latencies[i].report_id == 0)
-			break;
-
-		count += snprintf(buf + count, PAGE_SIZE, "%u %u %llu %llu|",
-					shid->latencies[i].report_id,
-					shid->latencies[i].signature,
-					shid->latencies[i].start_time,
-					shid->latencies[i].end_time);
-	}
-
-	return count;
-}
-static DEVICE_ATTR_RO(spi_hid_latency);
-
-static ssize_t
 spi_hid_perf_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct spi_hid *shid = dev_get_drvdata(dev);
@@ -2548,12 +2507,6 @@ spi_hid_perf_mode_store(struct device *dev,
 
 	spin_lock_irqsave(&shid->input_lock, flags);
 	shid->perf_mode = perf_mode;
-
-	// Reset the log
-	if (shid->perf_mode) {
-		memset(shid->latencies, 0, sizeof(shid->latencies));
-		shid->latency_index = 0;
-	}
 
 	spin_unlock_irqrestore(&shid->input_lock, flags);
 
@@ -2614,7 +2567,6 @@ static const struct attribute *const spi_hid_attributes[] = {
 	&dev_attr_ready.attr,
 	&dev_attr_bus_error_count.attr,
 	&dev_attr_device_initiated_reset_count.attr,
-	&dev_attr_spi_hid_latency.attr,
 	&dev_attr_spi_hid_perf_mode.attr,
 	&dev_attr_heatmap_debug.attr,
 	&dev_attr_seq_state.attr,
@@ -2744,7 +2696,6 @@ static int spi_hid_probe(struct spi_device *spi)
 	mutex_init(&shid->seq_lock);
 	mutex_init(&shid->power_lock);
 	mutex_init(&shid->output_lock);
-	mutex_init(&shid->raw_capture_lock);
 	mutex_init(&shid->response_mutex);
 	spin_lock_init(&shid->input_lock);
 	spin_lock_init(&shid->response_lock);
@@ -3056,8 +3007,6 @@ static void spi_hid_remove(struct spi_device *spi)
 	shid->heatmap_len = 0;
 	shid->heatmap_capacity = 0;
 	mutex_unlock(&shid->seq_lock);
-	if (shid->gpiod)
-		gpiod_put(shid->gpiod);
 	dev_info(dev, "TRACE[hid] remove complete\n");
 }
 
@@ -3080,9 +3029,6 @@ static int spi_hid_suspend(struct device *dev)
 	shid->stream_watchdog_active = false;
 	shid->raw_handshake_confirmed = false;
 	shid->feat_delay_pending = false;
-	mutex_unlock(&shid->seq_lock);
-
-	mutex_lock(&shid->seq_lock);
 	mutex_unlock(&shid->seq_lock);
 
 	spi_hid_disable_irq(shid);

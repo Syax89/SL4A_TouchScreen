@@ -36,6 +36,10 @@ if [[ "$PKG_VERSION" == *-* ]]; then
 	echo "      separator instead (e.g. 1.0.0~beta1) and re-run."
 	exit 1
 fi
+if [[ "$PKG_VERSION" == *[|/\\]* ]]; then
+	echo "FAIL: VERSION ('$PKG_VERSION') contains a shell metacharacter (|/\\)."
+	exit 1
+fi
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()  { echo -e "${YELLOW}$1${NC}"; }
@@ -247,7 +251,7 @@ rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c \
 # Remove test harness and service files from the DKMS source—they're not
 # kernel modules and would trigger build warnings.
 rm -f "$SRC_DEST/test_harness.c" "$SRC_DEST/sl4a-touch.service" "$SRC_DEST/sl4a-touch-load.sh" 2>/dev/null || true
-sed -i "s/#VERSION#/${PKG_VERSION}/" "$SRC_DEST/dkms.conf"
+sed -i "s|#VERSION#|${PKG_VERSION}|" "$SRC_DEST/dkms.conf"
 
 if ! dkms add -m "$PKG_NAME" -v "$PKG_VERSION"; then
 	cleanup_staged_install

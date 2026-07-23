@@ -11,55 +11,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-/*
- * spi-hid-dev events which may occur on the event callback function.
- * The event callback function may be called in interupt thread context and
- * should not be blocked or run for a long time, it is adviced that all work
- * resulting from these events are executed on a separate work queue thread.
- * EVENT_NONE is a noop event, can be ignored
- * EVENT_ERROR indicates an error has occurred and the device should be reset.
- *   Client must ensure all fetched input reports are out of scope and reset
- *   the hardware which automatically reinitializes the device and bus.
- * EVENT_RESET indicates that the device has reset, either because an error has
- *   occurred, or as a result of a hard device reset (from init or error event).
- *   Client must ensure all fetched input reports are out of scope and indicate
- *   that it is ready to restart the driver by calling the _restart() function.
- * EVENT_READY indicates that the device is initialized and ready to generate
- *   input reports and receive output reports.
- * EVENT_INPUT_REPORT indicates that at least one unsolicited input report is
- *   available to be fetched by calling the _input_report() function.
- * EVENT_RESPONSE indicates that an output report response is available to be
- *   fetched by calling the _input_report() function. The response event is
- *   functionally equivialent to the input report event to the driver, but
- *   gives the client an opportunity to fetch unsolicited reports on a
- *   different thread to responses, with a higher priority if necessary to
- *   reduce potential input latency.
- * EVENT_WAKEUP indicates that an irq has arrived from a device in a sleep
- *   power state. The client is responsible for handling the irq and set device
- *   into an awake power state.
- */
-#define SPI_HID_DEV_EVENT_NONE			0
-#define SPI_HID_DEV_EVENT_ERROR			1
-#define SPI_HID_DEV_EVENT_RESET			2
-#define SPI_HID_DEV_EVENT_READY			3
-#define SPI_HID_DEV_EVENT_INPUT_REPORT		4
-#define SPI_HID_DEV_EVENT_RESPONSE		5
-#define SPI_HID_DEV_EVENT_WAKEUP		6
-
-#define SPI_HID_BUS_STOP			0
-#define SPI_HID_BUS_ERROR_SPI_QUEUE		1
-#define SPI_HID_BUS_ERROR_SPI_STATUS		2
-#define SPI_HID_BUS_ERROR_SYNC_BYTE		3
-#define SPI_HID_BUS_ERROR_VERSION		4
-#define SPI_HID_BUS_ERROR_BUF_SIZE		5
-#define SPI_HID_BUS_ERROR_RESET			6
-#define SPI_HID_BUS_ERROR_STOP			7
-
 /* Protocol constants */
-#define SPI_HID_OUTPUT_HEADER_VERSION		0x02
-
-#define SPI_HID_OUTPUT_HEADER_OPCODE_WRITE	0x02
-
 #define SPI_HID_DEFAULT_INPUT_REGISTER		0x0000
 #define SPI_HID_SUPPORTED_VERSION		0x0100
 
@@ -85,31 +37,20 @@
 
 #define SPI_HID_COMMAND_SET_POWER		0x01
 
-#define SPI_HID_POWER_SUPPORT_NONE		0x01
-#define SPI_HID_POWER_SUPPORT_NO_RESP		0x02
-#define SPI_HID_POWER_SUPPORT_RESP		0x03
-
 #define SPI_HID_POWER_MODE_ACTIVE		0x01 /* "Active" - D0 */
 #define SPI_HID_POWER_MODE_SLEEP		0x02 /* "Doze" - D2 */
 #define SPI_HID_POWER_MODE_OFF			0x03
 #define SPI_HID_POWER_MODE_WAKING_SLEEP		0x04 /* "Suspend" - D3/D3* */
 
-#define SPI_HID_HEARTBEAT_REPORT_ID		0xFE
-#define SPI_HID_RIGHT_SCREEN_TOUCH_HEAT_MAP_REPORT_ID 0x0A
-#define SPI_HID_LEFT_SCREEN_TOUCH_HEAT_MAP_REPORT_ID 0x3C
-
-#define SPI_HID_MAX_LATENCIES			64
-
 /* Heatmap blob detection limits */
 #define HEATMAP_MAX_CELLS   4300
 #define HEATMAP_MAX_BLOBS   20
 #define HEATMAP_MAX_SLOTS   47   /* match Windows DLL blob slot count */
+#define SLOT_HISTORY_DEPTH  10
 
 /* Eight fixed-size V0 bodies keep capture bounded to roughly 34 KiB. */
 #define SPI_HID_RAW_CAPTURE_SLOTS 8
 #define SPI_HID_RAW_CAPTURE_BODY_LENGTH 4304
-#define SPI_HID_ISOLATED_SET_RING_SLOTS 8
-#define SPI_HID_ISOLATED_SET_BODY_LENGTH 512
 
 
 enum spi_hid_seq_state {
@@ -121,26 +62,6 @@ enum spi_hid_seq_state {
 	SPI_HID_SEQ_DONE = 4,
 	SPI_HID_SEQ_WAIT_FEATURE = 5,
 };
-
-enum spi_hid_isolated_set_state {
-	SPI_HID_ISOLATED_SET_DISABLED,
-	SPI_HID_ISOLATED_SET_WAIT_GET,
-	SPI_HID_ISOLATED_SET_WAIT_SET,
-	SPI_HID_ISOLATED_SET_OBSERVING,
-	SPI_HID_ISOLATED_SET_COMPLETE,
-	SPI_HID_ISOLATED_SET_RESET,
-	SPI_HID_ISOLATED_SET_FAILED,
-};
-
-struct spi_hid_isolated_set_frame {
-	__u64 timestamp_ns;
-	__u16 transport_length;
-	__u16 body_length;
-	__u8 type;
-	__u8 truncated;
-	__u8 header[SPI_HID_INPUT_HEADER_LEN];
-	__u8 body[SPI_HID_ISOLATED_SET_BODY_LENGTH];
-} __packed;
 
 struct spi_hid_device_desc_raw {
 	__le16 wDeviceDescLength;
@@ -212,8 +133,7 @@ struct spi_hid {
 	spinlock_t		input_lock;   /* Protects IRQ-shared performance data */
 
 	u32 device_descriptor_register;    /* Register address for device descriptor */
-
-	u16 hid_desc_addr;                 /* HID descriptor register address from ACPI */
+	u32 hid_desc_addr;                 /* HID descriptor register address from ACPI */
 	u8 power_state;                    /* D0 (1 active), D2 (2 doze), D3 (3 off) */
 	u8 attempts;                       /* Probe retry counter */
 
@@ -253,7 +173,7 @@ struct spi_hid {
 	/*
 	 * Locking hierarchy for code that needs more than one lock:
 	 *
-	 *   power_lock -> lock -> seq_lock -> output_lock -> raw_capture_lock
+	 *   power_lock -> lock -> seq_lock -> output_lock
 	 *
 	 * response_lock is a leaf spinlock and only protects response transaction
 	 * metadata.
@@ -264,7 +184,6 @@ struct spi_hid {
 	struct mutex seq_lock;
 	struct mutex power_lock;      /* Serializes power state transitions */
 	struct mutex output_lock;     /* Serializes output report access */
-	struct mutex raw_capture_lock; /* Serializes raw capture buffer access */
 	struct mutex response_mutex;  /* Serializes synchronous response transactions */
 	struct completion output_done; /* Signaled when output report completes */
 	spinlock_t response_lock;      /* Protects the synchronous response transaction */
@@ -293,11 +212,7 @@ struct spi_hid {
 	unsigned long seq_last_valid_jiffies; /* Last valid IRQ timestamp */
 	u32 seq_storm_count;           /* Consecutive invalid IRQ count (storm detection) */
 
-	u64 interrupt_time_stamps[2];  /* Ring buffer: last two IRQ timestamps */
-	struct latency_instance latencies[SPI_HID_MAX_LATENCIES]; /* IRQ-to-report latency ring */
-	u8 latency_index;              /* Current slot in latency ring */
 	u8 perf_mode;                  /* Performance mode flag */
-	u16 touch_signature_index;     /* Touch signature for latency tracking */
 
 	/* Report descriptor read from the device during standard discovery. */
 	u8 wire_report_descriptor[1024];
@@ -316,7 +231,6 @@ struct spi_hid {
 
 	/* Per-device blob detection buffers. */
 	u8  heatmap_baseline[HEATMAP_MAX_CELLS];
-	u32 heatmap_baseline_cells;
 	bool heatmap_have_baseline;
 	u32 heatmap_baseline_frames;
 	u8  heatmap_touched[HEATMAP_MAX_CELLS];
@@ -342,10 +256,8 @@ struct spi_hid {
 	u32 blob_slot_weight[HEATMAP_MAX_SLOTS];    /* last blob weight */
 	u32 blob_slot_missed[HEATMAP_MAX_SLOTS];    /* consecutive frames missed */
 	u8 blob_slot_stationary[HEATMAP_MAX_SLOTS]; /* stationary frame counter */
-	u8 blob_slot_blob[HEATMAP_MAX_SLOTS];       /* associated blob index */
 
 	/* Per-slot history ring for sway and velocity (Surface: 10 samples). */
-	#define SLOT_HISTORY_DEPTH 10
 	u32 blob_slot_hx[HEATMAP_MAX_SLOTS][SLOT_HISTORY_DEPTH];
 	u32 blob_slot_hy[HEATMAP_MAX_SLOTS][SLOT_HISTORY_DEPTH];
 	u8 blob_slot_hpos[HEATMAP_MAX_SLOTS];
@@ -373,34 +285,6 @@ struct spi_hid {
 	u32 raw_capture_next;
 	u32 raw_capture_invalid;
 	u32 raw_input_invalid;
-	bool raw_transition_attempted;
-	u32 raw_transition_scheduled;
-	u32 raw_transition_get_sent;
-	u32 raw_transition_get_write_failed;
-	u32 raw_transition_get_response;
-	u32 raw_transition_get_body_len;
-	u8 raw_transition_get_body[256];
-	u32 raw_transition_timeout;
-	u32 raw_transition_set_sent;
-	u32 raw_transition_set_write_failed;
-	u32 raw_transition_state_skipped;
-	u32 raw_transition_reset_before_response;
-
-	/* Separately gated, boot-time-only GET ID6 / SET observation harness. */
-	bool isolated_set_armed;
-	bool isolated_set_attempted;
-	u32 isolated_set_get_sent;
-	u32 isolated_set_set_sent;
-	u32 isolated_set_write_failed;
-	u32 isolated_set_timeout;
-	u32 isolated_set_reset;
-	u32 isolated_set_count;
-	u32 isolated_set_overflow;
-	u32 isolated_set_next;
-	enum spi_hid_isolated_set_state isolated_set_state;
-	u8 isolated_set_header[SPI_HID_INPUT_HEADER_LEN];
-	struct spi_hid_isolated_set_frame
-		isolated_set_ring[SPI_HID_ISOLATED_SET_RING_SLOTS];
 
 	/* Raw-mode handshake state for auto-retry on cold boot. */
 	struct delayed_work raw_handshake_watchdog; /* Handshake timeout/retry watchdog */
@@ -411,9 +295,6 @@ struct spi_hid {
 
 	struct delayed_work feat_delay_work;      /* GET_FEATURE delay work (matches Windows ~5900ms) */
 	bool feat_delay_pending;                  /* Delay work is scheduled */
-	struct delayed_work raw_transition_timeout_work;  /* Raw transition timeout */
-	struct delayed_work isolated_set_timeout_work;    /* Isolated set timeout */
-	struct delayed_work isolated_set_work;            /* Isolated set scheduling */
 
 	struct delayed_work stream_watchdog;      /* Input stream monitoring watchdog */
 	u32 stream_watchdog_data;                 /* Frames since last data */

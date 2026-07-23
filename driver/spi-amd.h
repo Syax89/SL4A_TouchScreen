@@ -7,9 +7,8 @@
 #include <linux/spi/spi.h>
 
 enum amd_spi_versions {
-	AMD_SPI_V1 = 1,	/* AMDI0061 */
-	AMD_SPI_V2,	/* AMDI0062 */
-	AMD_HID2_SPI,	/* AMDI0063 */
+	AMD_SPI_V2 = 2,	/* AMDI0062 */
+	AMD_HID2_SPI = 3,	/* AMDI0063 */
 };
 
 /**

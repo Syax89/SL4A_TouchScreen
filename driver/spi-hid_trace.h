@@ -31,7 +31,8 @@ DECLARE_EVENT_CLASS(spi_hid_transfer,
 		__entry->len = rx_len + tx_len;
 		__entry->ret = ret;
 
-		memcpy(__get_dynamic_array(tx_buf), tx_buf, tx_len);
+		memcpy(__get_dynamic_array(tx_buf), tx_buf,
+		       tx_len > 0 ? (unsigned int)tx_len : 0);
 		memcpy(__get_dynamic_array(rx_buf), rx_buf, rx_len);
 	),
 

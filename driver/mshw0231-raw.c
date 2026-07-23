@@ -14,9 +14,9 @@
 #include "spi-hid-capimg.h"
 #include "mshw0231-raw.h"
 
-extern int debug_level;
+extern int sl4a_debug_level;
 #define seq_dbg(shid, level, fmt, ...) \
-	do { if (debug_level >= (level)) \
+	do { if (sl4a_debug_level >= (level)) \
 		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
 
 /* ── Screen calibration ────────────────────────────────────────── */
@@ -49,10 +49,6 @@ static int dfa_data_offset;
 module_param(dfa_data_offset, int, 0444);
 MODULE_PARM_DESC(dfa_data_offset,
 	"DFT antenna frame data offset in bytes (0 = decoded raster, no offset)");
-
-static int touch_threshold_pct = 10;
-module_param(touch_threshold_pct, int, 0444);
-MODULE_PARM_DESC(touch_threshold_pct, "Unused experimental placeholder");
 
 static int ghost_dist = 6;
 module_param(ghost_dist, int, 0444);
@@ -132,7 +128,6 @@ void mshw0231_raw_reset(struct spi_hid *shid)
 				  HEATMAP_MAX_SLOTS);
 
 	shid->heatmap_have_baseline = false;
-	shid->heatmap_baseline_cells = 0;
 	shid->heatmap_baseline_frames = 0;
 	memset(shid->heatmap_baseline, 0, sizeof(shid->heatmap_baseline));
 	memset(shid->blob_slot_state, 0, sizeof(shid->blob_slot_state));
@@ -151,7 +146,6 @@ void mshw0231_raw_reset(struct spi_hid *shid)
 	memset(shid->blob_slot_hpos, 0, sizeof(shid->blob_slot_hpos));
 	memset(shid->blob_slot_hcount, 0, sizeof(shid->blob_slot_hcount));
 	memset(shid->blob_slot_stationary, 0, sizeof(shid->blob_slot_stationary));
-	memset(shid->blob_slot_blob, 0, sizeof(shid->blob_slot_blob));
 	memset(shid->blob_x, 0, sizeof(shid->blob_x));
 	memset(shid->blob_y, 0, sizeof(shid->blob_y));
 	memset(shid->blob_wsum, 0, sizeof(shid->blob_wsum));
@@ -184,7 +178,6 @@ void mshw0231_raw_reset(struct spi_hid *shid)
 #define GRID_COLS_DEFAULT   72     /* default, overridden by auto-detect or module param */
 #define GRID_ROWS_DEFAULT   48
 #define GRID_CELLS_DEFAULT  (GRID_COLS_DEFAULT * GRID_ROWS_DEFAULT)  /* 3456 */
-#define GRID_CELLS  (288 * 50)     /* max buffer allocation (headroom) */
 #define GRID_ROW_STRIDE_DEFAULT GRID_COLS_DEFAULT
 
 /* Signal lookup table (c590[256]). Extracted from TouchPenProcessor0C19.dll .rdata:
@@ -201,11 +194,28 @@ void mshw0231_raw_init(struct spi_hid *shid)
 {
 	int i;
 	for (i = 0; i < 256; i++) {
-		s32 v = 10000 - ((s32)i * 22 + 6000);
+		s32 v = C590_BASE - ((s32)i * C590_STEP_NUM / C590_STEP_DEN + C590_OFFSET);
 		shid->c590_lut[i] = (s16)(v > 0 ? v : 0);
 	}
 	seq_dbg(shid, 1, "HEATMAP: c590 lookup table initialized (range %d..%d)\n",
 		(int)shid->c590_lut[0], (int)shid->c590_lut[255]);
+	{
+		int val;
+		val = READ_ONCE(blob_min_weight); if (val < 1) val = 1;
+		blob_min_weight = val;
+		val = READ_ONCE(ema_alpha); if (val < 0 || val > 10000) val = 3;
+		ema_alpha = val;
+		val = READ_ONCE(blob_debounce); if (val < 1) val = 3;
+		blob_debounce = val;
+		val = READ_ONCE(blob_lift_frames); if (val < 1) val = 3;
+		blob_lift_frames = val;
+		val = READ_ONCE(hold_frames); if (val < 0) val = 0;
+		hold_frames = val;
+		val = READ_ONCE(blob_max_distance); if (val < 1) val = 3; if (val > 655) val = 655;
+		blob_max_distance = val;
+		val = READ_ONCE(ghost_dist); if (val < 1) val = 6; if (val > 255) val = 255;
+		ghost_dist = val;
+	}
 }
 
 /* Fixed-point atan2 approximation. Returns angle in degrees * 100.
@@ -266,30 +276,6 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 		frame_ema_alpha = 3;
 	if (data_offset < 0 || data_offset >= data_len)
 		return;
-
-	/* Clamp unsafe parameters to prevent division by zero
-	 * and undefined behavior. Use local variables to avoid
-	 * overwriting user-set sysfs values every frame. */
-	{
-		s32 val;
-		val = READ_ONCE(blob_min_weight); if (val < 1) val = 1;
-		blob_min_weight = val;  /* one-time clamp only */
-		val = READ_ONCE(ema_alpha); if (val < 0 || val > 10000) val = 3;
-		ema_alpha = val;
-		val = READ_ONCE(blob_debounce); if (val < 1) val = 3;
-		blob_debounce = val;
-		val = READ_ONCE(blob_lift_frames); if (val < 1) val = 3;
-		blob_lift_frames = val;
-		val = READ_ONCE(hold_frames); if (val < 0) val = 0;
-		hold_frames = val;
-		val = READ_ONCE(blob_max_distance); if (val < 1) val = 3;
-		blob_max_distance = val;
-		val = READ_ONCE(ghost_dist); if (val < 1) val = 6;
-		ghost_dist = val;
-		val = READ_ONCE(touch_threshold_pct); if (val < 0) val = 0;
-		if (val > 100) val = 100;
-		touch_threshold_pct = val;
-	}
 
 	/* The candidate cell field begins after metadata. Its geometry is not yet
 	 * proven, so never infer cells from a short or malformed frame. */
@@ -408,7 +394,6 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 					shid->heatmap_baseline[i] = raw;
 			}
 			if (shid->heatmap_baseline_frames >= 30) {
-				shid->heatmap_baseline_cells = cell_count;
 				shid->heatmap_have_baseline = true;
 				seq_dbg(shid, 1, "HEATMAP: baseline stabilized after %u frames (%u cells)\n",
 					 shid->heatmap_baseline_frames, cell_count);
@@ -827,8 +812,8 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 		}
 
 		for (i = 0; i < sorted_count; i++) {
-			u16 screen_gx = swap_xy ? sorted[i].gy : sorted[i].gx;
-			u16 screen_gy = swap_xy ? sorted[i].gx : sorted[i].gy;
+			u32 screen_gx = swap_xy ? sorted[i].gy : sorted[i].gx;
+			u32 screen_gy = swap_xy ? sorted[i].gx : sorted[i].gy;
 
 			seq_dbg(shid, 2, "CALIB: blob[%u] grid=(%u,%u) screen=(%u,%u) weight=%u scale=(%ux%u)\n",
 				 i, sorted[i].gx, sorted[i].gy,
@@ -974,6 +959,8 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 			for (round = 0; round < n_blobs; round++) {
 				memset(row_cover, 0, sizeof(row_cover));
 				memset(col_cover, 0, sizeof(col_cover));
+				memset(row_match, 0xFF, sizeof(row_match));
+				memset(col_match, 0xFF, sizeof(col_match));
 
 				for (;;) {
 					u8 changed = 0;
@@ -1354,6 +1341,7 @@ int mshw0231_raw_input_register(struct spi_hid *shid)
 				dev_warn(dev, "HEATMAP: failed to register touch input device\n");
 				input_free_device(shid->touch_input);
 				shid->touch_input = NULL;
+				return -ENODEV;
 			} else {
 				dev_info(dev, "HEATMAP: multitouch input device registered\n");
 			}

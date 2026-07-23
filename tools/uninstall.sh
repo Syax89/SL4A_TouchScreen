@@ -6,7 +6,7 @@
 #
 # Usage: sudo ./tools/uninstall.sh
 # ============================================================================
-set -e
+set -e -o pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="sl4a-touch"
