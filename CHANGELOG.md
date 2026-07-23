@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.3.0 — Production Hardening (2026-07-23)
+
+### Double-Blind Audit
+- 12 independent agents audited 6 domains (controller, HID transport, raw consumer,
+  headers/protocol, tests, scripts/DKMS) in parallel.
+- 3 findings confirmed as false positives by cross-verification against source.
+- 45 confirmed findings: 6 critical, 21 high, 18 medium.
+
+### Critical Fixes
+- `spi_hid_latency_show`: fix snprintf buffer overflow (PAGE_SIZE not reduced).
+- `hid_allocate_device`: fix NULL-vs-ERR_PTR check causing NULL dereference.
+- `spi-amd` combined TX+RX: add tx_len chunking when exceeding FIFO (70 bytes).
+- `spi-amd`: check `amd_spi_set_opcode` return value at all 3 call sites.
+- `install.sh`: fix sed injection via PKG_VERSION metacharacters.
+- `uninstall.sh`: add missing `-o pipefail`.
+
+### High Fixes
+- `debug_level` renamed to `sl4a_debug_level` (was non-static global).
+- Remove no-op lock/unlock in suspend; stop bypassing HID core `claimed` field.
+- Fix poll_work off-by-one byte offsets (data_buf[6]->[5], [8]->[7]).
+- `spi-amd`: FIFO combined-length validation (tx+rx+echo <= 70).
+- `spi-amd`: data preserved after PSP post-execute takeover.
+- `mshw0231-raw`: clamp overflow guards on ghost_dist and blob_max_distance.
+- `mshw0231-raw`: fix u32->u16 truncation in screen coordinates.
+- `mshw0231-raw`: fix Hungarian row_match stale assignments per round.
+- `mshw0231-raw`: `input_register_device` failures now return -ENODEV.
+- `spi-hid-core.h`: remove __packed from isolated_set_frame (misaligned __u64).
+- `spi-hid_trace.h`: guard memcpy against negative tx_len.
+- `spi-hid-core.h`: unify device_descriptor_register/hid_desc_addr to u32.
+- `activate-fch.sh`: wait timeout increased 2s -> 15s.
+
+### Medium Cleanup (-177 lines)
+- Removed ~30 unused constants, isolated_set subsystem, raw_transition fields,
+  raw_capture_lock, latencies ring buffer, DEV_EVENT/BUS_ERROR/POWER_SUPPORT.
+- Deduplicated vendor_init/sf_cmd/gf_cmd byte arrays (4->1 static const each).
+- Removed V1 code paths and DBG_VERBOSE blocks from spi-amd.
+- Fixed c590 LUT precision (22 -> 22204/1000).
+- Removed touch_threshold_pct (dead param), GRID_CELLS (dead define).
+- Moved param clamp from hot path to init (one-time instead of per-frame).
+- Activated descreq_work polling (scheduled on WAIT_DESC transition).
+- Added 6 orphaned test files to Makefile.
+
+### New Tests (+30 assertions)
+- `c590_atan2_host_test.c`: 33 assertions for LUT values and atan2 fixed-point math.
+- `capimg_decoder_host_test.c`: extended from 41 to 71 assertions (null pointers,
+  magic bytes, content_id, container length, body length boundaries, reserved
+  fields, raster sample count, section types, missing sections, zero-length).
+- `protocol_test.c`: extended from 92399 to 92409 assertions (parse_content
+  boundaries, output_length_valid range).
+- **Total gate**: 92,513 assertions, 0 failures, ASan/UBSan clean, LLVM=1 clean.
+
+---
+
 ## refactor/sl4a-distribution (2026-07-23)
 
 ### Boot safety (black-screen fix)
