@@ -1606,10 +1606,11 @@ static void spi_hid_poll_work(struct work_struct *work)
 
 			if (shid->raw_mode_active && shid->data_buf[7] == 0x0C &&
 			    shid->touch_input) {
-				u32 clen = (rl > 3) ? (rl - 3) : 0;
-
-				mshw0231_raw_consume_samples(shid, &shid->data_buf[8],
-							  clen, shid->data_buf[7]);
+				ret = mshw0231_raw_consume_v0(shid, &shid->data_buf[5], rblen - 5);
+				if (ret) {
+					dev_warn(dev, "SEQ: poller CapImg decode failed: %d (rblen=%u)\n", ret, rblen);
+					shid->stat_frames_dropped++;
+				}
 		} else if (rl > 3 && rl - 3 <= avail) {
 			if (shid->hid) {
 				int hret = hid_input_report(shid->hid,
@@ -2171,7 +2172,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			return;
 		}
 
-		if (shid->raw_mode_active && raw_input_beta && body[7] == 0x0C && shid->touch_input) {
+		if (shid->raw_mode_active && body[7] == 0x0C && shid->touch_input) {
 			int cret;
 
 			if (!shid->raw_handshake_confirmed) {
@@ -2187,11 +2188,13 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 							      msecs_to_jiffies(stream_watchdog_ms));
 				}
 			}
-			cret = mshw0231_raw_consume_v0(shid, &body[5], rblen - 5);
-			if (cret) {
-				dev_warn(dev, "SEQ: CapImg decode failed: %d (rblen=%u)\n", cret, rblen);
-				shid->stat_frames_dropped++;
-				return;
+			if (raw_input_beta) {
+				cret = mshw0231_raw_consume_v0(shid, &body[5], rblen - 5);
+				if (cret) {
+					dev_warn(dev, "SEQ: CapImg decode failed: %d (rblen=%u)\n", cret, rblen);
+					shid->stat_frames_dropped++;
+					return;
+				}
 			}
 		} else if (rl >= 3 && rl - 3 <= avail) {
 			if (shid->raw_mode_active && body[7] == 0x40 && rl - 2 >= 6) {

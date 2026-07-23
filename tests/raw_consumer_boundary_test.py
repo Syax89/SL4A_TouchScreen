@@ -12,7 +12,7 @@ assert "spi_hid_capimg_decode_v0" not in core
 assert "mshw0231_raw_consume_v0(shid, &body[5], rblen - 5)" in core
 assert core.index("!shid->raw_handshake_confirmed") < core.index(
     "mshw0231_raw_consume_v0(shid, &body[5], rblen - 5)")
-assert "mshw0231_raw_consume_samples(shid, &shid->data_buf[8]" in core
+assert "mshw0231_raw_consume_v0(shid, &shid->data_buf[5]" in core
 assert "spi_hid_capimg_decode_v0" in raw
 assert "mshw0231_raw_process_samples" not in core
 assert "static void mshw0231_raw_process_samples" in raw

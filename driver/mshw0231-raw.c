@@ -891,11 +891,9 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 			u16 min_val;
 			u32 bmd;
 
-			memset(new_active, 0, sizeof(new_active));
+		memset(new_active, 0, sizeof(new_active));
 			memset(new_gx, 0, sizeof(new_gx));
 			memset(new_gy, 0, sizeof(new_gy));
-			memset(row_match, 0xFF, sizeof(row_match));
-			memset(col_match, 0xFF, sizeof(col_match));
 			memset(row_val, 0, sizeof(row_val));
 			memset(col_val, 0, sizeof(col_val));
 
@@ -953,14 +951,12 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 					shid->cost[row][col] -= row_val[row];
 			}
 
-			/* Hungarian algorithm iterations. */
+		/* Hungarian matching: accumulate one assignment per round. */
+		memset(row_match, 0xFF, sizeof(row_match));
+		memset(col_match, 0xFF, sizeof(col_match));
+		for (round = 0; round < n_blobs; round++) {
 			memset(row_cover, 0, sizeof(row_cover));
 			memset(col_cover, 0, sizeof(col_cover));
-			for (round = 0; round < n_blobs; round++) {
-				memset(row_cover, 0, sizeof(row_cover));
-				memset(col_cover, 0, sizeof(col_cover));
-				memset(row_match, 0xFF, sizeof(row_match));
-				memset(col_match, 0xFF, sizeof(col_match));
 
 				for (;;) {
 					u8 changed = 0;
