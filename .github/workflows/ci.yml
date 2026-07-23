@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  whitespace:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tracked whitespace
+        run: |
+          empty_tree="$(git hash-object -t tree /dev/null)"
+          git diff --check "$empty_tree" HEAD
+
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host test dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3
+      - name: Run host gate
+        run: |
+          make -C tests test
+          make -C tests clean
+          make -C tests SANITIZE=1 test
+          make -C tests clean
+
+  kernel-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install generic kernel headers
+        run: sudo apt-get update && sudo apt-get install -y build-essential linux-headers-generic
+      - name: Build external modules
+        run: |
+          for candidate in /usr/src/linux-headers-*-generic; do
+            if [ -f "$candidate/Makefile" ]; then
+              KDIR="$candidate"
+            fi
+          done
+          test -n "${KDIR:-}"
+          make -C "$KDIR" M="$GITHUB_WORKSPACE/driver" clean
+          make -C "$KDIR" M="$GITHUB_WORKSPACE/driver" modules
+          test -s driver/sl4a-spi-amd.ko
+          test -s driver/sl4a-spi-hid.ko

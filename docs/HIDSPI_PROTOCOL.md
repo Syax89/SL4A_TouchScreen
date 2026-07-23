@@ -25,30 +25,36 @@ Each SPI exchange has a request (host→device) and response (device→host).
 | 4 | 1 | content_length | Reserved |
 | 5 | 1 | report_type | Report type flags |
 
-### Opcodes (content_id)
+### Report Types (header byte 0, upper nibble)
 
-| Value | Name | Description |
-|-------|------|-------------|
-| 0x07 | DESCREQ_RESPONSE | Response to device descriptor request |
-| 0x08 | DEVICE_DESC | Hardware descriptor register |
-| 0x0B | RPT_DESC | HID report descriptor data |
-| 0x0F | COMMAND | Feature/command report |
-| 0x11 | INPUT_REPORT | Input data (touch coordinates) |
-| 0x13 | OUTPUT_REPORT | Output data from host |
-| 0x1F | VENDOR_DEFINED | Vendor-specific commands |
+These correspond to the `SPI_HID_REPORT_TYPE_*` constants defined
+in `driver/spi-hid-core.h`.
+
+| Value | Define | Description |
+|-------|--------|-------------|
+| 0x01 | `SPI_HID_REPORT_TYPE_DATA` | Unsolicited input data |
+| 0x03 | `SPI_HID_REPORT_TYPE_RESET_RESP` | Reset acknowledgement |
+| 0x04 | `SPI_HID_REPORT_TYPE_COMMAND_RESP` | Command/request response |
+| 0x05 | `SPI_HID_REPORT_TYPE_GET_FEATURE_RESP` | Get-feature response |
+| 0x07 | `SPI_HID_REPORT_TYPE_DEVICE_DESC` | Device descriptor data |
+| 0x08 | `SPI_HID_REPORT_TYPE_REPORT_DESC` | HID report descriptor data |
 
 ### V0 Body Format
 
-Version 0 uses fixed-length 64-byte body slots:
+The V0 parser (`spi_hid_protocol_parse_content` in
+`driver/spi-hid-protocol.h`) uses **variable-length** bodies
+prefixed by a 3-byte content header:
 
 ```
-[0..body_len]    Input report body (padded to 64 bytes)
-[64]             Transport status byte
-[65..67]         Reserved
+[0..1]       total_length   — u16 LE, total body length (≥ 3, ≤ 8192)
+[2]          content_id     — identifies the payload type
+[3..N-1]     data           — payload (N = total_length, data_length = N - 3)
 ```
 
-The `length` field in the header covers all content including the
-4-byte transport trailer.
+The `report_length` field in the input header covers the full
+message including the body.  There is no fixed 64-byte slot size
+or transport trailer; `total_length` determines the semantic
+data boundary.
 
 ## Communication Sequence
 

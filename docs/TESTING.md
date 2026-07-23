@@ -12,10 +12,49 @@ make -C tests SANITIZE=1 test
 make -C tests clean
 ```
 
-The protocol and CapImg decoder tests are required host coverage. Several
-research checks currently print `SKIP` because their corpus or analyzer is not
-tracked; they are not release evidence and will be split from the required gate
-in Phase 5.
+The protocol, CapImg decoder, replay-fixture, and raw-capture-export tests are
+required host coverage. `replay_fixture_test.py` has no success-by-skip path:
+it verifies the eight tracked V0 bodies, deterministic malformed inputs, and
+the recorded lifecycle-evidence classifications.
+
+Six research checks (raw_transition_safety_test, isolated_set_safety_test,
+post_set_timeline_test, surface_tracker_oracle_test, raw_corpus_test, and
+v0_capimg_decoder_test) call `skip_optional_contract()` when their untracked
+corpus, analyzer, or harness is absent. They are kept on disk for future
+implementation but are excluded from the CI gate. Their empty or unused
+Makefile targets (raw_corpus_test, raw_capture_export_test,
+v0_capimg_decoder_test) were also removed.
+
+## CI
+
+GitHub Actions checks tracked whitespace, runs the normal and ASan/UBSan host
+gates, and compiles the modules out-of-tree against Ubuntu generic headers. The
+kernel job is a compile smoke test only: it does not load modules or qualify a
+kernel, DKMS lifecycle, Secure Boot, or Surface hardware behavior.
+
+## Hardware Evidence Helpers
+
+Validate the shell syntax without collecting host evidence:
+
+```sh
+bash -n tools/hardware_evidence/collect.sh
+bash -n tools/hardware_evidence/capture_direct_touch.sh
+bash -n tools/hardware_evidence/capture_linux_trace_bundle.sh
+bash -n tools/hardware_evidence/run_blinded_session.sh
+```
+
+On target hardware, use a new output path and a short bounded session. This is
+read-only, but journal and input permissions may require the caller to invoke
+the helper with `sudo`; it never escalates itself:
+
+```sh
+sudo ./tools/hardware_evidence/capture_linux_trace_bundle.sh --duration 20 \
+  --capture-direct-touch --output evidence/<run-id>/p1-touch-session
+```
+
+Check `manifest.txt` for the UTC bounds, journal exit status, and checksums.
+Retain the complete listed bundle, including a permission-error journal artifact
+when journal access was unavailable.
 
 ## DKMS Build
 
@@ -24,17 +63,25 @@ On a supported Linux target with matching kernel headers:
 ```sh
 sudo ./tools/install.sh
 dkms status
-modinfo spi-amd
-modinfo spi-hid
+modinfo sl4a-spi-amd
+modinfo sl4a-spi-hid
+# The alias queries must print no output.
+modinfo -F alias sl4a-spi-amd
+modinfo -F alias sl4a-spi-hid
 ```
+
+For a direct kernel build against a Clang-built kernel, add `LLVM=1`.
 
 Record the exact kernel, compiler, DKMS version, distribution, Secure Boot
 state, and build output in `COMPATIBILITY.md`.
 
 ## Target Hardware Matrix
 
-Run each case with the standard profile first. Run raw mode only as a separate,
-explicit test profile.
+Run each case only after login and after retaining a local console or remote
+shell for recovery. The install step must not bind the experimental controller.
+Activate it explicitly with `sudo ./tools/activate-fch.sh`; it refuses to
+displace existing AMDI0060 or MSHW0231 drivers and verifies both bindings.
+Recover with `sudo modprobe -r sl4a-spi-hid sl4a-spi-amd` followed by a reboot.
 
 The installer selects the standard profile by default. Since `raw_mode` is read
 only after module load, install the selected profile, then reboot before

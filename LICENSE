@@ -278,3 +278,12 @@ PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGES.
 
                      END OF TERMS AND CONDITIONS
+
+----------------------------------------------------------------------
+CLARIFICATION
+----------------------------------------------------------------------
+
+The AMD SPI controller driver (driver/spi-amd.c) is dual-licensed under
+BSD/GPL, as declared by MODULE_LICENSE("Dual BSD/GPL") in that source
+file. All other components in this repository are licensed under GPL-2.0
+only, as stated above.

@@ -2,17 +2,18 @@
 # spi-cmd tester — send commands to /proc/spi-cmd and see results
 # Usage: ./spi-test.sh
 
-MOD_DIR=/home/simone/spi-test
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MOD_DIR="$SCRIPT_DIR"
 PROC=/proc/spi-cmd
 
 die() { echo "$@"; exit 1; }
 
 # Build and load
 cd $MOD_DIR || die "cd failed"
-make LLVM=1 || die "build failed"
+make || die "build failed"
 sudo rmmod spi_cmd 2>/dev/null
 # Make sure spi-amd is not loaded (MMIO conflict)
-sudo rmmod spi_hid spi_amd 2>/dev/null
+sudo rmmod sl4a-spi-hid sl4a-spi-amd 2>/dev/null
 sudo insmod $MOD_DIR/spi-cmd.ko || die "insmod failed"
 echo "spi-cmd loaded."
 

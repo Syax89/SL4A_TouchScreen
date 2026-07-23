@@ -12,21 +12,27 @@
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
 sudo ./tools/install.sh
-sudo reboot
 ```
 
 The installer:
 1. Copies the driver source to `/usr/src/sl4a-touch-<version>/`
 2. Registers with DKMS
 3. Builds the two kernel modules
-4. Creates `/etc/modprobe.d/spi-hid.conf`
+4. Creates `/etc/modprobe.d/sl4a-spi-hid.conf`
 
 Module signing is delegated to the distribution DKMS configuration. The
-installer does not install a udev rule; the kernel binds modules through ACPI
-aliases.
+experimental modules are installed as `sl4a-spi-amd` and `sl4a-spi-hid`, export
+no module aliases, and are never bound automatically at boot.
 
-After reboot, the driver loads automatically when the MSHW0231 ACPI
-device is enumerated.
+After login, only when a recovery shell or console is available, activate it:
+
+```bash
+sudo ./tools/activate-fch.sh
+```
+
+The command refuses to displace drivers already bound to AMDI0060 or MSHW0231,
+then verifies both bindings. Recovery is `sudo modprobe -r sl4a-spi-hid
+sl4a-spi-amd` followed by a reboot.
 
 ### Uninstall
 
@@ -41,22 +47,21 @@ cd driver
 make -C /lib/modules/$(uname -r)/build M=$PWD modules
 
 # Manual install
-sudo cp spi-amd.ko spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
+sudo cp sl4a-spi-amd.ko sl4a-spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
 sudo depmod -a
-sudo modprobe spi-amd
-sudo modprobe spi-hid
+sudo ./tools/activate-fch.sh
 ```
 
 ## Module Parameters
 
-Load-time parameters in `/etc/modprobe.d/spi-hid.conf`:
+Load-time parameters in `/etc/modprobe.d/sl4a-spi-hid.conf`:
 
 ```
-options spi_hid raw_mode=N
+options sl4a_spi_hid raw_mode=N
 ```
 
 `sudo ./tools/install.sh --raw` writes the experimental raw profile:
-`options spi_hid raw_mode=Y skip_getfeat=Y`.
+`options sl4a_spi_hid raw_mode=Y skip_getfeat=Y`.
 
 | Parameter | Module default | Description |
 |-----------|---------|-------------|
@@ -84,7 +89,7 @@ options spi_hid raw_mode=N
 
 ```bash
 # Check driver loaded
-lsmod | grep spi_hid
+lsmod | grep sl4a_spi_hid
 
 # Observe HID reports if the device emits them
 ls /sys/class/hidraw/

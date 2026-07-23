@@ -1,7 +1,9 @@
-# Kbuild for both modules: spi-amd (controller) + spi-hid (HID-over-SPI)
+# Kbuild for the opt-in controller and HID-over-SPI modules.
 ccflags-y := -I$(src)
 
-obj-m += spi-amd.o
+# Keep the experimental controller distinct from the in-tree spi-amd module.
+obj-m += sl4a-spi-amd.o
+sl4a-spi-amd-objs := spi-amd.o
 
-obj-m += spi-hid.o
-spi-hid-objs := spi-hid-core.o spi-hid-capimg.o trace.o
+obj-m += sl4a-spi-hid.o
+sl4a-spi-hid-objs := spi-hid-core.o spi-hid-capimg.o mshw0231-raw.o trace.o

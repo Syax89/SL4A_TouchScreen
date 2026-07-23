@@ -1,5 +1,73 @@
 # Changelog
 
+## refactor/sl4a-distribution (2026-07-23)
+
+### Boot safety (black-screen fix)
+
+- Renamed modules to `sl4a-spi-amd`/`sl4a-spi-hid`; no longer collide with
+  in-tree `spi-amd` or auto-bind at boot.
+- Removed all ACPI/OF/SPI module aliases from both modules.
+- Added `tools/activate-fch.sh` for explicit post-login controller + HID
+  transport binding with rollback on failure.
+- Added PSP ownership gate (`SPI_MISC_CNTRL` bit 10) before every MMIO write;
+  PSP-owned controller returns `-EBUSY`.
+- Deferred speed programming to transfer path; setup performs no MMIO writes.
+- SPI100/SPD7 bits are now set-only, never cleared — preserves firmware state
+  and avoids documented FCH freeze condition.
+- Added regression tests for alias absence, ownership gating, and speed safety.
+
+### Phase 3 — Internal boundaries
+
+- Extracted raw CapImg decoder, heatmap, blob tracker, and input publication
+  into `driver/mshw0231-raw.c`. Core retains SPI, IRQ, V0 sequencing,
+  activation timing, and watchdogs.
+- Added `docs/AMDI0060_CONTRACT.md` — controller-specific invariants.
+- Added `docs/PARAMETERS.md` — full release/diagnostic/experimental map.
+- All raw pipeline and calibration controls are now load-time-only (`0444`).
+- `raw_input_beta` defaults to `false`; `install.sh --raw` sets it explicitly.
+- `raw_mode` defaults to `0` (standard HID), unlike v1.1.0 which defaulted to `1`.
+  Standard profile provides single-touch only; opt-in to raw mode for multi-touch.
+- Corrected misleading parameter descriptions (getfeat_delay_ms, touch_signal_mode,
+  touch_threshold_pct, acpi_probe_power_cycle, grid geometry).
+
+### Phase 4 — Replay and evidence
+
+- Versioned replay corpus `tests/fixtures/replay/v1` with eight real V0 frames,
+  SHA-256, provenance, three deterministic malformed inputs.
+- Required `tests/replay_fixture_test.py` — no skip path.
+- Decoder C test replays eight tracked raw-slot frames (41 assertions).
+- Hardware evidence collection suite:
+  - `tools/hardware_evidence/collect.sh` — dynamic ACPI/SPI/input discovery.
+  - `tools/hardware_evidence/capture_direct_touch.sh` — bounded touch evtest.
+  - `tools/hardware_evidence/capture_stylus.sh` — bounded stylus evtest.
+  - `tools/hardware_evidence/capture_linux_trace_bundle.sh` — provenance,
+    sysfs state, journal window, optional input capture, SHA-256 manifest.
+  - `tools/hardware_evidence/run_blinded_session.sh` — opaque-session runner
+    with role-separation worksheet and checksum verification.
+
+### Phase 5 — CI
+
+- `.github/workflows/ci.yml`: whitespace, host tests, sanitizers, out-of-tree
+  Ubuntu generic-header build smoke test.
+- `driver/Makefile` supports externally-set `KDIR` and `M`.
+- Added `docs/ROLLBACK.md` with uninstall, upgrade, kernel-update, and
+  Secure Boot / MOK enrollment procedures.
+
+### Hardware evidence (standard HID)
+
+Cold boot, warm boot, 30-minute stress, and suspend/resume observed
+on CachyOS 7.1.3-2 with BIOS 4.391.140. Pen and raw multi-touch remain
+unobserved/unqualified. See `docs/COMPATIBILITY.md` and
+`docs/BLINDED_SESSION_LOG.md`.
+
+### Installer and DKMS
+
+- Default modprobe config: `/etc/modprobe.d/sl4a-spi-hid.conf`.
+- Installer upgrades legacy artifacts to the opt-in controller format.
+- Uninstaller verifies package ownership before touching config or DKMS tree.
+
+---
+
 ## v1.2.0 (2026-07-19)
 
 > [!WARNING]

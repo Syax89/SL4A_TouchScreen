@@ -30,6 +30,10 @@
 
 #define AMD_SPI_FIFO_SIZE	70
 
+/* SPI_MISC_CNTRL: PSP ownership prevents host-controller accesses. */
+#define AMD_SPI_MISC_CNTRL_REG	0xFC
+#define AMD_SPI_PSP_OWNS	BIT(10)
+
 /* Diagnostic output is deliberately opt-in: level 1 records lifecycle and
  * controller state, level 2 records every SPI segment, and level 3 includes
  * the first bytes returned by each read. */
@@ -61,9 +65,9 @@ enum amd_spi_speed_val {
 	F_100MHz,
 	F_800KHz,
 	SPI_SPD7 = 0x7,
-	F_50MHz,
-	F_4MHz,
-	F_3_17MHz,
+	F_50MHz = 0x4,
+	F_4MHz = 0x32,
+	F_3_17MHz = 0x3f,
 };
 
 struct amd_spi_freq {
@@ -107,6 +111,14 @@ static inline void amd_spi_writereg32(struct amd_spi *amd_spi, int idx, u32 val)
 	writel(val, ((u8 __iomem *)amd_spi->io_remap_addr + idx));
 }
 
+static int amd_spi_check_psp_ownership(struct amd_spi *amd_spi)
+{
+	if (amd_spi_readreg16(amd_spi, AMD_SPI_MISC_CNTRL_REG) & AMD_SPI_PSP_OWNS)
+		return -EBUSY;
+
+	return 0;
+}
+
 static void amd_spi_setclear_reg32(struct amd_spi *amd_spi, int idx, u32 set, u32 clear)
 {
 	u32 tmp = amd_spi_readreg32(amd_spi, idx);
@@ -114,20 +126,38 @@ static void amd_spi_setclear_reg32(struct amd_spi *amd_spi, int idx, u32 set, u3
 	amd_spi_writereg32(amd_spi, idx, tmp);
 }
 
-static void amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs)
+static int amd_spi_select_chip(struct amd_spi *amd_spi, u8 cs)
 {
-	u8 tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
+	u8 tmp;
+	int ret;
+
+	ret = amd_spi_check_psp_ownership(amd_spi);
+	if (ret)
+		return ret;
+
+	tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
 	tmp &= ~AMD_SPI_ALT_CS_MASK;
 	/* MSHW0231 is wired to CS1; generic chip-select support is unverified. */
 	tmp |= 0x01;
 	amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, tmp);
+
+	return 0;
 }
 
-static inline void amd_spi_clear_chip(struct amd_spi *amd_spi, u8 cs)
+static int amd_spi_clear_chip(struct amd_spi *amd_spi, u8 cs)
 {
-	u8 tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
+	u8 tmp;
+	int ret;
+
+	ret = amd_spi_check_psp_ownership(amd_spi);
+	if (ret)
+		return ret;
+
+	tmp = amd_spi_readreg8(amd_spi, AMD_SPI_ALT_CS_REG);
 	tmp &= ~AMD_SPI_ALT_CS_MASK;
 	amd_spi_writereg8(amd_spi, AMD_SPI_ALT_CS_REG, tmp);
+
+	return 0;
 }
 
 static const struct amd_spi_freq amd_spi_freq[] = {
@@ -142,16 +172,21 @@ static const struct amd_spi_freq amd_spi_freq[] = {
 	{    800000,   F_800KHz,         0},
 };
 
-static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
+static int amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 {
 	unsigned int i, spd7_val, alt_spd;
+	int ret;
+
+	ret = amd_spi_check_psp_ownership(amd_spi);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < ARRAY_SIZE(amd_spi_freq) - 1; i++)
 		if (speed_hz >= amd_spi_freq[i].speed_hz)
 			break;
 
 	if (amd_spi->speed_hz == amd_spi_freq[i].speed_hz)
-		return;
+		return 0;
 
 	amd_spi->speed_hz = amd_spi_freq[i].speed_hz;
 
@@ -160,17 +195,22 @@ static void amd_set_spi_freq(struct amd_spi *amd_spi, u32 speed_hz)
 	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG, alt_spd,
 			       AMD_SPI_ALT_SPD_MASK);
 
-	amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG,
-			       amd_spi->speed_hz == 100000000 ?
-			       AMD_SPI_SPI100_MASK : 0, AMD_SPI_SPI100_MASK);
+	/* Firmware may retain SPI100/SPD7 state required by another FCH client.
+	 * Set these extensions only when selected; never clear them for a lower
+	 * requested speed. Clearing either field has previously stalled this FCH.
+	 */
+	if (amd_spi->speed_hz == 100000000)
+		amd_spi_setclear_reg32(amd_spi, AMD_SPI_ENA_REG,
+				       AMD_SPI_SPI100_MASK, AMD_SPI_SPI100_MASK);
 
-	spd7_val = 0;
 	if (amd_spi_freq[i].spd7_val) {
 		spd7_val = (amd_spi_freq[i].spd7_val << AMD_SPI_SPD7_SHIFT) &
 			AMD_SPI_SPD7_MASK;
+		amd_spi_setclear_reg32(amd_spi, AMD_SPI_SPEED_REG, spd7_val,
+				       AMD_SPI_SPD7_MASK);
 	}
-	amd_spi_setclear_reg32(amd_spi, AMD_SPI_SPEED_REG, spd7_val,
-			       AMD_SPI_SPD7_MASK);
+
+	return 0;
 }
 
 static void amd_spi_setup_v2_regs(struct amd_spi *amd_spi)
@@ -217,6 +257,10 @@ static int amd_spi_execute_opcode(struct amd_spi *amd_spi)
 {
 	int ret;
 
+	ret = amd_spi_check_psp_ownership(amd_spi);
+	if (ret)
+		return ret;
+
 	ret = amd_spi_busy_wait(amd_spi);
 	if (ret)
 		return ret;
@@ -250,6 +294,10 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	u32 fifo_pos = AMD_SPI_FIFO_BASE;
 	u16 saved_0x22;
 	int i, ret;
+
+	ret = amd_spi_check_psp_ownership(amd_spi);
+	if (ret)
+		return ret;
 
 	if (DBG_VERBOSE || opcode != 0x0B)
 		pr_debug("spi-amd: exec op=0x%02x tx=%u rx=%u\n", opcode, tx_len, rx_len);
@@ -357,8 +405,9 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	ret = amd_spi_execute_opcode(amd_spi);
 	if (ret) {
 		pr_err("spi-amd: TRACE segment execution failed op=0x%02x ret=%d\n",
-		       opcode, ret);
-		writew(saved_0x22, base + 0x22);
+			       opcode, ret);
+		if (!amd_spi_check_psp_ownership(amd_spi))
+			writew(saved_0x22, base + 0x22);
 		return ret;
 	}
 	if (debug_trace >= 1 && opcode == 0x02)
@@ -407,22 +456,18 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 			opcode, rx_len, amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG),
 			amd_spi_readreg8(amd_spi, AMD_SPI_STATUS_REG));
 	/* Windows fcn.0x6f84: restore SPI100_SPEED_CONFIG (0x22) after transfer */
+	ret = amd_spi_check_psp_ownership(amd_spi);
+	if (ret)
+		return ret;
 	writew(saved_0x22, base + 0x22);
 	return rx_len;
 }
 
 static int amd_spi_host_setup(struct spi_device *spi)
 {
-	struct amd_spi *amd_spi = spi_controller_get_devdata(spi->controller);
-	u32 hz = spi->max_speed_hz;
-
 	amd_trace(&spi->dev, 1, "host setup begin cs=%u mode=0x%x requested_hz=%u\n",
-		  spi_get_chipselect(spi, 0), spi->mode, hz);
-	amd_set_spi_freq(amd_spi, hz);
-	amd_trace(&spi->dev, 1, "host setup complete actual_hz=%u ena=0x%08x\n",
-		  amd_spi->speed_hz, amd_spi_readreg32(amd_spi, AMD_SPI_ENA_REG));
-	dev_dbg(&spi->dev, "spi-amd-v2-multi: set speed to %u Hz\n",
-		 amd_spi->speed_hz);
+		  spi_get_chipselect(spi, 0), spi->mode, spi->max_speed_hz);
+	/* Frequency programming is deferred until the guarded transfer path. */
 	return 0;
 }
 
@@ -433,14 +478,38 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 	struct spi_device *spi = msg->spi;
 	struct spi_transfer *xfer, *next;
 	struct device *dev = &spi->dev;
+	int ret;
 
 	amd_trace(dev, 2, "message begin frame=%u transfers=%u cs=%u\n",
 		  msg->frame_length, msg->actual_length, spi_get_chipselect(spi, 0));
-	amd_spi_select_chip(amd_spi, spi_get_chipselect(spi, 0));
+	ret = amd_spi_check_psp_ownership(amd_spi);
+	if (ret) {
+		msg->status = ret;
+		goto finalize;
+	}
+
+	ret = amd_set_spi_freq(amd_spi, spi->max_speed_hz);
+	if (ret) {
+		msg->status = ret;
+		goto finalize;
+	}
+
+	ret = amd_spi_select_chip(amd_spi, spi_get_chipselect(spi, 0));
+	if (ret) {
+		msg->status = ret;
+		goto finalize;
+	}
 
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		u32 remaining, sent;
-		int ret;
+
+		if (xfer->speed_hz) {
+			ret = amd_set_spi_freq(amd_spi, xfer->speed_hz);
+			if (ret) {
+				msg->status = ret;
+				goto out;
+			}
+		}
 
 		if (xfer->tx_buf && xfer->len > 0) {
 			u8 *tx_buf = (u8 *)xfer->tx_buf;
@@ -512,7 +581,12 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 	msg->status = 0;
 	msg->actual_length = msg->frame_length;
 out:
-	amd_spi_clear_chip(amd_spi, spi_get_chipselect(msg->spi, 0));
+	/* Do not write the chip-select register if PSP took ownership mid-message. */
+	if (amd_spi_clear_chip(amd_spi, spi_get_chipselect(msg->spi, 0)) &&
+	    !msg->status)
+		msg->status = -EBUSY;
+
+finalize:
 	amd_trace(dev, 2, "message complete status=%d actual=%u ctrl0=0x%08x\n",
 		  msg->status, msg->actual_length,
 		  amd_spi_readreg32(amd_spi, AMD_SPI_CTRL0_REG));
@@ -598,11 +672,12 @@ static int amd_spi_probe(struct platform_device *pdev)
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id spi_acpi_match[] = {
 	{ "AMDI0060", AMD_SPI_V2 },  /* Surface Laptop 4 AMD — force V2 */
-	{ "AMDI0061", AMD_SPI_V1 },
-	{ "AMDI0062", AMD_SPI_V2 },
 	{},
 };
-MODULE_DEVICE_TABLE(acpi, spi_acpi_match);
+/*
+ * Do not export an ACPI modalias for this experimental controller.  It must
+ * only bind after an explicit post-login modprobe of sl4a-spi-amd.
+ */
 #endif
 
 static void amd_spi_remove(struct platform_device *pdev)
@@ -617,7 +692,7 @@ static void amd_spi_remove(struct platform_device *pdev)
 
 static struct platform_driver amd_spi_driver = {
 	.driver = {
-		.name = "spi_amd_v2_multi",
+		.name = "sl4a_spi_amd_v2_multi",
 		.acpi_match_table = ACPI_PTR(spi_acpi_match),
 	},
 	.probe = amd_spi_probe,
@@ -627,4 +702,5 @@ static struct platform_driver amd_spi_driver = {
 module_platform_driver(amd_spi_driver);
 
 MODULE_LICENSE("Dual BSD/GPL");
+MODULE_AUTHOR("Syax89");
 MODULE_DESCRIPTION("AMD SPI V2 Multi-Opcode Driver");

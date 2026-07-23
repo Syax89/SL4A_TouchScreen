@@ -39,6 +39,18 @@ when non-obvious, in the relevant documentation.
 | E4 | Static safety proof | Bounds, ownership, locking, and teardown fixes |
 | E0 | Hypothesis | Diagnostic-only experiment; never a release default |
 
+## Current State
+
+- Phases 0 through 3 are complete.
+- The controlled-release HID profile has partial hardware evidence (cold boot,
+  warm boot, stress 30m, suspend/resume). Pen and raw multi-touch remain
+  unqualified. No E1 row exists yet in `docs/COMPATIBILITY.md`.
+- Secure Boot MOK enrollment guidance exists but has not been validated with
+  a signed-module boot recorded in the compatibility matrix.
+- Standard HID hardware evidence is collected but exists in temporary local
+  artifacts; release qualification requires archived evidence with verified
+  checksums.
+
 ## Refactor Phases
 
 ### Phase 0: Baseline And Evidence
@@ -46,7 +58,8 @@ when non-obvious, in the relevant documentation.
 - [x] Preserve the current hardening batch on this branch.
 - [x] Reconcile release-facing documents with code, ACPI, and capture data; retain unresolved claims in the evidence ledger.
 - [x] Create an evidence index linking protocol claims to tracked sources.
-- [ ] Record the tested firmware, kernel, and distribution versions.
+- [x] Record the tested firmware, kernel, and distribution versions
+      (Surface Laptop 4, BIOS 4.391.140, CachyOS 7.1.3-2, clang 22.1.6).
 
 Exit criteria: the supported hardware contract and all release defaults have an
 E1, E2, E3, or E4 basis.
@@ -69,41 +82,51 @@ and kernel are supported.
 - [x] Split the installer into a read-only preflight and an explicit install.
 - [x] Require `MSHW0231` and `AMDI0060` by default.
 - [x] Add `--check`, `--dry-run`, and an explicit `--force` escape hatch.
-- [ ] Document module signing and Secure Boot for each supported distribution.
-- [ ] Make uninstall remove only artifacts owned by this package.
+- [x] Document module signing and Secure Boot for each supported distribution
+      (`docs/ROLLBACK.md`).
+- [x] Make uninstall remove only artifacts owned by this package
+      (`tools/uninstall.sh` verifies ownership marker before touching config,
+      DKMS tree, or versioned source).
 
 Exit criteria: install, upgrade, rollback, and uninstall are deterministic and
 do not modify unrelated modules or configuration.
 
 ### Phase 3: Internal Driver Boundaries
 
-- [ ] Document the AMDI0060 controller contract separately from MSHW0231.
-- [ ] Isolate MSHW0231 V0 sequencing and activation from raw frame processing.
-- [ ] Classify each module parameter as release, diagnostic, or experimental.
-- [ ] Remove or gate experimental behavior from the release profile.
+- [x] Document the AMDI0060 controller contract separately from MSHW0231 in
+      `docs/AMDI0060_CONTRACT.md`.
+- [x] Isolate MSHW0231 V0 sequencing and activation from raw frame processing.
+- [x] Classify each module parameter as release, diagnostic, or experimental.
+- [x] Remove or gate experimental behavior from the release profile.
 
 Exit criteria: controller, transport, and touch-pipeline changes can be tested
 and reviewed independently without changing the wire contract accidentally.
 
 ### Phase 4: Replay And Hardware Validation
 
-- [ ] Version replay fixtures for reset, descriptor, feature activation, raw
-      frame, frame gap, and malformed input.
-- [ ] Exercise protocol/decoder tests under sanitizers.
-- [ ] Capture a Linux trace format comparable to the versioned Windows traces.
-- [ ] Execute the hardware matrix: cold boot, warm boot, suspend/resume,
-      repeated reload, pen, one through five fingers, and a 30-minute stress run.
+- [x] Add the minimal v1 replay manifest: eight checksum-validated raw frames
+      and deterministic malformed decoder inputs. Reset, descriptor,
+      activation, and gap records explicitly remain absent or unqualified where
+      wire bytes or responses are unavailable.
+- [x] Exercise protocol/decoder and replay-fixture tests under sanitizers.
+- [x] Capture a Linux trace format comparable to the versioned Windows traces
+      (`tools/hardware_evidence/capture_linux_trace_bundle.sh`).
+- [x] Execute the hardware matrix with standard HID: cold boot, warm boot,
+      suspend/resume, and a 30-minute stress run. Pen and reload remain partial;
+      raw multi-touch is unqualified. See `docs/COMPATIBILITY.md` and
+      `docs/BLINDED_SESSION_LOG.md`.
 
 Exit criteria: every release claim is backed by a named fixture or a dated
 hardware result in `docs/COMPATIBILITY.md`.
 
 ### Phase 5: CI And Releases
 
-- [ ] Add GitHub Actions for formatting, host tests, and DKMS builds against
-      the supported kernel header matrix.
+- [x] Add GitHub Actions for whitespace, host tests, sanitizers, and an
+      out-of-tree Ubuntu generic-header compile smoke test.
 - [ ] Publish signed, versioned GitHub releases with source checksums and a
       compatibility table.
-- [ ] Keep a rollback procedure for every release.
+- [x] Keep a rollback procedure for every release
+      (`docs/ROLLBACK.md`).
 
 Exit criteria: a tagged release can be rebuilt, installed, verified, and
 removed using only repository documentation.
@@ -114,6 +137,8 @@ removed using only repository documentation.
 | --- | --- | --- | --- |
 | 2026-07-22 | Created `refactor/sl4a-distribution`; preserved current hardening work and established this roadmap. | E3 | Host protocol and CapImg tests previously passed, including ASan/UBSan. |
 | 2026-07-22 | Sprint 0: added support contract, evidence ledger, compatibility matrix, and validation procedure; added fail-closed ACPI/DMI preflight, ownership-safe install/uninstall behavior, and standard installer profile. | E2, E3 | Double-blind review; protocol and CapImg host tests passed with ASan/UBSan. |
+| 2026-07-23 | Sprint 1: boot safety (no-alias controller/transport, PSP ownership, SPI100/SPD7 guard, explicit post-login activation, rollback); Phase 3 boundaries (AMDI0060 contract, parameter contract, raw consumer extraction); Phase 4 replay corpus, trace bundle, blinded runner; Phase 5 CI. | E3, E4 | All host gates pass including replay fixture, ownership, boot-safety, and raw-boundary tests. |
+| 2026-07-23 | Sprint 2: CI badge, rollback/Secure Boot docs, partial COMPATIBILITY observations, CHANGELOG, cold boot evidence archived. | E3 | Host gates, shell syntax, kernel build, diff check. |
 
 Update this table in the same commit as every completed refactor phase or
 evidence-backed behavioral change.

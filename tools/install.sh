@@ -3,10 +3,10 @@
 # install.sh — Multi-distro installer for the SL4A_TouchScreen driver
 # (Surface Laptop 4 AMD touchscreen, MSHW0231).
 #
-# Builds spi-amd.ko + spi-hid.ko via DKMS (auto-rebuilt on kernel updates),
+# Builds sl4a-spi-amd.ko + sl4a-spi-hid.ko via DKMS (auto-rebuilt on kernel updates),
 # and configures a standard HID profile by default. Raw multi-touch requires an
 # explicit --raw opt-in until its hardware validation matrix is complete.
-# Udev auto-loads the driver when AMDI0060 (AMD FCH SPI controller) is probed.
+# The experimental FCH controller is never auto-loaded or bound at boot.
 #
 # Tested on: Arch, CachyOS, Ubuntu/Debian, Fedora, openSUSE.
 #
@@ -17,13 +17,13 @@
 # Safe to re-run for profile changes. Rebuilding an installed version requires
 # a new VERSION or removal of that exact version first. See tools/uninstall.sh.
 # ============================================================================
-set -e
+set -e -o pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="sl4a-touch"
 PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SRC_DEST="/usr/src/${PKG_NAME}-${PKG_VERSION}"
-MODPROBE_CONF="/etc/modprobe.d/spi-hid.conf"
+MODPROBE_CONF="/etc/modprobe.d/sl4a-spi-hid.conf"
 SYSFS_ROOT="${SL4A_SYSFS_ROOT:-/sys}"
 DMI_ROOT="${SL4A_DMI_ROOT:-/sys/class/dmi/id}"
 MODE="install"
@@ -208,13 +208,23 @@ if [ -e "$MODPROBE_CONF" ] && ! grep -q '^# SL4A_TouchScreen' "$MODPROBE_CONF"; 
 fi
 
 info "Step 3: Leaving active modules untouched..."
-pass "Active modules left untouched; reboot will load the new modules"
+pass "Active modules left untouched; the FCH controller stays inactive until explicit activation"
 
 info "Step 4: Staging driver sources via DKMS ($SRC_DEST)..."
 if [ -e "$SRC_DEST" ]; then
 	if dkms status -m "$PKG_NAME" -v "$PKG_VERSION" 2>/dev/null | grep -q "installed"; then
-		info "DKMS version $PKG_NAME/$PKG_VERSION is already installed; updating only the $PROFILE profile"
-		profile_only=1
+		if grep -q '^obj-m += sl4a-spi-amd.o$' "$SRC_DEST/Kbuild" && \
+		   grep -q '^obj-m += sl4a-spi-hid.o$' "$SRC_DEST/Kbuild"; then
+			info "DKMS version $PKG_NAME/$PKG_VERSION is already installed; updating only the $PROFILE profile"
+			profile_only=1
+		else
+			info "Replacing the package's legacy spi-amd artifact with the opt-in controller module..."
+			if ! dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all; then
+				fail "could not remove the package's legacy DKMS artifact"
+			fi
+			rm -rf "$SRC_DEST"
+			profile_only=0
+		fi
 	else
 		fail "DKMS source for $PKG_NAME/$PKG_VERSION already exists from an incomplete install; remove that exact version before retrying"
 	fi
@@ -251,7 +261,7 @@ if ! dkms install -m "$PKG_NAME" -v "$PKG_VERSION"; then
 	cleanup_staged_install
 	fail "DKMS install failed; existing driver state was left unchanged"
 fi
-pass "spi-amd.ko + spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
+pass "sl4a-spi-amd.ko + sl4a-spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
 
 info "Step 5: Updating module dependencies..."
 depmod -a
@@ -263,12 +273,12 @@ tmp_config="$(mktemp "${MODPROBE_CONF}.XXXXXX")"
 if [ "$PROFILE" = "raw" ]; then
 	cat > "$tmp_config" <<'EOF'
 # SL4A_TouchScreen experimental raw heatmap profile
-options spi_hid raw_mode=Y skip_getfeat=Y
+options sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y
 EOF
 else
 	cat > "$tmp_config" <<'EOF'
 # SL4A_TouchScreen standard HID profile
-options spi_hid raw_mode=N
+options sl4a_spi_hid raw_mode=N
 EOF
 fi
 install -m 0644 "$tmp_config" "$MODPROBE_CONF"
@@ -286,7 +296,7 @@ fi
 
 echo ""
 echo "============================================"
-echo -e "${GREEN}Install complete. Reboot before using the touchscreen.${NC}"
-echo " The kernel binds the driver through its ACPI aliases on the next boot."
+echo -e "${GREEN}Install complete. The experimental FCH controller remains inactive.${NC}"
+echo " After login, use: sudo ./tools/activate-fch.sh"
 echo " To remove: sudo ./tools/uninstall.sh"
 echo "============================================"

@@ -11,7 +11,7 @@ set -e
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="sl4a-touch"
 PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
-MODPROBE_CONF="/etc/modprobe.d/spi-hid.conf"
+MODPROBE_CONF="/etc/modprobe.d/sl4a-spi-hid.conf"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info() { echo -e "${YELLOW}$1${NC}"; }

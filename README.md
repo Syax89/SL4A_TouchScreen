@@ -6,11 +6,26 @@ multitouch pipeline on the AMD Cezanne FCH SPI controller.
 
 [![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/Syax89/SL4A_TouchScreen)
 [![Release](https://img.shields.io/badge/release-1.2.0-brightgreen)](VERSION)
+[![CI](https://github.com/Syax89/SL4A_TouchScreen/actions/workflows/ci.yml/badge.svg)](https://github.com/Syax89/SL4A_TouchScreen/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue)](LICENSE)
 
 > [!WARNING]
 > **Beta software.** This is an experimental, reverse-engineered kernel driver.
 > Use at your own risk. No warranty; provided "as is".
+
+## What to Expect
+
+- **Standard HID mode** (default) provides **single-touch only** — basic
+  tap, drag, and single-finger interaction. This is the qualified profile.
+- A **stylus/pen input node** is published by the HID descriptor but is
+  **untested** — pen behavior has not been observed or validated.
+- **No multi-touch** in standard mode. Multi-touch requires the
+  experimental raw pipeline (`raw_mode=1`).
+- **Raw mode is experimental** and not release-qualified. Finger tracking
+  degrades at 4 contacts; pipeline tuning is ongoing.
+
+See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-step install and
+activation guide.
 
 ## Device
 
@@ -39,7 +54,7 @@ multitouch pipeline on the AMD Cezanne FCH SPI controller.
 ┌──────────────────────────────────────────────────────────────┐
 │ Userspace: libinput / evdev ← hid-multitouch                 │
 ├──────────────────────────────────────────────────────────────┤
-│ spi-hid.ko (spi-hid-core.c)                                  │
+│ sl4a-spi-hid.ko (spi-hid-core.c, explicit opt-in only)        │
 │   ├─ HID LL driver (DESCREQ → DEVICE_DESC → RPT_DESC)        │
 │   ├─ IRQ-driven input (IRQ → SPI read → input_report)        │
 │   └─ Raw heatmap pipeline:                                   │
@@ -47,7 +62,7 @@ multitouch pipeline on the AMD Cezanne FCH SPI controller.
 │        split → centroid → pre-merge → Hungarian →            │
 │        EMA + deadband + stationary lock → MT emission         │
 ├──────────────────────────────────────────────────────────────┤
-│ spi-amd.ko (spi-amd.c)                                       │
+│ sl4a-spi-amd.ko (spi-amd.c, explicit opt-in only)            │
 │   AMD FCH SPI controller V2 PIO driver                       │
 │   TX/RX FIFO, chunked reads, opcode model                    │
 ├──────────────────────────────────────────────────────────────┤
@@ -82,54 +97,58 @@ unresolved frame-layout assumptions are recorded in `docs/EVIDENCE.md`.
 
 Read [`docs/SUPPORT.md`](docs/SUPPORT.md) before installing. This repository is
 only for the Surface Laptop 4 AMD `AMDI0060` + `MSHW0231` hardware contract.
-The installer now uses the standard profile by default; raw mode requires an
-explicit `--raw` option. See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)
-before treating a setup as supported.
+The installer does not load or bind either experimental module. It uses distinct
+`sl4a-spi-amd` and `sl4a-spi-hid` module names and does not replace in-tree drivers.
+See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) before treating a setup as
+supported.
 
 ```bash
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
 ./tools/install.sh --check
 sudo ./tools/install.sh
-sudo reboot
 ```
 
-Use `sudo ./tools/install.sh --raw` only for the experimental raw heatmap
-profile. `--check` performs a read-only ACPI and build-prerequisite preflight;
-use `--force` only to investigate unsupported hardware.
+Only after login, with local/remote recovery access available, activate the
+experimental controller with:
+
+```bash
+sudo ./tools/activate-fch.sh
+```
+
+The command refuses to displace existing AMDI0060 or MSHW0231 drivers, then
+verifies both bindings. To recover after a failed experiment, run
+`sudo modprobe -r sl4a-spi-hid sl4a-spi-amd` and reboot. Use
+`sudo ./tools/install.sh --raw` only for the experimental raw heatmap profile.
+`--check` performs a read-only ACPI and build-prerequisite preflight; use
+`--force` only to investigate unsupported hardware.
 
 The DKMS installer contains dependency guidance for Arch/CachyOS,
-Ubuntu/Debian, Fedora, and openSUSE. It installs a modprobe configuration;
-the kernel binds the modules through their ACPI aliases. Secure Boot remains
-unqualified until recorded in the compatibility matrix.
+Ubuntu/Debian, Fedora, and openSUSE. Neither module exports aliases or has a
+boot-time binding rule. Secure Boot remains unqualified until recorded in the
+compatibility matrix. See [`docs/ROLLBACK.md`](docs/ROLLBACK.md) for the
+complete rollback and upgrade procedure.
 
 ## Module Parameters
 
 ```
-/etc/modprobe.d/spi-hid.conf:
-  options spi_hid raw_mode=N
+/etc/modprobe.d/sl4a-spi-hid.conf:
+  options sl4a_spi_hid raw_mode=N
 ```
 
 The explicit raw profile written by `install.sh --raw` uses
-`raw_mode=Y skip_getfeat=Y`.
+`raw_mode=Y raw_input_beta=Y skip_getfeat=Y`. Every raw control is experimental
+and load-time-only. The complete release, diagnostic, and experimental contract
+is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
 
-| Parameter | Module default | Description |
-|-----------|---------|-------------|
-| `raw_mode` | 0 | Raw heatmap + multi-touch mode; enabled only by `install.sh --raw` |
-| `skip_getfeat` | 1 | Skip GET_FEATURE handshake; raw profile sets `Y` explicitly |
-| `ema_alpha` | 7 | EMA smoothing (1-10) |
-| `blob_max_distance` | 3 | Hungarian base radius in cells |
-| `blob_min_weight` | 1000 | Minimum blob signal weight |
-| `blob_debounce` | 3 | New-touch debounce frames |
-| `blob_lift_frames` | 3 | Missed frames before lift |
-| `hold_frames` | 0 | Hold grace period (0 = disabled) |
-| `ghost_dist` | 6 | Pre-merge radius in cells |
-| `pre_assoc_ratio` | 0 | Pre-association filter (0 = disabled) |
-| `grid_cols/rows` | 0/0 | Uses the current 72×48 fallback grid when unset |
-| `calib_scale_x/y` | 0 | Scale ×1000 (0 = auto from descriptor) |
-| `calib_offset_x/y` | 0 | Screen offset |
-| `invert_x/y` | 0 | Invert axis |
-| `swap_xy` | 0 | Swap axes |
+## What Will Not Work
+
+- **Multi-touch** in standard mode (`raw_mode=0`)
+- **Pen input** — published node, untested and unqualified
+- **4-finger tracking** — unstable even in raw mode
+- **Palm rejection** — not implemented
+- **Other Surface models** — this driver targets only Surface Laptop 4
+  (AMD) with `AMDI0060` + `MSHW0231`
 
 ## Troubleshooting
 
@@ -145,7 +164,7 @@ The explicit raw profile written by `install.sh --raw` uses
 
 ```bash
 make -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
-sudo cp driver/spi-amd.ko driver/spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
+sudo cp driver/sl4a-spi-amd.ko driver/sl4a-spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
 sudo depmod -a
 sudo reboot
 ```
@@ -155,9 +174,11 @@ sudo reboot
 | Document | Content |
 |----------|---------|
 | [Wiki](https://github.com/Syax89/SL4A_TouchScreen/wiki) | Project wiki: protocol, pipeline, config, hardware |
+| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | 5-step install and activation guide |
 | [`docs/HIDSPI_PROTOCOL.md`](docs/HIDSPI_PROTOCOL.md) | HID-over-SPI V0 wire protocol |
 | [`docs/PIPELINE.md`](docs/PIPELINE.md) | Touch pipeline specification |
 | [`docs/SPI_REGISTERS.md`](docs/SPI_REGISTERS.md) | AMD FCH SPI controller registers |
+| [`docs/AMDI0060_CONTRACT.md`](docs/AMDI0060_CONTRACT.md) | AMDI0060 controller boundary and safety contract |
 | [`docs/CONFIG_TABLE.md`](docs/CONFIG_TABLE.md) | DLL config table values |
 | [`docs/ACTIVATION.md`](docs/ACTIVATION.md) | Raw mode activation (SET_FEATURE ID5) |
 | [`docs/CONTACT_ABI.md`](docs/CONTACT_ABI.md) | Contact struct ABI |
@@ -167,6 +188,7 @@ sudo reboot
 | [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) | Hardware validation matrix |
 | [`docs/TESTING.md`](docs/TESTING.md) | Reproducible validation procedure |
 | [`docs/EVIDENCE.md`](docs/EVIDENCE.md) | Evidence ledger and open discrepancies |
+| [`docs/HARDWARE_VALIDATION.md`](docs/HARDWARE_VALIDATION.md) | Blinded hardware-validation protocol and bounded input captures |
 
 ## License
 

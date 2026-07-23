@@ -23,6 +23,7 @@ wire protocol.
 | The HID DSM GUID is `6e2ac436-0fcf-41af-a265-b32a220dcfab`, revision 1, function 1. | E2 | `docs/acpi/dsdt.dsl:1576-1601`, `driver/spi-hid-core.c` |
 | The captured MSHW0231 device is identified as VID/PID `045e:0c19`. | E2 | `captures/wintrace/analisi_MSHW0231.md:3-7` |
 | The host protocol and CapImg decoder have executable bounds coverage. | E3 | `tests/protocol_test.c`, `tests/capimg_decoder_host_test.c` |
+| Eight retained V0 raw-slot bodies have checksum-validated decoder replay coverage, including deterministic malformed-input rejection. | E3 | `tests/fixtures/replay/v1/manifest.json`, `tests/replay_fixture_test.py` |
 
 ## Observations Not Yet Release Evidence
 
@@ -37,8 +38,8 @@ wire protocol.
 
 | Topic | Conflicting material | Required resolution |
 | --- | --- | --- |
-| Raw frame layout | `HIDSPI_PROTOCOL.md` and `ACTIVATION.md` describe 16-bit/6912-byte cells; the current parser documents byte-indexed, roughly 4304-byte CapImg frames. | Capture a labelled frame and add a replay fixture before changing either implementation or release claim. |
-| Raw activation | Documents imply ID5 alone activates raw mode; isolated capture times out after GET/SET. | Record a full cold-boot activation trace and resulting stream. |
+| Raw frame layout | `HIDSPI_PROTOCOL.md` and `ACTIVATION.md` describe 16-bit/6912-byte cells; the replay corpus covers eight 4304-byte CapImg bodies only. | Capture labelled reset, descriptor, and gap traffic before changing either implementation or release claim. |
+| Raw activation | Documents imply ID5 alone activates raw mode; isolated capture times out after GET/SET. The replay metadata records this as unqualified and has no activation response bytes. | Record a full cold-boot activation trace and resulting stream. |
 | Clock description | Older register docs mention 12 MHz; tracked ACPI requests 33.33 MHz. | Treat ACPI 33.33 MHz as the current target default; verify with an E1 controller trace before changing speed logic. |
 | Physical chip select | Driver forces ALT_CS 1 while ACPI exposes logical CS 0. | Record an E1 target trace before treating this mapping as portable board evidence. |
 | Raw profile | Historical v1.2.0 installer enabled raw although the module default was standard. | Current installer uses standard mode; `--raw` is explicit opt-in. |

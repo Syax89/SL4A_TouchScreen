@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _HARDCODED_RD_H
 #define _HARDCODED_RD_H
 

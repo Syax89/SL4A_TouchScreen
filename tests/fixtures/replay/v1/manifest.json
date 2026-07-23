@@ -1,0 +1,31 @@
+{
+  "format": "sl4a-replay-manifest",
+  "version": 1,
+  "provenance": {
+    "capture": "captures/id5-20260718",
+    "record": "raw_capture_status",
+    "description": "Eight retained raw-slot V0 bodies from the tracked id5 capture. Source paths are retained instead of duplicating the 34,432-byte corpus."
+  },
+  "raw_frames": [
+    {"id": "raw-slot-0", "path": "captures/id5-20260718/frames/raw-slot-0.v0", "bytes": 4304, "sha256": "bdbd1d4338683567aa0ec0eeed8a63681fac33734ae7120c429a7019d0f021cb"},
+    {"id": "raw-slot-1", "path": "captures/id5-20260718/frames/raw-slot-1.v0", "bytes": 4304, "sha256": "351369ad8018e1829c848d534920a6159e9c309fd729931db280465fb3a30811"},
+    {"id": "raw-slot-2", "path": "captures/id5-20260718/frames/raw-slot-2.v0", "bytes": 4304, "sha256": "477a0657f9afff5c732736f00322a695ed20b52ccc57ddc523a455f5218cdd67"},
+    {"id": "raw-slot-3", "path": "captures/id5-20260718/frames/raw-slot-3.v0", "bytes": 4304, "sha256": "2fda9e09300ef4aa388b01d720d9e5a46405a53c0acebd8f12a2c7020f9a24aa"},
+    {"id": "raw-slot-4", "path": "captures/id5-20260718/frames/raw-slot-4.v0", "bytes": 4304, "sha256": "1bee929b2b7da8eb0fdfccaf4e2b1f06823f629991c593b801694e9c9bee3dd6"},
+    {"id": "raw-slot-5", "path": "captures/id5-20260718/frames/raw-slot-5.v0", "bytes": 4304, "sha256": "e4ac891c92b178a574adbd8922a0344b71f1188dea715acffe711d40821a2110"},
+    {"id": "raw-slot-6", "path": "captures/id5-20260718/frames/raw-slot-6.v0", "bytes": 4304, "sha256": "6566e4ba6b7055e18071cdad1a8a92464ee813de76ab8faea1c99c368232153d"},
+    {"id": "raw-slot-7", "path": "captures/id5-20260718/frames/raw-slot-7.v0", "bytes": 4304, "sha256": "460f8b044bc098538c5e946e64bc5c421fbf3cadfe8606167b9bfdf8b23a0601"}
+  ],
+  "malformed_binary_inputs": [
+    {"id": "bad-v0-header", "source": "raw-slot-0", "mutation": {"offset": 0, "value_hex": "00"}, "sha256": "01cf2c51b94052c791f69c3286b1bd3f0b802745f9e3e8100d279cd41517678f", "expected_rejection": "expected a complete V0 0x0c body"},
+    {"id": "unsupported-rlv-width", "source": "raw-slot-0", "mutation": {"offset": 19, "value_hex": "07"}, "sha256": "f70954466551fb1c32778bcb8683b596feede2de01d7844a9e247b76e1354ac1", "expected_rejection": "unsupported heatmap encoding"},
+    {"id": "missing-vendor-section", "source": "raw-slot-0", "mutation": {"offset": 3489, "value_hex": "00"}, "sha256": "66efc3c4044508a92d65791709027d60e58c321f021332a0cc02494a9ea2b031", "expected_rejection": "incomplete CapImg container"}
+  ],
+  "lifecycle_fixtures": [
+    {"category": "reset", "evidence_status": "absent", "source": null, "detail": "No tracked reset request/response wire bytes; no reset behavior is replayed or modeled."},
+    {"category": "descriptor", "evidence_status": "absent", "source": null, "detail": "No tracked replayable V0 descriptor request/response exchange; descriptor behavior is not replayed or modeled."},
+    {"category": "activation", "evidence_status": "unqualified", "source": "captures/id5-20260718/isolated_set_status", "detail": "GET/SET was attempted, the write did not fail, and the capture timed out. No activation response or resulting stream bytes are present."},
+    {"category": "gap", "evidence_status": "absent", "source": null, "detail": "The retained raw-slot bodies have no labelled missing-frame interval or transport gap bytes."},
+    {"category": "malformed", "evidence_status": "derived", "source": "raw-slot-0", "detail": "Deterministic in-memory binary mutations are defined above; they are decoder-negative inputs, not observed device traffic."}
+  ]
+}

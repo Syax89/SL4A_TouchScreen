@@ -123,6 +123,36 @@ static void test_reject_invalid_section_lengths(void)
 	      "section longer than the remaining container is rejected");
 }
 
+static void test_tracked_v0_frames(void)
+{
+	static const char *const fixtures[] = {
+		"../captures/id5-20260718/frames/raw-slot-0.v0",
+		"../captures/id5-20260718/frames/raw-slot-1.v0",
+		"../captures/id5-20260718/frames/raw-slot-2.v0",
+		"../captures/id5-20260718/frames/raw-slot-3.v0",
+		"../captures/id5-20260718/frames/raw-slot-4.v0",
+		"../captures/id5-20260718/frames/raw-slot-5.v0",
+		"../captures/id5-20260718/frames/raw-slot-6.v0",
+		"../captures/id5-20260718/frames/raw-slot-7.v0",
+	};
+
+	for (size_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i++) {
+		uint8_t body[BODY_LENGTH];
+		struct spi_hid_capimg_raster raster;
+		FILE *fixture = fopen(fixtures[i], "rb");
+
+		CHECK(fixture != NULL, "tracked V0 fixture opens");
+		if (!fixture)
+			continue;
+		CHECK(fread(body, 1, sizeof(body), fixture) == sizeof(body),
+		      "tracked V0 fixture has expected body length");
+		CHECK(fgetc(fixture) == EOF, "tracked V0 fixture has no trailing bytes");
+		fclose(fixture);
+		CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == 0,
+		      "tracked V0 fixture decodes with the driver decoder");
+	}
+}
+
 int main(void)
 {
 	fprintf(stderr, "capimg_decoder_host_test: running...\n");
@@ -130,6 +160,7 @@ int main(void)
 	test_reject_truncated_body_or_container();
 	test_reject_duplicate_sections();
 	test_reject_invalid_section_lengths();
+	test_tracked_v0_frames();
 	fprintf(stderr, "capimg_decoder_host_test: %u assertions, %u failures\n",
 		passed, failed);
 	return failed != 0;
