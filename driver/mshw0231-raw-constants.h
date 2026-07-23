@@ -1,0 +1,51 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef MSHW0231_RAW_CONSTANTS_H
+#define MSHW0231_RAW_CONSTANTS_H
+
+/* Signal detection thresholds */
+#define HEATMAP_TOUCH_MIN_RISE      200
+#define HEATMAP_TOUCH_MIN_ABSOLUTE  400
+#define HEATMAP_BASELINE_FRAMES      30
+
+/* Peak detection */
+#define HEATMAP_MAX_PEAKS            16
+#define HEATMAP_PEAK_RADIUS           5
+
+/* CCL flood-fill */
+#define HEATMAP_MIN_BLOB_PIXELS       2
+#define HEATMAP_VELOCITY_REJECT_RADIUS  6
+
+/* Blob splitting */
+#define HEATMAP_SPLIT_MIN_PEAKS       2
+#define HEATMAP_SPLIT_MIN_DIST         4
+#define HEATMAP_SPLIT_RADIUS           2
+
+/* Edge penalty (percent × 100) */
+#define HEATMAP_EDGE_PENALTY_TOP      97
+#define HEATMAP_EDGE_PENALTY_BOTTOM   23
+
+/* Hungarian cost matrix */
+#define HUNGARIAN_COST_IN_RANGE       10
+#define HUNGARIAN_COST_OUT_RANGE     100
+#define HUNGARIAN_COST_EMPTY        1000
+#define HUNGARIAN_COST_SCALE         100
+#define HUNGARIAN_JUMP_REJECT_MARGIN  200
+
+/* Slot state machine */
+#define HEATMAP_HOLD_RECOVERY_WEIGHT   4000
+#define HEATMAP_DEADBAND_THRESHOLD      80
+#define HEATMAP_STATIONARY_FRAMES        6
+
+/* Missed frame timeout (ms) */
+#define HEATMAP_MISSED_FRAME_TIMEOUT_MS  60
+
+/* EMA smoothing default */
+#define HEATMAP_EMA_ALPHA_DEFAULT        7
+
+/* Association radius multipliers per finger count (×10) */
+#define ASSOC_RADIUS_1_FINGER           22
+#define ASSOC_RADIUS_3_FINGERS          28
+#define ASSOC_RADIUS_4_FINGERS          34
+#define ASSOC_RADIUS_5_FINGERS          40
+
+#endif

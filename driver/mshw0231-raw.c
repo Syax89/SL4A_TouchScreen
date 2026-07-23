@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Raw payload consumer. Transport and lifecycle ownership remain in core. */
+/* Raw payload consumer. Touch grid is 72 columns × 48 rows, row-major.
+ * Transport and lifecycle ownership remain in core. */
 #include <linux/errno.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
@@ -13,6 +14,7 @@
 #include "spi-hid-core.h"
 #include "spi-hid-capimg.h"
 #include "mshw0231-raw.h"
+#include "mshw0231-raw-constants.h"
 
 extern int sl4a_debug_level;
 #define seq_dbg(shid, level, fmt, ...) \
@@ -40,7 +42,7 @@ module_param(blob_min_weight, int, 0444);
 MODULE_PARM_DESC(blob_min_weight,
 	"Experimental raw-pipeline minimum blob signal rise (load-time only)");
 
-static int ema_alpha = 7;
+static int ema_alpha = HEATMAP_EMA_ALPHA_DEFAULT;
 module_param(ema_alpha, int, 0444);
 MODULE_PARM_DESC(ema_alpha,
 	"Experimental raw-pipeline EMA smoothing (load-time only)");
@@ -155,7 +157,7 @@ void mshw0231_raw_reset(struct spi_hid *shid)
 
 /* Screen mapping: logical range 0..32767 for both X and Y.
  * Reverse-engineered from TouchPenProcessor0C19.dll (GROUND_TRUTH.md §22.3):
- * raw frame is 288 columns (stride 0x120), rows auto-detected from data size.
+ * The grid is 72 columns × 48 rows, row-major layout (3456 cells).
  * Each byte indexes a float[256] lookup table (c590) for actual signal level.
  * Signal = c590[raw_byte] = max_signal - (index * step + offset).
  *
@@ -194,7 +196,7 @@ void mshw0231_raw_init(struct spi_hid *shid)
 {
 	int i;
 	for (i = 0; i < 256; i++) {
-		s32 v = C590_BASE - ((s32)i * C590_STEP_NUM / C590_STEP_DEN + C590_OFFSET);
+		s32 v = C590_BASE - (((s32)i * C590_STEP_NUM + C590_STEP_DEN / 2) / C590_STEP_DEN + C590_OFFSET);
 		shid->c590_lut[i] = (s16)(v > 0 ? v : 0);
 	}
 	seq_dbg(shid, 1, "HEATMAP: c590 lookup table initialized (range %d..%d)\n",
@@ -276,7 +278,7 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 				if (shid->heatmap_baseline_frames == 1 || raw > shid->heatmap_baseline[i])
 					shid->heatmap_baseline[i] = raw;
 			}
-			if (shid->heatmap_baseline_frames >= 30) {
+			if (shid->heatmap_baseline_frames >= HEATMAP_BASELINE_FRAMES) {
 				shid->heatmap_have_baseline = true;
 				seq_dbg(shid, 1, "HEATMAP: baseline stabilized after %u frames (%u cells)\n",
 					 shid->heatmap_baseline_frames, cell_count);
@@ -298,7 +300,7 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 		u8 raw = data[data_offset + i];
 
 		if (raw >= base) {
-			u16 cur = (u16)base * 7 + (u16)raw;
+			u16 cur = (u16)base * HEATMAP_EMA_ALPHA_DEFAULT + (u16)raw;
 			shid->heatmap_baseline[i] = (u8)(cur / 8);
 		}
 	}
@@ -316,7 +318,7 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 		/* Noise floor (Windows DAT_1806c08c8 = 0.04):
 		 * absolute c590 < 400 → class 5 (suppressed).
 		 * DLL config table +0xecc = 0.04 confirms. */
-		shid->heatmap_touched[i] = (rise >= 200 && curr >= 400) ? 1 : 0;
+		shid->heatmap_touched[i] = (rise >= HEATMAP_TOUCH_MIN_RISE && curr >= HEATMAP_TOUCH_MIN_ABSOLUTE) ? 1 : 0;
 	}
 	return true;
 }
@@ -338,7 +340,7 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 	u32 i;
 	u8 npeaks = 0;
 
-	for (i = 0; i < cell_count && npeaks < 16; i++) {
+	for (i = 0; i < cell_count && npeaks < HEATMAP_MAX_PEAKS; i++) {
 		u16 col, row;
 		s16 rise;
 		bool ok;
@@ -350,21 +352,21 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 		if (row >= nrows)
 			break;
 		rise = shid->heatmap_signal[i];
-		if (rise < 200)
+		if (rise < HEATMAP_TOUCH_MIN_RISE)
 			continue;
 
 		ok = true;
-		if (col >= 5 && shid->heatmap_touched[i - 5] &&
-		    shid->heatmap_signal[i - 5] > rise)
+		if (col >= HEATMAP_PEAK_RADIUS && shid->heatmap_touched[i - HEATMAP_PEAK_RADIUS] &&
+		    shid->heatmap_signal[i - HEATMAP_PEAK_RADIUS] > rise)
 			ok = false;
-		if (col + 5 < ncols && shid->heatmap_touched[i + 5] &&
-		    shid->heatmap_signal[i + 5] > rise)
+		if (col + HEATMAP_PEAK_RADIUS < ncols && shid->heatmap_touched[i + HEATMAP_PEAK_RADIUS] &&
+		    shid->heatmap_signal[i + HEATMAP_PEAK_RADIUS] > rise)
 			ok = false;
-		if (row >= 5 && shid->heatmap_touched[i - 5 * ncols] &&
-		    shid->heatmap_signal[i - 5 * ncols] > rise)
+		if (row >= HEATMAP_PEAK_RADIUS && shid->heatmap_touched[i - HEATMAP_PEAK_RADIUS * ncols] &&
+		    shid->heatmap_signal[i - HEATMAP_PEAK_RADIUS * ncols] > rise)
 			ok = false;
-		if (row + 5 < nrows && shid->heatmap_touched[i + 5 * ncols] &&
-		    shid->heatmap_signal[i + 5 * ncols] > rise)
+		if (row + HEATMAP_PEAK_RADIUS < nrows && shid->heatmap_touched[i + HEATMAP_PEAK_RADIUS * ncols] &&
+		    shid->heatmap_signal[i + HEATMAP_PEAK_RADIUS * ncols] > rise)
 			ok = false;
 		if (ok) {
 			peaks_col[npeaks] = col;
@@ -389,7 +391,7 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 			      u8 npeaks, const u16 *peaks_col,
 			      const u16 *peaks_row)
 {
-	u16 *queue = shid->heatmap_queue;
+	u32 *queue = shid->heatmap_queue;
 	u16 next_label = 1;
 	u32 ci;
 
@@ -406,7 +408,7 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 			break;
 
 		{
-			u16 head = 0, tail = 0;
+			u32 head = 0, tail = 0;
 			s64 sx = 0, sy = 0, sw = 0;
 			s64 sxx = 0, syy = 0, sxy = 0;
 			s32 min_r = 9999, max_r = -1, min_c = 9999, max_c = -1;
@@ -420,7 +422,7 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 			while (head < tail) {
 				u32 idx = queue[head++];
 				s16 w;
-				u16 r, c;
+				u32 r, c;
 				u32 nxt;
 
 				col = idx % ncols;
@@ -452,7 +454,6 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				if (col > 0) {
 					nxt = idx - 1;
 					if (shid->heatmap_touched[nxt] &&
-					    shid->heatmap_signal[nxt] > 0 &&
 					    shid->heatmap_label[nxt] == 0 &&
 					    tail < HEATMAP_MAX_CELLS) {
 						shid->heatmap_label[nxt] = label;
@@ -462,7 +463,6 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				if (col + 1 < ncols) {
 					nxt = idx + 1;
 					if (shid->heatmap_touched[nxt] &&
-					    shid->heatmap_signal[nxt] > 0 &&
 					    shid->heatmap_label[nxt] == 0 &&
 					    tail < HEATMAP_MAX_CELLS) {
 						shid->heatmap_label[nxt] = label;
@@ -472,7 +472,6 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				if (row > 0) {
 					nxt = idx - ncols;
 					if (shid->heatmap_touched[nxt] &&
-					    shid->heatmap_signal[nxt] > 0 &&
 					    shid->heatmap_label[nxt] == 0 &&
 					    tail < HEATMAP_MAX_CELLS) {
 						shid->heatmap_label[nxt] = label;
@@ -482,7 +481,6 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				if (row + 1 < nrows) {
 					nxt = idx + ncols;
 					if (shid->heatmap_touched[nxt] &&
-					    shid->heatmap_signal[nxt] > 0 &&
 					    shid->heatmap_label[nxt] == 0 &&
 					    tail < HEATMAP_MAX_CELLS) {
 						shid->heatmap_label[nxt] = label;
@@ -495,7 +493,7 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 			 * and total weight >= blob_min_weight. The max_rise check
 			 * alone rejects residual noise after lift (typically
 			 * 2-5 pixels at <200 rise). */
-			if (pixel_count < 2 || max_rise < 200 || sw < blob_min_weight)
+			if (pixel_count < HEATMAP_MIN_BLOB_PIXELS || max_rise < HEATMAP_TOUCH_MIN_RISE || sw < blob_min_weight)
 				continue;
 
 			/* Velocity rejection (Windows FUN_180600c40):
@@ -514,7 +512,7 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 						dx = -dx;
 					if (dy < 0)
 						dy = -dy;
-					if ((u32)dx <= 6 && (u32)dy <= 6) {
+					if ((u32)dx <= HEATMAP_VELOCITY_REJECT_RADIUS && (u32)dy <= HEATMAP_VELOCITY_REJECT_RADIUS) {
 						near_peak = true;
 						break;
 					}
@@ -536,15 +534,15 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				 * two merged fingers. Split them into separate
 				 * blobs using the peak positions (Windows
 				 * FUN_180602770 per-neighbor sub-centroids). */
-				if (npeaks >= 2 && pixel_count >= 8) {
+				if (npeaks >= HEATMAP_SPLIT_MIN_PEAKS && pixel_count >= 8) {
 					u8 p, split_count = 0;
 					u8 split_peaks[16];
-					for (p = 0; p < npeaks && split_count < 16; p++) {
+					for (p = 0; p < npeaks && split_count < HEATMAP_MAX_PEAKS; p++) {
 						u32 pix = (u32)peaks_row[p] * ncols + (u32)peaks_col[p];
 						if (shid->heatmap_label[pix] == label)
 							split_peaks[split_count++] = p;
 					}
-					if (split_count >= 2 && split_count <= 4) {
+					if (split_count >= HEATMAP_SPLIT_MIN_PEAKS && split_count <= 4) {
 						bool too_close = true;
 						for (p = 1; p < split_count && too_close; p++) {
 							u8 q;
@@ -557,7 +555,7 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 									dx = -dx;
 								if (dy < 0)
 									dy = -dy;
-								if ((u32)dx >= 4 || (u32)dy >= 4) {
+								if ((u32)dx >= HEATMAP_SPLIT_MIN_DIST || (u32)dy >= HEATMAP_SPLIT_MIN_DIST) {
 									too_close = false;
 									break;
 								}
@@ -571,8 +569,8 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 								s32 pc = peaks_col[split_peaks[p]];
 								s64 ssx = 0, ssy = 0, ssw = 0;
 								s32 r, c;
-								for (r = max(0, pr - 2); r <= min((s32)nrows - 1, pr + 2); r++) {
-									for (c = max(0, pc - 2); c <= min((s32)ncols - 1, pc + 2); c++) {
+							for (r = max(0, pr - HEATMAP_SPLIT_RADIUS); r <= min((s32)nrows - 1, pr + HEATMAP_SPLIT_RADIUS); r++) {
+								for (c = max(0, pc - HEATMAP_SPLIT_RADIUS); c <= min((s32)ncols - 1, pc + HEATMAP_SPLIT_RADIUS); c++) {
 										u32 idx = (u32)r * ncols + (u32)c;
 										s16 w;
 										if (shid->heatmap_label[idx] != label)
@@ -611,10 +609,10 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				 * Bottom (max_r near nrows): keep ~23% weight. */
 				if (min_r <= 1 || max_r >= (s32)nrows - 2 ||
 				    min_c <= 1 || max_c >= (s32)ncols - 2) {
-					if (max_r >= (s32)nrows - 2)
-						shid->blob_wsum[bi] = shid->blob_wsum[bi] * 23 / 100;
-					else
-						shid->blob_wsum[bi] = shid->blob_wsum[bi] * 97 / 100;
+				if (max_r >= (s32)nrows - 2)
+					shid->blob_wsum[bi] = shid->blob_wsum[bi] * HEATMAP_EDGE_PENALTY_BOTTOM / 100;
+				else
+					shid->blob_wsum[bi] = shid->blob_wsum[bi] * HEATMAP_EDGE_PENALTY_TOP / 100;
 				}
 
 				shid->blob_active[bi] = true;
@@ -764,15 +762,15 @@ static u32 raw_hungarian_match(struct spi_hid *shid,
 	 *   5+ fingers: 2.161 / 0.545 = 3.97x (+0x8EC)
 	 * More fingers → each blob has lower signal → wider
 	 * search needed for Hungarian to maintain tracking. */
-	bmd = (u32)blob_max_distance * 100;
+	bmd = (u32)blob_max_distance * HUNGARIAN_COST_SCALE;
 	if (active_slots == 1)
-		bmd = bmd * 22 / 10;   /* ×2.2 */
+		bmd = bmd * ASSOC_RADIUS_1_FINGER / 10;
 	else if (active_slots == 3)
-		bmd = bmd * 28 / 10;   /* ×2.8 */
+		bmd = bmd * ASSOC_RADIUS_3_FINGERS / 10;
 	else if (active_slots == 4)
-		bmd = bmd * 34 / 10;   /* ×3.4 */
+		bmd = bmd * ASSOC_RADIUS_4_FINGERS / 10;
 	else if (active_slots >= 5)
-		bmd = bmd * 40 / 10;   /* ×4.0 */
+		bmd = bmd * ASSOC_RADIUS_5_FINGERS / 10;
 
 	/* Build cost matrix: matching Python oracle Hungarian.
 	 * In-range: 10*sqrt(dx²+dy²), out-of-range: 100,
@@ -790,13 +788,13 @@ static u32 raw_hungarian_match(struct spi_hid *shid,
 				if (dy < 0)
 					dy = -dy;
 				if ((u32)dx <= bmd && (u32)dy <= bmd) {
-					u32 d = (u32)dx * (u32)dx + (u32)dy * (u32)dy;
-					shid->cost[row][col] = (u16)(int_sqrt((u64)d) / 10);
-				} else {
-					shid->cost[row][col] = 100;
-				}
+				u32 d = (u32)dx * (u32)dx + (u32)dy * (u32)dy;
+				shid->cost[row][col] = (u16)(int_sqrt((u64)d) / HUNGARIAN_COST_IN_RANGE);
 			} else {
-				shid->cost[row][col] = 1000;
+				shid->cost[row][col] = HUNGARIAN_COST_OUT_RANGE;
+			}
+		} else {
+			shid->cost[row][col] = HUNGARIAN_COST_EMPTY;
 			}
 			if (shid->cost[row][col] < row_min)
 				row_min = shid->cost[row][col];
@@ -948,7 +946,7 @@ static void raw_update_slots(struct spi_hid *shid,
 			if (was_claimed) {
 				s32 jdx = (s32)gx - (s32)shid->blob_slot_gx[s];
 				s32 jdy = (s32)gy - (s32)shid->blob_slot_gy[s];
-				u32 jmax = bmd + 200;
+				u32 jmax = bmd + HUNGARIAN_JUMP_REJECT_MARGIN;
 				if (jdx < 0)
 					jdx = -jdx;
 				if (jdy < 0)
@@ -989,7 +987,7 @@ static void raw_update_slots(struct spi_hid *shid,
 				 * Noise after finger lift produces low-weight
 				 * blobs (w < 4000) that should not re-claim the
 				 * slot. Let them expire through hold→lift instead. */
-				if (w < 4000 || shid->blob_slot_missed[s] < 2)
+				if (w < HEATMAP_HOLD_RECOVERY_WEIGHT || shid->blob_slot_missed[s] < 2)
 					goto slot_unassigned;
 				shid->blob_slot_state[s] = 2;
 				shid->blob_slot_duration[s] = 1;
@@ -1002,7 +1000,7 @@ static void raw_update_slots(struct spi_hid *shid,
 			/* EMA on blob weight (matching Windows: weight_smoothed = (old*7+new)/8).
 			 * Only for continuously-claimed slots — reset weight after hold/lift. */
 			if (old_state == 2)
-				shid->blob_slot_weight[s] = (shid->blob_slot_weight[s] * 7 + w) / 8;
+				shid->blob_slot_weight[s] = (shid->blob_slot_weight[s] * HEATMAP_EMA_ALPHA_DEFAULT + w) / (HEATMAP_EMA_ALPHA_DEFAULT + 1);
 			else
 				shid->blob_slot_weight[s] = w;
 
@@ -1023,14 +1021,14 @@ static void raw_update_slots(struct spi_hid *shid,
 					s32 ddx = (s32)egx - (s32)old_gx;
 					s32 ddy = (s32)egy - (s32)old_gy;
 
-					if (ddx >= -80 && ddx <= 80 &&
-					    ddy >= -80 && ddy <= 80) {
-						u8 c = shid->blob_slot_stationary[s];
-						if (c < 6) {
-							c++;
-							shid->blob_slot_stationary[s] = c;
-						}
-						if (c >= 6) {
+				if (ddx >= -(HEATMAP_DEADBAND_THRESHOLD) && ddx <= HEATMAP_DEADBAND_THRESHOLD &&
+				    ddy >= -(HEATMAP_DEADBAND_THRESHOLD) && ddy <= HEATMAP_DEADBAND_THRESHOLD) {
+					u8 c = shid->blob_slot_stationary[s];
+					if (c < HEATMAP_STATIONARY_FRAMES) {
+						c++;
+						shid->blob_slot_stationary[s] = c;
+					}
+					if (c >= HEATMAP_STATIONARY_FRAMES) {
 							new_gx[s] = old_gx;
 							new_gy[s] = old_gy;
 						} else {
@@ -1240,6 +1238,9 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 	int frame_ema_alpha;
 	int touched_count = 0;
 
+	if (!shid->touch_input)
+		return;
+
 	/* Parameters are fixed at module load; validate the frame before caching geometry. */
 	data_offset = READ_ONCE(dfa_data_offset);
 	configured_cols = READ_ONCE(grid_cols);
@@ -1310,7 +1311,7 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 	 * only when a frame has already arrived. */
 	if (shid->heatmap_last_frame_jiffies &&
 	    time_after(jiffies, shid->heatmap_last_frame_jiffies +
-		       msecs_to_jiffies(60))) {
+		       msecs_to_jiffies(HEATMAP_MISSED_FRAME_TIMEOUT_MS))) {
 		release_all_slots(shid->touch_input, shid->blob_slot_state,
 				  HEATMAP_MAX_SLOTS);
 		memset(shid->blob_slot_state, 0, sizeof(shid->blob_slot_state));
@@ -1369,8 +1370,8 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 	touched_count = 0;
 
 	{
-		u16 peaks_col[16];
-		u16 peaks_row[16];
+	u16 peaks_col[HEATMAP_MAX_PEAKS];
+	u16 peaks_row[HEATMAP_MAX_PEAKS];
 		u8 npeaks;
 
 		npeaks = raw_detect_peaks(shid, cell_count, ncols, nrows,
