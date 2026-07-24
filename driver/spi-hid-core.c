@@ -1213,7 +1213,8 @@ static void spi_hid_raw_probe_retry_work(struct work_struct *work)
 
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
-	    !READ_ONCE(shid->seq_enabled) || !shid->raw_mode_active)
+	    !READ_ONCE(shid->seq_enabled) || !shid->raw_mode_active ||
+	    shid->raw_handshake_confirmed)
 		goto out;
 	raw_handshake_restart_discovery(shid);
 out:
@@ -2194,6 +2195,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			if (!shid->raw_handshake_confirmed) {
 				shid->raw_handshake_confirmed = true;
 				cancel_delayed_work(&shid->raw_handshake_watchdog);
+				cancel_delayed_work(&shid->raw_probe_retry_work);
 				seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed (first heatmap frame received)\n");
 				if (stream_watchdog_ms > 0 && !shid->stream_watchdog_active) {
 					shid->stream_watchdog_active = true;
