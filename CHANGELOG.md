@@ -1,6 +1,6 @@
 # Changelog
 
-## refactor/sl4a-distribution (2026-07-24)
+## 1.4.0 — Raw Multitouch Fixes, Unified Installer (2026-07-24)
 
 ### Raw multitouch pipeline
 
@@ -50,6 +50,88 @@
 - Fixed a pre-existing bug in `install.sh` that made it fail to parse at
   all under this system's bash (`*[|/\\]*` inside a `[[ ]]` bracket
   expression needs the `|` escaped).
+- `install` now activates immediately at the end — no separate manual
+  step for the current session.
+- `install` also writes and enables a systemd oneshot unit
+  (`sl4a-touch-activate.service`, gated on `multi-user.target`) so the
+  driver activates automatically on every future boot too. This runs
+  after the base system is already up, not during early kernel/initrd
+  boot — the actual failure mode the original "Boot safety (black-screen
+  fix)" work (see the `refactor/sl4a-distribution (2026-07-23)` entry
+  below) was protecting against came from kernel-level ACPI/SPI module
+  aliases resolving during early boot with no shell and no recovery
+  path. A unit gated on `multi-user.target` runs well past that point:
+  a hung or failed activation here still leaves a working login.
+  `uninstall` disables and removes the unit (ownership-marker gated,
+  same pattern as the modprobe.d config).
+- Running the script with no arguments now shows an arrow-key menu
+  (Install/Uninstall/Activate/Status/Logs/Quit) instead of a usage/error
+  message — no subcommand needs to be typed or remembered. Explicit
+  subcommands still work unchanged for scripting/docs.
+- Found and fixed four real bugs by actually exercising `activate`
+  end-to-end against this machine's live installed state (DKMS,
+  Secure Boot enabled, real Surface ACPI topology) rather than only
+  `--check`/`--dry-run`, which none of the earlier testing had
+  exercised:
+  - The Secure Boot / MOK enrollment check trusted `mokutil
+    --test-key`'s exit code, which is 1 on this system even when the
+    key IS in the enrolled MOK database (mokutil separately checks the
+    *running* kernel's live trusted keyring, which only reflects an
+    enrollment after the next reboot, and still prints "already
+    enrolled" while exiting 1). Combined with `set -o pipefail`, piping
+    mokutil's output straight into `grep` made the whole pipeline
+    report failure regardless of what grep found. Fixed by capturing
+    mokutil's output separately from its exit code.
+  - A "no other MSHW\* ACPI device may exist" check unconditionally
+    refused to activate on real Surface hardware, which always exposes
+    several unrelated MSHW\* nodes (keyboard, sensors, battery, ...)
+    with their own drivers already bound. Removed it — the actual
+    identifying check (exactly one MSHW0231) was already separate and
+    sufficient.
+  - The arrow-key menu leaked raw `tput` cursor/erase escape sequences
+    onto stdout instead of stderr, corrupting the captured command name.
+  - The menu's redraw logic moved the cursor up one line short of what
+    it actually printed each frame, so every keypress scrolled the
+    terminal instead of redrawing in place.
+- Dropped a confusing "The git repo itself was not touched" line from
+  `uninstall`'s output; replaced with how to reinstall.
+
+### CI
+
+All three GitHub Actions jobs (`whitespace`, `host-tests`,
+`kernel-build`) had been failing since at least the `v1.3.0` tag:
+
+- `kernel-build`: `driver/spi-amd.c`'s `platform_driver.remove` is
+  void-returning, matching Linux 6.11+ (this driver targets upstream
+  v6.15). Ubuntu 24.04 LTS's 6.8 kernel headers — CI's target, and what
+  many real users on non-rolling distros still run — predate that
+  signature change and reject it outright under `-Werror`. Fixed with a
+  `LINUX_VERSION_CODE` conditional.
+- `kernel-build`: `driver/spi-hid-capimg.c` unconditionally included
+  `<linux/unaligned.h>`, which doesn't exist on that same 6.8 kernel
+  (only the older `<asm/unaligned.h>`). Fixed with `__has_include`
+  instead of another version check, since the exact boundary isn't a
+  clean single version across distro backports.
+- `host-tests`: `raw_pipeline_math_test` and `raw_pipeline_replay_test`
+  linked with `-lm` placed *before* the object/source files needing it —
+  works with this dev machine's linker defaults, fails under `-Wl,--as-needed`
+  (the Ubuntu CI runner's default) with "undefined reference to `sqrt`".
+  Fixed the link order.
+- `whitespace`: `git diff --check` was flagging ~34 files, almost all
+  verbatim forensic/reference data (`captures/`, `docs/acpi/`
+  iasl-decompiled tables, `docs/decomp/` pasted decompiler output,
+  `tools/windows_capture/`, `traces/`) where "fixing" the whitespace
+  would mean editing evidence data. Excluded those paths from the check.
+  Fixed the small number of remaining real hits directly
+  (`tools/parse_spi.py`, one incidental blank-with-whitespace line, one
+  inconsistent markdown hard-break, one stray blank line at EOF in
+  `driver/hardcoded_rd.h`).
+- Fixed a same-day regression: `tests/boot_binding_safety_test.py` still
+  read the three now-deleted `tools/{install,uninstall,activate-fch}.sh`
+  files after the installer consolidation above; updated it to read the
+  consolidated `tools/sl4a-touch.sh`.
+- Bumped `actions/checkout` to v5 (clears a Node.js 20 deprecation
+  warning on every run).
 
 ## 1.3.0 — Production Hardening (2026-07-23)
 
