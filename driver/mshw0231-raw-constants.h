@@ -54,4 +54,29 @@
 #define ASSOC_RADIUS_4_FINGERS          34
 #define ASSOC_RADIUS_5_FINGERS          40
 
+/*
+ * Ghost-merge radius multipliers per finger count (×10), baseline = 2
+ * fingers (implicit ×10, i.e. unscaled module-param ghost_dist).
+ *
+ * Unlike ASSOC_RADIUS_* (which WIDENS with finger count to tolerate more
+ * per-frame jitter when re-matching an already-tracked blob to its slot),
+ * this must NARROW with finger count: as more fingers are down, genuine
+ * distinct fingers are naturally packed closer together (spread 4-5
+ * finger gestures, closing pinch), so a merge radius sized for 1-2
+ * fingers starts mistaking adjacent-but-real fingers for duplicate
+ * detections of the same touch and drops one, causing flicker.
+ *
+ * FIRST-PASS VALUES, NOT HARDWARE-VALIDATED: the direction (tighten,
+ * not widen) is what motivates this change; the exact multipliers below
+ * are a reasoned starting guess (70%/60%/50% of baseline for 3/4/5+
+ * fingers) and need real multi-finger touch testing on hardware to
+ * confirm they don't over-tighten and start splitting single fingers
+ * into ghost pairs. 1-finger case is left at baseline since merge-vs-
+ * duplicate ambiguity barely matters with only one blob on screen.
+ */
+#define GHOST_RADIUS_1_FINGER            10
+#define GHOST_RADIUS_3_FINGERS            7
+#define GHOST_RADIUS_4_FINGERS            6
+#define GHOST_RADIUS_5_FINGERS            5
+
 #endif

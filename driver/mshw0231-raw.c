@@ -697,11 +697,38 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
  * heavier one, discard the lighter.
  *
  * Modifies sorted[] in-place; updates *sorted_count. */
-static void raw_ghost_merge(struct blob_entry *sorted, u8 *sorted_count,
-			    u32 ghost_dist)
+static void raw_ghost_merge(struct spi_hid *shid, struct blob_entry *sorted,
+			    u8 *sorted_count, u32 ghost_dist)
 {
-	u8 a, b, j;
-	u32 gdsq = (u32)ghost_dist * (u32)ghost_dist * 10000; /* ×100 scale */
+	u8 a, b, j, col;
+	u8 active_slots = 0;
+	u32 gd;
+	u32 gdsq;
+
+	/* Count claimed slots, same definition raw_hungarian_match() uses. */
+	for (col = 0; col < HEATMAP_MAX_SLOTS; col++)
+		if (shid->blob_slot_state[col] >= 2)
+			active_slots++;
+
+	/* Scale merge radius by finger count. Direction is opposite of
+	 * raw_hungarian_match()'s ASSOC_RADIUS_*: here we tighten as
+	 * finger count rises, since real distinct fingers get physically
+	 * closer together in multi-finger gestures and a radius sized
+	 * for 1-2 fingers starts falsely merging them. See constants
+	 * header for the (not yet hardware-validated) reasoning. */
+	gd = ghost_dist; /* baseline: 0/2 active slots, unscaled */
+	if (active_slots == 1)
+		gd = ghost_dist * GHOST_RADIUS_1_FINGER / 10;
+	else if (active_slots == 3)
+		gd = ghost_dist * GHOST_RADIUS_3_FINGERS / 10;
+	else if (active_slots == 4)
+		gd = ghost_dist * GHOST_RADIUS_4_FINGERS / 10;
+	else if (active_slots >= 5)
+		gd = ghost_dist * GHOST_RADIUS_5_FINGERS / 10;
+	if (gd < 1)
+		gd = 1;
+
+	gdsq = gd * gd * 10000; /* ×100 scale */
 
 	for (a = 0; a < *sorted_count; a++) {
 		if (sorted[a].w == 0)
@@ -1480,7 +1507,7 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 				 sorted_count, touched_count);
 
 		/* ── Stage 6: ghost merge ── */
-		raw_ghost_merge(sorted, &sorted_count,
+		raw_ghost_merge(shid, sorted, &sorted_count,
 				(u32)READ_ONCE(ghost_dist));
 
 		/* ── Stage 7: Hungarian global assignment ── */
