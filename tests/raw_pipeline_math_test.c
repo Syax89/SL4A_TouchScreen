@@ -49,13 +49,20 @@ static void test_hungarian_cost_computation(void)
 	CHECK(HUNGARIAN_COST_IN_RANGE == 10, "base cost multiplier is 10");
 
 	c = hungarian_cost_out_of_range();
-	CHECK(c == 100, "out-of-range cost = %u", c);
+	(void)c;
 
 	c = hungarian_cost_empty_slot();
 	CHECK(c == 1000, "empty slot cost = %u", c);
 
-	CHECK(HUNGARIAN_COST_EMPTY > HUNGARIAN_COST_OUT_RANGE,
-	      "empty slot cost (%u) > out-of-range (%u)", c, HUNGARIAN_COST_OUT_RANGE);
+	/* Invariant, not a pinned literal: an out-of-range candidate is
+	 * always rejected by the post-match distance re-check, so it must
+	 * never look cheaper to the optimizer than a valid empty-slot
+	 * match — otherwise the solver can prefer a doomed match over an
+	 * available empty slot and the blob gets dropped with no fallback
+	 * (found by blind review, driver/mshw0231-raw-constants.h). */
+	CHECK(HUNGARIAN_COST_OUT_RANGE > HUNGARIAN_COST_EMPTY,
+	      "out-of-range cost (%u) must exceed empty slot cost (%u)",
+	      HUNGARIAN_COST_OUT_RANGE, HUNGARIAN_COST_EMPTY);
 }
 
 /* ── Association radius per finger count ─────────────────────────────── */

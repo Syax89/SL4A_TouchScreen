@@ -810,8 +810,14 @@ static u32 raw_hungarian_match(struct spi_hid *shid,
 		bmd = bmd * ASSOC_RADIUS_5_FINGERS / 10;
 
 	/* Build cost matrix: matching Python oracle Hungarian.
-	 * In-range: 10*sqrt(dx²+dy²), out-of-range: 100,
-	 * empty/new slot: 1000.
+	 * In-range: 10*sqrt(dx²+dy²), empty/new slot: 1000,
+	 * out-of-range (claimed slot, but outside bmd): 1500 —
+	 * deliberately pricier than an empty slot (see
+	 * HUNGARIAN_COST_OUT_RANGE) since an out-of-range match is
+	 * always rejected by the final validation below and must
+	 * never look cheaper to the optimizer than a valid empty-slot
+	 * match, or a blob can lose to a doomed match and get dropped
+	 * instead of claiming the empty slot it should have.
 	 *
 	 * Track-continuity bias (see HUNGARIAN_CONTINUITY_BONUS): an
 	 * in-range candidate that is a currently *claimed* slot
@@ -1015,21 +1021,6 @@ static void raw_update_slots(struct spi_hid *shid,
 					goto slot_unassigned;
 			}
 
-			/* Copy per-blob eigenvalues to the assigned slot.
-			 * Must be unconditional: split sub-blobs legitimately
-			 * carry a zero ellipse (no eigen-decomposition was
-			 * computed for them), and that zero has to clear the
-			 * slot's previous ellipse state rather than leave it
-			 * unchanged. Otherwise raw_emit_mt() would keep
-			 * reporting stale MAJOR/MINOR/ORIENTATION from an
-			 * earlier frame right when two fingers converge and
-			 * split apart. */
-			if (blob_idx < HEATMAP_MAX_BLOBS) {
-				shid->eigmaj[s] = shid->blob_eigmaj[blob_idx];
-				shid->eigmin[s] = shid->blob_eigmin[blob_idx];
-				shid->eigori[s] = shid->blob_eigori[blob_idx];
-			}
-
 			switch (shid->blob_slot_state[s]) {
 			case 0:
 				shid->blob_slot_state[s] = 1;
@@ -1061,6 +1052,29 @@ static void raw_update_slots(struct spi_hid *shid,
 				shid->blob_slot_stationary[s] = 0;
 				break;
 			}
+
+			/* Copy per-blob eigenvalues to the assigned slot.
+			 * Must run only after the state-machine switch above
+			 * has accepted this match — case 4 (hold) can still
+			 * `goto slot_unassigned` on a low-weight candidate,
+			 * and copying before that point would let a rejected
+			 * noise blob's shape/orientation contaminate the
+			 * slot's persistent ellipse even though its position
+			 * update is correctly skipped (found by blind review).
+			 * Must be unconditional here: split sub-blobs
+			 * legitimately carry a zero ellipse (no eigen-
+			 * decomposition was computed for them), and that zero
+			 * has to clear the slot's previous ellipse state
+			 * rather than leave it unchanged, otherwise
+			 * raw_emit_mt() would keep reporting stale
+			 * MAJOR/MINOR/ORIENTATION from an earlier frame right
+			 * when two fingers converge and split apart. */
+			if (blob_idx < HEATMAP_MAX_BLOBS) {
+				shid->eigmaj[s] = shid->blob_eigmaj[blob_idx];
+				shid->eigmin[s] = shid->blob_eigmin[blob_idx];
+				shid->eigori[s] = shid->blob_eigori[blob_idx];
+			}
+
 			shid->blob_slot_missed[s] = 0;
 			shid->blob_slot_gx[s] = gx;
 			shid->blob_slot_gy[s] = gy;

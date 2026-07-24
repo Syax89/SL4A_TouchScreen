@@ -26,7 +26,17 @@
 
 /* Hungarian cost matrix */
 #define HUNGARIAN_COST_IN_RANGE       10
-#define HUNGARIAN_COST_OUT_RANGE     100
+/*
+ * Must stay strictly greater than HUNGARIAN_COST_EMPTY. The solver
+ * minimizes total cost; an out-of-range candidate is always rejected
+ * by the post-match distance re-check (raw_hungarian_match's final
+ * assignment loop), so it must never look cheaper to the optimizer
+ * than a valid empty-slot match. If it did, the solver could prefer
+ * an out-of-range claimed slot over an available empty slot, get that
+ * match rejected, and drop the blob for the frame with no fallback to
+ * the empty slot that was actually offered — found by blind review.
+ */
+#define HUNGARIAN_COST_OUT_RANGE    1500
 #define HUNGARIAN_COST_EMPTY        1000
 #define HUNGARIAN_COST_SCALE         100
 #define HUNGARIAN_JUMP_REJECT_MARGIN  200
