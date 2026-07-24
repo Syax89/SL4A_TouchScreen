@@ -9,14 +9,20 @@
 # point. Tested on: Arch, CachyOS, Ubuntu/Debian, Fedora, openSUSE.
 #
 # Usage:
-#   ./tools/sl4a-touch.sh install [--standard|--raw] [--check|--dry-run] [--force]
+#   ./tools/sl4a-touch.sh                              interactive arrow-key menu
+#   sudo ./tools/sl4a-touch.sh install [--standard|--raw] [--check|--dry-run] [--force]
 #   sudo ./tools/sl4a-touch.sh uninstall
 #   sudo ./tools/sl4a-touch.sh activate
 #   ./tools/sl4a-touch.sh status
 #   sudo ./tools/sl4a-touch.sh logs [-o FILE]
 #   ./tools/sl4a-touch.sh rebuild            (developer use only, see --help)
 #
-# Run with no arguments, or -h/--help, for the full command list.
+# install builds, installs via DKMS, enables a systemd unit that
+# auto-activates on every future boot (after multi-user.target — i.e.
+# after the base system, not during early kernel boot), and activates
+# immediately. Nothing here requires typing a subcommand: run the script
+# with no arguments for an arrow-key menu. Run with -h/--help for the
+# full command list.
 # ============================================================================
 set -e -o pipefail
 shopt -s nullglob
@@ -27,6 +33,7 @@ PKG_NAME="sl4a-touch"
 PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SRC_DEST="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 MODPROBE_CONF="/etc/modprobe.d/sl4a-spi-hid.conf"
+SYSTEMD_UNIT="/etc/systemd/system/sl4a-touch-activate.service"
 SYSFS_ROOT="${SL4A_SYSFS_ROOT:-/sys}"
 DMI_ROOT="${SL4A_DMI_ROOT:-/sys/class/dmi/id}"
 
@@ -125,9 +132,13 @@ Usage: tools/sl4a-touch.sh <command> [options]
 
 Commands:
   install [--standard|--raw] [--check|--dry-run] [--force]
-                    Build and install the driver via DKMS. Prompts
-                    interactively for a profile if none is given on a
-                    terminal; defaults to --standard otherwise.
+                    Build, install via DKMS, enable automatic activation on
+                    every future boot (a systemd unit gated on
+                    multi-user.target — after the base system is up, not
+                    during early kernel boot), and activate immediately.
+                    Nothing further to run. Prompts interactively for a
+                    profile if none is given on a terminal; defaults to
+                    --standard otherwise.
                       --standard  Single-touch + pen. Stable, supported. (default)
                       --raw       EXPERIMENTAL heatmap multitouch. May be
                                   unstable; no hardware-qualified result yet.
@@ -136,12 +147,15 @@ Commands:
                       --force     Continue even if expected hardware/DMI is
                                   not detected.
 
-  uninstall         Remove the installed driver and its DKMS registration.
-                    Loaded modules are left running until reboot.
+  uninstall         Remove the installed driver, its DKMS registration, and
+                    the boot-activation service. Loaded modules are left
+                    running until reboot.
 
-  activate          Load and bind the modules for this boot session. Never
-                    automatic (by design) — run this after every login/boot
-                    you want the touchscreen driver active for. Refuses to
+  activate          Load and bind the modules right now. install already
+                    sets this up to happen automatically on every future
+                    boot; use this command directly only to redo it
+                    immediately (e.g. after 'rebuild', or to retry after
+                    fixing a Secure Boot key enrollment). Refuses to
                     displace a device already bound to another driver.
 
   status            Show the installed DKMS version (if any), whether it
@@ -163,12 +177,66 @@ Commands:
 EOF
 }
 
-if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ "$1" = "help" ]; then
+# Arrow-key menu shown when the script is run with no arguments on a real
+# terminal — no subcommand to remember, just run the script. Prints the
+# chosen command name on stdout; caller captures it. Falls back to plain
+# usage text when stdin isn't a tty (piped/scripted invocation).
+menu_pick_command() {
+	local labels=("Install" "Uninstall" "Activate" "Status" "Collect diagnostics (logs)" "Quit")
+	local cmds=("install" "uninstall" "activate" "status" "logs" "")
+	local selected=0 n=${#labels[@]} key rest
+
+	tput civis >&2 2>/dev/null
+	trap 'tput cnorm >&2 2>/dev/null' RETURN
+
+	draw() {
+		echo "SL4A_TouchScreen driver management" >&2
+		echo "(up/down arrows, Enter to select)" >&2
+		echo "" >&2
+		for i in "${!labels[@]}"; do
+			if [ "$i" -eq "$selected" ]; then
+				echo -e "  ${CYAN}❯ ${BOLD}${labels[$i]}${NC}" >&2
+			else
+				echo "    ${labels[$i]}" >&2
+			fi
+		done
+	}
+
+	draw
+	while true; do
+		IFS= read -rsn1 key
+		if [ "$key" = $'\x1b' ]; then
+			IFS= read -rsn2 -t 0.01 rest || true
+			case "$rest" in
+				'[A') selected=$(( (selected - 1 + n) % n )) ;;
+				'[B') selected=$(( (selected + 1) % n )) ;;
+			esac
+		elif [ -z "$key" ]; then
+			break
+		fi
+		tput cuu $((n + 2)) >&2 2>/dev/null
+		tput ed >&2 2>/dev/null
+		draw
+	done
+	tput cnorm >&2 2>/dev/null
+	echo "" >&2
+	echo "${cmds[$selected]}"
+}
+
+if [ $# -eq 0 ]; then
+	if [ -t 0 ]; then
+		CMD="$(menu_pick_command)"
+		[ -z "$CMD" ] && exit 0
+	else
+		usage
+		exit 1
+	fi
+elif [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ "$1" = "help" ]; then
 	usage
-	[ $# -eq 0 ] && exit 1
 	exit 0
+else
+	CMD="$1"; shift
 fi
-CMD="$1"; shift
 
 # ── install ──────────────────────────────────────────────────────────────
 
@@ -308,10 +376,7 @@ cmd_install() {
 		fail "refusing to replace unowned $MODPROBE_CONF"
 	fi
 
-	info "Step 3: Leaving active modules untouched..."
-	pass "Active modules left untouched; nothing is loaded or bound until 'activate' is run"
-
-	info "Step 4: Staging driver sources via DKMS ($SRC_DEST)..."
+	info "Step 3: Staging driver sources via DKMS ($SRC_DEST)..."
 	local profile_only=0
 	if [ -e "$SRC_DEST" ]; then
 		if dkms status -m "$PKG_NAME" -v "$PKG_VERSION" 2>/dev/null | grep -q "installed"; then
@@ -348,12 +413,12 @@ cmd_install() {
 		dkms install -m "$PKG_NAME" -v "$PKG_VERSION" || { cleanup_staged_install; fail "DKMS install failed; existing driver state was left unchanged"; }
 		pass "sl4a-spi-amd.ko + sl4a-spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
 
-		info "Step 5: Updating module dependencies..."
+		info "Step 4: Updating module dependencies..."
 		depmod -a
 		pass "Module dependencies updated"
 	fi
 
-	info "Step 6: Activating $PROFILE profile..."
+	info "Step 5: Writing the $PROFILE profile to $MODPROBE_CONF..."
 	local tmp_config
 	tmp_config="$(mktemp "${MODPROBE_CONF}.XXXXXX")"
 	if [ "$PROFILE" = "raw" ]; then
@@ -371,13 +436,43 @@ EOF
 	rm -f "$tmp_config"
 	pass "Created $MODPROBE_CONF"
 
-	if [ -d /sys/firmware/efi ] && mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
-		echo ""
-		warn "Secure Boot is enabled."
-		echo "      If the modules fail to load, you may need to enroll a MOK key:"
-		echo "      sudo mokutil --import /var/lib/dkms/mok.pub  # (if exists)"
-		echo "      Or use your distro's DKMS signing configuration."
-	fi
+	# Auto-activate on every future boot via a systemd unit that runs AFTER
+	# multi-user.target — i.e. after the base system is already up, not
+	# during early kernel/initrd boot. This is the fix for the exact
+	# incident CHANGELOG.md's "Boot safety (black-screen fix)" describes:
+	# that incident came from kernel-level auto-binding via ACPI/SPI module
+	# aliases, which runs WHILE the kernel is still bringing the system up,
+	# with no shell and no recovery if the driver hangs. A systemd unit
+	# gated on multi-user.target runs well after that point — if activation
+	# ever hangs or fails here, you already have a working login and a
+	# shell to fix it with, which is the actual safety property that
+	# matters, not "never load automatically at all."
+	info "Step 6: Enabling automatic activation on every future boot..."
+	tmp_config="$(mktemp)"
+	cat > "$tmp_config" <<EOF
+# SL4A_TouchScreen — installed by tools/sl4a-touch.sh, removed by 'uninstall'.
+[Unit]
+Description=SL4A_TouchScreen driver activation (Surface Laptop 4 AMD touchscreen)
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=$REPO_DIR/tools/sl4a-touch.sh activate
+RemainAfterExit=yes
+# A failed activation (e.g. Secure Boot key not yet enrolled, hardware
+# absent) must never fail the boot or retry-loop — see journalctl -u
+# sl4a-touch-activate for why, then run 'activate' manually once fixed.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	install -m 0644 "$tmp_config" "$SYSTEMD_UNIT"
+	rm -f "$tmp_config"
+	systemctl daemon-reload
+	systemctl enable sl4a-touch-activate.service >/dev/null 2>&1
+	pass "Created $SYSTEMD_UNIT (enabled — activates automatically after every boot)"
 
 	echo ""
 	rule
@@ -386,10 +481,12 @@ EOF
 	else
 		echo -e "${GREEN}${BOLD}Install complete${NC} ${GREEN}— standard HID profile selected.${NC}"
 	fi
-	echo "Nothing is loaded or bound yet."
-	echo "  After login, run: sudo ./tools/sl4a-touch.sh activate"
-	echo "  To remove:         sudo ./tools/sl4a-touch.sh uninstall"
+	echo "  To remove:  sudo ./tools/sl4a-touch.sh uninstall"
 	rule
+
+	# Also load and bind it right now instead of making you reboot first.
+	info "Step 7: Activating now..."
+	cmd_activate
 }
 
 # ── uninstall ────────────────────────────────────────────────────────────
@@ -398,6 +495,18 @@ cmd_uninstall() {
 	elevate "remove the DKMS registration and /etc/modprobe.d config" uninstall "$@"
 
 	header "SL4A_TouchScreen driver uninstaller"
+
+	if [ -f "$SYSTEMD_UNIT" ]; then
+		if grep -q '^# SL4A_TouchScreen' "$SYSTEMD_UNIT"; then
+			info "Disabling and removing the boot-activation service..."
+			systemctl disable sl4a-touch-activate.service >/dev/null 2>&1 || true
+			rm -f "$SYSTEMD_UNIT"
+			systemctl daemon-reload
+			pass "Boot-activation service removed"
+		else
+			info "Leaving unowned $SYSTEMD_UNIT untouched"
+		fi
+	fi
 
 	if [ -f "$MODPROBE_CONF" ]; then
 		if grep -q '^# SL4A_TouchScreen' "$MODPROBE_CONF"; then
@@ -459,14 +568,55 @@ cmd_activate() {
 	fail_rollback() { rollback; fail "$1; modules loaded by this command were rolled back"; }
 
 	if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
-		if ! mokutil --test-key /var/lib/dkms/mok.pub >/dev/null 2>&1; then
-			cat >&2 <<'EOF'
-WARNING: Secure Boot is enabled but the DKMS MOK key is not enrolled.
-Signed modules will be rejected by the kernel.
-Enroll the key once:  sudo mokutil --import /var/lib/dkms/mok.pub
-See docs/ROLLBACK.md for the complete MOK enrollment procedure.
-After enrollment, reboot before running this command again.
-EOF
+		if [ ! -r /var/lib/dkms/mok.pub ]; then
+			warn "Secure Boot is enabled but no DKMS signing key was found at /var/lib/dkms/mok.pub."
+			echo "Run 'install' first — DKMS generates the key during the build."
+			exit 1
+		fi
+		# mokutil --test-key's exit code alone is unreliable: on this
+		# system it returns 1 even when the key IS in the enrolled MOK
+		# database (it also checks the *running* kernel's live trusted
+		# keyring, which only picks up a change after the next reboot).
+		# Its own output still says "already enrolled" in that case, so
+		# check that instead of trusting $? — capture output separately
+		# first ("|| true"), since under `set -o pipefail` a direct
+		# `mokutil | grep` pipeline would still report failure overall
+		# from mokutil's own exit code even when grep finds the match.
+		local mok_test_output
+		mok_test_output="$(mokutil --test-key /var/lib/dkms/mok.pub 2>&1 || true)"
+		if ! echo "$mok_test_output" | grep -qi "already enrolled"; then
+			echo ""
+			warn "Secure Boot is enabled but the DKMS signing key is not enrolled yet."
+			echo "The kernel will refuse to load the signed modules until it is."
+			echo ""
+			if [ -t 0 ]; then
+				echo "Step 1 of 2: enroll the key now (sets a one-time password you"
+				echo "re-enter once at the next boot):"
+				echo ""
+				if mokutil --import /var/lib/dkms/mok.pub; then
+					echo ""
+					pass "Key staged for enrollment."
+					echo ""
+					echo -e "${BOLD}Step 2 of 2 — do this now:${NC}"
+					echo "  1. Reboot: sudo reboot"
+					echo "  2. A blue 'MOK Manager' screen appears before your OS loads."
+					echo "     (If you miss it, it reappears on the next boot attempt.)"
+					echo "  3. Select 'Enroll MOK' -> 'Continue' -> 'Yes'."
+					echo "  4. Enter the password you just set above."
+					echo "  5. Select 'Reboot'."
+					echo "  6. After login, run this command again:"
+					echo "       sudo ./tools/sl4a-touch.sh activate"
+				else
+					fail "Key enrollment was not completed (mokutil exited non-zero). Nothing was activated."
+				fi
+			else
+				echo "Run this command yourself in a real terminal (it needs an"
+				echo "interactive password prompt), then follow the on-screen steps:"
+				echo ""
+				echo "  sudo mokutil --import /var/lib/dkms/mok.pub"
+				echo ""
+				echo "Full step-by-step MOK enrollment procedure: docs/ROLLBACK.md"
+			fi
 			exit 1
 		fi
 	fi
@@ -478,13 +628,14 @@ EOF
 	[ -d "$controller_platform" ] || fail "AMDI0060 platform device is absent"
 	local touches=(/sys/bus/acpi/devices/MSHW0231:*)
 	[ "${#touches[@]}" -eq 1 ] || fail "expected exactly one MSHW0231 ACPI device"
-	local extra_mshw=(/sys/bus/acpi/devices/MSHW*:*)
-	if [ "${#extra_mshw[@]}" -gt 1 ]; then
-		local extra_list
-		extra_list=$(printf '%s\n' "${extra_mshw[@]}" | grep -v "MSHW0231" | xargs -r -n1 basename | tr '\n' ' ')
-		[ -n "$extra_list" ] && fail "extra MSHW ACPI devices found beyond MSHW0231: ${extra_list}activation refused"
-	fi
 	local touch="${touches[0]}"
+	# Note: earlier versions of this check also refused to proceed if any
+	# OTHER "MSHW*" ACPI device existed at all. That's not a meaningful
+	# safety signal on real Surface hardware, which always exposes several
+	# unrelated MSHW* nodes (keyboard, sensors, battery, ...) with their own
+	# drivers already bound — it made activation impossible on every real
+	# Surface Laptop 4. The check above (exactly one MSHW0231) is what
+	# actually identifies the touchscreen; that's sufficient.
 
 	if [ -L "$controller_platform/driver" ]; then
 		fail "AMDI0060 is already bound to $(bound_driver "$controller_platform"); refusing to displace it"
@@ -533,6 +684,12 @@ cmd_status() {
 		none)     info "No modprobe profile configured (nothing installed)" ;;
 		*)        warn "Active modprobe profile: unrecognized contents in $MODPROBE_CONF" ;;
 	esac
+
+	if systemctl is-enabled sl4a-touch-activate.service >/dev/null 2>&1; then
+		pass "Auto-activates on every boot (sl4a-touch-activate.service enabled)"
+	else
+		info "Does not auto-activate on boot — run 'install' to enable it"
+	fi
 
 	echo ""
 	echo "Hardware:"
@@ -615,6 +772,10 @@ cmd_logs() {
 
 		echo "--- modprobe config ($MODPROBE_CONF) ---"
 		[ -f "$MODPROBE_CONF" ] && cat "$MODPROBE_CONF" || echo "(not present)"
+		echo ""
+
+		echo "--- Boot activation service ---"
+		systemctl status sl4a-touch-activate.service --no-pager 2>&1 | head -10
 		echo ""
 
 		echo "--- Loaded modules ---"
