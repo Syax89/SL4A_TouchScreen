@@ -185,6 +185,11 @@ menu_pick_command() {
 	local labels=("Install" "Uninstall" "Activate" "Status" "Collect diagnostics (logs)" "Quit")
 	local cmds=("install" "uninstall" "activate" "status" "logs" "")
 	local selected=0 n=${#labels[@]} key rest
+	# draw() below prints exactly this many lines every time: title +
+	# subtitle + one blank line + one line per option. Cursor-up must
+	# move by exactly this count each redraw, or successive frames drift
+	# and the terminal scrolls instead of redrawing in place.
+	local menu_lines=$((n + 3))
 
 	tput civis >&2 2>/dev/null
 	trap 'tput cnorm >&2 2>/dev/null' RETURN
@@ -214,7 +219,7 @@ menu_pick_command() {
 		elif [ -z "$key" ]; then
 			break
 		fi
-		tput cuu $((n + 2)) >&2 2>/dev/null
+		tput cuu "$menu_lines" >&2 2>/dev/null
 		tput ed >&2 2>/dev/null
 		draw
 	done
