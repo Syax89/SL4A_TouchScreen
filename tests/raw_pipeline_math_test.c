@@ -123,7 +123,6 @@ static void test_ema_smoothing(void)
 	CHECK(ema_smooth(0, 100, 1) == 50, "EMA alpha=1: average");
 	CHECK(ema_smooth(0, 100, 7) == 12, "EMA alpha=7: (%u*7+100)/8", ema_smooth(0, 100, 7));
 	CHECK(ema_smooth(1000, 1000, 7) == 1000, "EMA stable input stays");
-	CHECK(HEATMAP_EMA_ALPHA_DEFAULT == 7, "default EMA alpha is 7");
 }
 
 /* ── Deadband ────────────────────────────────────────────────────────── */
@@ -137,15 +136,19 @@ static u32 deadband_filter(u32 old, u32 new, u32 threshold)
 
 static void test_deadband(void)
 {
-	CHECK(deadband_filter(1000, 1050, HEATMAP_DEADBAND_THRESHOLD) == 1000,
-	      "deadband: 50 <= 80, stays at old");
-	CHECK(deadband_filter(1000, 1100, HEATMAP_DEADBAND_THRESHOLD) == 1100,
-	      "deadband: 100 > 80, updates to new");
-	CHECK(deadband_filter(1000, 920, HEATMAP_DEADBAND_THRESHOLD) == 1000,
-	      "deadband: -80 <= 80, stays (negative within)");
-	CHECK(deadband_filter(1000, 919, HEATMAP_DEADBAND_THRESHOLD) == 919,
-	      "deadband: -81 > 80, updates (negative beyond)");
-	CHECK(HEATMAP_DEADBAND_THRESHOLD == 80, "deadband threshold is 80");
+	/* Boundary cases relative to the configured threshold, not a pinned
+	 * literal — HEATMAP_DEADBAND_THRESHOLD is a tuning knob and these
+	 * tests must hold for any value it is set to. */
+	u32 t = HEATMAP_DEADBAND_THRESHOLD;
+
+	CHECK(deadband_filter(1000, 1000 + t, t) == 1000,
+	      "deadband: delta == threshold, stays at old");
+	CHECK(deadband_filter(1000, 1000 + t + 1, t) == 1000 + t + 1,
+	      "deadband: delta > threshold, updates to new");
+	CHECK(deadband_filter(1000, 1000 - t, t) == 1000,
+	      "deadband: -delta == threshold, stays (negative within)");
+	CHECK(deadband_filter(1000, 1000 - t - 1, t) == 1000 - t - 1,
+	      "deadband: -delta > threshold, updates (negative beyond)");
 }
 
 /* ── Slot state machine ──────────────────────────────────────────────── */
@@ -246,8 +249,6 @@ static void test_slot_fsm(void)
 	slot_fsm_tick(&s, 1, 5000, 3, 3, 3);
 	CHECK(s.state == SLOT_CLAIMED, "hold recovery: hold→claimed (w≥4000)");
 
-	/* stationary frame counter */
-	CHECK(HEATMAP_STATIONARY_FRAMES == 6, "stationary lock at 6 frames");
 	CHECK(HEATMAP_HOLD_RECOVERY_WEIGHT == 4000, "hold recovery weight=4000");
 }
 
