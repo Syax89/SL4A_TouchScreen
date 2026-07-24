@@ -998,9 +998,11 @@ static void raw_update_slots(struct spi_hid *shid,
 			shid->blob_slot_gx[s] = gx;
 			shid->blob_slot_gy[s] = gy;
 			/* EMA on blob weight (matching Windows: weight_smoothed = (old*7+new)/8).
+			 * Fixed alpha, independent of the position-smoothing ema_alpha
+			 * module param — see HEATMAP_WEIGHT_EMA_ALPHA.
 			 * Only for continuously-claimed slots — reset weight after hold/lift. */
 			if (old_state == 2)
-				shid->blob_slot_weight[s] = (shid->blob_slot_weight[s] * HEATMAP_EMA_ALPHA_DEFAULT + w) / (HEATMAP_EMA_ALPHA_DEFAULT + 1);
+				shid->blob_slot_weight[s] = (shid->blob_slot_weight[s] * HEATMAP_WEIGHT_EMA_ALPHA + w) / (HEATMAP_WEIGHT_EMA_ALPHA + 1);
 			else
 				shid->blob_slot_weight[s] = w;
 

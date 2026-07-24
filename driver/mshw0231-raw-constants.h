@@ -34,13 +34,19 @@
 /* Slot state machine */
 #define HEATMAP_HOLD_RECOVERY_WEIGHT   4000
 #define HEATMAP_DEADBAND_THRESHOLD      80
-#define HEATMAP_STATIONARY_FRAMES        6
+#define HEATMAP_STATIONARY_FRAMES         6
 
 /* Missed frame timeout (ms) */
 #define HEATMAP_MISSED_FRAME_TIMEOUT_MS  60
 
-/* EMA smoothing default */
-#define HEATMAP_EMA_ALPHA_DEFAULT        7
+/* EMA smoothing default (position tracking; module-param tunable via ema_alpha) */
+#define HEATMAP_EMA_ALPHA_DEFAULT         7
+
+/* Blob weight EMA alpha: fixed at the Windows-verified value (a = 1/8, i.e.
+ * weight = (old*7 + new)/8). This is a protocol-matching constant, not an
+ * experimental knob — it must stay decoupled from HEATMAP_EMA_ALPHA_DEFAULT,
+ * which module param ema_alpha tunes for position-smoothing experiments. */
+#define HEATMAP_WEIGHT_EMA_ALPHA          7
 
 /* Association radius multipliers per finger count (×10) */
 #define ASSOC_RADIUS_1_FINGER           22
