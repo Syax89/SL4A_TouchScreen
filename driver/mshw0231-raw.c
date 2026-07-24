@@ -811,9 +811,17 @@ static u32 raw_hungarian_match(struct spi_hid *shid,
 
 	/* Build cost matrix: matching Python oracle Hungarian.
 	 * In-range: 10*sqrt(dx²+dy²), out-of-range: 100,
-	 * empty/new slot: 1000. */
+	 * empty/new slot: 1000.
+	 *
+	 * Track-continuity bias (see HUNGARIAN_CONTINUITY_BONUS): an
+	 * in-range candidate that is a currently *claimed* slot
+	 * (state==2, i.e. an actively-tracked finger) gets a small
+	 * cost discount so the solver prefers keeping existing
+	 * tracking over a marginally cheaper swap between two claimed
+	 * slots (e.g. converging fingers during a pinch/rotate).  Not
+	 * applied to new/lift/hold slots — only actively-tracked ones
+	 * are worth protecting from an identity swap. */
 	for (row = 0; row < n_blobs; row++) {
-		u16 row_min = U16_MAX;
 		for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
 			s32 dx, dy;
 
@@ -825,93 +833,108 @@ static u32 raw_hungarian_match(struct spi_hid *shid,
 				if (dy < 0)
 					dy = -dy;
 				if ((u32)dx <= bmd && (u32)dy <= bmd) {
-				u32 d = (u32)dx * (u32)dx + (u32)dy * (u32)dy;
-				shid->cost[row][col] = (u16)(int_sqrt((u64)d) / HUNGARIAN_COST_IN_RANGE);
+					u32 d = (u32)dx * (u32)dx + (u32)dy * (u32)dy;
+					u16 c = (u16)(int_sqrt((u64)d) / HUNGARIAN_COST_IN_RANGE);
+
+					if (shid->blob_slot_state[col] == 2) {
+						if (c > HUNGARIAN_CONTINUITY_BONUS)
+							c -= HUNGARIAN_CONTINUITY_BONUS;
+						else
+							c = 0;
+					}
+					shid->cost[row][col] = c;
+				} else {
+					shid->cost[row][col] = HUNGARIAN_COST_OUT_RANGE;
+				}
 			} else {
-				shid->cost[row][col] = HUNGARIAN_COST_OUT_RANGE;
+				shid->cost[row][col] = HUNGARIAN_COST_EMPTY;
 			}
-		} else {
-			shid->cost[row][col] = HUNGARIAN_COST_EMPTY;
-			}
-			if (shid->cost[row][col] < row_min)
-				row_min = shid->cost[row][col];
 		}
-		/* Subtract row minimum. */
-		for (col = 0; col < HEATMAP_MAX_SLOTS; col++)
-			shid->cost[row][col] -= row_min;
 	}
 
-	/* Hungarian matching: accumulate one assignment per round. */
+	/* Hungarian algorithm (Kuhn-Munkres via successive shortest
+	 * augmenting paths with potentials), O(n^2 * m). This replaces
+	 * the previous greedy zero-assignment approach, which could
+	 * leave a blob unassigned even when a valid rearrangement of
+	 * existing assignments would have matched it (first row to
+	 * scan a shared zero grabbed it, starving a later row that had
+	 * no other in-range option).
+	 *
+	 * Internal arrays are 1-indexed (index 0 is a sentinel), the
+	 * classic e-maxx presentation; shid->cost[][] itself stays
+	 * 0-indexed. n_blobs <= HEATMAP_MAX_BLOBS <= HEATMAP_MAX_SLOTS
+	 * always holds. */
 	{
-		u8 row_match[HEATMAP_MAX_BLOBS];
-		u8 col_match[HEATMAP_MAX_SLOTS];
-		u8 row_cover[HEATMAP_MAX_BLOBS], col_cover[HEATMAP_MAX_SLOTS];
-		u8 round;
-		u16 min_val;
+		s32 u[HEATMAP_MAX_BLOBS + 1] = { 0 };
+		s32 v[HEATMAP_MAX_SLOTS + 1] = { 0 };
+		int p[HEATMAP_MAX_SLOTS + 1] = { 0 };
+		int way[HEATMAP_MAX_SLOTS + 1] = { 0 };
+		int i, j;
 
-		memset(row_match, 0xFF, sizeof(row_match));
-		memset(col_match, 0xFF, sizeof(col_match));
-		for (round = 0; round < n_blobs; round++) {
-			memset(row_cover, 0, sizeof(row_cover));
-			memset(col_cover, 0, sizeof(col_cover));
+		for (i = 1; i <= n_blobs; i++) {
+			s32 minv[HEATMAP_MAX_SLOTS + 1];
+			bool used[HEATMAP_MAX_SLOTS + 1] = { false };
+			int j0 = 0;
 
-			for (;;) {
-				u8 changed = 0;
+			p[0] = i;
+			for (j = 0; j <= HEATMAP_MAX_SLOTS; j++)
+				minv[j] = S32_MAX;
 
-				/* Select uncovered row with zero in an uncovered column. */
-				for (row = 0; row < n_blobs; row++) {
-					if (row_cover[row])
+			do {
+				int i0 = p[j0], j1 = -1;
+				s32 delta = S32_MAX;
+
+				used[j0] = true;
+				for (j = 1; j <= HEATMAP_MAX_SLOTS; j++) {
+					s32 cur;
+
+					if (used[j])
 						continue;
-					for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
-						if (col_cover[col])
-							continue;
-						if (shid->cost[row][col] == 0) {
-							row_match[row] = col;
-							col_match[col] = row;
-							row_cover[row] = 1;
-							col_cover[col] = 1;
-							changed = 1;
-							break;
-						}
+					cur = (s32)shid->cost[i0 - 1][j - 1] - u[i0] - v[j];
+					if (cur < minv[j]) {
+						minv[j] = cur;
+						way[j] = j0;
+					}
+					if (minv[j] < delta) {
+						delta = minv[j];
+						j1 = j;
 					}
 				}
-				if (changed)
-					continue;
+				for (j = 0; j <= HEATMAP_MAX_SLOTS; j++) {
+					if (used[j]) {
+						u[p[j]] += delta;
+						v[j] -= delta;
+					} else {
+						minv[j] -= delta;
+					}
+				}
+				j0 = j1;
+			} while (p[j0] != 0);
 
-				/* All uncovered costs > 0: find min and update. */
-				min_val = U16_MAX;
-				for (row = 0; row < n_blobs; row++) {
-					if (row_cover[row])
-						continue;
-					for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
-						if (col_cover[col])
-							continue;
-						if (shid->cost[row][col] < min_val)
-							min_val = shid->cost[row][col];
-					}
-				}
-				if (min_val == U16_MAX)
-					break;
+			do {
+				int j1 = way[j0];
 
-				for (row = 0; row < n_blobs; row++) {
-					for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
-						if (row_cover[row] && col_cover[col])
-							shid->cost[row][col] += min_val;
-						else if (!row_cover[row] && !col_cover[col])
-							shid->cost[row][col] -= min_val;
-					}
-				}
-			}
+				p[j0] = p[j1];
+				j0 = j1;
+			} while (j0);
 		}
 
-		/* Build final assignments from the matching.
-		 * Only keep matches with cost below the empty-slot penalty. */
+		/* Build final assignments from p[]. p[j] (1-indexed col)
+		 * holds the 1-indexed row assigned to it, 0 if unassigned.
+		 * Only keep matches whose slot is still within range —
+		 * p[] can validly assign a blob to a far-away *empty* slot
+		 * (cost ~1000) when nothing better exists; that empty-slot
+		 * creation case is accepted as-is, matching prior
+		 * behaviour. */
 		for (row = 0; row < n_blobs; row++)
 			assigned_slot[row] = 0xFF;
-		for (col = 0; col < HEATMAP_MAX_SLOTS; col++) {
+		for (j = 1; j <= HEATMAP_MAX_SLOTS; j++) {
 			s32 dx, dy;
 
-			row = col_match[col];
+			if (p[j] == 0)
+				continue;
+			row = (u8)(p[j] - 1);
+			col = (u8)(j - 1);
 			if (row >= n_blobs)
 				continue;
 			if (shid->blob_slot_state[col] >= 1) {

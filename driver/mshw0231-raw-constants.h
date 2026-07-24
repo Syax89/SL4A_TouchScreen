@@ -30,6 +30,17 @@
 #define HUNGARIAN_COST_EMPTY        1000
 #define HUNGARIAN_COST_SCALE         100
 #define HUNGARIAN_JUMP_REJECT_MARGIN  200
+/*
+ * Track-continuity bias: subtracted from the cost of a currently
+ * *claimed* (state==2) slot candidate so the assignment solver
+ * prefers keeping an actively-tracked finger on its existing slot
+ * over a marginally cheaper swap with another claimed slot (e.g.
+ * during a pinch or rotate where two fingers cross paths).
+ * FIRST-PASS VALUE, NOT EMPIRICALLY VALIDATED ON HARDWARE: chosen as
+ * half of HUNGARIAN_COST_IN_RANGE as a conservative starting point;
+ * needs tuning against real multi-finger gesture captures.
+ */
+#define HUNGARIAN_CONTINUITY_BONUS     5
 
 /* Slot state machine */
 #define HEATMAP_HOLD_RECOVERY_WEIGHT   4000
