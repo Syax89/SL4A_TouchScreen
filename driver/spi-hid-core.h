@@ -288,6 +288,7 @@ struct spi_hid {
 
 	/* Raw-mode handshake state for auto-retry on cold boot. */
 	struct delayed_work raw_handshake_watchdog; /* Handshake timeout/retry watchdog */
+	struct delayed_work raw_probe_retry_work;   /* Cold-boot retry continuation (non-blocking) */
 	int raw_handshake_retries_left;            /* Remaining handshake attempts */
 	u8 raw_handshake_wait_feature_defers;  /* WAIT_FEATURE deferral counter */
 	bool raw_handshake_confirmed;             /* Handshake successfully completed */

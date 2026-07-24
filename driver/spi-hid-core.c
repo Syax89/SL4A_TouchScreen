@@ -442,6 +442,7 @@ out:
 			cancel_delayed_work_sync(&shid->descreq_work);
 			cancel_delayed_work_sync(&shid->poll_work);
 			cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
+			cancel_delayed_work_sync(&shid->raw_probe_retry_work);
 			cancel_delayed_work_sync(&shid->feat_delay_work);
 			cancel_delayed_work_sync(&shid->stream_watchdog);
 		}
@@ -1170,6 +1171,54 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
  * mirrors those exact parameters. */
 #define RAW_HANDSHAKE_TIMEOUT_MS 2000
 #define RAW_HANDSHAKE_MAX_RETRIES 3
+#define RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS 5000
+
+/* Restart raw-mode discovery: D2->D0 power cycle then a fresh DESCREQ.
+ * On success, re-arms the watchdog with a margin longer than
+ * getfeat_delay_ms so the next feat_delay_work always has time to fire
+ * before the watchdog does; on failure, re-arms it at the short timeout
+ * so a transient SPI error still gets another attempt instead of leaving
+ * the sequencer stuck with no further retry.
+ *
+ * Caller holds seq_lock and has already confirmed removing/suspended/
+ * seq_enabled/raw_mode_active are still valid. */
+static void raw_handshake_restart_discovery(struct spi_hid *shid)
+{
+	struct device *dev = &shid->spi->dev;
+
+	if (spi_hid_vendor_init(shid)) {
+		dev_warn(dev, "SEQ: raw watchdog vendor recovery failed\n");
+		schedule_delayed_work(&shid->raw_handshake_watchdog,
+				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+		return;
+	}
+	if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
+		dev_warn(dev, "SEQ: raw watchdog DESCREQ retry failed\n");
+		schedule_delayed_work(&shid->raw_handshake_watchdog,
+				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+		return;
+	}
+	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
+	schedule_delayed_work(&shid->raw_handshake_watchdog,
+			      msecs_to_jiffies(getfeat_delay_ms + RAW_HANDSHAKE_TIMEOUT_MS + 1000));
+}
+
+/* Cold-boot retry continuation: fires RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS
+ * after the watchdog gives up on the first handshake attempt. Runs as its
+ * own delayed work instead of an inline msleep() so the watchdog callback
+ * never blocks its workqueue for 5 seconds. */
+static void spi_hid_raw_probe_retry_work(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(work, struct spi_hid, raw_probe_retry_work.work);
+
+	mutex_lock(&shid->seq_lock);
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    !READ_ONCE(shid->seq_enabled) || !shid->raw_mode_active)
+		goto out;
+	raw_handshake_restart_discovery(shid);
+out:
+	mutex_unlock(&shid->seq_lock);
+}
 
 static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 {
@@ -1197,26 +1246,9 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 			/* Reset state and let the IRQ thread re-discover. */
 			spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_WATCHDOG);
 			shid->raw_handshake_wait_feature_defers = 0;
-			mutex_unlock(&shid->seq_lock);
-			msleep(5000);
-			mutex_lock(&shid->seq_lock);
-			if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
-			    !READ_ONCE(shid->seq_enabled) || !shid->raw_mode_active) {
-				mutex_unlock(&shid->seq_lock);
-				return;
-			}
-			/* Restart: D2→D0 power cycle then DESCREQ. */
-			if (spi_hid_vendor_init(shid)) {
-				mutex_unlock(&shid->seq_lock);
-				return;
-			}
-			if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
-				mutex_unlock(&shid->seq_lock);
-				return;
-			}
-			spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
-			mutex_unlock(&shid->seq_lock);
-			return;
+			schedule_delayed_work(&shid->raw_probe_retry_work,
+					      msecs_to_jiffies(RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS));
+			goto out;
 		}
 		dev_err(dev, "SEQ: raw_mode handshake failed after %d attempts, falling back to standard HID\n",
 			shid->raw_probe_attempts + 1);
@@ -1260,26 +1292,10 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	 *
 	 * Cancel any pending feat_delay_work (otherwise
 	 * feat_delay_work's 5900ms timer and our 2000ms watchdog timer race —
-	 * the watchdog always fires first, creating an infinite reset loop).
-	 * Re-arm the watchdog with a timeout longer than getfeat_delay_ms so
-	 * the next feat_delay_work always has time to fire before us. */
+	 * the watchdog always fires first, creating an infinite reset loop). */
 	cancel_delayed_work(&shid->feat_delay_work);
 	shid->feat_delay_pending = false;
-	if (spi_hid_vendor_init(shid)) {
-		dev_warn(dev, "SEQ: raw watchdog vendor recovery failed\n");
-		schedule_delayed_work(&shid->raw_handshake_watchdog,
-				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
-		goto out;
-	}
-	if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
-		dev_warn(dev, "SEQ: raw watchdog DESCREQ retry failed\n");
-		schedule_delayed_work(&shid->raw_handshake_watchdog,
-				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
-		goto out;
-	}
-	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
-	schedule_delayed_work(&shid->raw_handshake_watchdog,
-			      msecs_to_jiffies(getfeat_delay_ms + RAW_HANDSHAKE_TIMEOUT_MS + 1000));
+	raw_handshake_restart_discovery(shid);
 out:
 	mutex_unlock(&shid->seq_lock);
 }
@@ -1453,7 +1469,7 @@ module_param(skip_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_getfeat,
 	"Skip GET_FEATURE, send SET_FEATURE directly after RPT_DESC");
 
-module_param(sl4a_debug_level, int, 0444);
+module_param(sl4a_debug_level, int, 0644);
 MODULE_PARM_DESC(sl4a_debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex");
 
 /* ── Raw-mode handshake timing (EXPERIMENTAL) ───────────────────── */
@@ -2633,6 +2649,7 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 	cancel_delayed_work_sync(&shid->descreq_work);
 	cancel_delayed_work_sync(&shid->poll_work);
 	cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
+	cancel_delayed_work_sync(&shid->raw_probe_retry_work);
 	cancel_delayed_work_sync(&shid->feat_delay_work);
 	cancel_delayed_work_sync(&shid->stream_watchdog);
 	cancel_work_sync(&shid->reset_work);
@@ -2789,6 +2806,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_WORK(&shid->error_work, spi_hid_error_work);
 	INIT_DELAYED_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
 	INIT_DELAYED_WORK(&shid->raw_handshake_watchdog, spi_hid_raw_handshake_watchdog);
+	INIT_DELAYED_WORK(&shid->raw_probe_retry_work, spi_hid_raw_probe_retry_work);
 	INIT_DELAYED_WORK(&shid->feat_delay_work, spi_hid_feat_delay_work);
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
