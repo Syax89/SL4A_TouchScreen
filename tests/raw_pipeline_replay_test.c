@@ -24,41 +24,37 @@
  * (both the far-apart and close-together fixtures report exactly 2
  * active MT slots at the right positions).
  *
- * KNOWN BUG found by this harness, affecting 3+ simultaneous blobs:
- * raw_detect_peaks() shares one global HEATMAP_MAX_PEAKS=16 budget
- * across every blob in the frame, and stops scanning the instant that
- * budget is hit. Its cross-shaped check only rejects a candidate cell
- * as "not a peak" when a TOUCHED neighbor exactly HEATMAP_PEAK_RADIUS
- * (5) cells away has a higher signal. On this hardware a real finger
- * blob is only ~2 grid cells in radius (72x48 cells over a ~292x195mm
- * panel is roughly 4mm/cell; a fingertip contact is ~8-12mm), so every
- * one of a blob's ~13 touched cells sits with only untouched
- * background 5 cells out in all 4 directions — the check never fires,
- * and EVERY touched cell of the blob (not just its true center)
- * independently qualifies as a "peak". Three well-separated fingers
- * (~13 peaks each, raster/row-major scan order) exhaust the 16-peak
- * budget partway through the second blob, so the third blob's row
- * range is never even reached by the scan. That blob's CCL component
- * is still found (peak detection doesn't gate CCL directly), but
- * raw_ccl_flood_fill()'s velocity-rejection check requires >=1
- * recorded peak within HEATMAP_VELOCITY_REJECT_RADIUS=6 of the blob's
- * centroid — with zero peaks recorded anywhere near it, it is silently
- * discarded even though its raw pixel count and weight are entirely
- * valid and above every other threshold. Confirmed mechanism (see the
- * investigation notes in the project session): shrinking the touch
- * fixtures to 5 touched cells/blob (15 total, under the 16 cap) makes
- * all 3 fingers detect correctly, isolating the cause to peak-budget
- * exhaustion rather than anything about blob count, position, or
- * Hungarian assignment. This is a pipeline-logic bug, fully
- * independent of the physical/sensing question a live 2-finger touch
- * on real hardware raised in this same session: it reproduces with
- * synthetic frames that bypass the sensor entirely, and specifically
- * requires 3+ simultaneous well-separated blobs (2 blobs can still
- * squeeze under the 16-peak cap with plenty of finger-sized blobs).
- * See test_n_finger() below: 3/4/5-finger checks are recorded with
- * CHECK_KNOWN_BUG() (tracked and printed, but excluded from process
- * exit status) rather than CHECK(), so `make test` stays green while
- * this remains visible and actively re-verified on every run.
+ * FIXED BUG found by this harness, affecting 3+ simultaneous blobs:
+ * raw_detect_peaks() used to compare each candidate cell against only
+ * 4 fixed points at exactly HEATMAP_PEAK_RADIUS cells away (one probe
+ * per axis) instead of scanning its full neighborhood. A real finger
+ * blob tapers smoothly across several concentric rings of decreasing
+ * signal, so a single-point probe at one exact distance almost always
+ * landed either outside the blob (untouched, trivially passed) or on
+ * a same-signal ring cell (not *strictly* greater, so also passed) —
+ * every touched cell of the blob (not just its true center)
+ * independently qualified as a "peak", ~13 per blob on this hardware's
+ * ~2-cell-radius fingertip contacts. Since raw_detect_peaks() shares
+ * one global HEATMAP_MAX_PEAKS=16 budget across the whole frame and
+ * scans in raster/row-major order, 2 blobs already exhausted it
+ * partway through the second one, so any 3rd+ blob's row range was
+ * never reached by the scan; its CCL component was still found (peak
+ * detection doesn't gate CCL directly), but raw_ccl_flood_fill()'s
+ * velocity-rejection check requires >=1 recorded peak within
+ * HEATMAP_VELOCITY_REJECT_RADIUS=6 of the blob's centroid, so it was
+ * silently discarded despite valid pixel count and weight. Fixed by
+ * replacing the 4-point probe with a true local-maximum scan over the
+ * full neighborhood (see the HEATMAP_PEAK_RADIUS comment in
+ * driver/mshw0231-raw-constants.h) — the blob's true center, being
+ * strictly higher signal than every other cell in the blob, always
+ * falls within radius of any of its own cells, so only the center
+ * now passes regardless of taper shape. This was a pipeline-logic
+ * bug, fully independent of the physical/sensing question a live
+ * 2-finger touch on real hardware raised in this same session: it
+ * reproduced with synthetic frames that bypass the sensor entirely.
+ * test_n_finger() below asserts normally (CHECK()) that 3/4/5-finger
+ * fixtures now report the correct slot count — a regression here
+ * would fail `make test`, not be silently tolerated.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,28 +75,11 @@
 
 static int passed;
 static int failed;
-static int known_bug_failed;
 
 #define CHECK(cond, msg, ...) do { \
 	if (!(cond)) { \
 		fprintf(stderr, "FAIL: " msg "\n", ##__VA_ARGS__); \
 		failed++; \
-	} else { \
-		passed++; \
-	} \
-} while (0)
-
-/* Same as CHECK(), but for the documented HEATMAP_MAX_PEAKS budget-
- * exhaustion bug above (3+ simultaneous blobs): tracked and printed
- * loudly on every run, but deliberately NOT counted in `failed` so it
- * doesn't flip make test's exit status. If this ever starts passing
- * (bug fixed) or a currently-passing scenario starts hitting it (bug
- * widened), the printed KNOWN-BUG counts below will change and should
- * be re-examined — this isn't a silent swallow. */
-#define CHECK_KNOWN_BUG(cond, msg, ...) do { \
-	if (!(cond)) { \
-		fprintf(stderr, "KNOWN-BUG: " msg "\n", ##__VA_ARGS__); \
-		known_bug_failed++; \
 	} else { \
 		passed++; \
 	} \
@@ -290,15 +269,13 @@ static void test_two_finger_close(void)
 
 /* ── Scenario: 3/4/5 fingers ──────────────────────────────────────── */
 
-/* See the KNOWN BUG block comment at the top of this file: 3+
- * simultaneous well-separated finger-sized blobs exhaust
+/* See the FIXED BUG block comment at the top of this file: 3+
+ * simultaneous well-separated finger-sized blobs used to exhaust
  * raw_detect_peaks()'s shared HEATMAP_MAX_PEAKS=16 budget before the
- * scan (which runs in raster/row-major order) ever reaches the later
- * blob(s), so they get silently dropped by the CCL near-peak check.
- * Recorded with CHECK_KNOWN_BUG(), not CHECK(): this is real, it's
- * reproduced with clean synthetic input with no hardware/sensing
- * involved, but it's tracked separately so `make test` stays green
- * while remaining fully visible and re-verified on every run. */
+ * scan (which runs in raster/row-major order) ever reached the later
+ * blob(s), silently dropping them at the CCL near-peak check. Fixed
+ * by the local-maximum neighborhood scan in raw_detect_peaks() — this
+ * now asserts normally, so a regression fails `make test`. */
 static void test_n_finger(const char *fixture, int expected)
 {
 	struct spi_hid shid;
@@ -310,9 +287,8 @@ static void test_n_finger(const char *fixture, int expected)
 		feed_frame(&shid, fixture);
 
 	int n = mt_record_active_count();
-	CHECK_KNOWN_BUG(n == expected, "%s: expected %d active MT slots, got %d "
-			"(HEATMAP_MAX_PEAKS budget exhaustion, see top-of-file comment)",
-			fixture, expected, n);
+	CHECK(n == expected, "%s: expected %d active MT slots, got %d",
+	      fixture, expected, n);
 	printf("  %s: %d active slot(s) (expected %d)\n", fixture, n, expected);
 	teardown_device(&shid);
 }
@@ -396,10 +372,7 @@ int main(void)
 	printf("-- hold and move --\n");
 	test_hold_and_move();
 
-	printf("raw_pipeline_replay_test: %d assertions passed, %d failures, %d known-bug failures\n",
-	       passed, failed, known_bug_failed);
-	if (known_bug_failed)
-		printf("  (see the HEATMAP_MAX_PEAKS block comment at the top of this file "
-		       "for the known-bug mechanism)\n");
+	printf("raw_pipeline_replay_test: %d assertions passed, %d failures\n",
+	       passed, failed);
 	return failed != 0;
 }
