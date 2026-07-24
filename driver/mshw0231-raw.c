@@ -344,6 +344,7 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 		u16 col, row;
 		s16 rise;
 		bool ok;
+		s32 dr, dc;
 
 		if (!shid->heatmap_touched[i])
 			continue;
@@ -355,19 +356,38 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 		if (rise < HEATMAP_TOUCH_MIN_RISE)
 			continue;
 
+		/* True local-maximum suppression over the full
+		 * (2*RADIUS+1)^2 neighborhood, not just 4 points at one
+		 * fixed exact distance. A real finger blob tapers smoothly
+		 * across several concentric rings of decreasing signal
+		 * (center highest, falling off toward the edges) — a
+		 * 4-point exact-distance check almost always finds its two
+		 * opposite sample points on the *same* ring (equal signal,
+		 * not strictly greater) or entirely outside the blob
+		 * (untouched), so it practically never rejects a non-center
+		 * cell. Scanning the whole neighborhood always finds the
+		 * blob's true (higher-signal) center within range of any
+		 * of its own cells, correctly leaving only the center as a
+		 * peak. */
 		ok = true;
-		if (col >= HEATMAP_PEAK_RADIUS && shid->heatmap_touched[i - HEATMAP_PEAK_RADIUS] &&
-		    shid->heatmap_signal[i - HEATMAP_PEAK_RADIUS] > rise)
-			ok = false;
-		if (col + HEATMAP_PEAK_RADIUS < ncols && shid->heatmap_touched[i + HEATMAP_PEAK_RADIUS] &&
-		    shid->heatmap_signal[i + HEATMAP_PEAK_RADIUS] > rise)
-			ok = false;
-		if (row >= HEATMAP_PEAK_RADIUS && shid->heatmap_touched[i - HEATMAP_PEAK_RADIUS * ncols] &&
-		    shid->heatmap_signal[i - HEATMAP_PEAK_RADIUS * ncols] > rise)
-			ok = false;
-		if (row + HEATMAP_PEAK_RADIUS < nrows && shid->heatmap_touched[i + HEATMAP_PEAK_RADIUS * ncols] &&
-		    shid->heatmap_signal[i + HEATMAP_PEAK_RADIUS * ncols] > rise)
-			ok = false;
+		for (dr = -(s32)HEATMAP_PEAK_RADIUS; ok && dr <= (s32)HEATMAP_PEAK_RADIUS; dr++) {
+			s32 nrow = (s32)row + dr;
+
+			if (nrow < 0 || nrow >= (s32)nrows)
+				continue;
+			for (dc = -(s32)HEATMAP_PEAK_RADIUS; dc <= (s32)HEATMAP_PEAK_RADIUS; dc++) {
+				s32 ncol = (s32)col + dc;
+				u32 nidx;
+
+				if ((dr == 0 && dc == 0) || ncol < 0 || ncol >= (s32)ncols)
+					continue;
+				nidx = (u32)nrow * ncols + (u32)ncol;
+				if (shid->heatmap_touched[nidx] && shid->heatmap_signal[nidx] > rise) {
+					ok = false;
+					break;
+				}
+			}
+		}
 		if (ok) {
 			peaks_col[npeaks] = col;
 			peaks_row[npeaks] = row;

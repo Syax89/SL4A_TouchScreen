@@ -9,7 +9,38 @@
 
 /* Peak detection */
 #define HEATMAP_MAX_PEAKS            16
-#define HEATMAP_PEAK_RADIUS           5
+/*
+ * Neighborhood radius for local-maximum suppression in
+ * raw_detect_peaks(): a touched cell is a "peak" only if no other
+ * touched cell within this Chebyshev radius has strictly higher
+ * signal. Must comfortably cover a real finger blob's full extent, so
+ * every non-center cell of the blob has its true (higher-signal)
+ * center inside its own search window and gets correctly rejected.
+ * Grid is 72 cols over ~292mm (~4.1mm/cell); a fingertip contact is
+ * ~8-12mm, i.e. roughly a 2-cell radius from center to edge.
+ *
+ * An earlier version of this check compared only 4 fixed points at
+ * exactly this distance (one cross-shaped probe per axis) instead of
+ * scanning the whole neighborhood. That cannot reject a smoothly
+ * tapering blob's non-center cells: a real finger blob has several
+ * concentric rings of decreasing signal, so a probe at one exact
+ * distance almost always lands either outside the blob (untouched,
+ * trivially passes) or on a same-signal ring cell (not *strictly*
+ * greater, so also passes) — every touched cell of the blob ends up
+ * independently qualifying as a "peak". Found by a synthetic-frame
+ * replay harness (tests/raw_pipeline_replay_test.c): ~13 spurious
+ * peaks per blob exhausted the shared HEATMAP_MAX_PEAKS budget after
+ * ~1-2 blobs, silently dropping any 3rd+ simultaneous touch before
+ * CCL's velocity-rejection check ever saw it. The full-neighborhood
+ * scan fixes this because the blob's true center — strictly higher
+ * signal than every other cell in the blob — always falls within
+ * radius of any of its own cells, correctly leaving only the center
+ * as a peak regardless of taper shape. Verified via replay to
+ * correctly detect 1-5 simultaneous synthetic blobs; the exact
+ * optimal radius may still benefit from real multi-finger hardware
+ * confirmation.
+ */
+#define HEATMAP_PEAK_RADIUS           2
 
 /* CCL flood-fill */
 #define HEATMAP_MIN_BLOB_PIXELS       2
