@@ -1,7 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/errno.h>
 #include <linux/kernel.h>
+/*
+ * linux/unaligned.h is the generic replacement for the old
+ * arch-specific asm/unaligned.h, introduced after Linux 6.8 (still the
+ * current Ubuntu 24.04 LTS kernel at the time of writing). __has_include
+ * avoids hardcoding the exact version boundary, which can vary with
+ * distro backports, and correctly picks up the host test build's own
+ * tests/linux-compat/linux/unaligned.h stub either way.
+ */
+#if __has_include(<linux/unaligned.h>)
 #include <linux/unaligned.h>
+#else
+#include <asm/unaligned.h>
+#endif
 
 #include "spi-hid-capimg.h"
 
