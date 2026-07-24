@@ -965,9 +965,16 @@ static void raw_update_slots(struct spi_hid *shid,
 					goto slot_unassigned;
 			}
 
-			/* Copy per-blob eigenvalues to the assigned slot. */
-			if (blob_idx < HEATMAP_MAX_BLOBS &&
-			    shid->blob_eigmaj[blob_idx] > 0) {
+			/* Copy per-blob eigenvalues to the assigned slot.
+			 * Must be unconditional: split sub-blobs legitimately
+			 * carry a zero ellipse (no eigen-decomposition was
+			 * computed for them), and that zero has to clear the
+			 * slot's previous ellipse state rather than leave it
+			 * unchanged. Otherwise raw_emit_mt() would keep
+			 * reporting stale MAJOR/MINOR/ORIENTATION from an
+			 * earlier frame right when two fingers converge and
+			 * split apart. */
+			if (blob_idx < HEATMAP_MAX_BLOBS) {
 				shid->eigmaj[s] = shid->blob_eigmaj[blob_idx];
 				shid->eigmin[s] = shid->blob_eigmin[blob_idx];
 				shid->eigori[s] = shid->blob_eigori[blob_idx];
