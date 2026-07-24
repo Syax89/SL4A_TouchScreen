@@ -83,7 +83,7 @@ The device descriptor register (read at `hid_desc_addr`) contains:
 Host:  write DESCREQ frame (10 bytes)
        [header: content_id=0x01, length=10]
        [body: known DESCREQ payload]
-       
+
 Device: responds with DEVICE_DESC (0x08)
         [header: content_id=0x08, length=30]
         [body: 20-byte hardware descriptor + 10-byte DESCREQ response]

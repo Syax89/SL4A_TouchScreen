@@ -1,3 +1,6 @@
+# tools/sl4a-touch.sh logs output (default path is repo root)
+sl4a-touch-diagnostics-*.txt
+
 # Build artifacts
 driver/*.o
 driver/*.ko

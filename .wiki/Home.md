@@ -8,7 +8,7 @@ standard HID single-touch, pen, and raw multi-touch via a V0 HID-over-SPI
 transport on the AMD FCH SPI controller.
 
 **Device**: MSHW0231 (045E:0C19), experimental 72×48 fallback grid
-**Transport**: HID-over-SPI V0 protocol (AMD Cezanne FCH SPI controller V2)  
+**Transport**: HID-over-SPI V0 protocol (AMD Cezanne FCH SPI controller V2)
 **Kernel**: historical research environment; see `docs/COMPATIBILITY.md`
 **Alignment**: experimental pipeline comparison, not a release claim
 

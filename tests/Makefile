@@ -20,7 +20,7 @@ c590_atan2_host_test: c590_atan2_host_test.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ c590_atan2_host_test.c
 
 raw_pipeline_math_test: raw_pipeline_math_test.c ../driver/mshw0231-raw-constants.h
-	$(CC) -std=gnu11 -Wall -Wextra -Werror $(LDFLAGS) -lm -o $@ raw_pipeline_math_test.c
+	$(CC) -std=gnu11 -Wall -Wextra -Werror $(LDFLAGS) -o $@ raw_pipeline_math_test.c -lm
 
 # ── raw_pipeline_replay_test: links the REAL driver/mshw0231-raw.c ──
 #
@@ -81,9 +81,9 @@ raw_pipeline_replay_test: raw_pipeline_replay_test.c \
 	$(CC) -std=gnu11 -Wall -Wextra -Werror \
 		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
 		-c -o $(RAW_STAGE_DIR)/spi-hid-capimg.o ../driver/spi-hid-capimg.c
-	$(CC) $(LDFLAGS) -lm -o $@ \
+	$(CC) $(LDFLAGS) -o $@ \
 		$(RAW_STAGE_DIR)/raw_pipeline_replay_test.o $(RAW_STAGE_DIR)/stubs.o \
-		$(RAW_STAGE_DIR)/mshw0231-raw.o $(RAW_STAGE_DIR)/spi-hid-capimg.o
+		$(RAW_STAGE_DIR)/mshw0231-raw.o $(RAW_STAGE_DIR)/spi-hid-capimg.o -lm
 
 test: protocol_test capimg_decoder_host_test c590_atan2_host_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test
 	./protocol_test

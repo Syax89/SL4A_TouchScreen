@@ -8,6 +8,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
+#include <linux/version.h>
 #include "spi-amd.h"
 
 #define AMD_SPI_CTRL0_REG	0x00
@@ -678,7 +679,7 @@ static const struct acpi_device_id spi_acpi_match[] = {
  */
 #endif
 
-static void amd_spi_remove(struct platform_device *pdev)
+static void amd_spi_do_remove(struct platform_device *pdev)
 {
 	struct spi_controller *host = platform_get_drvdata(pdev);
 
@@ -687,6 +688,28 @@ static void amd_spi_remove(struct platform_device *pdev)
 	spi_unregister_controller(host);
 	amd_trace(&pdev->dev, 1, "remove entered\n");
 }
+
+/*
+ * struct platform_driver's .remove changed from int-returning to
+ * void-returning in Linux 6.11 (the return value was never actually used
+ * by the driver core even before that). Kernels older than 6.11 -
+ * including Ubuntu 24.04 LTS's 6.8 series, still current at the time of
+ * writing - reject a void-returning .remove with a hard
+ * -Werror=incompatible-pointer-types build failure, so this can't just
+ * pick one signature.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+static int amd_spi_remove(struct platform_device *pdev)
+{
+	amd_spi_do_remove(pdev);
+	return 0;
+}
+#else
+static void amd_spi_remove(struct platform_device *pdev)
+{
+	amd_spi_do_remove(pdev);
+}
+#endif
 
 static struct platform_driver amd_spi_driver = {
 	.driver = {

@@ -15,7 +15,14 @@ jobs:
       - name: Check tracked whitespace
         run: |
           empty_tree="$(git hash-object -t tree /dev/null)"
-          git diff --check "$empty_tree" HEAD
+          # captures/, docs/acpi/, docs/decomp/, tools/windows_capture/, and
+          # traces/ hold verbatim forensic evidence (raw Windows/ACPI
+          # captures, iasl-decompiled tables, pasted decompiler output) —
+          # "fixing" their whitespace would mean editing evidence data.
+          # Everything else (real source and maintained docs) is checked.
+          git diff --check "$empty_tree" HEAD -- . \
+            ':!captures' ':!docs/acpi' ':!docs/decomp' \
+            ':!tools/windows_capture' ':!traces'
 
   host-tests:
     runs-on: ubuntu-24.04

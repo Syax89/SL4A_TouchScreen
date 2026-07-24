@@ -67,4 +67,3 @@ static const unsigned char hardcoded_report_descriptor[HARDCODED_RD_SIZE] = {
 };
 
 #endif
-
