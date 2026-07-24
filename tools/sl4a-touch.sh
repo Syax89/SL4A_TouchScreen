@@ -544,7 +544,7 @@ cmd_uninstall() {
 	echo ""
 	rule
 	echo -e "${GREEN}${BOLD}Uninstall complete.${NC} Reboot to unload the active driver."
-	echo "The git repo itself was not touched."
+	echo "To reinstall later: sudo ./tools/sl4a-touch.sh install"
 	rule
 }
 
