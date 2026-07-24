@@ -14,6 +14,9 @@ driver/..module*
 
 # Tests
 tests/protocol_test
+tests/capimg_decoder_host_test
+tests/c590_atan2_host_test
+tests/raw_pipeline_math_test
 tests/fch-test/*.o
 tests/fch-test/*.ko
 tests/fch-test/*.mod
