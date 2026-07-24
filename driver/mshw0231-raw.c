@@ -489,6 +489,17 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				}
 			}
 
+			/* Advance next_label unconditionally for every component
+			 * whose cells were just marked above, regardless of
+			 * whether it ends up rejected (noise/velocity) or split
+			 * below. If a rejected/split component's label were
+			 * reused by a later committed blob, the eigenvalue pass
+			 * further down (which rescans by bounding box and
+			 * matches on heatmap_label[idx] == label) could pick up
+			 * that earlier component's stale-labeled cells and
+			 * corrupt the second-moment sums for an unrelated blob. */
+			next_label++;
+
 			/* Filter noise: at least 2 pixels, peak signal >= 300,
 			 * and total weight >= blob_min_weight. The max_rise check
 			 * alone rejects residual noise after lift (typically
@@ -672,7 +683,6 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				}
 			}
 		}
-		next_label++;
 	}
 	return *nlabels;
 }
