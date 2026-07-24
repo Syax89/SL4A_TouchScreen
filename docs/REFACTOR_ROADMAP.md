@@ -85,8 +85,8 @@ and kernel are supported.
 - [x] Document module signing and Secure Boot for each supported distribution
       (`docs/ROLLBACK.md`).
 - [x] Make uninstall remove only artifacts owned by this package
-      (`tools/uninstall.sh` verifies ownership marker before touching config,
-      DKMS tree, or versioned source).
+      (`tools/sl4a-touch.sh uninstall` verifies ownership marker before
+      touching config, DKMS tree, or versioned source).
 
 Exit criteria: install, upgrade, rollback, and uninstall are deterministic and
 do not modify unrelated modules or configuration.

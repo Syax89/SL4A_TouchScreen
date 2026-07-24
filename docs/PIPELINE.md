@@ -92,7 +92,7 @@ Extracted from DLL `DAT_1808e0460` (file offset `0x8DF060`):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `raw_mode` | 0 | Raw heatmap + multi-touch; `install.sh --raw` enables it experimentally |
+| `raw_mode` | 0 | Raw heatmap + multi-touch; `sl4a-touch.sh install --raw` enables it experimentally |
 | `skip_getfeat` | 1 | Vendor-init activation path |
 | `ema_alpha` | 7 | EMA smoothing weight |
 | `blob_max_distance` | 3 | Hungarian base radius (cells) |

@@ -65,7 +65,7 @@ The original GET_FEATURE-based path:
 4. Send GET_FEATURE → device returns current ID5 state
 5. Send SET_FEATURE ID5=01 → observe whether a stream follows
 
-The `skip_getfeat=1` path is selected only by `install.sh --raw`. The standard
+The `skip_getfeat=1` path is selected only by `sl4a-touch.sh install --raw`. The standard
 installer profile remains standard HID mode until the raw validation matrix is
 complete.
 

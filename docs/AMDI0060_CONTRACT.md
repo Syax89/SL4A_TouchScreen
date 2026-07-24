@@ -17,7 +17,7 @@ interpretation, and raw-mode behavior belong to `sl4a-spi-hid`; see
 
 - The controller intentionally exports no ACPI modalias. It is loaded only by
   an explicit, post-login `modprobe sl4a-spi-amd` (`driver/spi-amd.c`).
-- The supplied activation path is `tools/activate-fch.sh`. It checks for
+- The supplied activation path is `tools/sl4a-touch.sh activate`. It checks for
   exactly one controller and touch ACPI node, refuses to displace an existing
   driver, loads controller then transport, verifies both bindings, and removes
   modules it loaded if activation fails.
@@ -67,7 +67,7 @@ interpretation, and raw-mode behavior belong to `sl4a-spi-hid`; see
   from a timeout.
 - The supported experiment recovery path is unloading `sl4a-spi-hid` before
   `sl4a-spi-amd`, then rebooting. Keep local or remote recovery access before
-  activation (`tools/activate-fch.sh`; `README.md`).
+  activation (`tools/sl4a-touch.sh activate`; `README.md`).
 
 ## Not Proven
 

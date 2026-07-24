@@ -61,7 +61,7 @@ when journal access was unavailable.
 On a supported Linux target with matching kernel headers:
 
 ```sh
-sudo ./tools/install.sh
+sudo ./tools/sl4a-touch.sh install --standard
 dkms status
 modinfo sl4a-spi-amd
 modinfo sl4a-spi-hid
@@ -79,7 +79,7 @@ state, and build output in `COMPATIBILITY.md`.
 
 Run each case only after login and after retaining a local console or remote
 shell for recovery. The install step must not bind the experimental controller.
-Activate it explicitly with `sudo ./tools/activate-fch.sh`; it refuses to
+Activate it explicitly with `sudo ./tools/sl4a-touch.sh activate`; it refuses to
 displace existing AMDI0060 or MSHW0231 drivers and verifies both bindings.
 Recover with `sudo modprobe -r sl4a-spi-hid sl4a-spi-amd` followed by a reboot.
 
@@ -89,10 +89,10 @@ testing:
 
 ```sh
 # Standard profile
-sudo ./tools/install.sh
+sudo ./tools/sl4a-touch.sh install --standard
 
 # Raw experimental profile
-sudo ./tools/install.sh --raw
+sudo ./tools/sl4a-touch.sh install --raw
 ```
 
 Do not run the raw matrix unless the raw profile is recorded in the result.

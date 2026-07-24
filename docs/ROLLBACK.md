@@ -18,7 +18,7 @@ in-tree `spi-amd` and no SL4A module loaded.
 ## Uninstalling the package
 
 ```sh
-sudo ./tools/uninstall.sh
+sudo ./tools/sl4a-touch.sh uninstall
 sudo reboot
 ```
 
@@ -29,7 +29,7 @@ left intact. After reboot, no SL4A artefact remains active.
 
 ```sh
 git checkout <release-tag>
-sudo ./tools/install.sh
+sudo ./tools/sl4a-touch.sh install
 sudo reboot
 ```
 

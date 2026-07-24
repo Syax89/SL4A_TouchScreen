@@ -11,10 +11,12 @@
 ```bash
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
-sudo ./tools/install.sh
+sudo ./tools/sl4a-touch.sh install
 ```
 
-The installer:
+Prompts interactively for a profile (standard HID, the supported default, or
+the experimental raw multitouch profile) unless `--standard`/`--raw` is
+given. The installer:
 1. Copies the driver source to `/usr/src/sl4a-touch-<version>/`
 2. Registers with DKMS
 3. Builds the two kernel modules
@@ -27,17 +29,24 @@ no module aliases, and are never bound automatically at boot.
 After login, only when a recovery shell or console is available, activate it:
 
 ```bash
-sudo ./tools/activate-fch.sh
+sudo ./tools/sl4a-touch.sh activate
 ```
 
 The command refuses to displace drivers already bound to AMDI0060 or MSHW0231,
 then verifies both bindings. Recovery is `sudo modprobe -r sl4a-spi-hid
 sl4a-spi-amd` followed by a reboot.
 
+### Status and diagnostics
+
+```bash
+./tools/sl4a-touch.sh status      # installed version, active profile, bound state — no root needed
+sudo ./tools/sl4a-touch.sh logs   # diagnostic bundle for bug reports
+```
+
 ### Uninstall
 
 ```bash
-sudo ./tools/uninstall.sh
+sudo ./tools/sl4a-touch.sh uninstall
 ```
 
 ## Manual Build
@@ -49,8 +58,12 @@ make -C /lib/modules/$(uname -r)/build M=$PWD modules
 # Manual install
 sudo cp sl4a-spi-amd.ko sl4a-spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
 sudo depmod -a
-sudo ./tools/activate-fch.sh
+sudo ./tools/sl4a-touch.sh activate
 ```
+
+(`./tools/sl4a-touch.sh rebuild` does the build + copy steps above in one
+command against the running kernel — developer use only; it bypasses DKMS,
+so it won't survive a kernel update.)
 
 ## Module Parameters
 
@@ -60,12 +73,12 @@ Load-time parameters in `/etc/modprobe.d/sl4a-spi-hid.conf`:
 options sl4a_spi_hid raw_mode=N
 ```
 
-`sudo ./tools/install.sh --raw` writes the experimental raw profile:
-`options sl4a_spi_hid raw_mode=Y skip_getfeat=Y`.
+`sudo ./tools/sl4a-touch.sh install --raw` writes the experimental raw profile:
+`options sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y`.
 
 | Parameter | Module default | Description |
 |-----------|---------|-------------|
-| `raw_mode` | N | Enable experimental raw heatmap + multi-touch mode with `install.sh --raw` |
+| `raw_mode` | N | Enable experimental raw heatmap + multi-touch mode with `sl4a-touch.sh install --raw` |
 | `skip_getfeat` | Y | Skip GET_FEATURE handshake |
 | `ema_alpha` | 7 | EMA smoothing coefficient (1-10) |
 | `blob_max_distance` | 3 | Hungarian association base radius (cells) |

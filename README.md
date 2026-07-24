@@ -105,23 +105,30 @@ supported.
 ```bash
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
-./tools/install.sh --check
-sudo ./tools/install.sh
+./tools/sl4a-touch.sh install --check
+sudo ./tools/sl4a-touch.sh install
 ```
+
+`install` prompts interactively for a profile (standard HID, the supported
+default, or the experimental raw multitouch profile) unless `--standard` or
+`--raw` is given explicitly. `--check` performs a read-only ACPI and
+build-prerequisite preflight and needs no root; `--force` only to investigate
+unsupported hardware.
 
 Only after login, with local/remote recovery access available, activate the
 experimental controller with:
 
 ```bash
-sudo ./tools/activate-fch.sh
+sudo ./tools/sl4a-touch.sh activate
 ```
 
 The command refuses to displace existing AMDI0060 or MSHW0231 drivers, then
 verifies both bindings. To recover after a failed experiment, run
 `sudo modprobe -r sl4a-spi-hid sl4a-spi-amd` and reboot. Use
-`sudo ./tools/install.sh --raw` only for the experimental raw heatmap profile.
-`--check` performs a read-only ACPI and build-prerequisite preflight; use
-`--force` only to investigate unsupported hardware.
+`sudo ./tools/sl4a-touch.sh install --raw` only for the experimental raw
+heatmap profile. `./tools/sl4a-touch.sh status` shows the installed version,
+active profile, and whether the driver is currently loaded and bound;
+`sudo ./tools/sl4a-touch.sh logs` collects a diagnostic bundle for bug reports.
 
 The DKMS installer contains dependency guidance for Arch/CachyOS,
 Ubuntu/Debian, Fedora, and openSUSE. Neither module exports aliases or has a
@@ -136,7 +143,7 @@ complete rollback and upgrade procedure.
   options sl4a_spi_hid raw_mode=N
 ```
 
-The explicit raw profile written by `install.sh --raw` uses
+The explicit raw profile written by `sl4a-touch.sh install --raw` uses
 `raw_mode=Y raw_input_beta=Y skip_getfeat=Y`. Every raw control is experimental
 and load-time-only. The complete release, diagnostic, and experimental contract
 is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).

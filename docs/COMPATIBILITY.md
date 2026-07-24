@@ -40,7 +40,7 @@ kept as an investigation artifact and is not a compatibility result.
 ## Known Constraints
 
 - The controlled-release profile is standard HID mode.
-- Raw mode is explicit opt-in through `install.sh --raw` and remains
+- Raw mode is explicit opt-in through `sl4a-touch.sh install --raw` and remains
   experimental until cold boot, resume, reload, pen, one through five fingers,
   and stress testing are recorded as E1 evidence.
 - Secure Boot is unqualified until a signed-module install result is recorded.

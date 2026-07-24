@@ -28,10 +28,10 @@ this DKMS package on another Surface, another AMD SPI controller, or a generic
 | Profile | `raw_mode` | Intended use | Release status |
 | --- | --- | --- | --- |
 | Standard | `N` | HID transport and descriptor discovery | Default for the planned controlled release |
-| Raw | `Y` | MSHW0231 CapImg capture and beta multitouch pipeline | Experimental; requires `install.sh --raw` |
+| Raw | `Y` | MSHW0231 CapImg capture and beta multitouch pipeline | Experimental; requires `sl4a-touch.sh install --raw` |
 
 The module's compiled default and the installer default are standard mode.
-`install.sh --raw` is required to write the experimental raw-mode profile.
+`sl4a-touch.sh install --raw` is required to write the experimental raw-mode profile.
 
 `raw_input_beta` controls publication of the decoded multitouch input device.
 Raw captures alone do not establish release-quality contact behavior.

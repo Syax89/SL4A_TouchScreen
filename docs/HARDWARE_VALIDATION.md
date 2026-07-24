@@ -12,7 +12,7 @@ assigned profile before each period:
 | Label | Profile | Purpose |
 | --- | --- | --- |
 | A | Standard HID package profile | Controlled-release candidate. |
-| B | Raw package profile (`install.sh --raw`) | Explicit experimental comparison. |
+| B | Raw package profile (`sl4a-touch.sh install --raw`) | Explicit experimental comparison. |
 | C | No SL4A package installed | Baseline control. |
 
 For each device, use a balanced cyclic order: `A-B-C`, `B-C-A`, or `C-A-B`.

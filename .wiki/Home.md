@@ -59,6 +59,7 @@ transport on the AMD FCH SPI controller.
 ```bash
 git clone git@github.com:Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
-sudo ./tools/install.sh
-# → Reboot; kernel ACPI aliases bind the modules
+sudo ./tools/sl4a-touch.sh install
+# → After login: sudo ./tools/sl4a-touch.sh activate
+#   (never automatic by design — no module aliases are exported)
 ```

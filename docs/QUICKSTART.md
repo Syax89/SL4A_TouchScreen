@@ -14,8 +14,11 @@ Get SL4A TouchScreen running on your Surface Laptop 4 (AMD) in 5 steps.
 ```bash
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
-sudo ./tools/install.sh
+sudo ./tools/sl4a-touch.sh install
 ```
+
+Prompts for a profile (standard HID, the supported default, or the
+experimental raw multitouch profile) unless `--standard`/`--raw` is given.
 
 ## 2. Secure Boot
 
@@ -34,7 +37,7 @@ Manager interface. See [`docs/ROLLBACK.md`](ROLLBACK.md) for the full procedure.
 Only after login, with a local console or remote shell available:
 
 ```bash
-sudo ./tools/activate-fch.sh
+sudo ./tools/sl4a-touch.sh activate
 ```
 
 The script binds the SL4A controller and HID transport. Keep shell access
@@ -43,15 +46,20 @@ available in case recovery is needed.
 ## 4. Verify
 
 ```bash
-ls /sys/bus/spi/devices/spi*
+./tools/sl4a-touch.sh status
 ```
 
-Look for a device node containing `spi 045E:0C19`. Confirm the driver is
-loaded:
+Shows the installed version, active profile, and whether the driver is
+currently loaded and bound — no root required. Or check manually:
 
 ```bash
+ls /sys/bus/spi/devices/spi*
 cat /sys/bus/spi/devices/spi*/modalias | grep 0C19
 ```
+
+Look for a device node containing `spi 045E:0C19`. If something looks wrong,
+`sudo ./tools/sl4a-touch.sh logs` collects a diagnostic bundle to attach to a
+bug report.
 
 ## 5. Recovery
 

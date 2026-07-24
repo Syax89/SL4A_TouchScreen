@@ -1,5 +1,56 @@
 # Changelog
 
+## refactor/sl4a-distribution (2026-07-24)
+
+### Raw multitouch pipeline
+
+- Replaced the greedy zero-assignment blob-to-slot matcher with a correct
+  Kuhn-Munkres augmenting-path Hungarian solver; added a track-continuity
+  cost bias so two actively-tracked fingers aren't swapped for a marginal
+  cost improvement during a pinch/rotate.
+- Scaled the ghost-merge radius down (not up) as finger count rises, so
+  genuinely distinct close fingers stop being merged into one at higher
+  density.
+- Fixed a CCL label-reuse bug that could corrupt a nearby blob's ellipse
+  data in dense multi-finger frames.
+- Fixed stale `TOUCH_MAJOR/MINOR/ORIENTATION` being reported after a blob
+  split.
+- Fixed `raw_detect_peaks()`: it compared each cell against only 4 fixed
+  points at one exact radius instead of scanning its full neighborhood,
+  so every touched cell of a blob (not just its center) counted as a
+  "peak" — exhausting the shared 16-peak-per-frame budget after 1-2
+  blobs and silently dropping any 3rd+ simultaneous finger. Replaced
+  with a true local-maximum neighborhood scan.
+- Closed a handshake-watchdog gap where a cold-boot retry timer could
+  tear down an already-confirmed-working raw stream.
+- Added `tests/raw_pipeline_replay_test.c`: links the real
+  `driver/mshw0231-raw.c` pipeline (not hand-written mirrors) against
+  saved synthetic heatmap fixtures (`tests/fixtures/raw-replay/`),
+  replaying 1-5 simultaneous synthetic touches through the actual code.
+  All two independently-verified bugs above (and the peak-detection fix)
+  were found and confirmed via this harness plus a double-blind
+  post-merge code review.
+- Verified on real Surface Laptop 4 hardware: single-touch confirmed
+  working end-to-end (raw `/dev/input` capture); simultaneous multi-touch
+  not yet re-verified on hardware after the peak-detection fix.
+
+### Installer consolidation
+
+- Replaced `tools/install.sh`, `tools/uninstall.sh`, `tools/activate-fch.sh`,
+  and `tools/rebuild_and_install.sh` with a single `tools/sl4a-touch.sh`
+  covering `install` / `uninstall` / `activate` / `status` / `logs` /
+  `rebuild`. `install` now prompts interactively for a profile (standard
+  HID, marked stable/recommended, vs. raw multitouch, marked
+  experimental) when run on a terminal without `--standard`/`--raw`;
+  non-interactive runs still default to standard.
+- Added `status` (installed vs. checkout version, active profile, loaded/
+  bound state — read-only, no root) and `logs` (single-file diagnostic
+  bundle: versions, DKMS/modprobe state, driver sysfs stats, filtered
+  dmesg — for bug reports).
+- Fixed a pre-existing bug in `install.sh` that made it fail to parse at
+  all under this system's bash (`*[|/\\]*` inside a `[[ ]]` bracket
+  expression needs the `|` escaped).
+
 ## 1.3.0 — Production Hardening (2026-07-23)
 
 ### Double-Blind Audit
