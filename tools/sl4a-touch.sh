@@ -351,6 +351,9 @@ cmd_install() {
 	else
 		command -v gcc >/dev/null 2>&1 || { echo "  missing: gcc"; MISSING=1; }
 	fi
+	if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
+		command -v openssl >/dev/null 2>&1 || { echo "  missing: openssl (needed to generate the DKMS signing key for Secure Boot)"; MISSING=1; }
+	fi
 	if [ "$MISSING" -ne 0 ]; then
 		echo ""
 		echo -e "${CYAN}Install missing packages with:${NC}"
@@ -379,6 +382,130 @@ cmd_install() {
 
 	if [ -e "$MODPROBE_CONF" ] && ! grep -q '^# SL4A_TouchScreen' "$MODPROBE_CONF"; then
 		fail "refusing to replace unowned $MODPROBE_CONF"
+	fi
+
+	local skip_activate=0
+
+	info "Step 2.5: Checking Secure Boot signing key..."
+	if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
+		if [ ! -f /var/lib/dkms/mok.pub ]; then
+			warn "Secure Boot is enabled but the DKMS signing key is missing."
+			info "Generating the signing key..."
+			if dkms generate_mok 2>/dev/null && [ -f /var/lib/dkms/mok.pub ]; then
+				pass "DKMS signing key generated at /var/lib/dkms/mok.pub"
+			else
+				info "'dkms generate_mok' did not produce the key. Generating it manually with openssl..."
+				openssl req -new -x509 -nodes -days 36500 -subj "/CN=SL4A_TouchScreen DKMS MOK/" \
+					-newkey rsa:2048 -keyout /var/lib/dkms/mok.key -out /var/lib/dkms/mok.pub 2>/dev/null || \
+					fail "Could not generate the DKMS signing key. Install 'openssl' and retry."
+				pass "DKMS signing key generated at /var/lib/dkms/mok.pub"
+			fi
+		else
+			pass "DKMS signing key found at /var/lib/dkms/mok.pub"
+		fi
+
+		info "Step 2.6: Checking MOK enrollment status..."
+		local mok_test_output
+		mok_test_output="$(mokutil --test-key /var/lib/dkms/mok.pub 2>&1 || true)"
+		if echo "$mok_test_output" | grep -qi "already enrolled"; then
+			pass "The MOK key is already enrolled — modules will load immediately"
+		else
+			warn "The MOK key is NOT yet enrolled. The kernel will refuse to load the signed modules until it is."
+			skip_activate=1
+			echo ""
+
+			if [ -t 0 ]; then
+				echo "╔══════════════════════════════════════════════════════════════╗"
+				echo "║  SECURE BOOT KEY ENROLLMENT REQUIRED                        ║"
+				echo "║──────────────────────────────────────────────────────────────║"
+				echo "║  The driver is installed but the kernel needs to trust the   ║"
+				echo "║  signing key before the modules can load. This takes two     ║"
+				echo "║  simple steps (do step 1 now, step 2 at the next boot).      ║"
+				echo "║                                                              ║"
+				echo "║  Step 1 of 2 — do this NOW:                                  ║"
+				echo "║    You will set a temporary password.                        ║"
+				echo "║    You need it only ONCE, at the next boot.                  ║"
+				echo "╚══════════════════════════════════════════════════════════════╝"
+				echo ""
+				read -r -p "Enroll the key now? [Y/n]: " enroll_choice
+				echo ""
+				case "$enroll_choice" in
+					[nN]*)
+						echo "╔══════════════════════════════════════════════════════════════╗"
+						echo "║  SKIPPED — the driver will NOT load until you enroll the    ║"
+						echo "║  key. When you are ready:                                    ║"
+						echo "║                                                              ║"
+						echo "║    sudo mokutil --import /var/lib/dkms/mok.pub              ║"
+						echo "║    sudo reboot                                               ║"
+						echo "║                                                              ║"
+						echo "║  At the blue MOK Manager screen after reboot:               ║"
+						echo "║    Enroll MOK → Continue → Yes → enter password → Reboot     ║"
+						echo "║                                                              ║"
+						echo "║  After login, the driver activates automatically.            ║"
+						echo "╚══════════════════════════════════════════════════════════════╝"
+						;;
+					*)
+						if mokutil --import /var/lib/dkms/mok.pub; then
+							pass "Key staged for enrollment."
+							echo ""
+							echo "╔══════════════════════════════════════════════════════════════╗"
+							echo "║  Step 2 of 2 — do this RIGHT NOW:                           ║"
+							echo "║──────────────────────────────────────────────────────────────║"
+							echo "║                                                              ║"
+							echo "║  1. REBOOT                                                     ║"
+							echo "║      sudo reboot                                              ║"
+							echo "║                                                              ║"
+							echo "║  2. BLUE SCREEN (MOK Manager)                                  ║"
+							echo "║      A blue screen appears BEFORE your operating system       ║"
+							echo "║      loads. THIS IS NORMAL. DO NOT PANIC. DO NOT SKIP IT.     ║"
+							echo "║      (If you miss it, it reappears at the next boot.)         ║"
+							echo "║                                                              ║"
+							echo "║  3. Enroll MOK                                                ║"
+							echo "║      Use the KEYBOARD (touch and mouse may not work here).    ║"
+							echo "║      Select: 'Enroll MOK'                                     ║"
+							echo "║      Then:    'Continue'                                      ║"
+							echo "║      Then:    'Yes'                                           ║"
+							echo "║                                                              ║"
+							echo "║  4. PASSWORD                                                   ║"
+							echo "║      Enter the password you set in step 1.                    ║"
+							echo "║                                                              ║"
+							echo "║  5. REBOOT                                                     ║"
+							echo "║      Select: 'Reboot'                                         ║"
+							echo "║                                                              ║"
+							echo "║  6. DONE                                                       ║"
+							echo "║      After login, the driver activates automatically.         ║"
+							echo "║      Nothing else to do. Verify with:                         ║"
+							echo "║        ./tools/sl4a-touch.sh status                           ║"
+							echo "║                                                              ║"
+							echo "║  ──────────────────────────────────────────────────────       ║"
+							echo "║  IN SHORT: reboot → blue screen → Enroll MOK → password →    ║"
+							echo "║  reboot → done.                                              ║"
+							echo "╚══════════════════════════════════════════════════════════════╝"
+						else
+							fail "Key enrollment was not completed (mokutil exited non-zero). No changes were made."
+						fi
+						;;
+				esac
+			else
+				echo "╔══════════════════════════════════════════════════════════════╗"
+				echo "║  SECURE BOOT KEY ENROLLMENT REQUIRED                        ║"
+				echo "║──────────────────────────────────────────────────────────────║"
+				echo "║  The driver is installed but the signing key must be         ║"
+				echo "║  enrolled before it can load. Run these commands:            ║"
+				echo "║                                                              ║"
+				echo "║    sudo mokutil --import /var/lib/dkms/mok.pub              ║"
+				echo "║    sudo reboot                                               ║"
+				echo "║                                                              ║"
+				echo "║  At the blue MOK Manager screen after reboot:               ║"
+				echo "║    Enroll MOK → Continue → Yes → enter password → Reboot     ║"
+				echo "║                                                              ║"
+				echo "║  After login, the driver activates automatically.            ║"
+				echo "║  Full guide: docs/ROLLBACK.md                                ║"
+				echo "╚══════════════════════════════════════════════════════════════╝"
+			fi
+		fi
+	else
+		pass "Secure Boot is disabled or mokutil is not available — no key enrollment needed"
 	fi
 
 	info "Step 3: Staging driver sources via DKMS ($SRC_DEST)..."
@@ -489,9 +616,17 @@ EOF
 	echo "  To remove:  sudo ./tools/sl4a-touch.sh uninstall"
 	rule
 
-	# Also load and bind it right now instead of making you reboot first.
-	info "Step 7: Activating now..."
-	cmd_activate
+	info "Step 7: Activating..."
+	if [ "$skip_activate" -eq 1 ]; then
+		warn "Activation is skipped — the MOK key must be enrolled first."
+		echo "  After you reboot and complete the key enrollment (see the"
+		echo "  instructions printed above), the driver will activate"
+		echo "  automatically on every boot. No further action needed."
+		echo ""
+		echo "  To verify after the reboot:  ./tools/sl4a-touch.sh status"
+	else
+		cmd_activate
+	fi
 }
 
 # ── uninstall ────────────────────────────────────────────────────────────
@@ -574,8 +709,25 @@ cmd_activate() {
 
 	if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
 		if [ ! -r /var/lib/dkms/mok.pub ]; then
-			warn "Secure Boot is enabled but no DKMS signing key was found at /var/lib/dkms/mok.pub."
-			echo "Run 'install' first — DKMS generates the key during the build."
+			echo ""
+			echo "╔══════════════════════════════════════════════════════════════╗"
+			echo "║  MISSING SIGNING KEY                                        ║"
+			echo "║──────────────────────────────────────────────────────────────║"
+			echo "║  Secure Boot is ON but the DKMS signing key does not exist.  ║"
+			echo "║                                                              ║"
+			echo "║  QUICK FIX (3 commands):                                    ║"
+			echo "║    1. sudo dkms generate_mok                                ║"
+			echo "║    2. sudo mokutil --import /var/lib/dkms/mok.pub          ║"
+			echo "║    3. sudo reboot                                           ║"
+			echo "║                                                              ║"
+			echo "║  At the blue MOK Manager screen after reboot:               ║"
+			echo "║    Enroll MOK → Continue → Yes → enter password → Reboot     ║"
+			echo "║                                                              ║"
+			echo "║  After login, the driver activates automatically.            ║"
+			echo "║                                                              ║"
+			echo "║  ALSO: running 'install' instead handles all of this         ║"
+			echo "║  for you automatically.                                      ║"
+			echo "╚══════════════════════════════════════════════════════════════╝"
 			exit 1
 		fi
 		# mokutil --test-key's exit code alone is unreliable: on this
@@ -609,8 +761,9 @@ cmd_activate() {
 					echo "  3. Select 'Enroll MOK' -> 'Continue' -> 'Yes'."
 					echo "  4. Enter the password you just set above."
 					echo "  5. Select 'Reboot'."
-					echo "  6. After login, run this command again:"
-					echo "       sudo ./tools/sl4a-touch.sh activate"
+				echo "  6. After login, the driver activates automatically"
+				echo "     (if installed via 'install'). Verify with:"
+				echo "       ./tools/sl4a-touch.sh status"
 				else
 					fail "Key enrollment was not completed (mokutil exited non-zero). Nothing was activated."
 				fi

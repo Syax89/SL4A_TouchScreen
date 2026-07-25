@@ -22,15 +22,19 @@ experimental raw multitouch profile) unless `--standard`/`--raw` is given.
 
 ## 2. Secure Boot
 
-If Secure Boot is enabled, enroll the DKMS MOK key before the module will
-load:
+The installer handles everything automatically — if Secure Boot is enabled,
+it generates the DKMS signing key and walks you through enrolling it. You just
+need a temporary password (used once at the next boot).
 
+If you skipped the enrollment prompt during installation:
 ```bash
+sudo dkms generate_mok
 sudo mokutil --import /var/lib/dkms/mok.pub
+sudo reboot
 ```
 
-Set a one-time password, reboot, and select **Enroll MOK** in the MOK
-Manager interface. See [`docs/ROLLBACK.md`](ROLLBACK.md) for the full procedure.
+At the blue MOK Manager screen: **Enroll MOK → Continue → Yes → enter password → Reboot**.
+After login the driver activates automatically.
 
 ## 3. Activate
 

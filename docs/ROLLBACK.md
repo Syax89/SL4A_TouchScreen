@@ -1,7 +1,9 @@
 # Rollback Procedure
 
-`sl4a-touch` does not auto-load or auto-bind at boot. Recovery from a failed
-activation is bounded and deterministic.
+`sl4a-touch` modules do not auto-load during kernel boot. The systemd
+activation service runs AFTER login (post-multi-user.target), so if
+activation hangs you always have a shell to recover with. Recovery from a
+failed activation is bounded and deterministic.
 
 ## After a failed or hung activation
 
@@ -46,11 +48,11 @@ from the repository checkout.
 
 ## Secure Boot and MOK
 
-The DKMS install generates a signing key at `/var/lib/dkms/mok.{key,pub}`.
-Modules are signed automatically, but the MOK public key must be enrolled
-once before the signed modules will load under Secure Boot.
+Running `sudo ./tools/sl4a-touch.sh install` handles the DKMS signing key
+generation and MOK enrollment automatically — it generates the key if missing,
+tells you exactly what to do, and prompts you to enroll it right away.
 
-### Enroll the DKMS MOK key
+### Enroll the DKMS MOK key manually
 
 ```sh
 sudo mokutil --import /var/lib/dkms/mok.pub
