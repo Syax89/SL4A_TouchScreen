@@ -127,6 +127,10 @@ static const char *spi_hid_seq_state_name(enum spi_hid_seq_state state)
 }
 
 /* Set the sequencer state machine to a new state. */
+#define RAW_HANDSHAKE_TIMEOUT_MS 2000
+#define RAW_HANDSHAKE_MAX_RETRIES 3
+#define RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS 5000
+
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason)
 {
@@ -144,6 +148,30 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 
 	if (new_state == SPI_HID_SEQ_WAIT_DESC)
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
+
+	/* Safety net: the device's data-ready IRQ is edge-triggered and can be
+	 * lost if it fires while we're still inside the SET_FEATURE write path
+	 * (mutex held). Without this, a missed edge means no further IRQ ever
+	 * arrives and the stream stalls forever with zero data. Arm a periodic
+	 * poller alongside the IRQ path as a backstop; whichever one observes
+	 * data first confirms the handshake and the other stays a no-op. */
+	if (new_state == SPI_HID_SEQ_DONE && shid->raw_mode_active) {
+		if (!shid->poll_interval_ms)
+			shid->poll_interval_ms = 20;
+		shid->poll_active = true;
+		schedule_delayed_work(&shid->poll_work, msecs_to_jiffies(shid->poll_interval_ms));
+
+		/* A "successful" SET_FEATURE write does not guarantee the device
+		 * actually starts streaming (observed hardware/firmware race: the
+		 * SPI transaction ACKs but no data ever follows). Both success
+		 * paths that reach DONE skip arming this watchdog entirely, so
+		 * without it a silently-inactive activation polls forever with
+		 * no automatic recovery. Arm it here unconditionally; it is a
+		 * no-op once raw_handshake_confirmed is set. */
+		if (!shid->raw_handshake_confirmed)
+			schedule_delayed_work(&shid->raw_handshake_watchdog,
+					      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+	}
 }
 
 static struct hid_ll_driver spi_hid_ll_driver;
@@ -1246,9 +1274,6 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
  * timer-based retry — CompleteTransferIfDoneOrStartResponseTimer arms a 2000ms response
  * timer, and CheckingResetRetryCountEntry retries up to 3 times before giving up. This
  * mirrors those exact parameters. */
-#define RAW_HANDSHAKE_TIMEOUT_MS 2000
-#define RAW_HANDSHAKE_MAX_RETRIES 3
-#define RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS 5000
 
 /* Restart raw-mode discovery: D2->D0 power cycle then a fresh DESCREQ.
  * On success, re-arms the watchdog with a margin longer than
@@ -1564,7 +1589,7 @@ MODULE_PARM_DESC(getfeat_delay_ms,
 	"Experimental delay in ms between RPT_DESC and GET_FEATURE (default 0; "
 	"Windows measured ~3.6 s, original protocol doc cited ~5.9 s)");
 
-static int stream_watchdog_ms = 0;  /* disabled by default, too aggressive for raw mode */
+static int stream_watchdog_ms = 2000;
 module_param(stream_watchdog_ms, int, 0444);
 MODULE_PARM_DESC(stream_watchdog_ms,
 	"Runtime streaming watchdog interval in ms (0=disable, Windows uses 2000)");
@@ -1644,13 +1669,16 @@ static void spi_hid_poll_work(struct work_struct *work)
 	u16 blen;
 
 	mutex_lock(&shid->seq_lock);
+	seq_dbg(shid, 3, "SEQ: poll_work tick (active=%d state=%d confirmed=%d)\n",
+		shid->poll_active, shid->seq_state, shid->raw_handshake_confirmed);
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
 	    !READ_ONCE(shid->seq_enabled))
 		goto out;
 	if (!shid->poll_active || shid->seq_state != SPI_HID_SEQ_DONE)
 		goto resched;
-	if (!shid->raw_handshake_confirmed)
-		goto resched;
+	/* Do NOT gate on raw_handshake_confirmed here: that flag is normally set
+	 * by the IRQ path, which is exactly what may never fire (lost edge).
+	 * This poller must be able to confirm the handshake itself below. */
 
 	ret = spi_hid_seq_read(shid, hdr, sizeof(hdr));
 	if (ret)
@@ -1699,6 +1727,14 @@ static void spi_hid_poll_work(struct work_struct *work)
 			seq_dbg(shid, 2, "SEQ: poller cid=0x%02x len=%u\n",
 				 shid->data_buf[7], rl);
 
+			if (shid->raw_mode_active && rl >= 3 && !shid->raw_handshake_confirmed) {
+				shid->raw_handshake_confirmed = true;
+				cancel_delayed_work(&shid->raw_handshake_watchdog);
+				cancel_delayed_work(&shid->raw_probe_retry_work);
+				seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed by poller (id=0x%02x)\n",
+					shid->data_buf[7]);
+			}
+
 			if (rl >= 3 && rl - 3 > avail) {
 				dev_warn_ratelimited(dev,
 					"SEQ: poller DATA report len=%u exceeds buffer (avail=%u), dropped\n",
@@ -1709,6 +1745,14 @@ static void spi_hid_poll_work(struct work_struct *work)
 
 			if (shid->raw_mode_active && shid->data_buf[7] == 0x0C &&
 			    shid->touch_input) {
+				if (stream_watchdog_ms > 0 && !shid->stream_watchdog_active) {
+					shid->stream_watchdog_active = true;
+					shid->stream_watchdog_data = shid->stat_data;
+					shid->stream_watchdog_misses = 0;
+					shid->stream_watchdog_reinits = 0;
+					schedule_delayed_work(&shid->stream_watchdog,
+							      msecs_to_jiffies(stream_watchdog_ms));
+				}
 				ret = mshw0231_raw_consume_v0(shid, &shid->data_buf[5], rblen - 5);
 				if (ret) {
 					dev_warn(dev, "SEQ: poller CapImg decode failed: %d (rblen=%u)\n", ret, rblen);
@@ -2275,22 +2319,25 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			return;
 		}
 
+		/* Confirm raw-mode handshake on any data frame (not just heatmap), since device
+		 * may send standard HID reports without type-0x0C frames. */
+		if (shid->raw_mode_active && rl >= 3 && !shid->raw_handshake_confirmed) {
+			shid->raw_handshake_confirmed = true;
+			cancel_delayed_work(&shid->raw_handshake_watchdog);
+			cancel_delayed_work(&shid->raw_probe_retry_work);
+			seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed (first data frame: id=0x%02x)\n", body[7]);
+		}
+
 		if (shid->raw_mode_active && body[7] == 0x0C && shid->touch_input) {
 			int cret;
 
-			if (!shid->raw_handshake_confirmed) {
-				shid->raw_handshake_confirmed = true;
-				cancel_delayed_work(&shid->raw_handshake_watchdog);
-				cancel_delayed_work(&shid->raw_probe_retry_work);
-				seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed (first heatmap frame received)\n");
-				if (stream_watchdog_ms > 0 && !shid->stream_watchdog_active) {
-					shid->stream_watchdog_active = true;
-					shid->stream_watchdog_data = shid->stat_data;
-					shid->stream_watchdog_misses = 0;
-					shid->stream_watchdog_reinits = 0;
-					schedule_delayed_work(&shid->stream_watchdog,
-							      msecs_to_jiffies(stream_watchdog_ms));
-				}
+			if (stream_watchdog_ms > 0 && !shid->stream_watchdog_active) {
+				shid->stream_watchdog_active = true;
+				shid->stream_watchdog_data = shid->stat_data;
+				shid->stream_watchdog_misses = 0;
+				shid->stream_watchdog_reinits = 0;
+				schedule_delayed_work(&shid->stream_watchdog,
+						      msecs_to_jiffies(stream_watchdog_ms));
 			}
 			if (raw_input_beta) {
 				cret = mshw0231_raw_consume_v0(shid, &body[5], rblen - 5);
