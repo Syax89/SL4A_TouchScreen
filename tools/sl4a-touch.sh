@@ -391,15 +391,23 @@ cmd_install() {
 		if [ ! -f /var/lib/dkms/mok.pub ]; then
 			warn "Secure Boot is enabled but the DKMS signing key is missing."
 			info "Generating the signing key..."
+			# mokutil requires a DER-encoded certificate.
 			if dkms generate_mok 2>/dev/null && [ -f /var/lib/dkms/mok.pub ]; then
 				pass "DKMS signing key generated at /var/lib/dkms/mok.pub"
 			else
 				info "'dkms generate_mok' did not produce the key. Generating it manually with openssl..."
 				openssl req -new -x509 -nodes -days 36500 -subj "/CN=SL4A_TouchScreen DKMS MOK/" \
-					-newkey rsa:2048 -keyout /var/lib/dkms/mok.key -out /var/lib/dkms/mok.pub 2>/dev/null || \
+					-newkey rsa:2048 -keyout /var/lib/dkms/mok.key -outform DER -out /var/lib/dkms/mok.pub 2>/dev/null || \
 					fail "Could not generate the DKMS signing key. Install 'openssl' and retry."
 				pass "DKMS signing key generated at /var/lib/dkms/mok.pub"
 			fi
+		elif ! openssl x509 -in /var/lib/dkms/mok.pub -inform DER -noout 2>/dev/null; then
+			warn "Existing DKMS signing key at /var/lib/dkms/mok.pub is not DER-encoded; mokutil cannot import it."
+			info "Re-encoding the existing certificate as DER (no new key pair is generated)..."
+			openssl x509 -in /var/lib/dkms/mok.pub -out /var/lib/dkms/mok.pub.der -outform DER 2>/dev/null \
+				&& mv /var/lib/dkms/mok.pub.der /var/lib/dkms/mok.pub \
+				|| fail "Could not re-encode the existing signing key as DER."
+			pass "DKMS signing key re-encoded as DER at /var/lib/dkms/mok.pub"
 		else
 			pass "DKMS signing key found at /var/lib/dkms/mok.pub"
 		fi
@@ -625,7 +633,14 @@ EOF
 		echo ""
 		echo "  To verify after the reboot:  ./tools/sl4a-touch.sh status"
 	else
-		cmd_activate
+		local requested_raw_mode="N"
+		[ "$PROFILE" = "raw" ] && requested_raw_mode="Y"
+		if [ -r /sys/module/sl4a_spi_hid/parameters/raw_mode ] && \
+		   [ "$(cat /sys/module/sl4a_spi_hid/parameters/raw_mode)" != "$requested_raw_mode" ]; then
+			warn "The selected profile changes a load-time-only module parameter. Reboot to apply it."
+		else
+			cmd_activate
+		fi
 	fi
 }
 
@@ -708,6 +723,13 @@ cmd_activate() {
 	fail_rollback() { rollback; fail "$1; modules loaded by this command were rolled back"; }
 
 	if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
+		# Re-encode a legacy PEM certificate for mokutil.
+		if [ -r /var/lib/dkms/mok.pub ] && ! openssl x509 -in /var/lib/dkms/mok.pub -inform DER -noout 2>/dev/null; then
+			warn "Existing DKMS signing key at /var/lib/dkms/mok.pub is not DER-encoded; re-encoding..."
+			openssl x509 -in /var/lib/dkms/mok.pub -out /var/lib/dkms/mok.pub.der -outform DER 2>/dev/null \
+				&& mv /var/lib/dkms/mok.pub.der /var/lib/dkms/mok.pub \
+				&& pass "DKMS signing key re-encoded as DER at /var/lib/dkms/mok.pub"
+		fi
 		if [ ! -r /var/lib/dkms/mok.pub ]; then
 			echo ""
 			echo "╔══════════════════════════════════════════════════════════════╗"
@@ -795,10 +817,12 @@ cmd_activate() {
 	# Surface Laptop 4. The check above (exactly one MSHW0231) is what
 	# actually identifies the touchscreen; that's sufficient.
 
-	if [ -L "$controller_platform/driver" ]; then
+	if [ -L "$controller_platform/driver" ] && \
+	   [ "$(bound_driver "$controller_platform")" != "$CONTROLLER_DRIVER" ]; then
 		fail "AMDI0060 is already bound to $(bound_driver "$controller_platform"); refusing to displace it"
 	fi
-	if [ -L "$touch/physical_node/driver" ]; then
+	if [ -L "$touch/physical_node/driver" ] && \
+	   [ "$(bound_driver "$touch/physical_node")" != "$HID_DRIVER" ]; then
 		fail "MSHW0231 is already bound to $(bound_driver "$touch/physical_node"); refusing to displace it"
 	fi
 
