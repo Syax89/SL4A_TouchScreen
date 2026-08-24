@@ -28,7 +28,7 @@ assert "controller_platform" in tool
 assert 'refusing to displace it' in tool
 assert 'modprobe -r "$HID_MODULE"' in tool
 assert 'modprobe -r "$CONTROLLER_MODULE"' in tool
-assert 'MSHW0231 did not bind to the HID transport' in tool
+assert 'touchscreen did not bind to the HID transport' in tool
 assert "grep -q '^obj-m += sl4a-spi-amd.o$'" in tool
 assert "grep -q '^obj-m += sl4a-spi-hid.o$'" in tool
 assert "grep -q '^# SL4A_TouchScreen'" in tool
