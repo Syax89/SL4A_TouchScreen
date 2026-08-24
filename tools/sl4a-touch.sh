@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================================
 # sl4a-touch.sh — unified install / uninstall / activate / status / logs /
-# rebuild tool for the SL4A_TouchScreen driver (Surface Laptop 4 AMD
-# touchscreen, MSHW0231 over AMDI0060).
+# rebuild tool for the SL4A_TouchScreen driver (Surface Laptop 3/4 AMD
+# touchscreen, MSHW0231 / MSHW0162 over AMDI0060).
 #
 # Replaces the previously separate tools/install.sh, tools/uninstall.sh,
 # tools/activate-fch.sh, and tools/rebuild_and_install.sh with one entry
@@ -84,6 +84,19 @@ fi
 
 acpi_device_present() {
 	compgen -G "$SYSFS_ROOT/bus/acpi/devices/$1:*" >/dev/null
+}
+
+# Echo the touchscreen ACPI ID (MSHW0231 on SL4, MSHW0162 on SL3 AMD),
+# or nothing (and non-zero) if neither is present.
+touchscreen_acpi_id() {
+	local id
+	for id in MSHW0231 MSHW0162; do
+		if acpi_device_present "$id"; then
+			echo "$id"
+			return 0
+		fi
+	done
+	return 1
 }
 
 bound_driver() {
@@ -269,7 +282,7 @@ cmd_install() {
 	esac
 
 	header "SL4A_TouchScreen driver installer — v${PKG_VERSION}"
-	echo "Surface Laptop 4 (AMD) touchscreen — MSHW0231"
+	echo "Surface Laptop 3/4 (AMD) touchscreen — MSHW0231 / MSHW0162"
 	echo "Distro detected: $ID (${ID_LIKE:-unknown})"
 	echo ""
 
@@ -304,35 +317,38 @@ cmd_install() {
 
 	info "Step 1: Checking hardware..."
 	local missing_hardware=""
-	if ! acpi_device_present "MSHW0231"; then missing_hardware="MSHW0231"; fi
+	# SL4 uses MSHW0231, SL3 (AMD) uses MSHW0162 — either is fine, AMDI0060 is required.
+	if ! acpi_device_present "MSHW0231" && ! acpi_device_present "MSHW0162"; then
+		missing_hardware="MSHW0231/MSHW0162"
+	fi
 	if ! acpi_device_present "AMDI0060"; then missing_hardware="${missing_hardware:+$missing_hardware, }AMDI0060"; fi
 	if [ -n "$missing_hardware" ]; then
 		if [ "$FORCE" -eq 1 ]; then
 			warn "expected ACPI device(s) not found: $missing_hardware. Continuing only because --force was supplied."
 		else
-			fail "expected Surface Laptop 4 AMD hardware not found: $missing_hardware (use --force to override)"
+			fail "expected Surface Laptop 3/4 AMD hardware not found: $missing_hardware (use --force to override)"
 		fi
 	else
-		pass "MSHW0231 and AMDI0060 found"
+		pass "MSHW0231/MSHW0162 and AMDI0060 found"
 	fi
 
 	if [ -r "$DMI_ROOT/product_name" ]; then
 		local product_name
 		product_name="$(tr -d '\n' < "$DMI_ROOT/product_name")"
-		if [ "$product_name" != "Surface Laptop 4" ]; then
+		if [ "$product_name" != "Surface Laptop 4" ] && [ "$product_name" != "Surface Laptop 3" ]; then
 			if [ "$FORCE" -eq 1 ]; then
-				warn "expected DMI product Surface Laptop 4, found: $product_name"
+				warn "expected DMI product Surface Laptop 3/4, found: $product_name"
 			else
-				fail "expected DMI product Surface Laptop 4, found: $product_name (use --force to override)"
+				fail "expected DMI product Surface Laptop 3/4, found: $product_name (use --force to override)"
 			fi
 		else
-			pass "Surface Laptop 4 DMI product found"
+			pass "Surface Laptop 3/4 DMI product found"
 		fi
 	else
 		if [ "$FORCE" -eq 1 ]; then
 			warn "DMI product name unavailable; continuing only because --force was supplied"
 		else
-			fail "DMI product name unavailable; use --force to bypass the Surface Laptop 4 check"
+			fail "DMI product name unavailable; use --force to bypass the Surface Laptop 3/4 check"
 		fi
 	fi
 
@@ -584,7 +600,7 @@ EOF
 	cat > "$tmp_config" <<EOF
 # SL4A_TouchScreen — installed by tools/sl4a-touch.sh, removed by 'uninstall'.
 [Unit]
-Description=SL4A_TouchScreen driver activation (Surface Laptop 4 AMD touchscreen)
+Description=SL4A_TouchScreen driver activation (Surface Laptop 3/4 AMD touchscreen)
 After=multi-user.target
 Wants=multi-user.target
 
@@ -784,22 +800,28 @@ cmd_activate() {
 	local controller="${controllers[0]}"
 	local controller_platform="/sys/bus/platform/devices/$(basename "$controller")"
 	[ -d "$controller_platform" ] || fail "AMDI0060 platform device is absent"
-	local touches=(/sys/bus/acpi/devices/MSHW0231:*)
-	[ "${#touches[@]}" -eq 1 ] || fail "expected exactly one MSHW0231 ACPI device"
+	# Touchscreen node: MSHW0231 (SL4) or MSHW0162 (SL3 AMD) — exactly one of the two.
+	local touches=()
+	local mshw
+	for mshw in MSHW0231 MSHW0162; do
+		local matches=(/sys/bus/acpi/devices/${mshw}:*)
+		[ -e "${matches[0]}" ] && touches+=("${matches[@]}")
+	done
+	[ "${#touches[@]}" -eq 1 ] || fail "expected exactly one MSHW0231/MSHW0162 ACPI device"
 	local touch="${touches[0]}"
 	# Note: earlier versions of this check also refused to proceed if any
 	# OTHER "MSHW*" ACPI device existed at all. That's not a meaningful
 	# safety signal on real Surface hardware, which always exposes several
 	# unrelated MSHW* nodes (keyboard, sensors, battery, ...) with their own
 	# drivers already bound — it made activation impossible on every real
-	# Surface Laptop 4. The check above (exactly one MSHW0231) is what
+	# Surface Laptop 3/4. The check above (exactly one MSHW0231/MSHW0162) is what
 	# actually identifies the touchscreen; that's sufficient.
 
 	if [ -L "$controller_platform/driver" ]; then
 		fail "AMDI0060 is already bound to $(bound_driver "$controller_platform"); refusing to displace it"
 	fi
 	if [ -L "$touch/physical_node/driver" ]; then
-		fail "MSHW0231 is already bound to $(bound_driver "$touch/physical_node"); refusing to displace it"
+		fail "touchscreen is already bound to $(bound_driver "$touch/physical_node"); refusing to displace it"
 	fi
 
 	[ ! -d "/sys/module/${CONTROLLER_MODULE//-/_}" ] && controller_loaded=1
@@ -808,9 +830,9 @@ cmd_activate() {
 
 	[ ! -d "/sys/module/${HID_MODULE//-/_}" ] && hid_loaded=1
 	modprobe "$HID_MODULE" || fail_rollback "could not load HID transport"
-	wait_for_driver "$touch/physical_node" "$HID_DRIVER" || fail_rollback "MSHW0231 did not bind to the HID transport"
+	wait_for_driver "$touch/physical_node" "$HID_DRIVER" || fail_rollback "touchscreen did not bind to the HID transport"
 
-	pass "AMDI0060 and MSHW0231 are bound"
+	pass "AMDI0060 and touchscreen are bound"
 	echo "Recovery: sudo modprobe -r sl4a-spi-hid sl4a-spi-amd; reboot."
 }
 
@@ -851,24 +873,28 @@ cmd_status() {
 
 	echo ""
 	echo "Hardware:"
-	if acpi_device_present "MSHW0231" && acpi_device_present "AMDI0060"; then
-		pass "  MSHW0231 and AMDI0060 present"
+	if [ -n "$(touchscreen_acpi_id)" ] && acpi_device_present "AMDI0060"; then
+		pass "  touchscreen ($(touchscreen_acpi_id)) and AMDI0060 present"
 	else
-		warn "  Expected ACPI devices not found — this may not be a Surface Laptop 4 AMD"
+		warn "  Expected ACPI devices not found — this may not be a Surface Laptop 3/4 AMD"
 	fi
 
 	echo ""
 	echo "Runtime state:"
 	if [ -d "/sys/module/${HID_MODULE//-/_}" ]; then
 		pass "  $HID_MODULE is loaded"
-		local touches=(/sys/bus/acpi/devices/MSHW0231:*)
-		if [ "${#touches[@]}" -eq 1 ]; then
-			local bound
-			bound="$(bound_driver "${touches[0]}/physical_node" 2>/dev/null || true)"
-			if [ "$bound" = "$HID_DRIVER" ]; then
-				pass "  MSHW0231 is bound to $HID_DRIVER"
-			else
-				info "  MSHW0231 is not bound to $HID_DRIVER yet — run 'activate'"
+		local ts_id
+		ts_id="$(touchscreen_acpi_id)" || true
+		if [ -n "$ts_id" ]; then
+			local touches=(/sys/bus/acpi/devices/${ts_id}:*)
+			if [ "${#touches[@]}" -eq 1 ]; then
+				local bound
+				bound="$(bound_driver "${touches[0]}/physical_node" 2>/dev/null || true)"
+				if [ "$bound" = "$HID_DRIVER" ]; then
+					pass "  $ts_id is bound to $HID_DRIVER"
+				else
+					info "  $ts_id is not bound to $HID_DRIVER yet — run 'activate'"
+				fi
 			fi
 		fi
 	else
@@ -919,7 +945,13 @@ cmd_logs() {
 		echo ""
 
 		echo "--- Hardware ---"
-		acpi_device_present "MSHW0231" && echo "MSHW0231: present" || echo "MSHW0231: NOT FOUND"
+		local ts_id
+		ts_id="$(touchscreen_acpi_id)" || true
+		if [ -n "$ts_id" ]; then
+			echo "$ts_id: present"
+		else
+			echo "touchscreen ACPI (MSHW0231/MSHW0162): NOT FOUND"
+		fi
 		acpi_device_present "AMDI0060" && echo "AMDI0060: present" || echo "AMDI0060: NOT FOUND"
 		[ -r "$DMI_ROOT/product_name" ] && echo "DMI product: $(tr -d '\n' < "$DMI_ROOT/product_name")"
 		echo ""
@@ -947,20 +979,24 @@ cmd_logs() {
 
 		echo ""
 		echo "--- Driver sysfs stats (if bound) ---"
-		local touches=(/sys/bus/acpi/devices/MSHW0231:*)
-		if [ "${#touches[@]}" -eq 1 ]; then
-			local dev="/sys/bus/platform/devices/$(basename "$(dirname "${touches[0]}")" 2>/dev/null)"
-			local spidev
-			spidev=$(find /sys/devices -maxdepth 6 -path '*spi-MSHW0231:00' -type d 2>/dev/null | head -1)
-			if [ -n "$spidev" ]; then
-				for f in lifecycle_status seq_state protocol_stats baseline_status; do
-					if [ -r "$spidev/$f" ]; then
-						echo "-- $f --"
-						cat "$spidev/$f"
-					fi
-				done
-			else
-				echo "(spi-MSHW0231:00 sysfs node not found — driver not bound)"
+		local ts_id
+		ts_id="$(touchscreen_acpi_id)" || true
+		if [ -n "$ts_id" ]; then
+			local touches=(/sys/bus/acpi/devices/${ts_id}:*)
+			if [ "${#touches[@]}" -eq 1 ]; then
+				local dev="/sys/bus/platform/devices/$(basename "$(dirname "${touches[0]}" 2>/dev/null)")"
+				local spidev
+				spidev=$(find /sys/devices -maxdepth 6 -path "*spi-${ts_id}:00" -type d 2>/dev/null | head -1)
+				if [ -n "$spidev" ]; then
+					for f in lifecycle_status seq_state protocol_stats baseline_status; do
+						if [ -r "$spidev/$f" ]; then
+							echo "-- $f --"
+							cat "$spidev/$f"
+						fi
+					done
+				else
+					echo "(spi-${ts_id}:00 sysfs node not found — driver not bound)"
+				fi
 			fi
 		fi
 
@@ -974,7 +1010,7 @@ cmd_logs() {
 
 		echo ""
 		echo "--- dmesg (driver-related lines) ---"
-		dmesg | grep -iE "sl4a|MSHW0231|AMDI0060" | tail -300
+		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -300
 	} > "$OUT"
 
 	chmod 644 "$OUT" 2>/dev/null || true

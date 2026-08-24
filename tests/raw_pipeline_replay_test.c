@@ -125,10 +125,22 @@ static void feed_frame(struct spi_hid *shid, const char *fixture_name)
 
 static void setup_device(struct spi_hid *shid, struct spi_device *spidev)
 {
+	/* SL4 (MSHW0231) tuning: 72x48 grid, 3456 capimg samples, 30-frame
+	 * baseline, EMA alpha 7 — mirrors the driver's current defaults
+	 * (alpha 7 = Windows-documented 12.5% baseline recovery). */
+	static const struct spi_hid_dev_cfg sl4_cfg = {
+		.capimg_raster_samples   = 3456,
+		.heatmap_baseline_needed = 30,
+		.heatmap_baseline_alpha  = 7,
+		.grid_cols               = 72,
+		.grid_rows               = 48,
+	};
+
 	memset(shid, 0, sizeof(*shid));
 	memset(spidev, 0, sizeof(*spidev));
 	shid->spi = spidev;
 	shid->raw_mode_active = true;
+	shid->cfg = &sl4_cfg;
 
 	mshw0231_raw_init(shid);
 	if (mshw0231_raw_input_register(shid) != 0 || !shid->touch_input) {

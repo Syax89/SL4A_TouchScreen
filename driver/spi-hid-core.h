@@ -48,6 +48,15 @@
 #define HEATMAP_MAX_SLOTS   47   /* match Windows DLL blob slot count */
 #define SLOT_HISTORY_DEPTH  10
 
+/* Per-device configuration, selected at probe time by ACPI ID. */
+struct spi_hid_dev_cfg {
+	u32 capimg_raster_samples;   /* CapImg heatmap cell count (3456 SL4 / 4056 SL3) */
+	u16 heatmap_baseline_needed; /* resting-baseline frames (30 SL4 / 33 SL3) */
+	u8  heatmap_baseline_alpha;  /* baseline recovery EMA weight (7 both devices; 12.5% recovery) */
+	u16 grid_cols;               /* heatmap grid columns (72 SL4 / 78 SL3) */
+	u16 grid_rows;               /* heatmap grid rows (48 SL4 / 52 SL3) */
+};
+
 /* Eight fixed-size V0 bodies keep capture bounded to roughly 34 KiB. */
 #define SPI_HID_RAW_CAPTURE_SLOTS 8
 #define SPI_HID_RAW_CAPTURE_BODY_LENGTH 4304
@@ -226,8 +235,11 @@ struct spi_hid {
 	u32 heatmap_len;                /* byte length of the last raw frame */
 	u32 heatmap_capacity;           /* allocated byte capacity of heatmap_buf */
 	u32 heatmap_content_id;         /* content_id from the captured frame */
-	u16 heatmap_grid_cols;          /* Heatmap columns (72) */
-	u16 heatmap_grid_rows;          /* Heatmap rows (48) */
+	u16 heatmap_grid_cols;          /* Heatmap columns (72 SL4 / 78 SL3, from cfg) */
+	u16 heatmap_grid_rows;          /* Heatmap rows (48 SL4 / 52 SL3, from cfg) */
+	const struct spi_hid_dev_cfg *cfg; /* device-specific config from probe */
+	u16 heatmap_baseline_needed;    /* cfg->heatmap_baseline_needed, copied at raw_init */
+	u8  heatmap_baseline_alpha;     /* cfg->heatmap_baseline_alpha, copied at raw_init */
 
 	/* Per-device blob detection buffers. */
 	u8  heatmap_baseline[HEATMAP_MAX_CELLS];

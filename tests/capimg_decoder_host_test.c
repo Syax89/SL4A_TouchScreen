@@ -66,7 +66,7 @@ static void test_valid_v0_layout(void)
 	struct spi_hid_capimg_raster raster = {0};
 
 	make_valid_body(body);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == 0,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
 	      "valid V0 layout is accepted");
 	CHECK(raster.samples == body + PAYLOAD_OFFSET + HEATMAP_OFFSET + 16,
 	      "decoded raster aliases the heatmap samples");
@@ -80,9 +80,9 @@ static void test_reject_truncated_body_or_container(void)
 	struct spi_hid_capimg_raster raster;
 
 	make_valid_body(body);
-	CHECK(spi_hid_capimg_decode_v0(body, 4299, &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, 4299, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "body shorter than the accepted V0 range is rejected");
-	CHECK(spi_hid_capimg_decode_v0(body, 4300, &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, 4300, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "container extending beyond a truncated body is rejected");
 }
 
@@ -94,7 +94,7 @@ static void test_reject_duplicate_sections(void)
 
 	make_valid_body(body);
 	put_le16(payload + VENDOR_OFFSET + 4, 0x0100);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "duplicate heatmap section is rejected");
 
 	make_valid_body(body);
@@ -102,7 +102,7 @@ static void test_reject_duplicate_sections(void)
 	put_le32(payload + VENDOR_OFFSET + HEADER_LENGTH,
 		 VENDOR_LENGTH - HEADER_LENGTH);
 	put_le16(payload + VENDOR_OFFSET + HEADER_LENGTH + 4, 0xff00);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "duplicate vendor section is rejected");
 }
 
@@ -114,12 +114,12 @@ static void test_reject_invalid_section_lengths(void)
 
 	make_valid_body(body);
 	put_le32(payload + HEATMAP_OFFSET, HEADER_LENGTH - 1);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "section shorter than its header is rejected");
 
 	make_valid_body(body);
 	put_le32(payload + HEATMAP_OFFSET, CONTAINER_LENGTH - HEATMAP_OFFSET + 1);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "section longer than the remaining container is rejected");
 }
 
@@ -149,7 +149,7 @@ static void test_tracked_v0_frames(void)
 		      "tracked V0 fixture has expected body length");
 		CHECK(fgetc(fixture) == EOF, "tracked V0 fixture has no trailing bytes");
 		fclose(fixture);
-		CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == 0,
+		CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
 		      "tracked V0 fixture decodes with the driver decoder");
 		decoded++;
 	}
@@ -162,9 +162,9 @@ static void test_reject_null_pointers(void)
 	struct spi_hid_capimg_raster raster;
 
 	make_valid_body(body);
-	CHECK(spi_hid_capimg_decode_v0(NULL, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(NULL, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "NULL body is rejected");
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), NULL) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, NULL) == -EINVAL,
 	      "NULL raster is rejected");
 }
 
@@ -175,13 +175,13 @@ static void test_reject_bad_magic_byte(void)
 
 	make_valid_body(body);
 	body[1] = 0x00;
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "wrong magic byte 0x00 rejected");
 	body[1] = 0x11;
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "wrong magic byte 0x11 rejected");
 	body[1] = 0x10;
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == 0,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
 	      "correct magic byte 0x10 accepted");
 }
 
@@ -192,10 +192,10 @@ static void test_reject_bad_content_id(void)
 
 	make_valid_body(body);
 	body[2] = 0x00;
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "content_id 0x00 rejected");
 	body[2] = 0x08;
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "content_id 0x08 rejected");
 }
 
@@ -207,22 +207,22 @@ static void test_reject_bad_container_length(void)
 
 	make_valid_body(body);
 	put_le32(payload, HEADER_LENGTH - 1);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "container < HEADER_LENGTH rejected");
 
 	make_valid_body(body);
 	put_le32(payload, CONTAINER_LENGTH + 1);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "container > V0_USAGE_61_LENGTH rejected");
 
 	make_valid_body(body);
 	put_le32(payload, 0);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "container length 0 rejected");
 
 	make_valid_body(body);
 	put_le32(payload, HEADER_LENGTH);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "container == HEADER_LENGTH (too small for sections) rejected");
 }
 
@@ -232,19 +232,19 @@ static void test_body_length_boundaries(void)
 	struct spi_hid_capimg_raster raster;
 
 	make_valid_body(body);
-	CHECK(spi_hid_capimg_decode_v0(body, 4299, &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, 4299, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "body_length=4299 rejected (below min)");
-	CHECK(spi_hid_capimg_decode_v0(body, 4300, &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, 4300, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "body_length=4300 (container >= body) rejected");
 
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == 0,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
 	      "body_length=4304 accepted");
 
-	CHECK(spi_hid_capimg_decode_v0(body, 4400, &raster) == 0,
+	CHECK(spi_hid_capimg_decode_v0(body, 4400, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
 	      "body_length=4400 accepted (max valid)");
-	CHECK(spi_hid_capimg_decode_v0(body, 4401, &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, 4401, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "body_length=4401 rejected (above max)");
-	CHECK(spi_hid_capimg_decode_v0(body, 4400, &raster) == 0,
+	CHECK(spi_hid_capimg_decode_v0(body, 4400, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
 	      "body_length=4400 re-accepted (boundary stable)");
 }
 
@@ -256,22 +256,22 @@ static void test_reject_reserved_fields(void)
 
 	make_valid_body(body);
 	put_le16(payload + 4, 1);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "reserved u16 at payload+4 non-zero rejected");
 
 	make_valid_body(body);
 	payload[HEATMAP_OFFSET + 6] = 0x00;
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "reserved version byte non-1 rejected");
 
 	make_valid_body(body);
 	payload[HEATMAP_OFFSET + 7] = 0x10;
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "reserved BBP byte non-8 rejected");
 
 	make_valid_body(body);
 	put_le32(payload + HEATMAP_OFFSET + 8, 1);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "reserved dword at heatmap+8 non-zero rejected");
 }
 
@@ -283,17 +283,17 @@ static void test_reject_wrong_raster_samples(void)
 
 	make_valid_body(body);
 	put_le32(payload + HEATMAP_OFFSET + 12, 3455);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "wrong raster sample count (3455) rejected");
 
 	make_valid_body(body);
 	put_le32(payload + HEATMAP_OFFSET + 12, 3457);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "wrong raster sample count (3457) rejected");
 
 	make_valid_body(body);
 	put_le32(payload + HEATMAP_OFFSET + 12, 0);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "zero raster sample count rejected");
 }
 
@@ -305,12 +305,12 @@ static void test_reject_unrecognized_section_type(void)
 
 	make_valid_body(body);
 	put_le16(payload + HEATMAP_OFFSET + 4, 0x0200);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "unknown section type 0x0200 rejected");
 
 	make_valid_body(body);
 	put_le16(payload + HEATMAP_OFFSET + 4, 0x0000);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "section type 0x0000 rejected");
 }
 
@@ -322,12 +322,12 @@ static void test_reject_missing_section(void)
 
 	make_valid_body(body);
 	put_le32(payload, CONTAINER_LENGTH - VENDOR_LENGTH);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "single-section (no vendor) frame rejected — both required");
 
 	memset(payload, 0, CONTAINER_LENGTH);
 	put_le32(payload, CONTAINER_LENGTH);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "all-zero container (no sections) rejected");
 }
 
@@ -339,8 +339,46 @@ static void test_reject_section_length_zero(void)
 
 	make_valid_body(body);
 	put_le32(payload + HEATMAP_OFFSET, 0);
-	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), &raster) == -EINVAL,
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "section length zero rejected");
+}
+
+/* SL3 (MSHW0162) frames carry a 4056-cell raster (78x52). Decoding must
+ * succeed only when the caller supplies the matching expected count, so the
+ * same frame is accepted with 4056 and rejected with the SL4 count (3456). */
+static void test_sl3_4056_grid(void)
+{
+#define SL3_RASTER_SAMPLES 4056
+	uint8_t body[4400];
+	uint8_t *payload = body + PAYLOAD_OFFSET;
+	const size_t heatmap_len = 16 + SL3_RASTER_SAMPLES;
+	const size_t vendor_offset = HEATMAP_OFFSET + heatmap_len;
+	const size_t vendor_len = CONTAINER_LENGTH - vendor_offset;
+	struct spi_hid_capimg_raster raster = {0};
+
+	memset(body, 0, sizeof(body));
+	body[0] = 0xce;
+	body[1] = 0x10;
+	body[2] = 0x0c;
+	put_le32(payload, CONTAINER_LENGTH);
+	put_le32(payload + HEATMAP_OFFSET, heatmap_len);
+	put_le16(payload + HEATMAP_OFFSET + 4, 0x0100);
+	payload[HEATMAP_OFFSET + 6] = 1;
+	payload[HEATMAP_OFFSET + 7] = 8;
+	put_le32(payload + HEATMAP_OFFSET + 12, SL3_RASTER_SAMPLES);
+	for (size_t i = 0; i < SL3_RASTER_SAMPLES; i++)
+		payload[HEATMAP_OFFSET + 16 + i] = (uint8_t)i;
+	put_le32(payload + vendor_offset, vendor_len);
+	put_le16(payload + vendor_offset + 4, 0xff00);
+
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SL3_RASTER_SAMPLES,
+				       &raster) == 0,
+	      "SL3 4056-cell frame accepted with matching expected count");
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body),
+				       SPI_HID_CAPIMG_RASTER_SAMPLES,
+				       &raster) == -EINVAL,
+	      "SL3 4056-cell frame rejected when expecting the SL4 3456 count");
+#undef SL3_RASTER_SAMPLES
 }
 
 int main(void)
@@ -361,6 +399,7 @@ int main(void)
 	test_reject_unrecognized_section_type();
 	test_reject_missing_section();
 	test_reject_section_length_zero();
+	test_sl3_4056_grid();
 	fprintf(stderr, "capimg_decoder_host_test: %u assertions, %u failures\n",
 		passed, failed);
 	return failed != 0;

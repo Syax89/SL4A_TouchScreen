@@ -24,6 +24,7 @@
 #define CAPIMG_VENDOR_SECTION 0xff00
 
 int spi_hid_capimg_decode_v0(const u8 *body, size_t body_length,
+			     u32 expected_samples,
 			     struct spi_hid_capimg_raster *raster)
 {
 	const u8 *payload;
@@ -59,10 +60,10 @@ int spi_hid_capimg_decode_v0(const u8 *body, size_t body_length,
 			return -EINVAL;
 
 		if (section_type == CAPIMG_HEATMAP_SECTION) {
-			if (heatmap_seen || section_length != 16 + SPI_HID_CAPIMG_RASTER_SAMPLES ||
+			if (heatmap_seen || section_length != 16 + expected_samples ||
 			    payload[offset + 6] != 1 || payload[offset + 7] != 8 ||
 			    get_unaligned_le32(payload + offset + 8) != 0 ||
-			    get_unaligned_le32(payload + offset + 12) != SPI_HID_CAPIMG_RASTER_SAMPLES)
+			    get_unaligned_le32(payload + offset + 12) != expected_samples)
 				return -EINVAL;
 			raster->samples = payload + offset + 16;
 			heatmap_seen = true;

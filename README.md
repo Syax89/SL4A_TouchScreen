@@ -1,8 +1,8 @@
 # SL4A TouchScreen
 
-Linux kernel driver for the Microsoft Surface Laptop 4 (AMD) touchscreen,
-implementing the MSHW0231 V0 HID-over-SPI transport and an experimental raw
-multitouch pipeline on the AMD Cezanne FCH SPI controller.
+Linux kernel driver for the Microsoft Surface Laptop 3/4 (AMD) touchscreen,
+implementing the MSHW0231 / MSHW0162 V0 HID-over-SPI transport and an
+experimental raw multitouch pipeline on the AMD Cezanne FCH SPI controller.
 
 [![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/Syax89/SL4A_TouchScreen)
 [![Release](https://img.shields.io/badge/release-1.2.0-brightgreen)](VERSION)
@@ -31,11 +31,11 @@ activation guide.
 
 | Component | Detail |
 |-----------|--------|
-| Model | Surface Laptop 4 (AMD Cezanne) |
-| Touch ACPI ID | `MSHW0231` (HID VID/PID: 0x045E/0x0C19) |
+| Model | Surface Laptop 4 (AMD Cezanne) / Surface Laptop 3 (AMD) |
+| Touch ACPI ID | `MSHW0231` (SL4, HID VID/PID: 0x045E/0x0C19) / `MSHW0162` (SL3) |
 | SPI Controller | `AMDI0060` (AMD FCH SPI V2 at MMIO 0xFEC10000) |
 | Protocol | HID-over-SPI Version 0 |
-| Touch grid | Current experimental raw-pipeline fallback: 72×48 cells |
+| Touch grid | 72×48 cells (SL4) / 78×52 cells (SL3) — selected by ACPI ID |
 | Report rate | ~100 Hz (raw mode) |
 
 ## Feature Status
@@ -154,8 +154,8 @@ is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
 - **Pen input** — published node, untested and unqualified
 - **4-finger tracking** — unstable even in raw mode
 - **Palm rejection** — not implemented
-- **Other Surface models** — this driver targets only Surface Laptop 4
-  (AMD) with `AMDI0060` + `MSHW0231`
+- **Other Surface models** — this driver targets Surface Laptop 3/4
+  (AMD) with `AMDI0060` + `MSHW0231`/`MSHW0162`
 
 ## Troubleshooting
 

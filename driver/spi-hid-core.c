@@ -33,7 +33,9 @@
 
 #include "spi-hid-core.h"
 #include "spi-hid-protocol.h"
+#include "spi-hid-capimg.h"
 #include "mshw0231-raw.h"
+#include "mshw0231-raw-constants.h"
 #include "spi-hid_trace.h"
 /* Hardcoded HID Report Descriptor from Windows dump (936 bytes) */
 #include "hardcoded_rd.h"
@@ -2544,13 +2546,36 @@ static struct hid_ll_driver spi_hid_ll_driver = {
 	.raw_request = spi_hid_ll_raw_request,
 };
 
+/* Device-specific tuning selected by ACPI ID at probe time. The SL4
+ * (MSHW0231) config reproduces the original hardcoded constants except for
+ * the baseline EMA alpha: it is 7 on both devices because alpha 2 made the
+ * baseline converge to raw/6 instead of resting raw (the Windows traces
+ * document a 12.5% recovery rate, i.e. alpha 7 — contributed by guskog);
+ * SL3 (MSHW0162) additionally uses its native 78x52 = 4056-cell panel. */
+static const struct spi_hid_dev_cfg spi_hid_cfg_sl4 = {
+	.capimg_raster_samples   = SPI_HID_CAPIMG_RASTER_SAMPLES, /* 3456 */
+	.heatmap_baseline_needed = HEATMAP_BASELINE_FRAMES,       /* 30 */
+	.heatmap_baseline_alpha  = 7,                             /* 12.5% recovery */
+	.grid_cols               = 72,
+	.grid_rows               = 48,
+};
+
+static const struct spi_hid_dev_cfg spi_hid_cfg_sl3 = {
+	.capimg_raster_samples   = 4056, /* SL3 MSHW0162 panel: 78x52 */
+	.heatmap_baseline_needed = 33,
+	.heatmap_baseline_alpha  = 7,
+	.grid_cols               = 78,
+	.grid_rows               = 52,
+};
+
 static const struct of_device_id spi_hid_of_match[] = {
 	{ .compatible = "hid-over-spi" },
 	{},
 };
 
 static const struct acpi_device_id spi_hid_acpi_match[] = {
-	{ "MSHW0231", 0 },	/* Surface touch controller */
+	{ "MSHW0231", (kernel_ulong_t)&spi_hid_cfg_sl4 }, /* Surface Laptop 4 (AMD) touch controller */
+	{ "MSHW0162", (kernel_ulong_t)&spi_hid_cfg_sl3 }, /* Surface Laptop 3 (AMD) touch controller */
 	{},
 };
 
@@ -2806,6 +2831,16 @@ static int spi_hid_probe(struct spi_device *spi)
 	spin_lock_init(&shid->input_lock);
 	spin_lock_init(&shid->response_lock);
 	spi_set_drvdata(spi, shid);
+
+	/* Per-device config: ACPI match data carries the right table; anything
+	 * else (DT, unknown ACPI id) falls back to the SL4 defaults. */
+	shid->cfg = device_get_match_data(dev);
+	if (!shid->cfg)
+		shid->cfg = &spi_hid_cfg_sl4;
+	dev_info(dev, "device config: grid %ux%u, %u capimg samples, baseline %u frames, EMA alpha %u\n",
+		 shid->cfg->grid_cols, shid->cfg->grid_rows,
+		 shid->cfg->capimg_raster_samples, shid->cfg->heatmap_baseline_needed,
+		 shid->cfg->heatmap_baseline_alpha);
 
 	ret = sysfs_create_files(&dev->kobj, spi_hid_attributes);
 	if (ret) {

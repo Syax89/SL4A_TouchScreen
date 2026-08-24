@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Support for Surface Laptop 3 (AMD) — MSHW0162
+
+- The HID transport now probes the SL3 AMD touch controller (`MSHW0162`)
+  in addition to the SL4 (`MSHW0231`). Device-specific tuning is selected
+  by ACPI ID at probe time and logged in dmesg ("device config: ..."):
+  - SL4 (MSHW0231): 72×48 grid, 3456 CapImg raster samples, 30-frame
+    resting baseline — all unchanged. The baseline recovery EMA alpha is
+    now 7 on SL4 as well (was 2): alpha 2 made the baseline converge to
+    raw/6 instead of resting raw, while 7 gives the Windows-documented
+    12.5% recovery rate (fix contributed by guskog).
+  - SL3 (MSHW0162): native 78×52 grid (4056 samples), 33-frame baseline,
+    EMA alpha 7 — values contributed and tested on real hardware by
+    guskog (issue #6).
+- `spi_hid_capimg_decode_v0()` now takes the expected raster sample count
+  and rejects frames carrying a different count (per-device validation).
+- Installer: hardware/DMI checks, activation, status, diagnostics and
+  logs all accept `MSHW0162` / Surface Laptop 3; exactly one of
+  `MSHW0231`/`MSHW0162` is required (plus `AMDI0060`).
+- Regression tests: capimg decoder covers the 4056-cell SL3 frame
+  (accepted with the SL3 count, rejected with the SL4 count).
+
 ## 1.5.0 — GET_REPORT Timeout Fix, Recovery Power-Cycle (2026-08-24)
 
 ### Fix: touchscreen dies after connect-time GET_REPORT timeout (issue #4)

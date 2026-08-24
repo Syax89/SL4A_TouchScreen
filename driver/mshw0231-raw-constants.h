@@ -91,7 +91,10 @@
 /* Missed frame timeout (ms) */
 #define HEATMAP_MISSED_FRAME_TIMEOUT_MS  60
 
-/* EMA smoothing default (position tracking; module-param tunable via ema_alpha) */
+/* EMA smoothing default (position tracking; module-param tunable via
+ * ema_alpha). Note: the baseline recovery alpha is NOT this constant — it
+ * comes from the per-device config (7 on both SL3/SL4, the Windows-
+ * documented 12.5% recovery rate). */
 #define HEATMAP_EMA_ALPHA_DEFAULT         2
 
 /* Blob weight EMA alpha: fixed at the Windows-verified value (a = 1/8, i.e.

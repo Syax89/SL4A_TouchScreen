@@ -201,6 +201,19 @@ void mshw0231_raw_init(struct spi_hid *shid)
 	}
 	seq_dbg(shid, 1, "HEATMAP: c590 lookup table initialized (range %d..%d)\n",
 		(int)shid->c590_lut[0], (int)shid->c590_lut[255]);
+	/* Copy the probe-selected per-device tuning (baseline frames: 30 SL4 /
+	 * 33 SL3; baseline recovery alpha 7 on both — the Windows-documented
+	 * 12.5% recovery rate, which alpha 2 did not provide: the baseline
+	 * converged to raw/6 instead of resting raw). Falls back to the SL4
+	 * defaults if no config was supplied (e.g. host replay tests). */
+	shid->heatmap_baseline_needed = shid->cfg ? shid->cfg->heatmap_baseline_needed
+						  : HEATMAP_BASELINE_FRAMES;
+	shid->heatmap_baseline_alpha = shid->cfg ? shid->cfg->heatmap_baseline_alpha
+						 : HEATMAP_EMA_ALPHA_DEFAULT;
+	if (!shid->heatmap_grid_cols && shid->cfg) {
+		shid->heatmap_grid_cols = shid->cfg->grid_cols;
+		shid->heatmap_grid_rows = shid->cfg->grid_rows;
+	}
 	{
 		int val;
 		val = READ_ONCE(blob_min_weight); if (val < 1) val = 1;
@@ -278,7 +291,7 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 				if (shid->heatmap_baseline_frames == 1 || raw > shid->heatmap_baseline[i])
 					shid->heatmap_baseline[i] = raw;
 			}
-			if (shid->heatmap_baseline_frames >= HEATMAP_BASELINE_FRAMES) {
+			if (shid->heatmap_baseline_frames >= shid->heatmap_baseline_needed) {
 				shid->heatmap_have_baseline = true;
 				seq_dbg(shid, 1, "HEATMAP: baseline stabilized after %u frames (%u cells)\n",
 					 shid->heatmap_baseline_frames, cell_count);
@@ -300,7 +313,7 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 		u8 raw = data[data_offset + i];
 
 		if (raw >= base) {
-			u16 cur = (u16)base * HEATMAP_EMA_ALPHA_DEFAULT + (u16)raw;
+			u16 cur = (u16)base * shid->heatmap_baseline_alpha + (u16)raw;
 			shid->heatmap_baseline[i] = (u8)(cur / 8);
 		}
 	}
@@ -1667,14 +1680,15 @@ int mshw0231_raw_consume_v0(struct spi_hid *shid, const u8 *body,
 			    u32 body_length)
 {
 	struct spi_hid_capimg_raster raster;
+	u32 expected_samples = shid->cfg ? shid->cfg->capimg_raster_samples
+					 : SPI_HID_CAPIMG_RASTER_SAMPLES;
 	int ret;
 
-	ret = spi_hid_capimg_decode_v0(body, body_length, &raster);
+	ret = spi_hid_capimg_decode_v0(body, body_length, expected_samples, &raster);
 	if (ret)
 		return ret;
 
-	mshw0231_raw_process_samples(shid, raster.samples,
-				     SPI_HID_CAPIMG_RASTER_SAMPLES, 0x0c);
+	mshw0231_raw_process_samples(shid, raster.samples, expected_samples, 0x0c);
 	return 0;
 }
 
