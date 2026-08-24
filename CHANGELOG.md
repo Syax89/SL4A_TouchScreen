@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 — GET_REPORT Timeout Fix, Recovery Power-Cycle (2026-08-24)
 
 ### Fix: touchscreen dies after connect-time GET_REPORT timeout (issue #4)
 
