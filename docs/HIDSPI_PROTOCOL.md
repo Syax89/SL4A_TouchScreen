@@ -147,10 +147,14 @@ power sequencing are experimental and require target-machine evidence.
 
 ### GET_FEATURE Delay
 
-Windows traces include a ~5900ms gap between RPT_DESC and GET_FEATURE. The
-Linux delay is configuration-dependent; with `skip_getfeat=1`, the experimental
-vendor-init path (0xC2 opcode) bypasses GET_FEATURE. Neither path is a
-release-qualified activation contract.
+Windows traces measure a ~3.6 s gap between RPT_DESC and GET_FEATURE
+(`surface_init.csv` rows 6195→6431: 3.623 s); the original protocol
+documentation cited ~5.9 s, which is not reproducible from the trace rows.
+The Linux delay is configuration-dependent; with `skip_getfeat=1`, the
+experimental vendor-init path (0xC2 opcode) bypasses GET_FEATURE. The
+driver's `sync_timeout_ms` (default 6000) bounds synchronous requests so a
+feature query issued during this settle window no longer tears the transport
+down. Neither path is a release-qualified activation contract.
 
 ## References
 

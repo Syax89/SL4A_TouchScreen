@@ -294,7 +294,7 @@ struct spi_hid {
 	bool raw_handshake_confirmed;             /* Handshake successfully completed */
 	u8 raw_probe_attempts;                    /* Deferred probe retry counter */
 
-	struct delayed_work feat_delay_work;      /* GET_FEATURE delay work (matches Windows ~5900ms) */
+	struct delayed_work feat_delay_work;      /* GET_FEATURE delay work (matches Windows ~3.6 s settle; original doc cited ~5.9 s) */
 	bool feat_delay_pending;                  /* Delay work is scheduled */
 
 	struct delayed_work stream_watchdog;      /* Input stream monitoring watchdog */
