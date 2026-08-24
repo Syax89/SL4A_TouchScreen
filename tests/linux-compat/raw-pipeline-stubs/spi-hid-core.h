@@ -34,6 +34,15 @@
 #define HEATMAP_MAX_SLOTS   47   /* match Windows DLL blob slot count */
 #define SLOT_HISTORY_DEPTH  10
 
+/* Per-device config stand-in (same shape as driver/spi-hid-core.h). */
+struct spi_hid_dev_cfg {
+	u32 capimg_raster_samples;
+	u16 heatmap_baseline_needed;
+	u8  heatmap_baseline_alpha;
+	u16 grid_cols;
+	u16 grid_rows;
+};
+
 /* Minimal device/spi_device stand-ins: mshw0231-raw.c only ever takes
  * &shid->spi->dev to hand to dev_warn()/dev_info(), both stubbed below
  * to no-ops (unless SL4A_TEST_VERBOSE_DEV is set), so no real fields
@@ -82,6 +91,9 @@ struct spi_hid {
 	u32 heatmap_content_id;
 	u16 heatmap_grid_cols;
 	u16 heatmap_grid_rows;
+	const struct spi_hid_dev_cfg *cfg;
+	u16 heatmap_baseline_needed;
+	u8  heatmap_baseline_alpha;
 
 	/* Per-device blob detection buffers. */
 	u8  heatmap_baseline[HEATMAP_MAX_CELLS];
