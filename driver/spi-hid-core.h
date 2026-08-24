@@ -52,7 +52,7 @@
 struct spi_hid_dev_cfg {
 	u32 capimg_raster_samples;   /* CapImg heatmap cell count (3456 SL4 / 4056 SL3) */
 	u16 heatmap_baseline_needed; /* resting-baseline frames (30 SL4 / 33 SL3) */
-	u8  heatmap_baseline_alpha;  /* baseline recovery EMA weight (2 SL4 / 7 SL3) */
+	u8  heatmap_baseline_alpha;  /* baseline recovery EMA weight (7 both devices; 12.5% recovery) */
 	u16 grid_cols;               /* heatmap grid columns (72 SL4 / 78 SL3) */
 	u16 grid_rows;               /* heatmap grid rows (48 SL4 / 52 SL3) */
 };

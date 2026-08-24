@@ -2547,13 +2547,15 @@ static struct hid_ll_driver spi_hid_ll_driver = {
 };
 
 /* Device-specific tuning selected by ACPI ID at probe time. The SL4
- * (MSHW0231) config reproduces the original hardcoded constants exactly,
- * so behavior on SL4 AMD is unchanged; SL3 (MSHW0162) uses the values
- * contributed by guskog (78x52 = 4056-cell panel, tested on real SL3). */
+ * (MSHW0231) config reproduces the original hardcoded constants except for
+ * the baseline EMA alpha: it is 7 on both devices because alpha 2 made the
+ * baseline converge to raw/6 instead of resting raw (the Windows traces
+ * document a 12.5% recovery rate, i.e. alpha 7 — contributed by guskog);
+ * SL3 (MSHW0162) additionally uses its native 78x52 = 4056-cell panel. */
 static const struct spi_hid_dev_cfg spi_hid_cfg_sl4 = {
 	.capimg_raster_samples   = SPI_HID_CAPIMG_RASTER_SAMPLES, /* 3456 */
 	.heatmap_baseline_needed = HEATMAP_BASELINE_FRAMES,       /* 30 */
-	.heatmap_baseline_alpha  = HEATMAP_EMA_ALPHA_DEFAULT,     /* 2 */
+	.heatmap_baseline_alpha  = 7,                             /* 12.5% recovery */
 	.grid_cols               = 72,
 	.grid_rows               = 48,
 };

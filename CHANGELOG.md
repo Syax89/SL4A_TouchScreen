@@ -7,12 +7,14 @@
 - The HID transport now probes the SL3 AMD touch controller (`MSHW0162`)
   in addition to the SL4 (`MSHW0231`). Device-specific tuning is selected
   by ACPI ID at probe time and logged in dmesg ("device config: ..."):
-  - SL4 (MSHW0231) keeps its exact previous constants: 72×48 grid,
-    3456 CapImg raster samples, 30-frame resting baseline, EMA alpha 2 —
-    behavior on SL4 AMD is unchanged.
-  - SL3 (MSHW0162) uses its native 78×52 grid (4056 samples), 33-frame
-    baseline and EMA alpha 7 — values contributed and tested on real
-    hardware by guskog (issue #6).
+  - SL4 (MSHW0231): 72×48 grid, 3456 CapImg raster samples, 30-frame
+    resting baseline — all unchanged. The baseline recovery EMA alpha is
+    now 7 on SL4 as well (was 2): alpha 2 made the baseline converge to
+    raw/6 instead of resting raw, while 7 gives the Windows-documented
+    12.5% recovery rate (fix contributed by guskog).
+  - SL3 (MSHW0162): native 78×52 grid (4056 samples), 33-frame baseline,
+    EMA alpha 7 — values contributed and tested on real hardware by
+    guskog (issue #6).
 - `spi_hid_capimg_decode_v0()` now takes the expected raster sample count
   and rejects frames carrying a different count (per-device validation).
 - Installer: hardware/DMI checks, activation, status, diagnostics and

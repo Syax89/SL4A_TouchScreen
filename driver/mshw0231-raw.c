@@ -201,9 +201,11 @@ void mshw0231_raw_init(struct spi_hid *shid)
 	}
 	seq_dbg(shid, 1, "HEATMAP: c590 lookup table initialized (range %d..%d)\n",
 		(int)shid->c590_lut[0], (int)shid->c590_lut[255]);
-	/* Copy the probe-selected per-device tuning (SL4: 30 frames / alpha 2,
-	 * SL3: 33 frames / alpha 7). Falls back to the SL4 defaults if no
-	 * config was supplied (e.g. host replay tests). */
+	/* Copy the probe-selected per-device tuning (baseline frames: 30 SL4 /
+	 * 33 SL3; baseline recovery alpha 7 on both — the Windows-documented
+	 * 12.5% recovery rate, which alpha 2 did not provide: the baseline
+	 * converged to raw/6 instead of resting raw). Falls back to the SL4
+	 * defaults if no config was supplied (e.g. host replay tests). */
 	shid->heatmap_baseline_needed = shid->cfg ? shid->cfg->heatmap_baseline_needed
 						  : HEATMAP_BASELINE_FRAMES;
 	shid->heatmap_baseline_alpha = shid->cfg ? shid->cfg->heatmap_baseline_alpha

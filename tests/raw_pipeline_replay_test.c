@@ -126,11 +126,12 @@ static void feed_frame(struct spi_hid *shid, const char *fixture_name)
 static void setup_device(struct spi_hid *shid, struct spi_device *spidev)
 {
 	/* SL4 (MSHW0231) tuning: 72x48 grid, 3456 capimg samples, 30-frame
-	 * baseline, EMA alpha 2 — matches the driver's pre-SL3 constants. */
+	 * baseline, EMA alpha 7 — mirrors the driver's current defaults
+	 * (alpha 7 = Windows-documented 12.5% baseline recovery). */
 	static const struct spi_hid_dev_cfg sl4_cfg = {
 		.capimg_raster_samples   = 3456,
 		.heatmap_baseline_needed = 30,
-		.heatmap_baseline_alpha  = 2,
+		.heatmap_baseline_alpha  = 7,
 		.grid_cols               = 72,
 		.grid_rows               = 48,
 	};
