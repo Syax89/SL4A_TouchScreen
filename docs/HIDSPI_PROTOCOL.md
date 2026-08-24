@@ -4,7 +4,9 @@ The MSHW0231 touch controller communicates via the HID-over-SPI protocol
 Version 0 (V0), a pre-release variant that differs from the public v1.0
 specification. This document describes the wire protocol as implemented
 by the Linux driver, validated against decompiled Windows `hidspi.sys`
-and `HidSpiCx.sys` drivers.
+and `HidSpiCx.sys` drivers. The Surface Laptop 3 AMD controller
+(`MSHW0162`) uses the same V0 transport; every frame-level detail in this
+document applies to both devices.
 
 ## Discovery
 

@@ -3,6 +3,8 @@
 The MSHW0231 touch controller has an observed activation sequence for raw-mode
 experiments. Its sufficiency for a reliable raw stream is not yet release
 evidence; see `docs/EVIDENCE.md` before treating it as a protocol contract.
+The Surface Laptop 3 AMD controller (`MSHW0162`) uses the same V0 transport
+and the same sequence.
 
 ## Activation Sequence
 

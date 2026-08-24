@@ -30,3 +30,17 @@ still triggers recovery.
 
 `touch_signal_mode` and
 `touch_threshold_pct` are currently unused placeholders.
+
+## Per-device defaults (selected by ACPI ID at probe)
+
+The probe logs a `device config:` line in dmesg with the active geometry.
+`grid_cols`/`grid_rows` are set from this config when they are left at 0:
+
+| Device | ACPI ID | Grid | CapImg raster samples | Baseline frames | Baseline recovery EMA alpha |
+| --- | --- | --- | --- | --- | --- |
+| Surface Laptop 4 AMD | `MSHW0231` | 72×48 | 3456 | 30 | 7 |
+| Surface Laptop 3 AMD | `MSHW0162` | 78×52 | 4056 | 33 | 7 |
+
+The baseline recovery alpha (7 on both devices) is the Windows-documented
+12.5% recovery rate: `new = (7·base + raw)/8`. The `ema_alpha` parameter is
+position smoothing only and is unrelated (default 2).

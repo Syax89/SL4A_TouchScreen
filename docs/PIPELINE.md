@@ -6,11 +6,12 @@ Linux kernel multitouch pipeline matching the Windows
 ## Pipeline Overview
 
 ```
-Frame (72×48 heatmap, 3456 cells)
+Frame (heatmap grid — 72×48/3456 cells on SL4 MSHW0231, 78×52/4056 on SL3 MSHW0162; selected by ACPI ID)
   │
   ├─ c590 LUT + baseline → signal rise per cell
   │   c590[i] = max(0, 10000 - (i·22 + 6000))
-  │   Baseline: 30-frame asymmetric per-cell EMA
+  │   Baseline: 30-frame (SL4) / 33-frame (SL3) asymmetric per-cell EMA,
+  │   recovery alpha 7 (12.5%) on both
   │
   ├─ Noise floor (c590 < 400 → suppressed, config+0xECC=0.04)
   │   heatmap_touched[i] = (rise >= 200)

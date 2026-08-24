@@ -1,6 +1,6 @@
 # Quickstart
 
-Get SL4A TouchScreen running on your Surface Laptop 4 (AMD) in 5 steps.
+Get SL4A TouchScreen running on your Surface Laptop 3/4 (AMD) in 5 steps.
 
 ## Prerequisites
 

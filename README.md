@@ -5,7 +5,7 @@ implementing the MSHW0231 / MSHW0162 V0 HID-over-SPI transport and an
 experimental raw multitouch pipeline on the AMD Cezanne FCH SPI controller.
 
 [![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/Syax89/SL4A_TouchScreen)
-[![Release](https://img.shields.io/badge/release-1.2.0-brightgreen)](VERSION)
+[![Release](https://img.shields.io/badge/release-1.5.0-brightgreen)](VERSION)
 [![CI](https://github.com/Syax89/SL4A_TouchScreen/actions/workflows/ci.yml/badge.svg)](https://github.com/Syax89/SL4A_TouchScreen/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue)](LICENSE)
 
@@ -66,7 +66,7 @@ activation guide.
 │   AMD FCH SPI controller V2 PIO driver                       │
 │   TX/RX FIFO, chunked reads, opcode model                    │
 ├──────────────────────────────────────────────────────────────┤
-│ Hardware: AMD FCH SPI @ 0xFEC10000 → MSHW0231                │
+│ Hardware: AMD FCH SPI @ 0xFEC10000 → MSHW0231 / MSHW0162       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -96,7 +96,8 @@ unresolved frame-layout assumptions are recorded in `docs/EVIDENCE.md`.
 ## Install
 
 Read [`docs/SUPPORT.md`](docs/SUPPORT.md) before installing. This repository is
-only for the Surface Laptop 4 AMD `AMDI0060` + `MSHW0231` hardware contract.
+only for the Surface Laptop 3/4 AMD `AMDI0060` + `MSHW0231`/`MSHW0162` hardware
+contracts.
 The installer does not load or bind either experimental module. It uses distinct
 `sl4a-spi-amd` and `sl4a-spi-hid` module names and does not replace in-tree drivers.
 See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) before treating a setup as
@@ -122,7 +123,8 @@ experimental controller with:
 sudo ./tools/sl4a-touch.sh activate
 ```
 
-The command refuses to displace existing AMDI0060 or MSHW0231 drivers, then
+The command refuses to displace existing AMDI0060 or touchscreen
+(MSHW0231/MSHW0162) drivers, then
 verifies both bindings. To recover after a failed experiment, run
 `sudo modprobe -r sl4a-spi-hid sl4a-spi-amd` and reboot. Use
 `sudo ./tools/sl4a-touch.sh install --raw` only for the experimental raw
