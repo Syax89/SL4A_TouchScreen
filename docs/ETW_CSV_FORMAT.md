@@ -71,7 +71,7 @@ TX: DESCREQ [01 00 0A 00 00 00 01 00 00 00 00 00]
 RX: DEVICE_DESC [07 00 1E 00 ... 28 bytes descriptor]
 TX: DESCREQ2 [01 00 ...]
 RX: RPT_DESC [0B 00 ... 936 bytes report descriptor]
---- 5900ms gap ---
+--- ~3.6s gap (measured) ---
 TX: GET_FEATURE [0F 00 ...]
 RX: FEATURE_RESP [0F 00 ...]
 TX: SET_FEATURE ID5=01 [0F 00 ...]

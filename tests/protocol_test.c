@@ -353,6 +353,33 @@ static void test_header_offsets(void)
 	}
 }
 
+/* ── Sync-request timeout policy (GitHub issue #4) ─────────────── */
+
+static void test_sync_timeout_policy(void)
+{
+	/* A feature-query (GET_FEATURE) timeout must NOT be fatal: the input
+	 * stream is IRQ-driven and independent of feature-query success, so
+	 * the transport must keep running and the HID client gets the error. */
+	CHECK(!spi_hid_protocol_sync_timeout_fatal(SPI_HID_SYNC_FEATURE),
+	      "sync policy: feature-query failure is non-fatal");
+
+	/* Descriptor requests are the only way to learn the transport
+	 * geometry; their failure keeps the fatal recovery path. */
+	CHECK(spi_hid_protocol_sync_timeout_fatal(SPI_HID_SYNC_DESCRIPTOR),
+	      "sync policy: descriptor failure is fatal");
+
+	/* Default timeout must cover the measured ~3.6 s device settle before
+	 * it answers feature queries, plus the ~5.9 s figure from the
+	 * original protocol doc (pre-fix hardcoded 1000 ms timed out on
+	 * cold boot). */
+	CHECK(SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT == 6000,
+	      "sync policy: default timeout is 6000 ms");
+	CHECK(SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT >= 5900,
+	      "sync policy: default covers the original 5900 ms doc figure");
+	CHECK(SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT > 1000,
+	      "sync policy: default strictly exceeds the old hardcoded 1000 ms");
+}
+
 int main(void)
 {
 	fprintf(stderr, "protocol_test: running...\n");
@@ -367,6 +394,7 @@ int main(void)
 	test_find_header_too_short();
 	test_output_length_boundaries();
 	test_header_offsets();
+	test_sync_timeout_policy();
 	test_fuzz_roundtrip();
 	test_fuzz_output_roundtrip();
 

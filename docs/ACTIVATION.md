@@ -22,8 +22,9 @@ This matches the Windows touch initialization trace
 
 ### 2. SET_FEATURE Handshake
 
-With `skip_getfeat=0`, the legacy path waits for the Windows-like ~5900ms gap
-between RPT_DESC and GET_FEATURE before sending the activation command. The
+With `skip_getfeat=0`, the legacy path waits for the Windows-like ~3.6 s gap
+(measured; the original protocol doc cited ~5.9 s) between RPT_DESC and
+GET_FEATURE before sending the activation command. The
 experimental raw profile uses `skip_getfeat=1` and takes the direct vendor-init
 path instead.
 
@@ -61,7 +62,7 @@ The driver uses a direct vendor-init path:
 The original GET_FEATURE-based path:
 1. Wait for device descriptor available
 2. Read report descriptor
-3. Wait ~5900ms (Windows GET_FEATURE delay)
+3. Wait ~3.6 s (Windows GET_FEATURE delay, measured; original doc cited ~5.9 s)
 4. Send GET_FEATURE → device returns current ID5 state
 5. Send SET_FEATURE ID5=01 → observe whether a stream follows
 

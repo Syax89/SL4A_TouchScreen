@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Fix: touchscreen dies after connect-time GET_REPORT timeout (issue #4)
+
+- A HID client (hidraw `HIDIOCGFEATURE`) issues a feature GET_REPORT ~1 s
+  after connect. The MSHW0231 does not answer feature queries until it has
+  settled for ~3.6 s (measured from Windows traces; the original protocol
+  doc cited ~5.9 s), so the hardcoded 1000 ms sync timeout fired and the
+  driver treated a benign feature-query timeout as fatal: `ready=false` →
+  ACPI power-cycle recovery → dead touchscreen (Zorin/Fedora).
+- `spi_hid_sync_request()` now classifies requests (`SPI_HID_SYNC_FEATURE`
+  vs `SPI_HID_SYNC_DESCRIPTOR`): a feature-query timeout returns
+  `-ETIMEDOUT`/`-EPROTO` to the caller without tearing the transport down;
+  descriptor-request timeouts keep the fatal recovery path.
+- New module parameter `sync_timeout_ms` (default 6000, int, 0444) bounds
+  every synchronous request, replacing the hardcoded 1000 ms; 6000 covers
+  the measured 3.6 s settle plus the ~5.9 s documented worst case.
+- Recovery is now a real ACPI `_PS3`→`_PS0` power cycle (never `_RST`,
+  which calls M010 and destroys the device) combined with a deterministic
+  re-arm of the sequencer to `WAIT_RESET` (performed before the cycle), so
+  the device's power-on `RESET_RSP` restarts descriptor discovery. If the
+  ACPI evaluation fails, the driver warns and re-arms discovery anyway
+  instead of leaving `ready=false` forever.
+- Docs corrected: the ~5900 ms device-settle figure is not reproducible
+  from the trace rows (measured ~3.6 s; 3.623 s gap in `surface_init.csv`).
+  `docs/PARAMETERS.md`, `docs/HIDSPI_PROTOCOL.md`, `docs/ACTIVATION.md`,
+  and `docs/ETW_CSV_FORMAT.md` now state the measured value.
+- Regression test: `tests/protocol_test.c` checks the sync timeout policy
+  (feature-query timeout non-fatal, descriptor timeout fatal, default
+  6000 ms).
+
 ## 1.4.0 — Raw Multitouch Fixes, Unified Installer (2026-07-24)
 
 ### Raw multitouch pipeline

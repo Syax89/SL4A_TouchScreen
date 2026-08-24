@@ -49,6 +49,10 @@ _Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
 int sl4a_debug_level;
 static int getfeat_delay_ms;  /* RPT_DESC → GET_FEATURE settle time (0 = immediate, safe default) */
 static bool skip_getfeat = true;
+/* Sync-request timeout: covers the ~3.6 s measured device settle before it
+ * answers feature queries (original protocol doc cited ~5.9 s). The old
+ * hardcoded 1000 ms timed out on a cold-boot feature query. */
+static int sync_timeout_ms = SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (sl4a_debug_level >= (level)) \
 		dev_info(&(shid)->spi->dev, "TRACE[hid:%d] " fmt, (level), ##__VA_ARGS__); } while (0)
@@ -364,10 +368,55 @@ static void spi_hid_stop_hid(struct spi_hid *shid)
 
 static void spi_hid_disable_irq(struct spi_hid *shid);
 
-/* _RST calls M010 which DESTROYS the device. Never call it. */
+/* _RST calls M010 which DESTROYS the device. Never call it.
+ * ACPI recovery is a real _PS3->_PS0 power cycle (mirrors the
+ * acpi_probe_power_cycle probe experiment). The sequencer is re-armed to
+ * WAIT_RESET BEFORE the cycle so the device's power-on RESET_RSP lands
+ * deterministically in WAIT_RESET and restarts descriptor discovery. If
+ * the ACPI evaluation fails, the re-arm stays in place and discovery
+ * restarts on the next IRQ instead of leaving ready=false with no re-arm.
+ * Caller must NOT hold power_lock: this function takes seq_lock. */
 static int spi_hid_reset_via_acpi(struct spi_hid *shid)
 {
-	msleep(300);
+	struct device *dev = &shid->spi->dev;
+	acpi_handle h = ACPI_HANDLE(dev);
+	acpi_status status;
+
+	mutex_lock(&shid->seq_lock);
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    !READ_ONCE(shid->seq_enabled)) {
+		mutex_unlock(&shid->seq_lock);
+		return -ESHUTDOWN;
+	}
+	/* Park the sequencer in WAIT_RESET before the power cycle: every
+	 * discovery handler also restarts discovery on a type-3 RESET_RSP,
+	 * so even a stray pre-_PS3 IRQ cannot wedge the re-arm. */
+	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_DEVICE_RESET);
+	mutex_unlock(&shid->seq_lock);
+
+	if (!h) {
+		dev_warn(dev, "no ACPI handle, skipping power toggle\n");
+		return 0;
+	}
+
+	dev_info(dev, "ACPI power cycle _PS3 -> _PS0\n");
+	status = acpi_evaluate_object(h, "_PS3", NULL, NULL);
+	if (ACPI_FAILURE(status)) {
+		dev_warn(dev, "ACPI _PS3 failed: %s, skipping power toggle\n",
+			 acpi_format_exception(status));
+		return 0;
+	}
+	msleep(50);
+	status = acpi_evaluate_object(h, "_PS0", NULL, NULL);
+	if (ACPI_FAILURE(status)) {
+		/* _PS3 already powered the part down: report the failure so the
+		 * caller keeps power_state OFF (the part is dark), with the
+		 * WAIT_RESET re-arm already in place for when it comes back. */
+		dev_warn(dev, "ACPI _PS0 failed: %s, part likely unpowered\n",
+			 acpi_format_exception(status));
+		return -EIO;
+	}
+	msleep(100);
 	return 0;
 }
 
@@ -376,6 +425,7 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 	struct device *dev = &shid->spi->dev;
 	int ret = 0;
 	bool terminal_failure = false;
+	bool acpi_recovery = false;
 
 	mutex_lock(&shid->power_lock);
 	if (shid->power_state == SPI_HID_POWER_MODE_OFF)
@@ -398,6 +448,11 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 	shid->ready = false;
 	sysfs_notify(&dev->kobj, NULL, "ready");
 
+	/* ACPI (non-DT) recovery needs seq_lock, so it runs after power_lock
+	 * is released below; the two mutexes are never nested. */
+	if (!dev->of_node)
+		acpi_recovery = true;
+
 	if (dev->of_node) {
 		ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_reset);
 		if (ret) {
@@ -418,17 +473,26 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 			dev_err(dev, "Power Restart failed\n");
 			goto out;
 		}
-	} else {
-		ret = spi_hid_reset_via_acpi(shid);
-		if (ret) {
-			dev_err(dev, "Reset failed\n");
-			goto out;
-		}
+		shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
 	}
-	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
 
 out:
 	mutex_unlock(&shid->power_lock);
+	if (acpi_recovery) {
+		ret = spi_hid_reset_via_acpi(shid);
+		if (ret && ret != -ESHUTDOWN)
+			dev_err(dev, "Reset failed\n");
+		/* Either the cycle completed (0) or we bailed before touching
+		 * power (-ESHUTDOWN): the part is powered in both cases, so
+		 * re-advertise ACTIVE; a racing remove/suspend owns the rest.
+		 * Any other error (-EIO: _PS0 failed) means the part is dark:
+		 * leave power_state OFF. */
+		if (ret == 0 || ret == -ESHUTDOWN) {
+			mutex_lock(&shid->power_lock);
+			shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
+			mutex_unlock(&shid->power_lock);
+		}
+	}
 	if (terminal_failure) {
 		/* refresh_device_work also needs power_lock. Never wait for it while
 		 * holding that lock, otherwise exhausted recovery deadlocks. */
@@ -678,7 +742,8 @@ static int spi_hid_send_output_report(struct spi_hid *shid, u32 output_register,
 * interrupt thread.
 */
 static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
-		struct spi_hid_output_report *report, u8 expected_response_type)
+		struct spi_hid_output_report *report, u8 expected_response_type,
+		enum spi_hid_sync_kind kind)
 {
 	struct device *dev = &shid->spi->dev;
 	unsigned long flags;
@@ -727,7 +792,7 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	 */
 	mutex_unlock(&shid->lock);
 	ret = wait_for_completion_interruptible_timeout(&shid->output_done,
-			msecs_to_jiffies(1000));
+			msecs_to_jiffies(sync_timeout_ms));
 	mutex_lock(&shid->lock);
 	spin_lock_irqsave(&shid->response_lock, flags);
 	response_valid = ret > 0 && shid->response_generation == generation &&
@@ -739,13 +804,22 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	}
 	spin_unlock_irqrestore(&shid->response_lock, flags);
 	if (ret <= 0 || !response_valid) {
-		if (ret == 0)
-			dev_err(dev, "response timed out\n");
-		else if (ret > 0)
-			dev_err(dev, "response completed without valid data\n");
-		shid->ready = false;
-		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
-		schedule_work(&shid->error_work);
+		if (spi_hid_protocol_sync_timeout_fatal(kind)) {
+			if (ret == 0)
+				dev_err(dev, "response timed out\n");
+			else if (ret > 0)
+				dev_err(dev, "response completed without valid data\n");
+			shid->ready = false;
+			sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
+			schedule_work(&shid->error_work);
+		} else {
+			/* A feature-query failure is not fatal: the input stream
+			 * is IRQ-driven and independent of feature-query success.
+			 * The HID client gets the error and falls back to defaults;
+			 * the transport keeps running. */
+			dev_warn(dev, "feature query %s, device stays running\n",
+				 ret == 0 ? "timed out" : "returned invalid data");
+		}
 		if (ret == 0)
 			ret = -ETIMEDOUT;
 		else if (ret > 0)
@@ -777,7 +851,7 @@ static int spi_hid_report_descriptor_request(struct spi_hid *shid)
 
 	ret =  spi_hid_sync_request(shid,
 			shid->desc.report_descriptor_register, &report,
-			SPI_HID_REPORT_TYPE_REPORT_DESC);
+			SPI_HID_REPORT_TYPE_REPORT_DESC, SPI_HID_SYNC_DESCRIPTOR);
 	if (ret) {
 		dev_err(dev, "Expected report descriptor not received!\n");
 		goto out;
@@ -985,7 +1059,8 @@ static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
 
 
 	return spi_hid_sync_request(shid, shid->desc.output_register,
-			&report, SPI_HID_REPORT_TYPE_GET_FEATURE_RESP);
+			&report, SPI_HID_REPORT_TYPE_GET_FEATURE_RESP,
+			SPI_HID_SYNC_FEATURE);
 }
 
 static int spi_hid_set_request(struct spi_hid *shid,
@@ -1292,8 +1367,10 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	 * matching how Windows recovers from a failed feature handshake.
 	 *
 	 * Cancel any pending feat_delay_work (otherwise
-	 * feat_delay_work's 5900ms timer and our 2000ms watchdog timer race —
-	 * the watchdog always fires first, creating an infinite reset loop). */
+	 * feat_delay_work's settle timer (~3.6 s measured Windows gap; the
+	 * original protocol doc cited ~5.9 s) and our 2000ms watchdog timer
+	 * race — the watchdog always fires first, creating an infinite reset
+	 * loop). */
 	cancel_delayed_work(&shid->feat_delay_work);
 	shid->feat_delay_pending = false;
 	raw_handshake_restart_discovery(shid);
@@ -1301,7 +1378,8 @@ out:
 	mutex_unlock(&shid->seq_lock);
 }
 
-/* GET_FEATURE delayed work (Windows: ~5900ms gap between RPT_DESC and GET_FEATURE).
+/* GET_FEATURE delayed work (Windows: ~3.6 s measured gap between RPT_DESC
+ * and GET_FEATURE; the original protocol doc cited ~5.9 s).
  * The device needs this idle period to stabilise before accepting feature commands.
  * Running as a delayed work avoids holding seq_lock across a long msleep. */
 static void spi_hid_feat_delay_work(struct work_struct *work)
@@ -1450,6 +1528,11 @@ module_param(acpi_probe_power_cycle, bool, 0444);
 MODULE_PARM_DESC(acpi_probe_power_cycle,
 	"Experimental ACPI _PS3->_PS0 power cycle at probe (default disabled)");
 
+module_param(sync_timeout_ms, int, 0444);
+MODULE_PARM_DESC(sync_timeout_ms,
+	"Timeout in ms for synchronous requests (default 6000: covers the ~3.6 s measured device "
+	"settle before feature queries are answered; the original protocol doc cited ~5.9 s)");
+
 /* SET_FEATURE handshake experiments:
  * always writes fine at the driver level but the device silently stops responding
  * afterward most of the time. Two testable hypotheses, toggled independently so results
@@ -1476,7 +1559,8 @@ MODULE_PARM_DESC(sl4a_debug_level, "Log verbosity: 0=errors, 1=transitions, 2=pe
 /* ── Raw-mode handshake timing (EXPERIMENTAL) ───────────────────── */
 module_param(getfeat_delay_ms, int, 0444);
 MODULE_PARM_DESC(getfeat_delay_ms,
-	"Experimental delay in ms between RPT_DESC and GET_FEATURE (default 0; Windows observed about 5900)");
+	"Experimental delay in ms between RPT_DESC and GET_FEATURE (default 0; "
+	"Windows measured ~3.6 s, original protocol doc cited ~5.9 s)");
 
 static int stream_watchdog_ms = 0;  /* disabled by default, too aggressive for raw mode */
 module_param(stream_watchdog_ms, int, 0444);

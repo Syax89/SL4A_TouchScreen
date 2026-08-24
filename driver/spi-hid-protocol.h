@@ -18,6 +18,30 @@ typedef uint16_t spi_hid_proto_u16;
 #define SPI_HID_PROTOCOL_WRITE_OPCODE 0x02
 #define SPI_HID_PROTOCOL_MAX_OUTPUT_LENGTH 0x0fff
 
+/* Synchronous request classes (spi_hid_sync_request in spi-hid-core.c).
+ * Feature queries (GET_FEATURE) are independent of the IRQ-driven input
+ * stream: a timeout there must not tear the transport down. Descriptor
+ * requests are the only way to learn the transport geometry, so their
+ * failure remains fatal. */
+enum spi_hid_sync_kind {
+	SPI_HID_SYNC_FEATURE = 0,
+	SPI_HID_SYNC_DESCRIPTOR = 1,
+};
+
+/* Default synchronous-request timeout in ms. The MSHW0231 answers feature
+ * queries only after ~3.6 s of settle (measured from Windows trace rows;
+ * the original protocol doc cited ~5.9 s), so 6000 ms covers the
+ * documented worst case while the pre-fix hardcoded 1000 ms timed out on
+ * a cold-boot feature query and tore the transport down. */
+#define SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT 6000
+
+/* Whether a failed synchronous request of this kind must be treated as a
+ * fatal transport error (1 = fatal, 0 = caller-side error only). */
+static inline int spi_hid_protocol_sync_timeout_fatal(enum spi_hid_sync_kind kind)
+{
+	return kind != SPI_HID_SYNC_FEATURE;
+}
+
 static inline int spi_hid_protocol_output_length_valid(unsigned int output_length)
 {
 	return output_length <= SPI_HID_PROTOCOL_MAX_OUTPUT_LENGTH;
