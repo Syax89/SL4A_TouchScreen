@@ -175,11 +175,19 @@ struct slot_state {
 	u32 blob_weight;
 };
 
+/* Mirror of the driver's per-slot state machine (driver/mshw0231-raw.c, the
+ * `blob_slot_state` switches in the blob tracker). It is DOCUMENTATION: it
+ * cannot observe the driver, so a regression in the driver will not fail here.
+ * The behavioural checks live in raw_pipeline_replay_test.c, which links the
+ * real pipeline. Keep this in step with the driver anyway, or the next reader
+ * learns the wrong machine (reviews R19/R18 found four silent divergences:
+ * hold entry consulted the weight, hold expiry fired a frame late, and both
+ * re-claim branches restarted `duration` at 0 instead of 1).
+ */
 static void slot_fsm_tick(struct slot_state *s, int has_blob, u32 blob_weight,
 			   int hold_frames, int blob_debounce, int blob_lift_frames)
 {
 	if (has_blob) {
-		s->missed = 0;
 		switch (s->state) {
 		case SLOT_EMPTY:
 			s->state = SLOT_NEW;
@@ -196,13 +204,17 @@ static void slot_fsm_tick(struct slot_state *s, int has_blob, u32 blob_weight,
 			 * re-press (the driver's `case 3`; review R14/R17c). */
 			if (blob_weight >= HEATMAP_HOLD_RECOVERY_WEIGHT) {
 				s->state = SLOT_CLAIMED;
-				s->duration = 0;
+				s->duration = 1;
 			}
 			break;
 		case SLOT_HOLD:
-			if (blob_weight >= HEATMAP_HOLD_RECOVERY_WEIGHT) {
+			/* Hold recovery wants a substantial blob AND at least two
+			 * missed frames (driver `case 4`): noise right after the
+			 * lift arrives earlier and must not re-claim the slot. */
+			if (blob_weight >= HEATMAP_HOLD_RECOVERY_WEIGHT &&
+			    s->missed >= 2) {
 				s->state = SLOT_CLAIMED;
-				s->duration = 0;
+				s->duration = 1;
 			}
 			break;
 		case SLOT_CLAIMED:
@@ -218,19 +230,33 @@ static void slot_fsm_tick(struct slot_state *s, int has_blob, u32 blob_weight,
 			s->duration = 0;
 			break;
 		case SLOT_CLAIMED:
-			if (hold_frames > 0 && s->missed <= (u32)hold_frames && s->blob_weight >= HEATMAP_HOLD_RECOVERY_WEIGHT)
+			/* hold_frames == 0 releases on the first missed frame;
+			 * otherwise the slot is held and the weight is not consulted
+			 * here at all (driver `case 2`). */
+			if (hold_frames >= 1) {
 				s->state = SLOT_HOLD;
-			else
+				s->missed = 1;
+			} else {
 				s->state = SLOT_LIFT;
+				s->missed = 0;
+			}
 			s->duration = 0;
 			break;
 		case SLOT_HOLD:
-			if (s->missed > (u32)hold_frames)
+			/* The lift lands on the hold_frames-th missed frame,
+			 * counted from the entry that set missed = 1. */
+			if (s->missed >= (u32)hold_frames) {
 				s->state = SLOT_LIFT;
+				s->missed = 0;
+				s->duration = 0;
+			}
 			break;
 		case SLOT_LIFT:
-			if (++s->duration >= (u32)blob_lift_frames)
+			if (s->missed >= (u32)blob_lift_frames) {
 				s->state = SLOT_EMPTY;
+				s->missed = 0;
+				s->duration = 0;
+			}
 			break;
 		}
 	}
@@ -251,11 +277,11 @@ static void test_slot_fsm(void)
 	slot_fsm_tick(&s, 1, 5000, 0, 3, 3);
 	CHECK(s.state == SLOT_CLAIMED, "tick3: new→claimed (debounced)");
 
-	/* claimed → lift (blob goes away, no hold) */
+	/* claimed → lift (blob goes away, hold_frames == 0) */
 	slot_fsm_tick(&s, 0, 0, 0, 3, 3);
-	CHECK(s.state == SLOT_LIFT, "tick4: claimed→lift");
+	CHECK(s.state == SLOT_LIFT, "tick4: claimed→lift (hold_frames=0)");
 
-	/* lift → empty after lift_frames */
+	/* lift → empty after blob_lift_frames missed frames */
 	slot_fsm_tick(&s, 0, 0, 0, 3, 3);
 	CHECK(s.state == SLOT_LIFT, "tick5: lift (frame 1/3)");
 	slot_fsm_tick(&s, 0, 0, 0, 3, 3);
@@ -263,12 +289,34 @@ static void test_slot_fsm(void)
 	slot_fsm_tick(&s, 0, 0, 0, 3, 3);
 	CHECK(s.state == SLOT_EMPTY, "tick7: lift→empty");
 
-	/* hold recovery: claimed→hold→claimed if weight ≥ 4000 */
+	/* hold: with hold_frames > 0 a missed frame holds the slot, whatever
+	 * the weight of the blob that was last seen */
 	s.state = SLOT_CLAIMED; s.blob_weight = 5000; s.missed = 0; s.duration = 0;
 	slot_fsm_tick(&s, 0, 0, 3, 3, 3);
-	CHECK(s.state == SLOT_HOLD, "hold: claimed→hold (weight≥4000+hold_frames>0)");
+	CHECK(s.state == SLOT_HOLD, "hold: claimed→hold (hold_frames>0)");
+	CHECK(s.missed == 1, "hold: entry sets missed=1");
+
+	/* a blob returning after a single missed frame does not re-claim it */
 	slot_fsm_tick(&s, 1, 5000, 3, 3, 3);
-	CHECK(s.state == SLOT_CLAIMED, "hold recovery: hold→claimed (w≥4000)");
+	CHECK(s.state == SLOT_HOLD, "hold: one missed frame cannot re-claim");
+
+	slot_fsm_tick(&s, 0, 0, 3, 3, 3);
+	CHECK(s.state == SLOT_HOLD && s.missed == 2, "hold: missed=2");
+
+	/* two missed frames and a substantial blob re-claim it */
+	slot_fsm_tick(&s, 1, 5000, 3, 3, 3);
+	CHECK(s.state == SLOT_CLAIMED, "hold recovery: hold→claimed (w≥4000, missed≥2)");
+	CHECK(s.duration == 1, "hold recovery: duration restarts at 1");
+
+	/* hold expiry: the lift lands on the hold_frames-th missed frame,
+	 * counted from the entry */
+	s.state = SLOT_CLAIMED; s.blob_weight = 5000; s.missed = 0; s.duration = 0;
+	slot_fsm_tick(&s, 0, 0, 3, 3, 3);
+	CHECK(s.state == SLOT_HOLD && s.missed == 1, "expiry: enter hold");
+	slot_fsm_tick(&s, 0, 0, 3, 3, 3);
+	CHECK(s.state == SLOT_HOLD && s.missed == 2, "expiry: hold frame 2/3");
+	slot_fsm_tick(&s, 0, 0, 3, 3, 3);
+	CHECK(s.state == SLOT_LIFT && s.missed == 0, "expiry: hold→lift on frame 3/3");
 
 	CHECK(HEATMAP_HOLD_RECOVERY_WEIGHT == 4000, "hold recovery weight=4000");
 }

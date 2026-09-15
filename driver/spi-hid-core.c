@@ -3019,7 +3019,7 @@ static DEVICE_ATTR_RO(baseline_status);
 
 /* Single source for what bug reports say about the build. The suite checks this
  * string against VERSION: it reported "v1.0" for nine releases (review R17c). */
-#define SL4A_DRIVER_VERSION "1.6.2"
+#define SL4A_DRIVER_VERSION "1.6.3"
 
 static ssize_t build_info_show(struct device *dev, struct device_attribute *attr, char *buf)
 {

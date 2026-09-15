@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — dead-code removal
+## 1.6.3 — housekeeping: dead code, build string, FSM model (2026-09-15)
 
 Round 4's inventory listed the parts of the driver no code path can reach. They
 are gone rather than annotated, so the next reader does not have to prove their
@@ -23,6 +23,15 @@ Also fixes the build string shipped in 1.6.2: `VERSION` moved to 1.6.2 while
 `SL4A_DRIVER_VERSION` stayed at 1.6.1. The host-test version check caught it on
 `main` (the release commit failed CI for exactly this), and bumping the define is
 part of the release steps now.
+
+Also aligns the per-slot state machine model in `raw_pipeline_math_test.c` with
+the driver, which it had drifted from in four places: hold entry consulted the
+blob weight (the driver holds the slot on the first missed frame whatever the
+weight was), hold expiry fired one frame late, and both re-claim branches
+restarted `duration` at 0 instead of 1. Reintroducing either mechanism now fails
+the suite, so the expectations bite; the file also says out loud that it is
+documentation, because the behavioural checks live in `raw_pipeline_replay_test.c`
+where the real pipeline runs.
 
 ## 1.6.2 — Follow-up review of the 1.6.1 fixes (2026-09-15)
 
