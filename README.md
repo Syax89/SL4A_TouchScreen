@@ -98,8 +98,14 @@ unresolved frame-layout assumptions are recorded in `docs/EVIDENCE.md`.
 Read [`docs/SUPPORT.md`](docs/SUPPORT.md) before installing. This repository is
 only for the Surface Laptop 3/4 AMD `AMDI0060` + `MSHW0231`/`MSHW0162` hardware
 contracts.
-The installer does not load or bind either experimental module. It uses distinct
-`sl4a-spi-amd` and `sl4a-spi-hid` module names and does not replace in-tree drivers.
+The installer stages the modules through DKMS and then **activates them right
+away** (Step 7): it binds the experimental modules as soon as it finishes, and
+enables a systemd unit that keeps them bound on every future boot. Have recovery
+access ready (a local console or a remote shell) *before* running it. On Secure
+Boot systems the MOK key must be enrolled first; until it is, activation is
+skipped and the boot unit does it after the enrollment reboot.
+Modules use distinct `sl4a-spi-amd` and `sl4a-spi-hid` names and never replace
+in-tree drivers.
 See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) before treating a setup as
 supported.
 
@@ -116,8 +122,9 @@ default, or the experimental raw multitouch profile) unless `--standard` or
 build-prerequisite preflight and needs no root; `--force` only to investigate
 unsupported hardware.
 
-Only after login, with local/remote recovery access available, activate the
-experimental controller with:
+`install` activates the driver before it returns (Step 7), so have
+local/remote recovery access available *before* running it. The
+experimental controller can also be activated by hand with:
 
 ```bash
 sudo ./tools/sl4a-touch.sh activate

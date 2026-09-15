@@ -36,8 +36,10 @@ sudo reboot
 ```
 
 The installer detects an existing DKMS registration for the same `PACKAGE_NAME`
-and replaces it. After reboot, the new version is staged but inactive; activate
-only after login.
+and replaces it (removing any other registered version first, so two versions
+cannot both build the same module names). After reboot the new version is staged,
+and `install` itself activates it — activation is no longer a separate manual
+step; `activate` remains available for doing it by hand.
 
 ## Kernel updates
 
