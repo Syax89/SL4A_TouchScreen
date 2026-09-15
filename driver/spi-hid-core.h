@@ -254,6 +254,7 @@ struct spi_hid {
 	u32 blob_x[HEATMAP_MAX_BLOBS];
 	u32 blob_y[HEATMAP_MAX_BLOBS];
 	u32 blob_wsum[HEATMAP_MAX_BLOBS];
+	u32 blob_raw_wsum[HEATMAP_MAX_BLOBS];   /* pre-edge-penalty weight */
 	bool blob_active[HEATMAP_MAX_BLOBS];
 	s32 blob_eigmaj[HEATMAP_MAX_BLOBS];
 	s32 blob_eigmin[HEATMAP_MAX_BLOBS];

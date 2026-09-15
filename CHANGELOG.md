@@ -23,24 +23,33 @@ synchronous-request lock ordering, and the diagnostic log-option quoting.
   the per-device config at probe (never NULL) and the parameter path only ran when
   the cache was empty, so both knobs were dead on every boot. The parameters are
   now an explicit override of the cached geometry.
+- A `dfa_data_offset` that cannot fit the cached grid: see above (the third
+  bullet under this heading).
+- Split sub-blobs are edge-penalised by their own window instead of skipping the
+  penalty: the split path `continue`d over it, so a bezel artifact wide enough for
+  two peaks was published at full weight. The tracker's recovery guard, on the
+  other hand, now uses the *pre-penalty* weight: a real bottom-row finger keeps
+  only 23% of its weight there, below the recovery threshold, so guarding on the
+  penalised value made every bottom-edge contact unrecoverable after one dropped
+  frame (found by the adversarial pass on this very change).
 - A `dfa_data_offset` that cannot fit the cached grid no longer resets the whole
-  pipeline 100 times a second: the mismatch is reported at a sane rate, the reset
-  is skipped when the offset is the cause (re-learning the geometry cannot help),
-  and the message says what to do instead.
-- Split sub-blobs get the parent's edge weight penalty too. The split path
-  `continue`d over the penalty block, so a bezel artifact wide enough to hold two
-  peaks was published at full weight — exactly the false touch that penalty exists
-  for.
+  pipeline 100 times a second: the mismatch is reported at a sane rate, the cached
+  geometry is dropped so the auto-detect can re-derive it from the frames actually
+  arriving, and any slot still held from a previous valid frame is released once on
+  the way out.
 - The ghost merge is strict (`<`, not `<=`), as in Windows and in the in-tree
   oracle test, so two blobs exactly at the coalescing radius no longer silently
   drop one.
 - `mshw0231_raw_input_register()` returns `-ENOMEM` when the input device cannot
   be allocated. It reported success, which left the driver in "raw mode" with no
   input device: every frame discarded, nothing said why.
-- The `CALIB:` trace printed coordinates 100× the ones the pipeline actually
-  publishes (it divided by 1000 where emission divides by 100000), and the
-  `CALIB_REF:` trace built `hx` and `hy` from the same byte. Both diagnostics
-  exist to be read during calibration.
+- The `CALIB:` trace printed coordinates 100× the ones the pipeline computes (it
+  divided by 1000 where emission divides by 100000); it now shares the emission
+  expression and says in the line that it prints the pre-offset value, because it
+  logs pre-tracker blobs while emission logs post-tracker slots — the two are not
+  the same quantity and reading it as if they were was the second half of the
+  problem. The `CALIB_REF:` trace built `hx` and `hy` from the same byte; both now
+  come from the consecutive little-endian pairs the report descriptor defines.
 - Comment drift corrected in the tracker (the EMA/deadband/stationary numbers did
   not match the constants the code uses).
 
