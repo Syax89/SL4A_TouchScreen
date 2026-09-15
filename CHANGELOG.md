@@ -34,13 +34,16 @@ synchronous-request lock ordering, and the diagnostic log-option quoting.
   the terminal-failure path.
 - The descriptor poller handles the DEVICE_DESC it recovers instead of counting
   it and dropping the frame.
-- Standard mode no longer parks in `WAIT_RESET` when the device answers nothing
-  at all after power-up or resume: a watchdog kicks descriptor discovery on its
-  own (a plain `DESCREQ` write, no power sequencing) up to three times, two
-  seconds apart, then says in dmesg that it is giving up. Before, `ready` stayed
-  false and the touchscreen stayed dead until a reload or a suspend/resume, which
-  is the cold-boot case of issue #4. Raw mode already had its own cold-boot
-  retries and is unchanged.
+- Opt-in standard-mode backstop for a device that answers power-up or resume with
+  nothing at all: `wait_reset_kick_ms` (0 = off, the default) sends a `DESCREQ`
+  after that many milliseconds without a single IRQ edge, up to three times, then
+  logs and stops. Without the backstop the sequencer sat in `WAIT_RESET` with no
+  timer armed, `ready` false and no touchscreen until a reload or a
+  suspend/resume, which is the cold-boot shape of issue #4. It never reads the
+  input buffer (so a frame the IRQ thread is about to handle cannot be stolen) and
+  performs no power sequencing. The default is off because the safe interval is
+  measured, not known: enabling it means a device that never answers is polled for
+  its descriptor afterwards. Raw mode keeps its own cold-boot retries.
 
 ### Raw handshake and stream monitoring
 

@@ -169,6 +169,7 @@ struct spi_hid {
 	struct gpio_desc *gpiod;    /* GPIO descriptor for device interrupt */
 	struct delayed_work descreq_work; /* DESCREQ retry work */
 	u32 wait_reset_kicks;             /* Standard-mode WAIT_RESET kicks used */
+	u32 wait_reset_irqs;              /* IRQ-edge snapshot taken when the kick timer was armed */
 
 	struct regulator *supply;    /* Power supply regulator */
 	struct pinctrl *pinctrl;     /* Pin control state container */
@@ -331,6 +332,7 @@ struct spi_hid {
 	u32 stat_getfeat_resp;
 	u32 stat_frames_dropped;
 	u32 stat_irq_count;
+	u32 stat_irq_edges;                       /* Hard-IRQ edges seen (top half) */
 	u32 stat_wire_patches; /* descriptor bytes patched (0 = 100% wire-read) */
 	ktime_t seq_dbg_last_irq;
 	enum spi_hid_seq_state seq_dbg_last_state;
