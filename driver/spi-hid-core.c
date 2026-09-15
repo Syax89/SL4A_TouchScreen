@@ -2711,8 +2711,11 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			}
 		} else if (rl >= 3 && rl - 3 <= avail) {
 			if (shid->raw_mode_active && body[7] == 0x40 && rl - 2 >= 6) {
-				u16 hx = body[8] | (body[10] << 8);
-				u16 hy = body[10] | (body[12] << 8);
+				/* Report 0x40: ID, one TipSwitch byte, then X and Y
+				 * as 16-bit little-endian pairs (see
+				 * captures/wintrace/mshw0231_report_descriptor.txt). */
+				u16 hx = body[9] | (body[10] << 8);
+				u16 hy = body[11] | (body[12] << 8);
 				seq_dbg(shid, 2, "CALIB_REF: hid=(%u,%u)\n", hx, hy);
 			}
 			if (shid->hid) {

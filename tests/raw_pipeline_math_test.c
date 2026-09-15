@@ -407,6 +407,24 @@ static void test_baseline_drift_decay(void)
 	CHECK(s.base == 150, "baseline never crosses below resting raw, got %u", s.base);
 }
 
+/* ── Edge penalty vs the recovery guard (adversarial review R10) ─────── */
+
+/* The tracker's "is this blob substantial enough to recover a contact" guard has
+ * to compare against the *pre-penalty* weight: a real finger on the bottom row
+ * keeps only HEATMAP_EDGE_PENALTY_BOTTOM percent of its weight, which is below
+ * HEATMAP_HOLD_RECOVERY_WEIGHT, so guarding on the penalised value made every
+ * bottom-edge contact unrecoverable after a single dropped frame. */
+static void test_recovery_guard_uses_raw_weight(void)
+{
+	u32 raw = 5000;
+	u32 penalised = raw * HEATMAP_EDGE_PENALTY_BOTTOM / 100;
+
+	CHECK(penalised < HEATMAP_HOLD_RECOVERY_WEIGHT,
+	      "penalised bottom-edge weight (%u) stays below the recovery threshold", penalised);
+	CHECK(raw >= HEATMAP_HOLD_RECOVERY_WEIGHT,
+	      "pre-penalty weight (%u) passes the recovery guard", raw);
+}
+
 int main(void)
 {
 	printf("raw_pipeline_math_test: running...\n");
@@ -422,6 +440,8 @@ int main(void)
 	test_signal_thresholds();
 	test_jump_rejection();
 	test_baseline_drift_decay();
+
+	test_recovery_guard_uses_raw_weight();
 
 	printf("raw_pipeline_math_test: %d assertions, %d failures\n", passed, failed);
 	return failed != 0;

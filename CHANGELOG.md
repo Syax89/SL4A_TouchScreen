@@ -50,6 +50,51 @@ following were verified against the source before being changed:
   real-pipeline check in `raw_pipeline_replay_test` (falsified: neutralising the
   branch makes that check fail).
 
+### Raw pipeline (tracker and diagnostics)
+
+- A one-frame gap no longer becomes a real release: re-acquisition while the lift
+  is pending used to restart the debounce unconditionally (`case 3` → state 1),
+  where the hold path requires a substantial blob before recovering the contact.
+  Since a single peak-free frame puts *every* finger into lift, one dropped frame
+  aborted pinches, scrolls and drags by releasing and re-pressing all contacts.
+- The lift-lookback history is cleared whenever a slot starts or frees a contact.
+  It was only ever appended to, so after a slot had been reused a fast tap could
+  report the *previous* contact's position as its lift point, which libinput then
+  classifies as a swipe instead of a tap.
+- `grid_cols`/`grid_rows` are reachable again: the geometry cache was filled from
+  the per-device config at probe (never NULL) and the parameter path only ran when
+  the cache was empty, so both knobs were dead on every boot. The parameters are
+  now an explicit override of the cached geometry.
+- A `dfa_data_offset` that cannot fit the cached grid: see above (the third
+  bullet under this heading).
+- Split sub-blobs are edge-penalised by their own window instead of skipping the
+  penalty: the split path `continue`d over it, so a bezel artifact wide enough for
+  two peaks was published at full weight. The tracker's recovery guard, on the
+  other hand, now uses the *pre-penalty* weight: a real bottom-row finger keeps
+  only 23% of its weight there, below the recovery threshold, so guarding on the
+  penalised value made every bottom-edge contact unrecoverable after one dropped
+  frame (found by the adversarial pass on this very change).
+- A `dfa_data_offset` that cannot fit the cached grid no longer resets the whole
+  pipeline 100 times a second: the mismatch is reported at a sane rate, the cached
+  geometry is dropped so the auto-detect can re-derive it from the frames actually
+  arriving, and any slot still held from a previous valid frame is released once on
+  the way out.
+- The ghost merge is strict (`<`, not `<=`), as in Windows and in the in-tree
+  oracle test, so two blobs exactly at the coalescing radius no longer silently
+  drop one.
+- `mshw0231_raw_input_register()` returns `-ENOMEM` when the input device cannot
+  be allocated. It reported success, which left the driver in "raw mode" with no
+  input device: every frame discarded, nothing said why.
+- The `CALIB:` trace printed coordinates 100× the ones the pipeline computes (it
+  divided by 1000 where emission divides by 100000); it now shares the emission
+  expression and says in the line that it prints the pre-offset value, because it
+  logs pre-tracker blobs while emission logs post-tracker slots — the two are not
+  the same quantity and reading it as if they were was the second half of the
+  problem. The `CALIB_REF:` trace built `hx` and `hy` from the same byte; both now
+  come from the consecutive little-endian pairs the report descriptor defines.
+- Comment drift corrected in the tracker (the EMA/deadband/stationary numbers did
+  not match the constants the code uses).
+
 ### Transport, power management and recovery
 
 - The input IRQ-storm breaker no longer parks the sequencer silently: it logs,

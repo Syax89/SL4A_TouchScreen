@@ -68,6 +68,7 @@ extern int sl4a_stub_verbose;
 #define dev_warn(dev, fmt, ...) \
 	do { (void)(dev); if (sl4a_stub_verbose) \
 		fprintf(stderr, "[dev_warn] " fmt, ##__VA_ARGS__); } while (0)
+#define dev_warn_ratelimited(dev, fmt, ...) dev_warn(dev, fmt, ##__VA_ARGS__)
 #define dev_info(dev, fmt, ...) \
 	do { (void)(dev); if (sl4a_stub_verbose) \
 		fprintf(stderr, "[dev_info] " fmt, ##__VA_ARGS__); } while (0)
@@ -109,6 +110,7 @@ struct spi_hid {
 	u32 blob_x[HEATMAP_MAX_BLOBS];
 	u32 blob_y[HEATMAP_MAX_BLOBS];
 	u32 blob_wsum[HEATMAP_MAX_BLOBS];
+	u32 blob_raw_wsum[HEATMAP_MAX_BLOBS];   /* pre-edge-penalty weight */
 	bool blob_active[HEATMAP_MAX_BLOBS];
 	s32 blob_eigmaj[HEATMAP_MAX_BLOBS];
 	s32 blob_eigmin[HEATMAP_MAX_BLOBS];
