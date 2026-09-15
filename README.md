@@ -165,6 +165,7 @@ is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
 |-------|-----|
 | No touch after cold boot | Power off → unplug AC → wait 30s → reboot |
 | No touch after cold boot, but the driver looks ready (dmesg shows the descriptor, HID registered, `ready`) | Set `std_liveness_ms=8000` (`echo 'options sl4a_spi_hid std_liveness_ms=8000' \| sudo tee /etc/modprobe.d/sl4a-liveness.conf`), cold boot, then read the `standard-mode liveness` line in dmesg: it reports the controller activity (IRQs) seen in that window, so a healthy idle device prints the alarm too (issue #4) |
+| No touch after cold boot and no `RESET_RSP` in dmesg at all | The driver kicks discovery by itself, up to three times two seconds apart (`no RESET_RSP after 2000 ms, forcing DESCREQ (kick N/3)`). If it then prints `device silent after 3 discovery kicks`, the controller is not answering even a direct descriptor request: power off, unplug AC, wait 30 s, reboot, and report the full log in issue #4 |
 | No multi-touch (only single-touch) | Check `raw_mode=Y` in modprobe config |
 | Fingers lost during fast movement | Increase `blob_lift_frames` |
 | Jitter during pinch-to-zoom | Verify `ema_alpha=7`, stationary lock active |

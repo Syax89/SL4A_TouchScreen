@@ -34,6 +34,13 @@ synchronous-request lock ordering, and the diagnostic log-option quoting.
   the terminal-failure path.
 - The descriptor poller handles the DEVICE_DESC it recovers instead of counting
   it and dropping the frame.
+- Standard mode no longer parks in `WAIT_RESET` when the device answers nothing
+  at all after power-up or resume: a watchdog kicks descriptor discovery on its
+  own (a plain `DESCREQ` write, no power sequencing) up to three times, two
+  seconds apart, then says in dmesg that it is giving up. Before, `ready` stayed
+  false and the touchscreen stayed dead until a reload or a suspend/resume, which
+  is the cold-boot case of issue #4. Raw mode already had its own cold-boot
+  retries and is unchanged.
 
 ### Raw handshake and stream monitoring
 
