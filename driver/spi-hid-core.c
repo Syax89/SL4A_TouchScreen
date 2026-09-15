@@ -486,6 +486,14 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 	shid->ready = false;
 	sysfs_notify(&dev->kobj, NULL, "ready");
 
+	/* Recovery needs a live transport. A caller can have parked the
+	 * sequencer to stop a storm (the IRQ-storm breaker clears seq_enabled)
+	 * and both the ACPI and the pinctrl paths need descriptor discovery to
+	 * run again afterwards, so re-enable it here. The terminal-failure
+	 * path above is unaffected: it returns with the sequencer off on
+	 * purpose. */
+	WRITE_ONCE(shid->seq_enabled, true);
+
 	/* ACPI (non-DT) recovery needs seq_lock, so it runs after power_lock
 	 * is released below; the two mutexes are never nested. */
 	if (!dev->of_node)
@@ -1901,8 +1909,22 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	if (shid->seq_storm_count > 100) {
 		unsigned long delta = jiffies - shid->seq_last_valid_jiffies;
 		if (delta < HZ) {
+			/* The transport is not making progress. Stop it and hand the
+			 * recovery to the error handler: parking the sequencer here
+			 * used to be the end of the story (only a reload or a
+			 * suspend/resume re-enabled it), with nothing in the log at
+			 * the default verbosity. Ready is cleared too so userspace
+			 * stops believing the touchscreen works. */
+			dev_warn_ratelimited(dev,
+				"SEQ: input IRQ storm (%u failed reads in <%u jiffies), parking the sequencer and scheduling recovery\n",
+				shid->seq_storm_count, HZ);
 			WRITE_ONCE(shid->seq_enabled, false);
 			shid->seq_storm_count = 0;
+			if (shid->ready) {
+				shid->ready = false;
+				sysfs_notify(&dev->kobj, NULL, "ready");
+			}
+			schedule_work(&shid->error_work);
 			return IRQ_HANDLED;
 		}
 		shid->seq_storm_count = 0;
