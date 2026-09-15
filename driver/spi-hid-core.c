@@ -1472,6 +1472,14 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		}
 		if (!shid->hid)
 			schedule_work(&shid->create_device_work);
+		/* The re-discovery that cleared `ready` never completes for a silent
+		 * device, and this fallback is exactly that case: restoring a
+		 * standard HID device with `ready` false would leave its clients
+		 * answering -ENODEV forever. */
+		if (!shid->ready) {
+			shid->ready = true;
+			sysfs_notify(&dev->kobj, NULL, "ready");
+		}
 		dev_info(dev, "SEQ: raw handshake failed; using standard HID\n");
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_WATCHDOG);
 		shid->raw_handshake_wait_feature_defers = 0;
@@ -2737,8 +2745,10 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
 
 	switch (reqtype) {
 	case HID_REQ_SET_REPORT:
-		/* Same TOCTOU as ll_output_report: re-check under the lock before
-		 * handing the transfer to a suspended transport. */
+		/* Same window as ll_output_report: a cheap re-check that keeps a
+		 * client from starting a transfer on a transport we already know is
+		 * going away; the flags live under seq_lock, so this does not close
+		 * the race, only narrows it. */
 		if (READ_ONCE(shid->suspended) || READ_ONCE(shid->removing)) {
 			ret = -ENODEV;
 			break;
@@ -2837,9 +2847,12 @@ static int spi_hid_ll_output_report(struct hid_device *hid,
 		ret = -ENODEV;
 		goto out;
 	}
-	/* The `ready` gate above is taken before the lock, so a suspend can land
-	 * between it and the send: re-check here, or the client blocks in
-	 * spi_sync against a quiesced controller (the GET path aborts instead). */
+	/* `ready` is gated before the lock, and `suspended`/`removing` are
+	 * published under `seq_lock`: this read narrows the window rather than
+	 * closing it. Enough to stop a client blocking in spi_sync against a
+	 * controller that was already quiesced when the call arrived; a suspend
+	 * landing in the remaining window is bounded by the SPI core's own
+	 * failure path. */
 	if (READ_ONCE(shid->suspended) || READ_ONCE(shid->removing)) {
 		dev_err(dev, "%s called while suspended\n", __func__);
 		ret = -ENODEV;
