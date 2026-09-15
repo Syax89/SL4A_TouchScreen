@@ -8,6 +8,36 @@ three reports presented with high confidence turned out to be false positives an
 are deliberately **not** "fixed" here: the installer module-name handling, the
 synchronous-request lock ordering, and the diagnostic log-option quoting.
 
+### Installer
+
+- `logs` no longer truncates its own diagnostic bundle: `git` refuses to read a
+  user-owned checkout as root, `systemctl status` exits non-zero for an inactive
+  unit, and an empty `dmesg | grep` is exit 1 — under `set -e -o pipefail` each
+  of those aborted collection, so the one command a reporter is asked to run
+  failed in exactly the states worth diagnosing.
+- Upgrades remove the previous DKMS registration instead of leaving both: two
+  registered versions built the same module names, and `dkms autoinstall`
+  installed whichever ran last on the next kernel update, so an older revision
+  could silently become the one that loads. `uninstall` removes leftover versions
+  too, instead of printing "Uninstall complete" while an old registration (and
+  its `/usr/src` tree) survives and keeps being rebuilt.
+- An interrupted staging run is recoverable: the next `install` cleans up the
+  half-staged version and restages, rather than refusing to continue until the
+  user deletes `/usr/src/sl4a-touch-<version>` by hand.
+- `logs -o FILE` is validated before root puts it in a redirect: no symlinks, no
+  non-regular files (`-o /dev/null` used to chmod the device node) and a missing
+  argument is now an error instead of a silent `shift`.
+- The boot-activation unit quotes its `ExecStart` path, so a checkout whose path
+  contains a space no longer produces a unit that fails after every boot.
+- `activate` honours `SL4A_SYSFS_ROOT` like the rest of the script, so preflight
+  and activation agree on which tree they are inspecting.
+- `install` refuses to replace a `sl4a-touch-activate.service` it does not own,
+  the guard it already applied to the modprobe configuration.
+- README/TESTING corrected: the install step does bind the experimental modules
+  (Step 7) and enables the boot unit. The docs claimed it did not, which is
+  exactly the sentence a careful user reads to decide when to arrange recovery
+  access.
+
 ### Transport, power management and recovery
 
 - The input IRQ-storm breaker no longer parks the sequencer silently: it logs,

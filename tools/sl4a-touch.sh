@@ -113,6 +113,24 @@ dkms_installed_version() {
 		sed -n 's/^sl4a-touch\/\([^,]*\),.*/\1/p' || true
 }
 
+# Remove every DKMS registration of this package except $1 (empty = all of them),
+# together with its staged source tree. An upgrade used to leave the previous
+# version registered: both then built the same sl4a-spi-amd.ko/sl4a-spi-hid.ko
+# names, and `dkms autoinstall` installed whichever ran last on the next kernel
+# update, so an older revision could silently become the one that loads.
+dkms_remove_other_versions() {
+	local keep="$1" line ver
+	dkms status -m "$PKG_NAME" 2>/dev/null | while IFS= read -r line; do
+		ver="${line#${PKG_NAME}/}"
+		ver="${ver%%,*}"
+		[ -n "$ver" ] || continue
+		[ "$ver" = "$keep" ] && continue
+		info "Removing stale DKMS registration $PKG_NAME/$ver..."
+		dkms remove -m "$PKG_NAME" -v "$ver" --all >/dev/null 2>&1 || true
+		rm -rf "/usr/src/${PKG_NAME}-${ver}"
+	done || true
+}
+
 modprobe_profile() {
 	[ -f "$MODPROBE_CONF" ] || { echo "none"; return; }
 	if grep -q 'raw_mode=Y' "$MODPROBE_CONF" 2>/dev/null; then
@@ -204,8 +222,8 @@ menu_pick_command() {
 	# and the terminal scrolls instead of redrawing in place.
 	local menu_lines=$((n + 3))
 
-	tput civis >&2 2>/dev/null
-	trap 'tput cnorm >&2 2>/dev/null' RETURN
+	tput civis >&2 2>/dev/null || true
+	trap 'tput cnorm >&2 2>/dev/null || true' RETURN
 
 	draw() {
 		echo "SL4A_TouchScreen driver management" >&2
@@ -535,6 +553,16 @@ cmd_install() {
 	fi
 
 	info "Step 3: Staging driver sources via DKMS ($SRC_DEST)..."
+
+	cleanup_staged_install() {
+		dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all >/dev/null 2>&1 || true
+		rm -rf "$SRC_DEST"
+	}
+
+	# Upgrades: drop any other version of this package first, or the old
+	# registration keeps building the same module names on every kernel update.
+	dkms_remove_other_versions "$PKG_VERSION"
+
 	local profile_only=0
 	if [ -e "$SRC_DEST" ]; then
 		if dkms status -m "$PKG_NAME" -v "$PKG_VERSION" 2>/dev/null | grep -q "installed"; then
@@ -548,14 +576,11 @@ cmd_install() {
 				rm -rf "$SRC_DEST"
 			fi
 		else
-			fail "DKMS source for $PKG_NAME/$PKG_VERSION already exists from an incomplete install; remove that exact version before retrying"
+			# Left behind by an interrupted run: recoverable, not a dead end.
+			info "Cleaning up an incomplete staging of $PKG_NAME/$PKG_VERSION..."
+			cleanup_staged_install
 		fi
 	fi
-
-	cleanup_staged_install() {
-		dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all >/dev/null 2>&1 || true
-		rm -rf "$SRC_DEST"
-	}
 
 	if [ "$profile_only" -eq 0 ]; then
 		mkdir -p "$SRC_DEST"
@@ -616,7 +641,7 @@ Wants=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=$REPO_DIR/tools/sl4a-touch.sh activate
+ExecStart="$REPO_DIR/tools/sl4a-touch.sh" activate
 RemainAfterExit=yes
 # A failed activation (e.g. Secure Boot key not yet enrolled, hardware
 # absent) must never fail the boot or retry-loop — see journalctl -u
@@ -626,6 +651,11 @@ SuccessExitStatus=0 1
 [Install]
 WantedBy=multi-user.target
 EOF
+	# Same ownership guard the modprobe config gets: never clobber a file at
+	# this path that this tool did not write.
+	if [ -e "$SYSTEMD_UNIT" ] && ! grep -q '^# SL4A_TouchScreen' "$SYSTEMD_UNIT"; then
+		fail "refusing to replace unowned $SYSTEMD_UNIT"
+	fi
 	install -m 0644 "$tmp_config" "$SYSTEMD_UNIT"
 	rm -f "$tmp_config"
 	systemctl daemon-reload
@@ -705,6 +735,11 @@ cmd_uninstall() {
 	elif [ -e "$SRC_DEST" ]; then
 		info "Leaving unowned $SRC_DEST untouched"
 	fi
+
+	# Any other version of this package (a leftover from an earlier upgrade)
+	# would survive this uninstall and keep being rebuilt on kernel updates,
+	# so a version mismatch no longer turns "Uninstall complete" into a lie.
+	dkms_remove_other_versions ""
 
 	depmod -a
 	pass "DKMS removal completed"
@@ -822,16 +857,16 @@ cmd_activate() {
 		fi
 	fi
 
-	local controllers=(/sys/bus/acpi/devices/AMDI0060:*)
+	local controllers=("$SYSFS_ROOT"/bus/acpi/devices/AMDI0060:*)
 	[ "${#controllers[@]}" -eq 1 ] || fail "expected exactly one AMDI0060 ACPI device"
 	local controller="${controllers[0]}"
-	local controller_platform="/sys/bus/platform/devices/$(basename "$controller")"
+	local controller_platform="$SYSFS_ROOT/bus/platform/devices/$(basename "$controller")"
 	[ -d "$controller_platform" ] || fail "AMDI0060 platform device is absent"
 	# Touchscreen node: MSHW0231 (SL4) or MSHW0162 (SL3 AMD) — exactly one of the two.
 	local touches=()
 	local mshw
 	for mshw in MSHW0231 MSHW0162; do
-		local matches=(/sys/bus/acpi/devices/${mshw}:*)
+		local matches=("$SYSFS_ROOT"/bus/acpi/devices/${mshw}:*)
 		[ -e "${matches[0]}" ] && touches+=("${matches[@]}")
 	done
 	[ "${#touches[@]}" -eq 1 ] || fail "expected exactly one MSHW0231/MSHW0162 ACPI device"
@@ -853,11 +888,11 @@ cmd_activate() {
 		fail "touchscreen is already bound to $(bound_driver "$touch/physical_node"); refusing to displace it"
 	fi
 
-	[ ! -d "/sys/module/${CONTROLLER_MODULE//-/_}" ] && controller_loaded=1
+	[ ! -d "$SYSFS_ROOT/module/${CONTROLLER_MODULE//-/_}" ] && controller_loaded=1
 	modprobe "$CONTROLLER_MODULE" || fail_rollback "could not load experimental controller"
 	wait_for_driver "$controller_platform" "$CONTROLLER_DRIVER" || fail_rollback "experimental controller did not bind"
 
-	[ ! -d "/sys/module/${HID_MODULE//-/_}" ] && hid_loaded=1
+	[ ! -d "$SYSFS_ROOT/module/${HID_MODULE//-/_}" ] && hid_loaded=1
 	modprobe "$HID_MODULE" || fail_rollback "could not load HID transport"
 	wait_for_driver "$touch/physical_node" "$HID_DRIVER" || fail_rollback "touchscreen did not bind to the HID transport"
 
@@ -945,16 +980,35 @@ cmd_logs() {
 	local OUT=""
 	while [ $# -gt 0 ]; do
 		case "$1" in
-			-o|--output) OUT="$2"; shift 2 ;;
+			-o|--output)
+				[ $# -ge 2 ] || fail "-o requires a path"
+				OUT="$2"
+				shift 2 ;;
 			*) fail "unknown logs option: $1 (see --help)" ;;
 		esac
 	done
+
+	# $OUT ends up in a root redirect plus a chmod that follows symlinks: keep
+	# it away from device nodes, symlinks and anything that is not a plain file.
+	if [ -n "$OUT" ]; then
+		[ -L "$OUT" ] && fail "refusing to write the bundle through the symlink $OUT"
+		if [ -e "$OUT" ] && [ ! -f "$OUT" ]; then
+			fail "refusing to overwrite $OUT: not a regular file"
+		fi
+	fi
+
 	elevate "read the kernel log (dmesg)" logs ${OUT:+-o "$OUT"}
 	[ -n "$OUT" ] || OUT="$REPO_DIR/sl4a-touch-diagnostics-$(date +%Y%m%d-%H%M%S).txt"
 
 	header "SL4A_TouchScreen diagnostic collection"
 	info "Writing to $OUT..."
 
+	# Nothing in the bundle may abort collection: git refuses to read a
+	# user-owned checkout as root, `systemctl status` exits non-zero for an
+	# inactive unit, and a dmesg|grep with no match is exit 1 — under
+	# `set -e -o pipefail` each of those used to truncate the file that a bug
+	# report needs, in exactly the broken states worth diagnosing.
+	set +e
 	{
 		echo "=== SL4A_TouchScreen diagnostic bundle ==="
 		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -1041,6 +1095,7 @@ cmd_logs() {
 		echo "--- dmesg (driver-related lines) ---"
 		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -300
 	} > "$OUT"
+	set -e
 
 	chmod 644 "$OUT" 2>/dev/null || true
 	pass "Diagnostic bundle written to: $OUT"

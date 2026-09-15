@@ -78,10 +78,10 @@ state, and build output in `COMPATIBILITY.md`.
 ## Target Hardware Matrix
 
 Run each case only after login and after retaining a local console or remote
-shell for recovery. The install step must not bind the experimental controller.
-Activate it explicitly with `sudo ./tools/sl4a-touch.sh activate`; it refuses to
-displace existing AMDI0060 or touchscreen (MSHW0231/MSHW0162) drivers and
-verifies both bindings.
+shell for recovery: the install step binds the experimental controller itself
+(Step 7) and enables the boot unit. Activation refuses to displace existing
+AMDI0060 or touchscreen (MSHW0231/MSHW0162) drivers and verifies both bindings;
+`sudo ./tools/sl4a-touch.sh activate` runs the same checks by hand.
 Recover with `sudo modprobe -r sl4a-spi-hid sl4a-spi-amd` followed by a reboot.
 
 The installer selects the standard profile by default. Since `raw_mode` is read
