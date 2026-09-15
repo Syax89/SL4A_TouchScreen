@@ -145,7 +145,7 @@ static const char *spi_hid_seq_state_name(enum spi_hid_seq_state state)
 /* Standard-mode backstop for a device that says nothing at all after power-up
  * or a D2->D0 transition. Opt-in through wait_reset_kick_ms (0 = off): see the
  * comment on the watchdog itself for why the default is off. */
-#define WAIT_RESET_MAX_KICKS 3
+#define WAIT_RESET_MAX_WRITE_RETRIES 3
 
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason);
@@ -1649,13 +1649,14 @@ static void spi_hid_arm_wait_reset_watchdog(struct spi_hid *shid)
  *    was armed, so a frame it is still holding (a slow RESET_RSP, a threaded
  *    handler queued behind seq_lock) is never consumed out from under the IRQ
  *    thread: no read happens here at all;
- *  - the kick is a plain DESCREQ write with no power sequencing, bounded to
- *    WAIT_RESET_MAX_KICKS per episode, so it cannot loop or reset hardware.
- * A device that speaks after a kick is picked up by the existing WAIT_DESC path
- * (which answers a late RESET_RSP with its own DESCREQ: back-to-back DESCREQs
- * are the one thing field testing has to confirm). Standard mode only; raw mode
- * retries cold boots on its own. Off by default because the safe interval is
- * measured, not known. */
+ *  - the kick is a plain DESCREQ write with no power sequencing, sent at most
+ *    once per power-up or resume (the counter bounds retries of a *failed*
+ *    write), so it cannot loop or reset hardware. If a frame arrives after the
+ *    kick, the WAIT_DESC path answers the late RESET_RSP with its own DESCREQ:
+ *    the worst case is two back-to-back DESCREQs, which no measurement in tree
+ *    can rule out, so it is on the field-test list. Standard mode only; raw
+ *    mode retries cold boots on its own. Off by default because the safe
+ *    interval is measured, not known. */
 static void spi_hid_wait_reset_watchdog(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid,
@@ -1668,7 +1669,7 @@ static void spi_hid_wait_reset_watchdog(struct work_struct *work)
 	    shid->seq_state != SPI_HID_SEQ_WAIT_RESET)
 		goto out;
 
-	if (shid->stat_irq_edges != shid->wait_reset_irqs) {
+	if (READ_ONCE(shid->stat_irq_edges) != shid->wait_reset_irqs) {
 		/* The controller did signal: the IRQ thread owns that frame, so
 		 * re-arm around the new edge count without touching the buffer. */
 		shid->wait_reset_irqs = shid->stat_irq_edges;
@@ -1677,16 +1678,15 @@ static void spi_hid_wait_reset_watchdog(struct work_struct *work)
 		goto out;
 	}
 
-	if (shid->wait_reset_kicks >= WAIT_RESET_MAX_KICKS) {
+	if (shid->wait_reset_kicks >= WAIT_RESET_MAX_WRITE_RETRIES) {
 		dev_warn(dev,
-			 "SEQ: no RESET_RSP and no IRQ at all after %u discovery kicks, giving up until the next reload or resume\n",
+			 "SEQ: DESCREQ write to a silent controller failed %u times, giving up until the next reload or resume\n",
 			 shid->wait_reset_kicks);
 		goto out;
 	}
 	shid->wait_reset_kicks++;
-	dev_warn(dev, "SEQ: no RESET_RSP and no IRQ at all after %d ms, forcing DESCREQ (kick %u/%u)\n",
-		 wait_reset_kick_ms, shid->wait_reset_kicks,
-		 WAIT_RESET_MAX_KICKS);
+	dev_warn(dev, "SEQ: no RESET_RSP and no IRQ at all after %d ms, forcing DESCREQ\n",
+		 wait_reset_kick_ms);
 
 	if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
 		dev_warn(dev, "SEQ: recovery DESCREQ write failed, retrying\n");
@@ -1780,9 +1780,9 @@ module_param(wait_reset_kick_ms, int, 0444);
 MODULE_PARM_DESC(wait_reset_kick_ms,
 	"Experimental standard-mode backstop in ms (0=disable, the default): when "
 	"the controller has produced no IRQ at all since power-up or resume, send "
-	"a DESCREQ every this many ms, up to 3 times, then log and stop. No power "
-	"sequencing is involved, but a device that never answers is polled for its "
-	"descriptor afterwards (issue #4)");
+	"one DESCREQ after this delay, then log and stop (a failed write is retried "
+	"up to 3 times). No power sequencing is involved, but a device that never "
+	"answers is polled for its descriptor afterwards (issue #4)");
 
 module_param(sl4a_debug_level, int, 0644);
 MODULE_PARM_DESC(sl4a_debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex");
@@ -3418,10 +3418,12 @@ static int spi_hid_probe(struct spi_device *spi)
 		}
 	}
 
+	mutex_lock(&shid->seq_lock);
 	shid->seq_enabled = true;
 	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_PROBE);
 	shid->ready = shid->seq_state >= SPI_HID_SEQ_DONE ? true : false;
 	shid->keep_powered = true;
+	mutex_unlock(&shid->seq_lock);
 
 	/* Wait for device to stabilize after ACPI _INI power-on.
 	 * _INI is called by the ACPI subsystem before probe() and handles
