@@ -36,16 +36,17 @@ synchronous-request lock ordering, and the diagnostic log-option quoting.
   it and dropping the frame.
 - Opt-in standard-mode backstop for a device that answers power-up or resume with
   nothing at all: `wait_reset_kick_ms` (0 = off, the default) sends one `DESCREQ`
-  after that many milliseconds without a single IRQ edge, then logs and stops (a
-  failed write is retried up to three times). Without the backstop the sequencer
-  sat in `WAIT_RESET` with no timer armed, `ready` false and no touchscreen until
-  a reload or a suspend/resume, which is the cold-boot shape of issue #4. It never
-  reads the input buffer (so a frame the IRQ thread is about to handle cannot be
-  stolen) and performs no power sequencing. The default is off because the safe
-  interval is measured, not known: enabling it means a device that never answers
-  is polled for its descriptor afterwards, and that a late `RESET_RSP` draws a
-  second `DESCREQ` from the `WAIT_DESC` path (unmeasured, on the field-test list).
-  Raw mode keeps its own cold-boot retries.
+  after that many milliseconds without a single IRQ edge — one kick per entry into
+  `WAIT_RESET`, with a failed write retried up to three times — and the existing
+  descriptor poller then keeps reading until the device answers or resets. Without
+  the backstop the sequencer sat in `WAIT_RESET` with no timer armed, `ready` false
+  and no touchscreen until a reload or a suspend/resume, which is the cold-boot
+  shape of issue #4. It never reads the input buffer (so a frame the IRQ thread is
+  about to handle cannot be stolen) and performs no power sequencing. The default
+  is off because the safe interval is measured, not known: enabling it means a
+  device that never answers is polled for its descriptor afterwards, and that a
+  late `RESET_RSP` draws a second `DESCREQ` from the `WAIT_DESC` path (unmeasured,
+  on the field-test list). Raw mode keeps its own cold-boot retries.
 
 ### Raw handshake and stream monitoring
 

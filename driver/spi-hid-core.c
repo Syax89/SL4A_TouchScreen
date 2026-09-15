@@ -156,6 +156,13 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 {
 	enum spi_hid_seq_state old_state = shid->seq_state;
 
+	/* Standard mode has no other timer covering a device that never answers
+	 * power-up or resume with a RESET_RSP. Armed before the unchanged-state
+	 * early return: the ACPI recovery parks in WAIT_RESET, and a power cycle
+	 * owes a fresh RESET_RSP even when the state itself does not change. */
+	if (new_state == SPI_HID_SEQ_WAIT_RESET)
+		spi_hid_arm_wait_reset_watchdog(shid);
+
 	if (old_state == new_state)
 		return;
 
@@ -168,11 +175,6 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 
 	if (new_state == SPI_HID_SEQ_WAIT_DESC)
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
-
-	/* Standard mode has no other timer covering a device that never answers
-	 * power-up or resume with a RESET_RSP. */
-	if (new_state == SPI_HID_SEQ_WAIT_RESET)
-		spi_hid_arm_wait_reset_watchdog(shid);
 
 	/* Safety net: the device's data-ready IRQ is edge-triggered and can be
 	 * lost if it fires while we're still inside the SET_FEATURE write path
@@ -1649,14 +1651,15 @@ static void spi_hid_arm_wait_reset_watchdog(struct spi_hid *shid)
  *    was armed, so a frame it is still holding (a slow RESET_RSP, a threaded
  *    handler queued behind seq_lock) is never consumed out from under the IRQ
  *    thread: no read happens here at all;
- *  - the kick is a plain DESCREQ write with no power sequencing, sent at most
- *    once per power-up or resume (the counter bounds retries of a *failed*
- *    write), so it cannot loop or reset hardware. If a frame arrives after the
- *    kick, the WAIT_DESC path answers the late RESET_RSP with its own DESCREQ:
- *    the worst case is two back-to-back DESCREQs, which no measurement in tree
- *    can rule out, so it is on the field-test list. Standard mode only; raw
- *    mode retries cold boots on its own. Off by default because the safe
- *    interval is measured, not known. */
+ *  - the kick is a plain DESCREQ write with no power sequencing, sent once per
+ *    entry into WAIT_RESET (the counter bounds retries of a *failed* write).
+ *    After it the existing descriptor poller takes over and reads every 100 ms
+ *    until the device answers or resets. If a frame arrives after the kick, the
+ *    WAIT_DESC path answers the late RESET_RSP with its own DESCREQ: the worst
+ *    case is two back-to-back DESCREQs, which no measurement in tree can rule
+ *    out, so it is on the field-test list. Standard mode only; raw mode retries
+ *    cold boots on its own. Off by default because the safe interval is
+ *    measured, not known. */
 static void spi_hid_wait_reset_watchdog(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid,
@@ -1780,9 +1783,10 @@ module_param(wait_reset_kick_ms, int, 0444);
 MODULE_PARM_DESC(wait_reset_kick_ms,
 	"Experimental standard-mode backstop in ms (0=disable, the default): when "
 	"the controller has produced no IRQ at all since power-up or resume, send "
-	"one DESCREQ after this delay, then log and stop (a failed write is retried "
-	"up to 3 times). No power sequencing is involved, but a device that never "
-	"answers is polled for its descriptor afterwards (issue #4)");
+	"one DESCREQ after this delay (a failed write is retried up to 3 times). "
+	"No power sequencing is involved. After the kick the descriptor poller "
+	"keeps reading every 100 ms until the device answers or resets, so a dead "
+	"controller is polled rather than left silent (issue #4)");
 
 module_param(sl4a_debug_level, int, 0644);
 MODULE_PARM_DESC(sl4a_debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex");
