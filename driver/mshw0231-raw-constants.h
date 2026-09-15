@@ -6,6 +6,11 @@
 #define HEATMAP_TOUCH_MIN_RISE      200
 #define HEATMAP_TOUCH_MIN_ABSOLUTE  400
 #define HEATMAP_BASELINE_FRAMES      30
+/* Downward baseline decay: 1 raw count every this many frames (~2.5 s at
+ * 100 Hz). Resting raw drifts down with temperature, and the baseline update
+ * only recovers upward, so without this a downward drift leaves `rise` positive
+ * everywhere and the pipeline publishes phantom contacts until a reload. */
+#define HEATMAP_DRIFT_DIV           256
 
 /* Peak detection */
 #define HEATMAP_MAX_PEAKS            16

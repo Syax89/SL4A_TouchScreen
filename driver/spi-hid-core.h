@@ -245,6 +245,7 @@ struct spi_hid {
 	u8  heatmap_baseline[HEATMAP_MAX_CELLS];
 	bool heatmap_have_baseline;
 	u32 heatmap_baseline_frames;
+	u16 heatmap_drift_div;      /* countdown for the slow downward decay */
 	u8  heatmap_touched[HEATMAP_MAX_CELLS];
 	s16 heatmap_signal[HEATMAP_MAX_CELLS];   /* precomputed c590 signal rise */
 	u16 heatmap_label[HEATMAP_MAX_CELLS];    /* CCL component labels */

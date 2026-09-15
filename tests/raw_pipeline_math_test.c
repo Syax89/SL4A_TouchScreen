@@ -348,6 +348,61 @@ static void test_jump_rejection(void)
 	CHECK(HUNGARIAN_JUMP_REJECT_MARGIN == 200, "jump reject margin = 200");
 }
 
+/* ── Baseline tracking: upward EMA + slow downward decay ─────────────── */
+
+/* Mirrors the branch in raw_compute_signal(): raw >= base recovers toward the
+ * resting value at 12.5%, raw < base decays one count every HEATMAP_DRIFT_DIV
+ * frames. Without the decay the baseline was monotone non-decreasing, so any
+ * downward drift left `rise` positive across the panel until a reload. */
+typedef struct { u8 base; u16 drift_div; } bl_sim;
+
+static void bl_sim_update(bl_sim *s, u8 raw, u8 alpha)
+{
+	bool decay_now = false;
+
+	if (--s->drift_div == 0) {
+		s->drift_div = HEATMAP_DRIFT_DIV;
+		decay_now = true;
+	}
+	if (raw >= s->base) {
+		u16 cur = (u16)s->base * alpha + (u16)raw;
+		s->base = (u8)(cur / 8);
+	} else if (decay_now) {
+		s->base = s->base - 1;
+	}
+}
+
+static void test_baseline_drift_decay(void)
+{
+	bl_sim s = { .base = 200, .drift_div = HEATMAP_DRIFT_DIV };
+	u16 i;
+
+	/* Upward: resting raw rises, baseline follows at 12.5%. */
+	bl_sim_update(&s, 232, 7);
+	CHECK(s.base == (u8)(((u16)200 * 7 + 232) / 8), "baseline recovers upward, got %u", s.base);
+
+	/* Downward: no decay until the divider wraps. */
+	s.base = 200;
+	s.drift_div = HEATMAP_DRIFT_DIV;
+	for (i = 0; i < HEATMAP_DRIFT_DIV - 1; i++)
+		bl_sim_update(&s, 150, 7);
+	CHECK(s.base == 200, "baseline holds during a touch, got %u", s.base);
+
+	bl_sim_update(&s, 150, 7);
+	CHECK(s.base == 199, "baseline decays one count after the divider, got %u", s.base);
+
+	for (i = 0; i < HEATMAP_DRIFT_DIV; i++)
+		bl_sim_update(&s, 150, 7);
+	CHECK(s.base == 198, "decay keeps running while the cell stays below baseline, got %u", s.base);
+
+	/* A cell sitting exactly on its resting value stops decaying. */
+	s.base = 150;
+	s.drift_div = HEATMAP_DRIFT_DIV;
+	for (i = 0; i < 3 * HEATMAP_DRIFT_DIV; i++)
+		bl_sim_update(&s, 150, 7);
+	CHECK(s.base == 150, "baseline never crosses below resting raw, got %u", s.base);
+}
+
 int main(void)
 {
 	printf("raw_pipeline_math_test: running...\n");
@@ -362,6 +417,7 @@ int main(void)
 	test_edge_penalty();
 	test_signal_thresholds();
 	test_jump_rejection();
+	test_baseline_drift_decay();
 
 	printf("raw_pipeline_math_test: %d assertions, %d failures\n", passed, failed);
 	return failed != 0;
