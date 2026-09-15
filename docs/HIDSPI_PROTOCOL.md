@@ -134,8 +134,14 @@ for the exact firmware and profile.
 
 ### Opcode Doubling
 
-The Windows driver doubles the opcode byte in certain commands. The
-Linux driver matches this behavior for compatibility.
+A single write opcode (`0x02`) starts each command frame. Windows sends it once
+and pads the short command bodies with the constant `0C EE 5B` trailer; the
+Linux driver sent it twice (`02 02 ..`) with a zeroed trailer until the frames
+were reconciled against `captures/wintrace/surface_init.csv`. The Windows form is
+now the default (`wire_double_opcode=0`) and the doubled form is behind
+`wire_double_opcode=1`. The frames themselves are defined in
+`driver/spi-hid-wire-frames.h` and asserted byte for byte by
+`tests/wire_frames_test.c`.
 
 ### TX_COUNT Quirk
 
@@ -153,7 +159,10 @@ Windows traces measure a ~3.6 s gap between RPT_DESC and GET_FEATURE
 (`surface_init.csv` rows 6195→6431: 3.623 s); the original protocol
 documentation cited ~5.9 s, which is not reproducible from the trace rows.
 The Linux delay is configuration-dependent; with `skip_getfeat=1`, the
-experimental vendor-init path (0xC2 opcode) bypasses GET_FEATURE. The
+experimental vendor-init path (0xC2 opcode) does not park in `WAIT_FEATURE`
+waiting for the GET_FEATURE reply, and no `skip_getfeat` value suppresses the
+raw-mode Report ID 6 configuration read that Windows performs between RPT_DESC
+and SET_FEATURE ID5. The
 driver's `sync_timeout_ms` (default 6000) bounds synchronous requests so a
 feature query issued during this settle window no longer tears the transport
 down. Neither path is a release-qualified activation contract.
