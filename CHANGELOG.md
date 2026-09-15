@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 — Surface Laptop 3 (AMD) support, raw-mode streaming backstop, issue #4 diagnostics (2026-09-15)
 
 ### Standard-mode startup liveness, detection only (issue #4)
 
