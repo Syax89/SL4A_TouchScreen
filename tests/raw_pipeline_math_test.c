@@ -100,7 +100,9 @@ static int ghost_should_merge(u32 gx1, u32 gy1, u32 gx2, u32 gy2, u32 gdsq)
 	u32 dx, dy;
 	if (gx1 >= gx2) dx = gx1 - gx2; else dx = gx2 - gx1;
 	if (gy1 >= gy2) dy = gy1 - gy2; else dy = gy2 - gy1;
-	return dx * dx + dy * dy <= gdsq;
+	/* Strict, like the driver (`< gdsq`): exactly at the radius is not a
+	 * merge, and `<=` here would hide a revert of that rule (review R17c). */
+	return dx * dx + dy * dy < gdsq;
 }
 
 static void test_ghost_merge(void)
@@ -112,6 +114,9 @@ static void test_ghost_merge(void)
 	      "identical positions merge");
 	CHECK(ghost_should_merge(100, 100, 105, 100, gdsq),
 	      "within ghost_dist merge");
+	/* Boundary: 6 cells = 600 fixed-point units, so dx² == gdsq exactly. */
+	CHECK(!ghost_should_merge(100, 100, 700, 100, gdsq),
+	      "exactly at ghost_dist does not merge (strict <)");
 
 	gdsq = ghost_dist_sq(255);
 	CHECK(gdsq == (u32)255 * 255 * 10000, "ghost_dist=255 sq no overflow");
@@ -177,13 +182,22 @@ static void slot_fsm_tick(struct slot_state *s, int has_blob, u32 blob_weight,
 		s->missed = 0;
 		switch (s->state) {
 		case SLOT_EMPTY:
-		case SLOT_LIFT:
 			s->state = SLOT_NEW;
 			s->duration = 0;
 			__attribute__((fallthrough));
 		case SLOT_NEW:
 			if (++s->duration >= (u32)blob_debounce)
 				s->state = SLOT_CLAIMED;
+			break;
+		case SLOT_LIFT:
+			/* Re-acquisition while the lift is pending re-claims the slot
+			 * directly, exactly like the driver: restarting the debounce
+			 * here turned a single dropped frame into a release plus a
+			 * re-press (the driver's `case 3`; review R14/R17c). */
+			if (blob_weight >= HEATMAP_HOLD_RECOVERY_WEIGHT) {
+				s->state = SLOT_CLAIMED;
+				s->duration = 0;
+			}
 			break;
 		case SLOT_HOLD:
 			if (blob_weight >= HEATMAP_HOLD_RECOVERY_WEIGHT) {
@@ -409,21 +423,11 @@ static void test_baseline_drift_decay(void)
 
 /* ── Edge penalty vs the recovery guard (adversarial review R10) ─────── */
 
-/* The tracker's "is this blob substantial enough to recover a contact" guard has
- * to compare against the *pre-penalty* weight: a real finger on the bottom row
- * keeps only HEATMAP_EDGE_PENALTY_BOTTOM percent of its weight, which is below
- * HEATMAP_HOLD_RECOVERY_WEIGHT, so guarding on the penalised value made every
- * bottom-edge contact unrecoverable after a single dropped frame. */
-static void test_recovery_guard_uses_raw_weight(void)
-{
-	u32 raw = 5000;
-	u32 penalised = raw * HEATMAP_EDGE_PENALTY_BOTTOM / 100;
-
-	CHECK(penalised < HEATMAP_HOLD_RECOVERY_WEIGHT,
-	      "penalised bottom-edge weight (%u) stays below the recovery threshold", penalised);
-	CHECK(raw >= HEATMAP_HOLD_RECOVERY_WEIGHT,
-	      "pre-penalty weight (%u) passes the recovery guard", raw);
-}
+/* The behavioural check for this rule drives the real pipeline:
+ * `test_recovery_guard_real_pipeline()` in `raw_pipeline_replay_test.c` feeds a
+ * bottom-edge blob, drops frames and requires the slot to come back. The
+ * constant-only assertion that used to live here could not fail when the guard
+ * compared the penalised weight (adversarial review R14), so it is gone. */
 
 int main(void)
 {
@@ -440,8 +444,6 @@ int main(void)
 	test_signal_thresholds();
 	test_jump_rejection();
 	test_baseline_drift_decay();
-
-	test_recovery_guard_uses_raw_weight();
 
 	printf("raw_pipeline_math_test: %d assertions, %d failures\n", passed, failed);
 	return failed != 0;

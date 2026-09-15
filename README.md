@@ -123,7 +123,12 @@ build-prerequisite preflight and needs no root; `--force` only to investigate
 unsupported hardware.
 
 `install` activates the driver before it returns (Step 7), so have
-local/remote recovery access available *before* running it. The
+local/remote recovery access available *before* running it. Two cases skip that
+activation, and the installer says so when they apply: with Secure Boot the MOK
+key must be enrolled first (the boot unit activates after the enrollment reboot),
+and when the selected profile changes the load-time `raw_mode` parameter the
+modules keep the previous profile until the next boot, where the boot unit
+activates the new one. The
 experimental controller can also be activated by hand with:
 
 ```bash
@@ -140,8 +145,9 @@ active profile, and whether the driver is currently loaded and bound;
 `sudo ./tools/sl4a-touch.sh logs` collects a diagnostic bundle for bug reports.
 
 The DKMS installer contains dependency guidance for Arch/CachyOS,
-Ubuntu/Debian, Fedora, and openSUSE. Neither module exports aliases or has a
-boot-time binding rule. Secure Boot remains unqualified until recorded in the
+Ubuntu/Debian, Fedora, and openSUSE. Neither module exports aliases, so the
+kernel never binds them on its own — the systemd unit `install` enables is what
+repeats the binding after every boot. Secure Boot remains unqualified until recorded in the
 compatibility matrix. See [`docs/ROLLBACK.md`](docs/ROLLBACK.md) for the
 complete rollback and upgrade procedure.
 

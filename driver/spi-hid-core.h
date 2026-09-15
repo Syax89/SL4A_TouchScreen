@@ -239,6 +239,7 @@ struct spi_hid {
 	u32 heatmap_content_id;         /* content_id from the captured frame */
 	u16 heatmap_grid_cols;          /* Heatmap columns (72 SL4 / 78 SL3, from cfg) */
 	u16 heatmap_grid_rows;          /* Heatmap rows (48 SL4 / 52 SL3, from cfg) */
+	bool heatmap_grid_mismatch;     /* latch: one pipeline reset per mismatch episode */
 	const struct spi_hid_dev_cfg *cfg; /* device-specific config from probe */
 	u16 heatmap_baseline_needed;    /* cfg->heatmap_baseline_needed, copied at raw_init */
 	u8  heatmap_baseline_alpha;     /* cfg->heatmap_baseline_alpha, copied at raw_init */

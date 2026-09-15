@@ -501,13 +501,19 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				pixel_count++;
 				r = (u16)row;
 				c = (u16)col;
-				if (r < min_r)
+				/* Cast to s32: `r`/`c` are u32 here while the bounds
+				 * start at -1, so a plain `r > max_r` is evaluated
+				 * unsigned and the maximum is never updated — which
+				 * silently disabled the bottom/right edge penalty and
+				 * the ellipse below (found while writing the recovery
+				 * guard check, review R14). */
+				if ((s32)r < min_r)
 					min_r = r;
-				if (r > max_r)
+				if ((s32)r > max_r)
 					max_r = r;
-				if (c < min_c)
+				if ((s32)c < min_c)
 					min_c = c;
-				if (c > max_c)
+				if ((s32)c > max_c)
 					max_c = c;
 
 				/* 4-connected neighbors */
@@ -641,6 +647,12 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 								s32 pc = peaks_col[split_peaks[p]];
 								s64 ssx = 0, ssy = 0, ssw = 0;
 								s32 r, c;
+								/* The sub-blob's own extent, not the sampling
+								 * window: the window is a superset, so penalising
+								 * with it drops a peak two rows from the edge that
+								 * touches nothing (adversarial review R14). */
+								s32 b_min_r = (s32)nrows, b_max_r = -1;
+								s32 b_min_c = (s32)ncols, b_max_c = -1;
 							for (r = max(0, pr - HEATMAP_SPLIT_RADIUS); r <= min((s32)nrows - 1, pr + HEATMAP_SPLIT_RADIUS); r++) {
 								for (c = max(0, pc - HEATMAP_SPLIT_RADIUS); c <= min((s32)ncols - 1, pc + HEATMAP_SPLIT_RADIUS); c++) {
 										u32 idx = (u32)r * ncols + (u32)c;
@@ -653,14 +665,14 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 										ssx += (s64)c * w;
 										ssy += (s64)r * w;
 										ssw += w;
+										if (r < b_min_r) b_min_r = r;
+										if (r > b_max_r) b_max_r = r;
+										if (c < b_min_c) b_min_c = c;
+										if (c > b_max_c) b_max_c = c;
 									}
 								}
 								if (ssw > 0) {
 									s32 sbi = *nlabels;
-									s32 w_min_r = max(0, pr - HEATMAP_SPLIT_RADIUS);
-									s32 w_max_r = min((s32)nrows - 1, pr + HEATMAP_SPLIT_RADIUS);
-									s32 w_min_c = max(0, pc - HEATMAP_SPLIT_RADIUS);
-									s32 w_max_c = min((s32)ncols - 1, pc + HEATMAP_SPLIT_RADIUS);
 									shid->blob_x[sbi] = (u32)(ssx * 100 / ssw);
 									shid->blob_y[sbi] = (u32)(ssy * 100 / ssw);
 									shid->blob_raw_wsum[sbi] = (u32)ssw;
@@ -668,7 +680,7 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 									 * parent's bbox: the interior peak of a bent
 									 * component is not a bezel contact. */
 									shid->blob_wsum[sbi] = raw_edge_penalised_weight((u32)ssw,
-												w_min_r, w_max_r, w_min_c, w_max_c, nrows, ncols);
+											b_min_r, b_max_r, b_min_c, b_max_c, nrows, ncols);
 									shid->blob_active[sbi] = true;
 									shid->blob_eigmaj[sbi] = 0;
 									shid->blob_eigmin[sbi] = 0;
@@ -1439,8 +1451,15 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 	/* Geometry: the module parameters are an explicit override, the cached
 	 * per-device geometry is the default. Without this the parameters were
 	 * unreachable: mshw0231_raw_init() always fills the cache from shid->cfg
-	 * (never NULL), and the auto-detect block below is skipped once it is. */
+	 * (never NULL), and the auto-detect block below is skipped once it is.
+	 * The override also has to fit this frame: re-arming a geometry the
+	 * mismatch branch below just dropped would reset the pipeline once per
+	 * frame — the storm this code exists to avoid (adversarial review R14).
+	 * Rows derived from grid_cols always fit, so only an explicit row count
+	 * needs the test. */
 	if (configured_cols > 1 &&
+	    (!(configured_rows > 1) ||
+	     (u32)configured_cols * (u32)configured_rows <= cell_count) &&
 	    (shid->heatmap_grid_cols != configured_cols ||
 	     (configured_rows > 1 && shid->heatmap_grid_rows != configured_rows))) {
 		shid->heatmap_grid_cols = configured_cols;
@@ -1466,7 +1485,7 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 			nrows = GRID_ROWS_DEFAULT;
 		}
 		if (nrows > HEATMAP_MAX_CELLS / ncols || ncols * nrows > cell_count) {
-			dev_warn(dev, "HEATMAP: frame has %u bytes, insufficient for %ux%u grid\n",
+			dev_warn_ratelimited(dev, "HEATMAP: frame has %u bytes, insufficient for %ux%u grid\n",
 				 cell_count, ncols, nrows);
 			return;
 		}
@@ -1489,19 +1508,25 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 		 * dfa_data_offset makes that permanent, so drop the cached geometry
 		 * and let the auto-detect above re-derive it instead of wiping the
 		 * pipeline 100 times per second — but reset once on the way out, so
-		 * a slot held from a previous valid frame cannot stay published. */
+		 * a slot held from a previous valid frame cannot stay published.
+		 * The reset is latched per mismatch episode: with grid_cols/
+		 * grid_rows set next to an impossible offset the override above
+		 * re-arms the cache every frame, and an unlatched reset would then
+		 * release every held contact at the frame rate (review R14). */
 		dev_warn_ratelimited(dev,
 			"HEATMAP: frame has %u cells, need %u for cached grid (match grid_cols/grid_rows, or set dfa_data_offset=0)\n",
 			cell_count, ncols * nrows);
-		if (data_offset && shid->heatmap_grid_cols) {
-			shid->heatmap_grid_cols = 0;
-			shid->heatmap_grid_rows = 0;
-			mshw0231_raw_reset(shid);
-		} else if (!data_offset) {
+		if (!shid->heatmap_grid_mismatch) {
+			shid->heatmap_grid_mismatch = true;
+			if (data_offset && shid->heatmap_grid_cols) {
+				shid->heatmap_grid_cols = 0;
+				shid->heatmap_grid_rows = 0;
+			}
 			mshw0231_raw_reset(shid);
 		}
 		return;
 	}
+	shid->heatmap_grid_mismatch = false;
 	cell_count = ncols * nrows;
 
 	/* At the default 100 Hz stream rate, six missing frames are roughly
@@ -1608,7 +1633,7 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 			scale_y = (SCREEN_MAX * 1000) / (screen_y_cells - 1);
 
 		for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
-			if (!shid->blob_active[i] || shid->blob_wsum[i] < blob_min_weight)
+			if (!shid->blob_active[i] || shid->blob_raw_wsum[i] < blob_min_weight)
 				continue;
 			sorted[sorted_count].gx = shid->blob_x[i];
 			sorted[sorted_count].gy = shid->blob_y[i];

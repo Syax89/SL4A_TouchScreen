@@ -1,8 +1,9 @@
 # Rollback Procedure
 
-`sl4a-touch` modules do not auto-load during kernel boot. The systemd
-activation service runs AFTER login (post-multi-user.target), so if
-activation hangs you always have a shell to recover with. Recovery from a
+`sl4a-touch` modules do not auto-load during kernel boot: nothing binds them by
+kernel alias. The systemd activation service runs after `multi-user.target` is
+reached — at the login prompt, not during early boot and not "after login" — so
+if activation hangs you always have a shell to recover with. Recovery from a
 failed activation is bounded and deterministic.
 
 ## After a failed or hung activation
@@ -37,9 +38,11 @@ sudo reboot
 
 The installer detects an existing DKMS registration for the same `PACKAGE_NAME`
 and replaces it (removing any other registered version first, so two versions
-cannot both build the same module names). After reboot the new version is staged,
-and `install` itself activates it — activation is no longer a separate manual
-step; `activate` remains available for doing it by hand.
+cannot both build the same module names); it stages the new version and activates
+it in the same run, so a reboot is only needed when the profile changes a
+load-time parameter (`raw_mode`) or when the MOK key still has to be enrolled for
+Secure Boot, and the boot unit repeats the activation after
+every boot. `activate` remains available for doing it by hand.
 
 ## Kernel updates
 

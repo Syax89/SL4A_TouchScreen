@@ -121,22 +121,28 @@ dkms_installed_version() {
 dkms_remove_other_versions() {
 	local keep="$1" line ver src
 	dkms status -m "$PKG_NAME" 2>/dev/null | while IFS= read -r line; do
-		ver="${line#${PKG_NAME}/}"
-		ver="${ver%%,*}"
-		[ -n "$ver" ] || continue
+		# Both real shapes parse here: "sl4a-touch/1.6.1, 6.12, x86_64:
+		# installed" and the source-only "sl4a-touch/1.6.1: added" (no comma —
+		# the old "%%," kept "1.6.1: added", so every later `dkms remove -v`
+		# failed on it). A legacy DKMS 2.x line ("sl4a-touch, 1.6.1, ...:
+		# installed") matches nothing and is skipped rather than acted on.
+		ver="$(printf '%s\n' "$line" | sed -n "s|^${PKG_NAME}/\([^,: ]*\)[,: ].*|\1|p")"
+		case "$ver" in
+			''|*[!A-Za-z0-9.+~_-]*) continue ;;
+		esac
 		[ "$ver" = "$keep" ] && continue
 		src="/usr/src/${PKG_NAME}-${ver}"
 		info "Removing stale DKMS registration $PKG_NAME/$ver..."
 		if dkms remove -m "$PKG_NAME" -v "$ver" --all >/dev/null 2>&1; then
 			# Drop the tree only when DKMS let go of it and the tree is
 			# this package's (same ownership marker the uninstall path uses).
-			if [ -f "$src/dkms.conf" ] && grep -q '^PACKAGE_NAME="sl4a-touch"' "$src/dkms.conf"; then
+			if [ -f "$src/dkms.conf" ] && grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$src/dkms.conf"; then
 				rm -rf "$src"
 			else
 				info "Leaving unowned $src untouched"
 			fi
 		else
-			info "DKMS removal of $PKG_NAME/$ver failed; leaving $src for recovery"
+			warn "DKMS removal of $PKG_NAME/$ver failed; $PKG_NAME/$ver stays registered and can win the next kernel update (remove it by hand: sudo dkms remove -m $PKG_NAME -v $ver --all)"
 		fi
 	done || true
 }
@@ -260,11 +266,11 @@ menu_pick_command() {
 		elif [ -z "$key" ]; then
 			break
 		fi
-		tput cuu "$menu_lines" >&2 2>/dev/null
-		tput ed >&2 2>/dev/null
+		tput cuu "$menu_lines" >&2 2>/dev/null || true
+		tput ed >&2 2>/dev/null || true
 		draw
 	done
-	tput cnorm >&2 2>/dev/null
+	tput cnorm >&2 2>/dev/null || true
 	echo "" >&2
 	echo "${cmds[$selected]}"
 }
@@ -566,6 +572,14 @@ cmd_install() {
 
 	cleanup_staged_install() {
 		dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all >/dev/null 2>&1 || true
+		# Same ownership rule as the two removal paths: never delete a tree
+		# that carries someone else's dkms.conf. A partial copy of our own
+		# staging has no dkms.conf yet and stays safe to drop.
+		if [ -f "$SRC_DEST/dkms.conf" ] && \
+		   ! grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$SRC_DEST/dkms.conf"; then
+			info "Leaving unowned $SRC_DEST untouched"
+			return 0
+		fi
 		rm -rf "$SRC_DEST"
 	}
 
@@ -672,16 +686,6 @@ EOF
 	systemctl enable sl4a-touch-activate.service >/dev/null 2>&1
 	pass "Created $SYSTEMD_UNIT (enabled — activates automatically after every boot)"
 
-	echo ""
-	rule
-	if [ "$PROFILE" = "raw" ]; then
-		echo -e "${YELLOW}${BOLD}Install complete${NC} ${YELLOW}— EXPERIMENTAL raw multitouch profile selected.${NC}"
-	else
-		echo -e "${GREEN}${BOLD}Install complete${NC} ${GREEN}— standard HID profile selected.${NC}"
-	fi
-	echo "  To remove:  sudo ./tools/sl4a-touch.sh uninstall"
-	rule
-
 	info "Step 7: Activating..."
 	if [ "$skip_activate" -eq 1 ]; then
 		warn "Activation is skipped — the MOK key must be enrolled first."
@@ -695,11 +699,27 @@ EOF
 		[ "$PROFILE" = "raw" ] && requested_raw_mode="Y"
 		if [ -r /sys/module/sl4a_spi_hid/parameters/raw_mode ] && \
 		   [ "$(cat /sys/module/sl4a_spi_hid/parameters/raw_mode)" != "$requested_raw_mode" ]; then
-			warn "The selected profile changes a load-time-only module parameter. Reboot to apply it."
+			warn "The selected profile changes a load-time-only module parameter."
+			echo "  The modules keep the previous profile until the next boot;"
+			echo "  the boot unit then activates the new one automatically."
+			echo "  Nothing else to do (to activate by hand now:  sudo ./tools/sl4a-touch.sh activate)"
 		else
 			cmd_activate
 		fi
 	fi
+
+	# Only now: everything that can fail has run. The banner used to print
+	# before Step 7, so a failed activation was announced by "Install complete"
+	# (review R16).
+	echo ""
+	rule
+	if [ "$PROFILE" = "raw" ]; then
+		echo -e "${YELLOW}${BOLD}Install complete${NC} ${YELLOW}— EXPERIMENTAL raw multitouch profile selected.${NC}"
+	else
+		echo -e "${GREEN}${BOLD}Install complete${NC} ${GREEN}— standard HID profile selected.${NC}"
+	fi
+	echo "  To remove:  sudo ./tools/sl4a-touch.sh uninstall"
+	rule
 }
 
 # ── uninstall ────────────────────────────────────────────────────────────
@@ -735,7 +755,7 @@ cmd_uninstall() {
 	pass "Reboot is required to stop the active driver safely"
 
 	info "Removing package-owned DKMS registration $PKG_NAME/$PKG_VERSION..."
-	if [ -f "$SRC_DEST/dkms.conf" ] && grep -q '^PACKAGE_NAME="sl4a-touch"' "$SRC_DEST/dkms.conf"; then
+	if [ -f "$SRC_DEST/dkms.conf" ] && grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$SRC_DEST/dkms.conf"; then
 		if dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all; then
 			rm -rf "$SRC_DEST"
 			pass "Removed package-owned DKMS version $PKG_VERSION"
@@ -992,6 +1012,7 @@ cmd_logs() {
 		case "$1" in
 			-o|--output)
 				[ $# -ge 2 ] || fail "-o requires a path"
+				[ -n "$2" ] || fail "-o requires a non-empty path"
 				OUT="$2"
 				shift 2 ;;
 			*) fail "unknown logs option: $1 (see --help)" ;;
@@ -1007,7 +1028,9 @@ cmd_logs() {
 		[ -L "$OUT" ] && fail "refusing to write the bundle through the symlink $OUT"
 		if [ -e "$OUT" ]; then
 			[ -f "$OUT" ] || fail "refusing to overwrite $OUT: not a regular file"
-			grep -q '^=== SL4A_TouchScreen diagnostic bundle ===' "$OUT" 2>/dev/null || \
+			# First line only: a file that merely quotes the header somewhere
+			# is not one of our bundles and must not be truncated.
+			[ "$(head -n 1 "$OUT" 2>/dev/null)" = "=== SL4A_TouchScreen diagnostic bundle ===" ] || \
 				fail "refusing to overwrite $OUT: it is not a diagnostic bundle (choose another -o path)"
 		fi
 	fi
@@ -1023,7 +1046,10 @@ cmd_logs() {
 	# inactive unit, and a dmesg|grep with no match is exit 1 — under
 	# `set -e -o pipefail` each of those used to truncate the file that a bug
 	# report needs, in exactly the broken states worth diagnosing.
-	set +e
+	# `+o pipefail` as well: `set +e` alone leaves pipefail on, so a dmesg|grep
+	# with no match would make the status check below reject a bundle that was
+	# written perfectly (review R19).
+	set +e +o pipefail
 	{
 		echo "=== SL4A_TouchScreen diagnostic bundle ==="
 		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -1110,11 +1136,16 @@ cmd_logs() {
 		echo "--- dmesg (driver-related lines) ---"
 		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -300
 	} > "$OUT"
-	set -e
+	bundle_status=$?
+	set -e -o pipefail
 
 	# With `set +e` a failed redirect is silent: without this check the script
-	# would report a bundle it never wrote.
-	if [ ! -s "$OUT" ]; then
+	# would report a bundle it never wrote. The size alone is not enough — a
+	# redirect that cannot be opened keeps the previous (non-empty) file, and a
+	# write that stops on a full disk is non-empty too — so the redirect's own
+	# status and the bundle's last section are checked as well.
+	if [ "$bundle_status" -ne 0 ] || [ ! -s "$OUT" ] || \
+	   ! grep -q '^--- dmesg' "$OUT" 2>/dev/null; then
 		fail "the diagnostic bundle could not be written to $OUT"
 	fi
 

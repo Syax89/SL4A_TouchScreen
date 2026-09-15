@@ -1639,6 +1639,9 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		shid->ready = true;
 		shid->keep_powered = true;
 		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
+		/* Parity with the raw fallback: a client waiting on `ready` must be
+		 * woken here too (review R15). */
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		/* Hardcode and create device */
 		shid->desc.hid_version = 0x0100;
 		shid->desc.report_descriptor_length = 936;
@@ -1671,13 +1674,17 @@ out:
 static void spi_hid_arm_wait_reset_watchdog(struct spi_hid *shid)
 {
 	lockdep_assert_held(&shid->seq_lock);
+	/* `irq_requested` too: before the line is armed no edge can be counted, so
+	 * arming then would let a short interval kick a device that was never given
+	 * the chance to signal (probe settles for 300 ms after the state is set).
+	 * Probe re-arms once the IRQ is up (review R15). */
 	if (wait_reset_kick_ms <= 0 || !shid->works_initialized ||
 	    READ_ONCE(shid->suspended) || READ_ONCE(shid->removing) ||
-	    shid->raw_mode_active)
+	    !READ_ONCE(shid->irq_requested) || shid->raw_mode_active)
 		return;
 
 	shid->wait_reset_kicks = 0;
-	shid->wait_reset_irqs = shid->stat_irq_edges;
+	shid->wait_reset_irqs = READ_ONCE(shid->stat_irq_edges);
 	mod_delayed_work(system_wq, &shid->wait_reset_watchdog,
 			 msecs_to_jiffies(wait_reset_kick_ms));
 }
@@ -1902,11 +1909,11 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 	}
 
 	if (!shid->raw_mode_active) {
-		/* Once per boot and once per resume: recovering on silence alone
-		 * would power-cycle an idle-but-healthy touchscreen, and repeating it
-		 * on every discovery cycle spent the recovery budget until the driver
-		 * shut the device down for good. Observed activity and resume restore
-		 * the allowance (the flag starts zeroed at probe). */
+		/* Once per silent episode (not once per boot): recovering on silence
+		 * alone would power-cycle an idle-but-healthy touchscreen, and
+		 * repeating it on every discovery cycle spent the recovery budget
+		 * until the driver shut the device down for good. Observed activity
+		 * and resume restore the allowance (the flag starts zeroed at probe). */
 		bool silent = shid->stat_irq_count == shid->std_liveness_irqs;
 		bool recover = silent && std_liveness_recover &&
 			!shid->std_liveness_recovered;
@@ -2050,6 +2057,17 @@ static void spi_hid_poll_work(struct work_struct *work)
 			seq_dbg(shid, 2, "SEQ: poller cid=0x%02x len=%u\n",
 				 shid->data_buf[7], rl);
 
+			/* Drop an oversized frame before anything reads it: the IRQ
+			 * path validates first too, and a frame this path discards
+			 * must not be able to retire the handshake (review R17c). */
+			if (rl >= 3 && rl - 3 > avail) {
+				dev_warn_ratelimited(dev,
+					"SEQ: poller DATA report len=%u exceeds buffer (avail=%u), dropped\n",
+					rl, avail);
+				shid->stat_frames_dropped++;
+				goto resched;
+			}
+
 			if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
 			    spi_hid_protocol_raw_confirms_handshake(shid->data_buf[7], rl)) {
 				shid->raw_handshake_confirmed = true;
@@ -2061,14 +2079,6 @@ static void spi_hid_poll_work(struct work_struct *work)
 					shid->poll_active = false;
 				seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed by poller (raw frame id=0x%02x)\n",
 					shid->data_buf[7]);
-			}
-
-			if (rl >= 3 && rl - 3 > avail) {
-				dev_warn_ratelimited(dev,
-					"SEQ: poller DATA report len=%u exceeds buffer (avail=%u), dropped\n",
-					rl, avail);
-				shid->stat_frames_dropped++;
-				goto resched;
 			}
 
 			if (shid->raw_mode_active && shid->data_buf[7] == 0x0C &&
@@ -2439,6 +2449,9 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		}
 		seq_dbg(shid, 1, "SEQ: report descriptor received, shid->hid=%p, scheduling create_device_work...\n", shid->hid);
 		shid->ready = true;
+		/* Every flip of `ready` wakes pollers of the attribute (the rest of
+		 * the file does; this happy path was the one exception). */
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		shid->keep_powered = true;
 		if (!shid->hid && !shid->raw_mode_active) {
 			bool queued = schedule_work(&shid->create_device_work);
@@ -2581,8 +2594,9 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: got DATA! Creating HID device...\n");
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		shid->keep_powered = true;
-		if (!shid->hid)
+		if (!shid->hid && !shid->raw_mode_active)
 			schedule_work(&shid->create_device_work);
 		seq_handle_data(shid, type, blen);
 	} else if (type == 3) {
@@ -2601,8 +2615,9 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		shid->desc.version_id = 0x0100;
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		shid->keep_powered = true;
-		if (!shid->hid) {
+		if (!shid->hid && !shid->raw_mode_active) {
 			seq_dbg(shid, 1, "SEQ: creating HID device with hardcoded descriptors...\n");
 			schedule_work(&shid->create_device_work);
 		}
@@ -2782,11 +2797,12 @@ static int spi_hid_ll_power(struct hid_device *hid, int level)
 	int ret = 0;
 
 	/* `hid` is published by the HID lifecycle (create/disconnect), not by
-	 * `shid->lock`: every other reader tests it unlocked too, so the lock
-	 * only looked like it protected something. The test is a courtesy check
-	 * and a stale read only decides the return code. `level` is ignored on
-	 * purpose: the transport keeps running across HID suspend, and the D2/D0
-	 * traffic belongs to the sequencer, not to the HID core. */
+	 * `shid->lock`, and the other readers take `seq_lock` rather than this
+	 * lock: taking `shid->lock` here only looked like it protected something.
+	 * The test is a courtesy check and a stale read only decides the return
+	 * code. `level` is ignored on purpose: the transport keeps running across
+	 * HID suspend, and the D2/D0 traffic belongs to the sequencer, not to the
+	 * HID core. */
 	if (!READ_ONCE(shid->hid))
 		ret = -ENODEV;
 
@@ -3130,9 +3146,13 @@ static ssize_t baseline_status_show(struct device *dev, struct device_attribute 
 }
 static DEVICE_ATTR_RO(baseline_status);
 
+/* Single source for what bug reports say about the build. The suite checks this
+ * string against VERSION: it reported "v1.0" for nine releases (review R17c). */
+#define SL4A_DRIVER_VERSION "1.6.1"
+
 static ssize_t build_info_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "spi-hid v1.0\n");
+	return sysfs_emit(buf, "spi-hid v%s\n", SL4A_DRIVER_VERSION);
 }
 static DEVICE_ATTR_RO(build_info);
 
@@ -3548,6 +3568,11 @@ static int spi_hid_probe(struct spi_device *spi)
 	}
 	shid->irq_requested = true;
 	shid->irq_enabled = true;
+	/* Only now can an edge be counted, so only now does the backstop's "no IRQ
+	 * at all" clock mean anything (issue #4). */
+	mutex_lock(&shid->seq_lock);
+	spi_hid_arm_wait_reset_watchdog(shid);
+	mutex_unlock(&shid->seq_lock);
 	dev_info(dev, "SEQ: IRQ armed (state=WAIT_RESET, zero touch)\n");
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_IRQ_ARMED, 0);
 	dev_info(dev, "TRACE[hid] probe complete: d3 -> %s\n",
