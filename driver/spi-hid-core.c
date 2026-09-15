@@ -59,6 +59,9 @@ static bool skip_std_getfeat;
 /* Experimental: when the standard-mode startup liveness check sees no input
  * data after DONE, run the existing ACPI recovery instead of only logging. */
 static bool std_liveness_recover;
+/* Standard-mode backstop: kick discovery when the controller has produced no IRQ
+ * at all since power-up or resume (0 = off; see the watchdog comment). */
+static int wait_reset_kick_ms;
 /* Sync-request timeout: covers the ~3.6 s measured device settle before it
  * answers feature queries (original protocol doc cited ~5.9 s). The old
  * hardcoded 1000 ms timed out on a cold-boot feature query. */
@@ -139,10 +142,26 @@ static const char *spi_hid_seq_state_name(enum spi_hid_seq_state state)
 #define RAW_HANDSHAKE_MAX_RETRIES 3
 #define RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS 5000
 
+/* Standard-mode backstop for a device that says nothing at all after power-up
+ * or a D2->D0 transition. Opt-in through wait_reset_kick_ms (0 = off): see the
+ * comment on the watchdog itself for why the default is off. */
+#define WAIT_RESET_MAX_WRITE_RETRIES 3
+
+static void spi_hid_seq_set_state(struct spi_hid *shid,
+		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason);
+static void spi_hid_arm_wait_reset_watchdog(struct spi_hid *shid);
+
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason)
 {
 	enum spi_hid_seq_state old_state = shid->seq_state;
+
+	/* Standard mode has no other timer covering a device that never answers
+	 * power-up or resume with a RESET_RSP. Armed before the unchanged-state
+	 * early return: the ACPI recovery parks in WAIT_RESET, and a power cycle
+	 * owes a fresh RESET_RSP even when the state itself does not change. */
+	if (new_state == SPI_HID_SEQ_WAIT_RESET)
+		spi_hid_arm_wait_reset_watchdog(shid);
 
 	if (old_state == new_state)
 		return;
@@ -555,6 +574,7 @@ out:
 			cancel_delayed_work_sync(&shid->raw_probe_retry_work);
 			cancel_delayed_work_sync(&shid->feat_delay_work);
 			cancel_delayed_work_sync(&shid->stream_watchdog);
+			cancel_delayed_work_sync(&shid->wait_reset_watchdog);
 		}
 		spi_hid_stop_hid(shid);
 		mutex_lock(&shid->power_lock);
@@ -1604,6 +1624,85 @@ out:
 }
 
 
+/* Arm (or re-arm) the standard-mode WAIT_RESET kick timer and restart its budget.
+ * Must be called with seq_lock held. A no-op unless wait_reset_kick_ms is set:
+ * the backstop is opt-in, off by default (issue #4 field experiment). */
+static void spi_hid_arm_wait_reset_watchdog(struct spi_hid *shid)
+{
+	lockdep_assert_held(&shid->seq_lock);
+	if (wait_reset_kick_ms <= 0 || !shid->works_initialized ||
+	    READ_ONCE(shid->suspended) || READ_ONCE(shid->removing) ||
+	    shid->raw_mode_active)
+		return;
+
+	shid->wait_reset_kicks = 0;
+	shid->wait_reset_irqs = shid->stat_irq_edges;
+	mod_delayed_work(system_wq, &shid->wait_reset_watchdog,
+			 msecs_to_jiffies(wait_reset_kick_ms));
+}
+
+/* Opt-in backstop for a device that answers power-up or resume with nothing at
+ * all: a RESET_RSP is expected, and without this the sequencer sits in
+ * WAIT_RESET with no timer armed, `ready` false and no touchscreen until a
+ * module reload or a suspend/resume (the cold-boot shape of issue #4).
+ *
+ * Two properties keep it safe:
+ *  - it only acts when the controller produced ZERO IRQ edges since the timer
+ *    was armed, so a frame it is still holding (a slow RESET_RSP, a threaded
+ *    handler queued behind seq_lock) is never consumed out from under the IRQ
+ *    thread: no read happens here at all;
+ *  - the kick is a plain DESCREQ write with no power sequencing, sent once per
+ *    entry into WAIT_RESET (the counter bounds retries of a *failed* write).
+ *    After it the existing descriptor poller takes over and reads every 100 ms
+ *    until the device answers or resets. If a frame arrives after the kick, the
+ *    WAIT_DESC path answers the late RESET_RSP with its own DESCREQ: the worst
+ *    case is two back-to-back DESCREQs, which no measurement in tree can rule
+ *    out, so it is on the field-test list. Standard mode only; raw mode retries
+ *    cold boots on its own. Off by default because the safe interval is
+ *    measured, not known. */
+static void spi_hid_wait_reset_watchdog(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid,
+					    wait_reset_watchdog);
+	struct device *dev = &shid->spi->dev;
+
+	mutex_lock(&shid->seq_lock);
+	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
+	    !READ_ONCE(shid->seq_enabled) || shid->raw_mode_active ||
+	    shid->seq_state != SPI_HID_SEQ_WAIT_RESET)
+		goto out;
+
+	if (READ_ONCE(shid->stat_irq_edges) != shid->wait_reset_irqs) {
+		/* The controller did signal: the IRQ thread owns that frame, so
+		 * re-arm around the new edge count without touching the buffer. */
+		shid->wait_reset_irqs = shid->stat_irq_edges;
+		mod_delayed_work(system_wq, &shid->wait_reset_watchdog,
+				 msecs_to_jiffies(wait_reset_kick_ms));
+		goto out;
+	}
+
+	if (shid->wait_reset_kicks >= WAIT_RESET_MAX_WRITE_RETRIES) {
+		dev_warn(dev,
+			 "SEQ: DESCREQ write to a silent controller failed %u times, giving up until the next reload or resume\n",
+			 shid->wait_reset_kicks);
+		goto out;
+	}
+	shid->wait_reset_kicks++;
+	dev_warn(dev, "SEQ: no RESET_RSP and no IRQ at all after %d ms, forcing DESCREQ\n",
+		 wait_reset_kick_ms);
+
+	if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
+		dev_warn(dev, "SEQ: recovery DESCREQ write failed, retrying\n");
+		mod_delayed_work(system_wq, &shid->wait_reset_watchdog,
+				 msecs_to_jiffies(wait_reset_kick_ms));
+		goto out;
+	}
+	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_FALLBACK);
+	seq_dbg(shid, 1, "SEQ: DESCREQ sent without a RESET_RSP, waiting for the descriptor\n");
+out:
+	mutex_unlock(&shid->seq_lock);
+}
+
 /* Heatmap blob detection — raw multi-touch pipeline
  * The raw content_id=0x0C frame is a capacitive sensor heatmap:
  * 2 bytes SurfaceSwitch (timestamp/scan ID), then cell data.
@@ -1679,6 +1778,15 @@ module_param(std_liveness_recover, bool, 0444);
 MODULE_PARM_DESC(std_liveness_recover,
 	"Experimental: run the ACPI recovery when the standard-mode startup "
 	"liveness check finds no input data after DONE (needs std_liveness_ms)");
+
+module_param(wait_reset_kick_ms, int, 0444);
+MODULE_PARM_DESC(wait_reset_kick_ms,
+	"Experimental standard-mode backstop in ms (0=disable, the default): when "
+	"the controller has produced no IRQ at all since power-up or resume, send "
+	"one DESCREQ after this delay (a failed write is retried up to 3 times). "
+	"No power sequencing is involved. After the kick the descriptor poller "
+	"keeps reading every 100 ms until the device answers or resets, so a dead "
+	"controller is polled rather than left silent (issue #4)");
 
 module_param(sl4a_debug_level, int, 0644);
 MODULE_PARM_DESC(sl4a_debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex");
@@ -2585,6 +2693,11 @@ static irqreturn_t spi_hid_dev_irq(int irq, void *_shid)
 	if (READ_ONCE(shid->removing) || !READ_ONCE(shid->seq_enabled))
 		return IRQ_NONE;
 
+	/* Edge accounting for the WAIT_RESET kick watchdog: a controller that has
+	 * signalled at least once is not silent, so the timer must not touch the
+	 * input buffer it may still be holding a frame in. */
+	shid->stat_irq_edges++;
+
 	return IRQ_WAKE_THREAD;
 }
 
@@ -3037,6 +3150,7 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 	cancel_delayed_work_sync(&shid->raw_probe_retry_work);
 	cancel_delayed_work_sync(&shid->feat_delay_work);
 	cancel_delayed_work_sync(&shid->stream_watchdog);
+	cancel_delayed_work_sync(&shid->wait_reset_watchdog);
 	cancel_work_sync(&shid->reset_work);
 	cancel_work_sync(&shid->create_device_work);
 	cancel_work_sync(&shid->refresh_device_work);
@@ -3229,6 +3343,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->stream_watchdog_active = false;
 
 	INIT_DELAYED_WORK(&shid->poll_work, spi_hid_poll_work);
+	INIT_DELAYED_WORK(&shid->wait_reset_watchdog, spi_hid_wait_reset_watchdog);
 	shid->poll_active = false;
 	shid->poll_interval_ms = 0;
 	shid->poll_missed = 0;
@@ -3307,10 +3422,12 @@ static int spi_hid_probe(struct spi_device *spi)
 		}
 	}
 
+	mutex_lock(&shid->seq_lock);
 	shid->seq_enabled = true;
 	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_PROBE);
 	shid->ready = shid->seq_state >= SPI_HID_SEQ_DONE ? true : false;
 	shid->keep_powered = true;
+	mutex_unlock(&shid->seq_lock);
 
 	/* Wait for device to stabilize after ACPI _INI power-on.
 	 * _INI is called by the ACPI subsystem before probe() and handles
@@ -3499,6 +3616,9 @@ static int spi_hid_resume(struct device *dev)
 	WRITE_ONCE(shid->seq_enabled, true);
 	shid->seq_state = SPI_HID_SEQ_WAIT_RESET;
 	WRITE_ONCE(shid->suspended, false);
+	/* Standard mode: the device now owes us a RESET_RSP and nothing else is
+	 * armed if it stays quiet. */
+	spi_hid_arm_wait_reset_watchdog(shid);
 	mutex_unlock(&shid->seq_lock);
 
 	/* Vendor init before the IRQ is re-enabled: it writes the D2/D0 pair and
