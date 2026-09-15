@@ -66,10 +66,6 @@ DECLARE_EVENT_CLASS(spi_hid_irq,
 		__entry->bus_num, __entry->chip_select, __entry->irq)
 );
 
-DEFINE_EVENT(spi_hid_irq, spi_hid_dev_irq,
-	TP_PROTO(struct spi_hid *shid, int irq),
-	TP_ARGS(shid, irq)
-);
 
 DECLARE_EVENT_CLASS(spi_hid,
 	TP_PROTO(struct spi_hid *shid),
@@ -116,20 +112,12 @@ DECLARE_EVENT_CLASS(spi_hid,
 		__entry->ready ? 'R' : 'r')
 );
 
-DEFINE_EVENT(spi_hid, spi_hid_reset_work,
-	TP_PROTO(struct spi_hid *shid),
-	TP_ARGS(shid)
-);
 
 DEFINE_EVENT(spi_hid, spi_hid_create_device_work,
 	TP_PROTO(struct spi_hid *shid),
 	TP_ARGS(shid)
 );
 
-DEFINE_EVENT(spi_hid, spi_hid_refresh_device_work,
-	TP_PROTO(struct spi_hid *shid),
-	TP_ARGS(shid)
-);
 
 /*
  * NOTE: spi_hid_seq_state is intentionally a standalone TRACE_EVENT
