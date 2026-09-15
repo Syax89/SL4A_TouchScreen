@@ -1776,7 +1776,6 @@ MODULE_PARM_DESC(std_liveness_recover,
 	"Experimental: run the ACPI recovery when the standard-mode startup "
 	"liveness check finds no input data after DONE (needs std_liveness_ms)");
 
-static int wait_reset_kick_ms;   /* 0 = off */
 module_param(wait_reset_kick_ms, int, 0444);
 MODULE_PARM_DESC(wait_reset_kick_ms,
 	"Experimental standard-mode backstop in ms (0=disable, the default): when "
