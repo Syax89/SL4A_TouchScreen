@@ -34,6 +34,12 @@ assert "grep -q '^obj-m += sl4a-spi-hid.o$'" in tool
 assert "grep -q '^# SL4A_TouchScreen'" in tool
 assert 'PACKAGE_NAME="sl4a-touch"' in tool
 
+# The build string the diagnostics report must track VERSION: it said "spi-hid
+# v1.0" while the tree was at 1.6.1, misattributing every bug report (review R17c).
+_version = (root / "VERSION").read_text().strip()
+assert f'#define SL4A_DRIVER_VERSION "{_version}"' in hid, \
+    f"driver build_info version does not match VERSION ({_version})"
+
 for module in ("sl4a-spi-amd.ko", "sl4a-spi-hid.ko"):
     path = root / "driver" / module
     if path.exists():

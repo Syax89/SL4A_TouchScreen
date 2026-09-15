@@ -100,8 +100,9 @@ following were verified against the source before being changed:
 - The hardcoded-descriptor fallback no longer creates a standard HID device in
   raw mode: it follows the same `raw_mode_active` gate as the normal descriptor
   path, instead of giving userspace two publishers for one panel.
-- `SET_REPORT` and `output_report` re-check `suspended`/`removing` under the lock,
-  which narrows the window in which a client can block in `spi_sync` against a
+- `SET_REPORT` and `output_report` re-check `suspended`/`removing` on every call;
+  those flags are published under `seq_lock` and read here with `READ_ONCE`, which
+  narrows the window in which a client can block in `spi_sync` against a
   controller that has just been quiesced (it does not close it: a suspend landing
   after the check is bounded by the SPI core's own failure path); `ll_power` no
   longer pretends `shid->lock` protects the `hid` pointer;
@@ -216,8 +217,9 @@ following were verified against the source before being changed:
   terminal error path cannot disable the line twice and leave it masked.
 - `input_unregister_device()` during the raw to standard fallback runs outside
   `seq_lock`, so the IRQ thread and poller are not serialized behind it.
-- `std_liveness_recover` runs once per boot and once per resume instead of once
-  per discovery cycle, so a healthy but idle device cannot be power-cycled into
+- `std_liveness_recover` runs once per silent episode instead of once per
+  discovery cycle — observed activity and resume restore the allowance, so a
+  healthy but idle device cannot be power-cycled into
   the terminal-failure path.
 - The descriptor poller handles the DEVICE_DESC it recovers instead of counting
   it and dropping the frame.

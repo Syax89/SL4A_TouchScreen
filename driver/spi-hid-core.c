@@ -1909,11 +1909,11 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 	}
 
 	if (!shid->raw_mode_active) {
-		/* Once per boot and once per resume: recovering on silence alone
-		 * would power-cycle an idle-but-healthy touchscreen, and repeating it
-		 * on every discovery cycle spent the recovery budget until the driver
-		 * shut the device down for good. Observed activity and resume restore
-		 * the allowance (the flag starts zeroed at probe). */
+		/* Once per silent episode (not once per boot): recovering on silence
+		 * alone would power-cycle an idle-but-healthy touchscreen, and
+		 * repeating it on every discovery cycle spent the recovery budget
+		 * until the driver shut the device down for good. Observed activity
+		 * and resume restore the allowance (the flag starts zeroed at probe). */
 		bool silent = shid->stat_irq_count == shid->std_liveness_irqs;
 		bool recover = silent && std_liveness_recover &&
 			!shid->std_liveness_recovered;
@@ -2057,6 +2057,17 @@ static void spi_hid_poll_work(struct work_struct *work)
 			seq_dbg(shid, 2, "SEQ: poller cid=0x%02x len=%u\n",
 				 shid->data_buf[7], rl);
 
+			/* Drop an oversized frame before anything reads it: the IRQ
+			 * path validates first too, and a frame this path discards
+			 * must not be able to retire the handshake (review R17c). */
+			if (rl >= 3 && rl - 3 > avail) {
+				dev_warn_ratelimited(dev,
+					"SEQ: poller DATA report len=%u exceeds buffer (avail=%u), dropped\n",
+					rl, avail);
+				shid->stat_frames_dropped++;
+				goto resched;
+			}
+
 			if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
 			    spi_hid_protocol_raw_confirms_handshake(shid->data_buf[7], rl)) {
 				shid->raw_handshake_confirmed = true;
@@ -2068,14 +2079,6 @@ static void spi_hid_poll_work(struct work_struct *work)
 					shid->poll_active = false;
 				seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed by poller (raw frame id=0x%02x)\n",
 					shid->data_buf[7]);
-			}
-
-			if (rl >= 3 && rl - 3 > avail) {
-				dev_warn_ratelimited(dev,
-					"SEQ: poller DATA report len=%u exceeds buffer (avail=%u), dropped\n",
-					rl, avail);
-				shid->stat_frames_dropped++;
-				goto resched;
 			}
 
 			if (shid->raw_mode_active && shid->data_buf[7] == 0x0C &&
@@ -2593,7 +2596,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		shid->ready = true;
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		shid->keep_powered = true;
-		if (!shid->hid)
+		if (!shid->hid && !shid->raw_mode_active)
 			schedule_work(&shid->create_device_work);
 		seq_handle_data(shid, type, blen);
 	} else if (type == 3) {
@@ -2614,7 +2617,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		shid->ready = true;
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		shid->keep_powered = true;
-		if (!shid->hid) {
+		if (!shid->hid && !shid->raw_mode_active) {
 			seq_dbg(shid, 1, "SEQ: creating HID device with hardcoded descriptors...\n");
 			schedule_work(&shid->create_device_work);
 		}
@@ -3143,9 +3146,13 @@ static ssize_t baseline_status_show(struct device *dev, struct device_attribute 
 }
 static DEVICE_ATTR_RO(baseline_status);
 
+/* Single source for what bug reports say about the build. The suite checks this
+ * string against VERSION: it reported "v1.0" for nine releases (review R17c). */
+#define SL4A_DRIVER_VERSION "1.6.1"
+
 static ssize_t build_info_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "spi-hid v1.0\n");
+	return sysfs_emit(buf, "spi-hid v%s\n", SL4A_DRIVER_VERSION);
 }
 static DEVICE_ATTR_RO(build_info);
 
