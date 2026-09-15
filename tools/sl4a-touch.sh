@@ -136,7 +136,7 @@ dkms_remove_other_versions() {
 		if dkms remove -m "$PKG_NAME" -v "$ver" --all >/dev/null 2>&1; then
 			# Drop the tree only when DKMS let go of it and the tree is
 			# this package's (same ownership marker the uninstall path uses).
-			if [ -f "$src/dkms.conf" ] && grep -q '^PACKAGE_NAME="sl4a-touch"$' "$src/dkms.conf"; then
+			if [ -f "$src/dkms.conf" ] && grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$src/dkms.conf"; then
 				rm -rf "$src"
 			else
 				info "Leaving unowned $src untouched"
@@ -576,7 +576,7 @@ cmd_install() {
 		# that carries someone else's dkms.conf. A partial copy of our own
 		# staging has no dkms.conf yet and stays safe to drop.
 		if [ -f "$SRC_DEST/dkms.conf" ] && \
-		   ! grep -q '^PACKAGE_NAME="sl4a-touch"$' "$SRC_DEST/dkms.conf"; then
+		   ! grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$SRC_DEST/dkms.conf"; then
 			info "Leaving unowned $SRC_DEST untouched"
 			return 0
 		fi
@@ -686,16 +686,6 @@ EOF
 	systemctl enable sl4a-touch-activate.service >/dev/null 2>&1
 	pass "Created $SYSTEMD_UNIT (enabled — activates automatically after every boot)"
 
-	echo ""
-	rule
-	if [ "$PROFILE" = "raw" ]; then
-		echo -e "${YELLOW}${BOLD}Install complete${NC} ${YELLOW}— EXPERIMENTAL raw multitouch profile selected.${NC}"
-	else
-		echo -e "${GREEN}${BOLD}Install complete${NC} ${GREEN}— standard HID profile selected.${NC}"
-	fi
-	echo "  To remove:  sudo ./tools/sl4a-touch.sh uninstall"
-	rule
-
 	info "Step 7: Activating..."
 	if [ "$skip_activate" -eq 1 ]; then
 		warn "Activation is skipped — the MOK key must be enrolled first."
@@ -709,11 +699,27 @@ EOF
 		[ "$PROFILE" = "raw" ] && requested_raw_mode="Y"
 		if [ -r /sys/module/sl4a_spi_hid/parameters/raw_mode ] && \
 		   [ "$(cat /sys/module/sl4a_spi_hid/parameters/raw_mode)" != "$requested_raw_mode" ]; then
-			warn "The selected profile changes a load-time-only module parameter. Reboot to apply it."
+			warn "The selected profile changes a load-time-only module parameter."
+			echo "  The modules keep the previous profile until the next boot;"
+			echo "  the boot unit then activates the new one automatically."
+			echo "  Nothing else to do (to activate by hand now:  sudo ./tools/sl4a-touch.sh activate)"
 		else
 			cmd_activate
 		fi
 	fi
+
+	# Only now: everything that can fail has run. The banner used to print
+	# before Step 7, so a failed activation was announced by "Install complete"
+	# (review R16).
+	echo ""
+	rule
+	if [ "$PROFILE" = "raw" ]; then
+		echo -e "${YELLOW}${BOLD}Install complete${NC} ${YELLOW}— EXPERIMENTAL raw multitouch profile selected.${NC}"
+	else
+		echo -e "${GREEN}${BOLD}Install complete${NC} ${GREEN}— standard HID profile selected.${NC}"
+	fi
+	echo "  To remove:  sudo ./tools/sl4a-touch.sh uninstall"
+	rule
 }
 
 # ── uninstall ────────────────────────────────────────────────────────────
@@ -749,7 +755,7 @@ cmd_uninstall() {
 	pass "Reboot is required to stop the active driver safely"
 
 	info "Removing package-owned DKMS registration $PKG_NAME/$PKG_VERSION..."
-	if [ -f "$SRC_DEST/dkms.conf" ] && grep -q '^PACKAGE_NAME="sl4a-touch"$' "$SRC_DEST/dkms.conf"; then
+	if [ -f "$SRC_DEST/dkms.conf" ] && grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$SRC_DEST/dkms.conf"; then
 		if dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all; then
 			rm -rf "$SRC_DEST"
 			pass "Removed package-owned DKMS version $PKG_VERSION"
@@ -1040,7 +1046,10 @@ cmd_logs() {
 	# inactive unit, and a dmesg|grep with no match is exit 1 — under
 	# `set -e -o pipefail` each of those used to truncate the file that a bug
 	# report needs, in exactly the broken states worth diagnosing.
-	set +e
+	# `+o pipefail` as well: `set +e` alone leaves pipefail on, so a dmesg|grep
+	# with no match would make the status check below reject a bundle that was
+	# written perfectly (review R19).
+	set +e +o pipefail
 	{
 		echo "=== SL4A_TouchScreen diagnostic bundle ==="
 		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -1128,7 +1137,7 @@ cmd_logs() {
 		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -300
 	} > "$OUT"
 	bundle_status=$?
-	set -e
+	set -e -o pipefail
 
 	# With `set +e` a failed redirect is silent: without this check the script
 	# would report a bundle it never wrote. The size alone is not enough — a

@@ -39,6 +39,9 @@ assert 'PACKAGE_NAME="sl4a-touch"' in tool
 _version = (root / "VERSION").read_text().strip()
 assert f'#define SL4A_DRIVER_VERSION "{_version}"' in hid, \
     f"driver build_info version does not match VERSION ({_version})"
+# ... and that the attribute actually uses it, not a literal again.
+assert 'sysfs_emit(buf, "spi-hid v%s\\n", SL4A_DRIVER_VERSION)' in hid, \
+    "build_info_show does not use SL4A_DRIVER_VERSION"
 
 for module in ("sl4a-spi-amd.ko", "sl4a-spi-hid.ko"):
     path = root / "driver" / module

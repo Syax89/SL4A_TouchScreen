@@ -40,7 +40,8 @@ The installer detects an existing DKMS registration for the same `PACKAGE_NAME`
 and replaces it (removing any other registered version first, so two versions
 cannot both build the same module names); it stages the new version and activates
 it in the same run, so a reboot is only needed when the profile changes a
-load-time parameter (`raw_mode`), and the boot unit repeats the activation after
+load-time parameter (`raw_mode`) or when the MOK key still has to be enrolled for
+Secure Boot, and the boot unit repeats the activation after
 every boot. `activate` remains available for doing it by hand.
 
 ## Kernel updates

@@ -17,6 +17,8 @@ tool = (root / "tools" / "sl4a-touch.sh").read_text()
 # reported, never glossed over with "Diagnostic bundle written" for a file that
 # nothing wrote (a stale bundle from a previous run is non-empty too).
 assert "bundle_status=$?" in tool
+assert "set +e +o pipefail" in tool          # pipefail off for the block, or a
+assert "set -e -o pipefail" in tool          # dmesg|grep miss fails a good bundle
 assert 'if [ "$bundle_status" -ne 0 ] || [ ! -s "$OUT" ] || \\' in tool
 assert "! grep -q '^--- dmesg' \"$OUT\"" in tool
 assert "the diagnostic bundle could not be written to" in tool
@@ -34,7 +36,7 @@ assert 'head -n 1 "$OUT"' in tool
 # `dkms remove -v` and the `rm -rf` that follows it.
 assert "printf '%s\\n' \"$line\" | sed -n" in tool
 assert "''|*[!A-Za-z0-9.+~_-]*) continue ;;" in tool
-assert tool.count('^PACKAGE_NAME="sl4a-touch"$') >= 3
+assert tool.count("^PACKAGE_NAME=\"sl4a-touch\"[[:space:]]*$") >= 3
 
 # A stale registration that survives must be loud: it can win the next kernel
 # update, which is the whole reason the cleanup exists.
