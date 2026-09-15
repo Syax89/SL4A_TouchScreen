@@ -17,6 +17,11 @@
 - A failed feature `GET_REPORT` now names the report id, the report type and the
   calling process, so the cold-boot feature query in issue #4 can finally be
   attributed to a real client instead of "a HID client".
+- Two opt-in switches for the issue #4 experiments, both off by default and never
+  written by the installer: `std_liveness_recover` turns the liveness check into
+  the existing ACPI recovery when no data arrives, and `skip_std_getfeat` answers
+  feature reads with `-EOPNOTSUPP` in standard mode so nothing is written to SPI
+  for a feature query (the A/B test requested in issue #4).
 - No behavior change with default parameters: the check is off unless enabled.
 
 ### Raw-mode streaming backstop and installer fixes (contributed by cristinagp, PR #7)

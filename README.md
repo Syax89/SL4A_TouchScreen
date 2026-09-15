@@ -164,6 +164,7 @@ is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
 | Issue | Fix |
 |-------|-----|
 | No touch after cold boot | Power off → unplug AC → wait 30s → reboot |
+| No touch after cold boot, but the driver looks ready (dmesg shows the descriptor, HID registered, `ready`) | Set `std_liveness_ms=8000` in `/etc/modprobe.d/sl4a-liveness.conf`, cold boot, then read the `standard-mode liveness` line in dmesg: it says whether any input frame ever arrived (issue #4) |
 | No multi-touch (only single-touch) | Check `raw_mode=Y` in modprobe config |
 | Fingers lost during fast movement | Increase `blob_lift_frames` |
 | Jitter during pinch-to-zoom | Verify `ema_alpha=7`, stationary lock active |
