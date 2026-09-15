@@ -139,6 +139,10 @@ static const char *spi_hid_seq_state_name(enum spi_hid_seq_state state)
 #define RAW_HANDSHAKE_MAX_RETRIES 3
 #define RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS 5000
 
+/* Defined with the other SET_FEATURE plumbing further down; the skip_getfeat
+ * paths above it need it. */
+static int spi_hid_seq_write_setfeat(struct spi_hid *shid);
+
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason)
 {
@@ -591,6 +595,12 @@ static const u8 vendor_init_cmd[] = {
 /* Shared SET_FEATURE command (15 bytes, doubled-opcode). */
 static const u8 sf_cmd[] = {
 	0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
+	0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
+};
+
+/* The same command without the doubled leading opcode (setfeat_no_double). */
+static const u8 sf_nd_cmd[] = {
+	0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
 	0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
 };
 
@@ -1333,6 +1343,14 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 {
 	int ret;
 
+	/* Re-discovery means the touchscreen is not usable until it completes:
+	 * leaving `ready` set lets HID clients interleave sync requests with the
+	 * sequencer's DESCREQ and steal its responses. */
+	if (shid->ready) {
+		shid->ready = false;
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
+	}
+
 	ret = spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
 	if (ret) {
 		dev_warn(&shid->spi->dev, "SEQ: DESCREQ recovery write failed: %d\n", ret);
@@ -1363,6 +1381,13 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 static void raw_handshake_restart_discovery(struct spi_hid *shid)
 {
 	struct device *dev = &shid->spi->dev;
+
+	/* Re-discovery: no touchscreen until the descriptor arrives again, and a
+	 * client sync request interleaving here would steal sequencer frames. */
+	if (shid->ready) {
+		shid->ready = false;
+		sysfs_notify(&dev->kobj, NULL, "ready");
+	}
 
 	if (spi_hid_vendor_init(shid)) {
 		dev_warn(dev, "SEQ: raw watchdog vendor recovery failed\n");
@@ -1512,7 +1537,7 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0))
 			goto retry_watchdog;
 		usleep_range(36000, 39000);
-		if (spi_hid_seq_write(shid, sf_cmd, sizeof(sf_cmd), NULL, 0))
+		if (spi_hid_seq_write_setfeat(shid))
 			goto retry_watchdog;
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FEATURE_REQUEST);
 		mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
@@ -1520,7 +1545,12 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		goto out;
 	}
 
-	seq_dbg(shid, 1, "SEQ: raw_mode=1 -> GET_FEATURE after delay, WAIT_FEATURE\n");
+	seq_dbg(shid, 1, "SEQ: raw_mode=1 -> vendor init + GET_FEATURE after delay, WAIT_FEATURE\n");
+	usleep_range(68000, 72000);
+	if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0)) {
+		goto retry_watchdog;
+	}
+	usleep_range(36000, 39000);
 	if (spi_hid_seq_write(shid, gf_cmd, sizeof(gf_cmd), NULL, 0)) {
 		goto retry_watchdog;
 	}
@@ -1593,7 +1623,10 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		shid->desc.vendor_id = 0x045E;
 		shid->desc.product_id = 0x0C19;
 		shid->desc.version_id = 0x0100;
-		if (!shid->hid)
+		/* Raw mode suppresses the standard HID device everywhere else (see the
+		 * wire-descriptor path); the fallback must not hand userspace a second
+		 * publisher while the raw pipeline owns the panel. */
+		if (!shid->hid && !shid->raw_mode_active)
 			schedule_work(&shid->create_device_work);
 	} else {
 		seq_dbg(shid, 1, "SEQ: poll-work: unexpected type=%d, retrying...\n", type);
@@ -1665,6 +1698,19 @@ static bool setfeat_no_double;
 module_param(setfeat_no_double, bool, 0444);
 MODULE_PARM_DESC(setfeat_no_double,
 	"Send SET_FEATURE without the leading-opcode-doubling quirk (14 bytes instead of 15)");
+
+/* One place for the SET_FEATURE quirks, so every path that writes it honours
+ * setfeat_no_double / setfeat_speed_hz. The two skip_getfeat paths used to send
+ * the plain frame at bus speed, which voided both switches for exactly the
+ * experiments they exist for. Caller holds seq_lock. */
+static int spi_hid_seq_write_setfeat(struct spi_hid *shid)
+{
+	if (setfeat_no_double)
+		return spi_hid_seq_write_speed(shid, sf_nd_cmd, sizeof(sf_nd_cmd),
+					       NULL, 0, setfeat_speed_hz);
+	return spi_hid_seq_write_speed(shid, sf_cmd, sizeof(sf_cmd), NULL, 0,
+				       setfeat_speed_hz);
+}
 
 module_param(skip_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_getfeat,
@@ -1801,13 +1847,11 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 			shid->seq_enabled = true;
 			mshw0231_raw_reset(shid);
 
-			{
-			if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
-				dev_warn(dev, "SEQ: stream watchdog DESCREQ failed\n");
-			} else {
-				spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
-			}
-		}
+			/* Same recovery the handshake watchdog runs: D2/D0 vendor init
+			 * then a fresh DESCREQ, with the handshake timer re-armed, so a
+			 * second silent failure is caught by the normal timeout instead
+			 * of waiting for another stream-watchdog window. */
+			raw_handshake_restart_discovery(shid);
 		} else {
 			dev_err(dev, "SEQ: stream watchdog: max retries reached, giving up\n");
 			shid->stream_watchdog_active = false;
@@ -2306,7 +2350,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 					}
 					usleep_range(36000, 39000);
 					seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
-					if (spi_hid_seq_write(shid, sf_cmd, sizeof(sf_cmd), NULL, 0)) {
+					if (spi_hid_seq_write_setfeat(shid)) {
 							dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
 							schedule_delayed_work(&shid->raw_handshake_watchdog,
 								msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
@@ -2390,21 +2434,12 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 				 off, off + chunk - 1, chunk, body + off);
 		}
 		{
-			u8 sf_nd[14] = {
-				0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-				0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
-			};
 			usleep_range(4500, 5500);
 			seq_dbg(shid, 1, "SEQ: sending SET_FEATURE speed=%u no_double=%d\n",
 				 setfeat_speed_hz, setfeat_no_double);
 			int ret;
 
-			if (setfeat_no_double)
-				ret = spi_hid_seq_write_speed(shid, sf_nd, sizeof(sf_nd),
-								  NULL, 0, setfeat_speed_hz);
-			else
-				ret = spi_hid_seq_write_speed(shid, sf_cmd, sizeof(sf_cmd),
-								  NULL, 0, setfeat_speed_hz);
+			ret = spi_hid_seq_write_setfeat(shid);
 			if (ret) {
 				dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed: %d\n", ret);
 				return;
@@ -2622,10 +2657,14 @@ static int spi_hid_ll_power(struct hid_device *hid, int level)
 	struct spi_hid *shid = spi_get_drvdata(spi);
 	int ret = 0;
 
-	mutex_lock(&shid->lock);
-	if (!shid->hid)
+	/* `hid` is published by the HID lifecycle (create/disconnect), not by
+	 * `shid->lock`: every other reader tests it unlocked too, so the lock
+	 * only looked like it protected something. The test is a courtesy check
+	 * and a stale read only decides the return code. `level` is ignored on
+	 * purpose: the transport keeps running across HID suspend, and the D2/D0
+	 * traffic belongs to the sequencer, not to the HID core. */
+	if (!READ_ONCE(shid->hid))
 		ret = -ENODEV;
-	mutex_unlock(&shid->lock);
 
 	return ret;
 }
@@ -2698,6 +2737,12 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
 
 	switch (reqtype) {
 	case HID_REQ_SET_REPORT:
+		/* Same TOCTOU as ll_output_report: re-check under the lock before
+		 * handing the transfer to a suspended transport. */
+		if (READ_ONCE(shid->suspended) || READ_ONCE(shid->removing)) {
+			ret = -ENODEV;
+			break;
+		}
 		if (len > U16_MAX - 3) {
 			ret = -EMSGSIZE;
 			break;
@@ -2789,6 +2834,14 @@ static int spi_hid_ll_output_report(struct hid_device *hid,
 	mutex_lock(&shid->lock);
 	if (!shid->ready) {
 		dev_err(dev, "%s called in unready state\n", __func__);
+		ret = -ENODEV;
+		goto out;
+	}
+	/* The `ready` gate above is taken before the lock, so a suspend can land
+	 * between it and the send: re-check here, or the client blocks in
+	 * spi_sync against a quiesced controller (the GET path aborts instead). */
+	if (READ_ONCE(shid->suspended) || READ_ONCE(shid->removing)) {
+		dev_err(dev, "%s called while suspended\n", __func__);
 		ret = -ENODEV;
 		goto out;
 	}
@@ -3094,6 +3147,11 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	dev_info(dev, "TRACE[hid] probe begin irq=%d raw_mode=%u acpi_power_cycle=%u\n",
 		 spi->irq, raw_mode, acpi_probe_power_cycle);
+
+	/* A negative delay would be added to the raw handshake timeout and wrap
+	 * msecs_to_jiffies() into the far future: the watchdog would stay armed
+	 * and never fire. Clamp once here; the parameter is read-only. */
+	getfeat_delay_ms = clamp_t(int, getfeat_delay_ms, 0, 10000);
 
 	if (dev->of_node && spi->irq <= 0) {
 		dev_err(dev, "Missing IRQ\n");

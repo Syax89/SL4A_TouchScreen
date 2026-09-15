@@ -8,6 +8,35 @@ three reports presented with high confidence turned out to be false positives an
 are deliberately **not** "fixed" here: the installer module-name handling, the
 synchronous-request lock ordering, and the diagnostic log-option quoting.
 
+### Raw handshake paths, re-discovery and HID gating
+
+A second review round covered what the first one had barely looked at. All of the
+following were verified against the source before being changed:
+
+- The delayed `raw_mode` handshake no longer drops the vendor init: with
+  `skip_getfeat=0 getfeat_delay_ms>0` it sends the same
+  `vendor init -> GET_FEATURE` sequence as the immediate path, instead of a bare
+  `GET_FEATURE` that made the experiment disagree with itself.
+- `setfeat_speed_hz` and `setfeat_no_double` are honoured on every SET_FEATURE
+  path, not only on the `GET_FEAT_RESP` one: under the default `skip_getfeat=1`
+  both switches used to be silently dead for the experiments they exist for.
+- Stream-watchdog recovery goes through the same restart as the handshake
+  watchdog (D2/D0 vendor init, fresh DESCREQ, timer re-armed) instead of a
+  DESCREQ-only sequence with no timer and no counter reset.
+- Every re-discovery clears `ready` (and notifies sysfs), so HID clients cannot
+  interleave sync requests with the sequencer and steal its responses while the
+  descriptor is being fetched again.
+- The hardcoded-descriptor fallback no longer creates a standard HID device in
+  raw mode: it follows the same `raw_mode_active` gate as the normal descriptor
+  path, instead of giving userspace two publishers for one panel.
+- `SET_REPORT` and `output_report` re-check `suspended`/`removing` under the lock,
+  so a client cannot block in `spi_sync` against a controller that has just been
+  quiesced; `ll_power` no longer pretends `shid->lock` protects the `hid` pointer;
+  a negative `getfeat_delay_ms` is clamped at probe instead of wrapping the
+  handshake watchdog into the far future.
+- `SPI_HID_SEQ_VENDOR_INIT` is documented as unreachable: no path sets it, so the
+  vendor handler belongs to the decompiled state map, not to live code.
+
 ### Transport, power management and recovery
 
 - The input IRQ-storm breaker no longer parks the sequencer silently: it logs,

@@ -67,7 +67,7 @@ enum spi_hid_seq_state {
 	SPI_HID_SEQ_WAIT_RESET = 0,
 	SPI_HID_SEQ_WAIT_DESC = 1,
 	SPI_HID_SEQ_WAIT_RPT = 2,
-	SPI_HID_SEQ_VENDOR_INIT = 3,
+	SPI_HID_SEQ_VENDOR_INIT = 3,   /* decompiled-map state: nothing sets it today */
 	SPI_HID_SEQ_DONE = 4,
 	SPI_HID_SEQ_WAIT_FEATURE = 5,
 };
