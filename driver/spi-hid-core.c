@@ -691,12 +691,6 @@ static void spi_hid_reset_work(struct work_struct *work)
 	mutex_unlock(&shid->power_lock);
 	if (ret) {
 		dev_err(dev, "failed to send device reset request\n");
-		/* The DEVICE_DESC that clears this flag is never coming: clear it
-		 * here so HID creation is not blocked until the next reset
-		 * response (or forever, on the hardcoded-descriptor fallback). */
-		mutex_lock(&shid->seq_lock);
-		shid->reset_pending = false;
-		mutex_unlock(&shid->seq_lock);
 		schedule_work(&shid->error_work);
 		return;
 	}
@@ -790,9 +784,10 @@ static int spi_hid_send_output_report(struct spi_hid *shid, u32 output_register,
 
 /*
 * Abort a synchronous transaction whose reply can no longer arrive (PM is
-* quiescing the transport). Mirrors spi_hid_complete_response(): closing the
-* transaction and waking the waiter lets the caller fail fast instead of
-* burning the whole sync timeout on a device that cannot answer.
+* quiescing the transport, or the device is being removed). Mirrors
+* spi_hid_complete_response(): closing the transaction and waking the waiter
+* lets the caller fail fast instead of burning the whole sync timeout on a
+* device that cannot answer.
 */
 static void spi_hid_abort_pending_sync(struct spi_hid *shid)
 {
@@ -862,10 +857,10 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	 * IRQ thread to process the response. The caller (ll_raw_request)
 	 * expects this release/reacquire pattern.
 	 */
-	/* PM can quiesce the transport between the ready check above and the
-	 * wait below, and with the IRQ disabled nothing will complete this
-	 * transaction: fail it now instead of waiting out the timeout. */
-	if (READ_ONCE(shid->suspended)) {
+	/* PM or removal can quiesce the transport between the ready check above
+	 * and the wait below, and with the IRQ disabled nothing will complete
+	 * this transaction: fail it now instead of waiting out the timeout. */
+	if (READ_ONCE(shid->suspended) || READ_ONCE(shid->removing)) {
 		spin_lock_irqsave(&shid->response_lock, flags);
 		if (shid->response_generation == generation) {
 			shid->output_pending = false;
@@ -873,7 +868,7 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 			shid->response_generation++;
 		}
 		spin_unlock_irqrestore(&shid->response_lock, flags);
-		dev_dbg(dev, "request aborted, device is suspending\n");
+		dev_dbg(dev, "request aborted, device is going away\n");
 		ret = -ENODEV;
 		goto out;
 	}
@@ -891,11 +886,12 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	}
 	spin_unlock_irqrestore(&shid->response_lock, flags);
 	if (ret <= 0 || !response_valid) {
-		/* A suspend that raced this request aborted the transaction: that
-		 * is not a device failure, and scheduling a recovery cycle here
-		 * would fight the PM transition. */
-		if (READ_ONCE(shid->suspended)) {
-			dev_dbg(dev, "request failed, device is suspending\n");
+		/* A suspend or removal that raced this request aborted the
+		 * transaction: that is not a device failure, and scheduling a
+		 * recovery cycle here would fight the PM transition or the
+		 * teardown. */
+		if (READ_ONCE(shid->suspended) || READ_ONCE(shid->removing)) {
+			dev_dbg(dev, "request failed, device is going away\n");
 			ret = -ENODEV;
 			goto out;
 		}
@@ -1584,10 +1580,6 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		shid->keep_powered = true;
-		/* The hardcoded descriptors below mean no DEVICE_DESC will arrive
-		 * to clear this, and create_device_work refuses to run while it is
-		 * set: clear it here or HID is never created. */
-		shid->reset_pending = false;
 		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
 		/* Hardcode and create device */
 		shid->desc.hid_version = 0x0100;
@@ -3425,11 +3417,17 @@ static void spi_hid_remove(struct spi_device *spi)
 	mutex_lock(&shid->seq_lock);
 	WRITE_ONCE(shid->removing, true);
 	WRITE_ONCE(shid->seq_enabled, false);
+	/* ready is the only gate the feature/descriptor reads use: leaving it set
+	 * let a HID client issue SPI traffic against a device being removed and
+	 * wait out the whole sync timeout. */
+	shid->ready = false;
 	shid->poll_active = false;
 	shid->stream_watchdog_active = false;
 	mutex_unlock(&shid->seq_lock);
 	spi_hid_disable_irq(shid);
 	spi_hid_cancel_workers(shid);
+	/* Nothing will answer a synchronous request now. */
+	spi_hid_abort_pending_sync(shid);
 	spi_hid_free_irq(shid);
 	mutex_lock(&shid->power_lock);
 	if (spi_hid_power_down(shid))

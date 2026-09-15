@@ -17,7 +17,9 @@ synchronous-request lock ordering, and the diagnostic log-option quoting.
 - Suspend clears `ready` and aborts an in-flight synchronous transaction, and a
   request that races the transition fails with `-ENODEV` instead of waiting out
   the whole `sync_timeout_ms` and, for descriptor reads, tearing the transport
-  down and scheduling a recovery during the PM transition.
+  down and scheduling a recovery during the PM transition. The same abort and
+  `ready` clear now cover removal, which used to leave a HID client waiting
+  through the teardown.
 - Resume runs the raw vendor init before re-enabling the IRQ, and reports a
   failed init instead of discarding its result.
 - The IRQ enable/disable decision is a real test-and-set, so a suspend racing the
@@ -54,6 +56,14 @@ synchronous-request lock ordering, and the diagnostic log-option quoting.
 - The installer fails with an explicit message when `openssl` is missing while
   re-encoding a legacy PEM signing key as DER, instead of a vague or absent
   error.
+
+### Noted, deliberately not changed
+
+- `spi_hid_reset_work` is never scheduled anywhere in the tree (only `INIT_WORK`
+  and `cancel_work_sync` reference it), so `reset_pending` is never set and the
+  code around it is unreachable. This surfaced while verifying a reviewer's claim
+  about that flag; removing the machinery is left to a separate cleanup rather
+  than folded into these fixes.
 
 ## 1.6.0 — Surface Laptop 3 (AMD) support, raw-mode streaming backstop, issue #4 diagnostics (2026-09-15)
 
