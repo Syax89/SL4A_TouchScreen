@@ -832,8 +832,6 @@ out:
 	return ret;
 }
 
-/*
-
 static int spi_hid_create_device(struct spi_hid *shid)
 {
 	struct hid_device *hid;
