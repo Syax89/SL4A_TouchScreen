@@ -43,17 +43,7 @@ DECLARE_EVENT_CLASS(spi_hid_transfer,
 		__entry->ret)
 );
 
-DEFINE_EVENT(spi_hid_transfer, spi_hid_output_begin,
-	TP_PROTO(struct spi_hid *shid, const void *tx_buf, int tx_len,
-			const void *rx_buf, u16 rx_len, int ret),
-	TP_ARGS(shid, tx_buf, tx_len, rx_buf, rx_len, ret)
-);
 
-DEFINE_EVENT(spi_hid_transfer, spi_hid_output_end,
-	TP_PROTO(struct spi_hid *shid, const void *tx_buf, int tx_len,
-			const void *rx_buf, u16 rx_len, int ret),
-	TP_ARGS(shid, tx_buf, tx_len, rx_buf, rx_len, ret)
-);
 
 DECLARE_EVENT_CLASS(spi_hid_irq,
 	TP_PROTO(struct spi_hid *shid, int irq),
