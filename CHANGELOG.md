@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.1 — Review-campaign fixes, raw pipeline and installer (2026-09-15)
 
 Fixes from a double-blind multi-agent review campaign over the 1.6.0 revision.
 Every reported finding was verified against the source before being acted on;
