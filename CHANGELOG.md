@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — installer: quote the `-o` path at the elevation call site
+
+`logs -o` was passed to the elevated child as `${OUT:+-o "$OUT"}`, which bash
+word-splits before the child sees it: a bundle path containing a space arrived as
+three arguments and `cmd_logs` rejected the second as an unknown option. The
+`logs` command is the one reporters are pointed at, so it is worth being exact.
+The contract test now pins the quoted call and the absence of the expansion
+(reverting it fails the suite).
+
 ## 1.6.3 — housekeeping: dead code, build string, FSM model (2026-09-15)
 
 Round 4's inventory listed the parts of the driver no code path can reach. They

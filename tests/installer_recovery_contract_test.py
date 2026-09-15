@@ -19,6 +19,11 @@ tool = (root / "tools" / "sl4a-touch.sh").read_text()
 assert "bundle_status=$?" in tool
 assert "set +e +o pipefail" in tool          # pipefail off for the block, or a
 assert "set -e -o pipefail" in tool          # dmesg|grep miss fails a good bundle
+# The -o path must be quoted at the call site too: an unquoted `${VAR:+...}` is
+# word-split, so "logs -o my file.txt" reached the child as three arguments and
+# was rejected as an unknown option (review R3-F4).
+assert 'logs -o "$OUT"' in tool
+assert 'logs ${OUT:+-o' not in tool
 assert 'if [ "$bundle_status" -ne 0 ] || [ ! -s "$OUT" ] || \\' in tool
 assert "! grep -q '^--- dmesg' \"$OUT\"" in tool
 assert "the diagnostic bundle could not be written to" in tool
