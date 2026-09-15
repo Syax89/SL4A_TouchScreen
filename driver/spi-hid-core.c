@@ -52,6 +52,13 @@ _Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
 int sl4a_debug_level;
 static int getfeat_delay_ms;  /* RPT_DESC → GET_FEATURE settle time (0 = immediate, safe default) */
 static bool skip_getfeat = true;
+/* Experimental: never write a feature GET_REPORT on the wire while running
+ * standard HID. Issue #4 suspects the connect-time feature query is what keeps
+ * the controller from ever starting to stream. */
+static bool skip_std_getfeat;
+/* Experimental: when the standard-mode startup liveness check sees no input
+ * data after DONE, run the existing ACPI recovery instead of only logging. */
+static bool std_liveness_recover;
 /* Sync-request timeout: covers the ~3.6 s measured device settle before it
  * answers feature queries (original protocol doc cited ~5.9 s). The old
  * hardcoded 1000 ms timed out on a cold-boot feature query. */
@@ -1581,6 +1588,16 @@ module_param(skip_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_getfeat,
 	"Skip GET_FEATURE, send SET_FEATURE directly after RPT_DESC");
 
+module_param(skip_std_getfeat, bool, 0444);
+MODULE_PARM_DESC(skip_std_getfeat,
+	"Experimental: answer feature GET_REPORT with -EOPNOTSUPP in standard HID, "
+	"so nothing is written to SPI for a feature query (issue #4 A/B switch)");
+
+module_param(std_liveness_recover, bool, 0444);
+MODULE_PARM_DESC(std_liveness_recover,
+	"Experimental: run the ACPI recovery when the standard-mode startup "
+	"liveness check finds no input data after DONE (needs std_liveness_ms)");
+
 module_param(sl4a_debug_level, int, 0644);
 MODULE_PARM_DESC(sl4a_debug_level, "Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex");
 
@@ -1636,18 +1653,27 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 		goto out;
 
 	if (!shid->raw_mode_active) {
-		/* Detection only, one shot: report and stop. Recovering here
-		 * would risk power-cycling an idle-but-healthy touchscreen. */
+		/* One shot. Recovering on silence alone would risk power-cycling
+		 * an idle-but-healthy touchscreen, so it stays opt-in. */
+		bool silent = shid->stat_data == shid->stream_watchdog_data;
+
 		shid->stream_watchdog_active = false;
-		if (shid->stat_data == shid->stream_watchdog_data)
-			dev_warn(dev,
-				 "SEQ: standard-mode liveness: no input data within %dms of DONE; the controller may not be streaming (issue #4)\n",
-				 std_liveness_ms);
-		else
+		if (!silent)
 			dev_info(dev,
 				 "SEQ: standard-mode liveness: %u data frame(s) within %dms of DONE\n",
 				 shid->stat_data - shid->stream_watchdog_data,
 				 std_liveness_ms);
+		else if (std_liveness_recover)
+			dev_warn(dev,
+				 "SEQ: standard-mode liveness: no input data within %dms of DONE, running ACPI recovery\n",
+				 std_liveness_ms);
+		else
+			dev_warn(dev,
+				 "SEQ: standard-mode liveness: no input data within %dms of DONE; the controller may not be streaming (issue #4)\n",
+				 std_liveness_ms);
+
+		if (silent && std_liveness_recover)
+			schedule_work(&shid->error_work);
 		goto out;
 	}
 
@@ -2552,6 +2578,17 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
 		ret = len;
 		break;
 	case HID_REQ_GET_REPORT:
+		/* Experimental A/B switch (issue #4): with skip_std_getfeat the
+		 * standard profile answers feature reads without touching SPI at
+		 * all, so the connect-time feature query cannot leave the
+		 * controller in a non-streaming state. Feature reports only:
+		 * input-report reads are untouched. */
+		if (skip_std_getfeat && !shid->raw_mode_active &&
+		    rtype == HID_FEATURE_REPORT) {
+			ret = -EOPNOTSUPP;
+			break;
+		}
+
 		ret = spi_hid_get_request(shid, reportnum);
 		if (ret) {
 			/* Name the report and the client: the cold-boot feature

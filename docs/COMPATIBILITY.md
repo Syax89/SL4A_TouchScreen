@@ -32,6 +32,7 @@ archived evidence with verified checksums and a completed matrix.
 | 2026-07-23 | Post-activation | Controller+transport bound; ready; data=267; 0 drops | evidence/post-activation-state | pass |
 | 2026-07-23 | Suspend/resume | Touch returned ready; descriptor re-read (reset 2→4, re-read desc); 0 drops. Platform warnings from surface_aggregator/charger, not SL4A stack | evidence/pre-suspend, evidence/post-resume | functional, platform deviation |
 | 2026-07-23 | Stylus | HID 045E:0C19 Stylus discovered (pen, pressure, tilt); no pen hardware available for input test | device discovery only | not applicable |
+| 2026-09-09 | Community report, SL4 AMD (issue #4), standard HID on v1.5.0 | Cold boot reaches probe, RESET_RSP, descriptor (936 B) and HID creation, then no input frames at all; the same instance streams immediately after a suspend/resume (idle IRQ ~150, 755 while touching). Reported by the reporter, not reproduced locally | issue #4 comment | fail (recovered only by suspend/resume) |
 
 `captures/id5-20260718/raw_capture_status` records valid raw captures, but has
 no associated firmware, kernel, distribution, or gesture-output result. It is
