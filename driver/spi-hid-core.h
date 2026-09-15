@@ -101,8 +101,6 @@ struct spi_hid_device_descriptor {
 	u16 vendor_id;
 	u16 product_id;
 	u16 version_id;
-	u8 device_power_support;
-	u8 power_response_delay;
 };
 
 struct spi_hid_input_buf {
@@ -142,7 +140,6 @@ struct spi_hid {
 	spinlock_t		input_lock;   /* Protects IRQ-shared performance data */
 
 	u32 device_descriptor_register;    /* Register address for device descriptor */
-	u32 hid_desc_addr;                 /* HID descriptor register address from ACPI */
 	u8 power_state;                    /* D0 (1 active), D2 (2 doze), D3 (3 off) */
 	u8 attempts;                       /* Probe retry counter */
 
@@ -193,8 +190,6 @@ struct spi_hid {
 	bool output_pending;          /* Output report sent, awaiting response */
 	bool response_valid;          /* response contains the current transaction */
 	u64 response_generation;      /* Rejects late responses from prior requests */
-
-	u32 report_descriptor_crc32;  /* CRC32 of wire-read report descriptor */
 
 	u32 bus_error_count;          /* Cumulative SPI bus error counter */
 	int bus_last_error;           /* Last bus error code */

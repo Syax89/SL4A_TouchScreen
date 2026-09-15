@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — second dead-code pass (occurrence audit over the whole repo)
+
+The first cleanup removed what round 4's inventory named; this one is a full
+audit, so every item below is verified twice: word-boundary occurrence counts in
+every file, the git history for readers that used to exist, and the live SPI write
+path confirmed.
+
+- `spi_hid_output`, `spi_hid_output_header` and `spi_hid_report_descriptor_request`
+  have no call site anywhere. They were already unreachable before 1.6.3 (their
+  only caller was the reset/refresh handler that release deleted); the live write
+  path is `spi_hid_send_output_report` via `spi_hid_ll_output_report`, plus
+  `spi_sync()` in five places.
+- `spi_hid_protocol_validate_raw_capture`: unused `static inline` in the protocol
+  header.
+- Trace events with no producer: `spi_hid_dev_irq`, `spi_hid_reset_work`,
+  `spi_hid_refresh_device_work`, `spi_hid_output_begin`, `spi_hid_output_end`.
+- Fields written and never read: `report_descriptor_crc32` (its only reader lived
+  in the refresh worker), `hid_desc_addr`, `device_power_support`,
+  `power_response_delay`.
+- `poll_missed` stays and is now reported by `protocol_stats`: the poller counts
+  consecutive rejected reads and nothing ever showed the number, which is exactly
+  the diagnostic the cold-boot investigation needs.
+
 ## Unreleased — installer: quote the `-o` path at the elevation call site
 
 `logs -o` was passed to the elevated child as `${OUT:+-o "$OUT"}`, which bash
@@ -23,10 +46,9 @@ innocence again:
   was never queued.
 - `keep_powered`: written in six places, read nowhere. Suspend-time power gating
   needs an implementation, not a field.
-- The trace events for both workers stay in `spi-hid_trace.h` (tracing ABI, zero
-  cost when unused) and the unreachable `VENDOR_INIT` handler stays with them: it
-  documents a state of the decompiled protocol map, and the raw-mode gates added
-  there are correct if the state is ever wired up.
+- The unreachable `VENDOR_INIT` handler stays, with its raw-mode gates: it
+  documents a state of the decompiled protocol map, and those gates are correct
+  if the state is ever wired up.
 
 Also fixes the build string shipped in 1.6.2: `VERSION` moved to 1.6.2 while
 `SL4A_DRIVER_VERSION` stayed at 1.6.1. The host-test version check caught it on

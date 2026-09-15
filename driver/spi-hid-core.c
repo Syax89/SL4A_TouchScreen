@@ -222,8 +222,6 @@ static void spi_hid_parse_dev_desc(struct spi_hid_device_desc_raw *raw,
 	desc->vendor_id = le16_to_cpu(raw->wVendorID);
 	desc->product_id = le16_to_cpu(raw->wProductID);
 	desc->version_id = le16_to_cpu(raw->wVersionID);
-	desc->device_power_support = 0;
-	desc->power_response_delay = 0;
 }
 
 static int spi_hid_validate_dev_desc(const struct spi_hid_device_desc_raw *raw,
@@ -239,72 +237,6 @@ static int spi_hid_validate_dev_desc(const struct spi_hid_device_desc_raw *raw,
 		return -EPROTO;
 
 	return 0;
-}
-
-static int spi_hid_output_header(__u8 *buf,
-		u16 output_register, u16 output_report_length)
-{
-	return spi_hid_protocol_encode_output_header(buf, output_register,
-			output_report_length);
-}
-
-static int spi_hid_output(struct spi_hid *shid, void *buf, u16 length)
-{
-	struct spi_transfer transfer;
-	struct spi_message message;
-	int ret;
-	u8 *tx_buf;
-
-	tx_buf = kmalloc(length + 1, GFP_KERNEL);
-	if (!tx_buf)
-		return -ENOMEM;
-
-	/*
-	 * NOTE: This prepends a second 0x02 opcode byte. The caller's header
-	 * already encodes the output opcode. This doubled-opcode behavior
-	 * matches the observed Linux workaround but differs from Windows
-	 * canonical 10-byte DESCREQ. Review for v1.0 protocol compliance.
-	 */
-	tx_buf[0] = 0x02; /* Prepend write register opcode 0x02 */
-	memcpy(&tx_buf[1], buf, length);
-
-	memset(&transfer, 0, sizeof(transfer));
-	transfer.tx_buf = tx_buf;
-	transfer.len = length + 1;
-
-	spi_message_init_with_transfers(&message, &transfer, 1);
-
-	/*
-	 * output_report() is implemented with spi_sync() rather than
-	 * spi_async(), intentionally deviating from the requirement in
-	 * Documentation/hid/hid-transport.rst that ->output_report() be
-	 * asynchronous.  This is safe for the following reasons:
-	 *
-	 * 1) The SPI bus framework serializes all transfers so only one
-	 *    message can be in-flight at a time.
-	 * 2) The sequencer state machine (seq_lock) already enforces
-	 *    ordering — input reads and output writes never race.
-	 * 3) The standard HID profile for this device only sends
-	 *    infrequent single-touch and pen reports that complete in
-	 *    well under 2 ms, so blocking the calling thread has no
-	 *    measurable latency impact.
-	 */
-	trace_spi_hid_output_begin(shid, transfer.tx_buf,
-			transfer.len, NULL, 0, 0);
-
-	ret = spi_sync(shid->spi, &message);
-
-	trace_spi_hid_output_end(shid, transfer.tx_buf,
-			transfer.len, NULL, 0, ret);
-
-	kfree(tx_buf);
-
-	if (ret) {
-		shid->bus_error_count++;
-		shid->bus_last_error = ret;
-	}
-
-	return ret;
 }
 
 static const char *spi_hid_power_mode_string(u8 power_state)
@@ -897,40 +829,6 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 
 out:
 	mutex_unlock(&shid->response_mutex);
-	return ret;
-}
-
-/*
-* This function returns the length of the report descriptor, or a negative
-* error code if something went wrong.
-*/
-static int spi_hid_report_descriptor_request(struct spi_hid *shid)
-{
-	int ret;
-	struct device *dev = &shid->spi->dev;
-	struct spi_hid_output_report report = {
-		.content_type = SPI_HID_CONTENT_TYPE_COMMAND,
-		.content_length = 0,
-		.content_id = 0,
-		.content = NULL,
-	};
-
-
-	ret =  spi_hid_sync_request(shid,
-			shid->desc.report_descriptor_register, &report,
-			SPI_HID_REPORT_TYPE_REPORT_DESC, SPI_HID_SYNC_DESCRIPTOR);
-	if (ret) {
-		dev_err(dev, "Expected report descriptor not received!\n");
-		goto out;
-	}
-
-	ret = (shid->response.body[0] | (shid->response.body[1] << 8)) - 3;
-	if (ret != shid->desc.report_descriptor_length) {
-		dev_warn(dev, "report descriptor length differs from device descriptor; using the shorter value\n");
-		ret = min_t(unsigned int, ret,
-			shid->desc.report_descriptor_length);
-	}
-out:
 	return ret;
 }
 
@@ -2699,9 +2597,6 @@ static int spi_hid_ll_parse(struct hid_device *hid)
 		ret = hid_parse_report(hid, shid->wire_report_descriptor,
 					shid->wire_report_descriptor_len);
 		if (!ret) {
-			shid->report_descriptor_crc32 = crc32_le(0,
-				shid->wire_report_descriptor,
-				shid->wire_report_descriptor_len);
 			mutex_unlock(&shid->lock);
 			return 0;
 		}
@@ -2719,9 +2614,6 @@ static int spi_hid_ll_parse(struct hid_device *hid)
 	if (ret)
 		dev_err(dev, "failed parsing report: %d\n", ret);
 	else
-		shid->report_descriptor_crc32 = crc32_le(0,
-			(unsigned char const *) shid->response.content,
-			HARDCODED_RD_SIZE);
 
 	mutex_unlock(&shid->lock);
 	return ret;
@@ -3000,11 +2892,12 @@ static ssize_t protocol_stats_show(struct device *dev, struct device_attribute *
 {
 	struct spi_hid *shid = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "reset_rsp=%u\ndevice_desc=%u\nrpt_desc=%u\ndata=%u\ngetfeat_resp=%u\nframes_dropped=%u\nirq_count=%u\nwire_patches=%u\n",
+	return sysfs_emit(buf, "reset_rsp=%u\ndevice_desc=%u\nrpt_desc=%u\ndata=%u\ngetfeat_resp=%u\nframes_dropped=%u\nirq_count=%u\nwire_patches=%u\npoll_missed=%u\n",
 		shid->stat_reset_rsp, shid->stat_device_desc, shid->stat_rpt_desc,
 		shid->stat_data, shid->stat_getfeat_resp,
 		shid->stat_frames_dropped, shid->stat_irq_count,
-		shid->stat_wire_patches);
+		shid->stat_wire_patches,
+		shid->poll_missed);
 }
 static DEVICE_ATTR_RO(protocol_stats);
 
@@ -3286,7 +3179,6 @@ static int spi_hid_probe(struct spi_device *spi)
 		shid->powered = true;
 	}
 
-	shid->hid_desc_addr = shid->device_descriptor_register;
 
 	INIT_WORK(&shid->create_device_work, spi_hid_create_device_work);
 	INIT_WORK(&shid->error_work, spi_hid_error_work);

@@ -138,19 +138,6 @@ static inline int spi_hid_protocol_raw_confirms_handshake(spi_hid_proto_u8 conte
 	return report_length >= 3 && content_id == SPI_HID_RAW_CAPTURE_CONTENT_ID;
 }
 
-static inline int spi_hid_protocol_validate_raw_capture(
-		const spi_hid_proto_u8 *body, unsigned int body_length,
-		struct spi_hid_protocol_content *content)
-{
-	if (body_length != SPI_HID_RAW_CAPTURE_BODY_LENGTH ||
-	    spi_hid_protocol_parse_content(body, body_length, content))
-		return -1;
-
-	return content->total_length == SPI_HID_RAW_CAPTURE_TOTAL_LENGTH &&
-		content->content_id == SPI_HID_RAW_CAPTURE_CONTENT_ID &&
-		content->data_length == SPI_HID_RAW_CAPTURE_TOTAL_LENGTH - 3 ? 0 : -1;
-}
-
 static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
 		int length, int *offset)
 {
