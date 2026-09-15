@@ -315,6 +315,7 @@ struct spi_hid {
 	u32 stream_watchdog_reinits;              /* Stream reinit counter */
 	bool stream_watchdog_active;              /* Watchdog is active */
 	bool std_liveness_recovered;              /* Standard-mode liveness recovery already ran for this device state */
+	u32 std_liveness_irqs;                    /* IRQ count snapshot for the standard-mode liveness check */
 
 	struct delayed_work poll_work;            /* Active polling work item */
 	bool poll_active;                         /* Polling loop running */

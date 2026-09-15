@@ -1760,7 +1760,7 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 		 * every discovery cycle spent the reset budget until the driver
 		 * shut the device down for good. Data frames, probe and resume
 		 * restore the allowance. */
-		bool silent = shid->stat_data == shid->stream_watchdog_data;
+		bool silent = shid->stat_irq_count == shid->std_liveness_irqs;
 		bool recover = silent && std_liveness_recover &&
 			!shid->std_liveness_recovered;
 
@@ -1768,8 +1768,8 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 		if (!silent) {
 			shid->std_liveness_recovered = false;
 			dev_info(dev,
-				 "SEQ: standard-mode liveness: %u data frame(s) within %dms of DONE\n",
-				 shid->stat_data - shid->stream_watchdog_data,
+				 "SEQ: standard-mode liveness: %u IRQ(s) within %dms of DONE\n",
+				 shid->stat_irq_count - shid->std_liveness_irqs,
 				 std_liveness_ms);
 		} else if (std_liveness_recover) {
 			if (!recover)
@@ -2362,6 +2362,11 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 			if (std_liveness_ms > 0) {
 				shid->stream_watchdog_data = shid->stat_data;
+				/* Liveness is judged on IRQs, not on parsed frames:
+				 * stat_data only advances for frames that reach a live
+				 * HID client, so a device that did send frames while the
+				 * device node was still being created looked silent. */
+				shid->std_liveness_irqs = shid->stat_irq_count;
 				shid->stream_watchdog_misses = 0;
 				shid->stream_watchdog_active = true;
 				schedule_delayed_work(&shid->stream_watchdog,
@@ -3211,7 +3216,11 @@ static int spi_hid_probe(struct spi_device *spi)
 
 		msleep(100);
 	} else {
-		/* ACPI _INI has already powered the MSHW0231 before probe. */
+		/* ACPI _INI has already powered the MSHW0231 before probe. On an
+		 * OF/DT platform nothing enables the regulator and `powered` stays
+		 * false, so the power-down path below early-returns and
+		 * regulator_disable() is never reached: unqualified by design for
+		 * now, as these parts are ACPI-only (review R1d-F6). */
 		shid->powered = true;
 	}
 

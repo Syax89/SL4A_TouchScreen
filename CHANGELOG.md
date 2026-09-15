@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+Fixes from a double-blind multi-agent review campaign over the 1.6.0 revision.
+Every reported finding was verified against the source before being acted on;
+three reports presented with high confidence turned out to be false positives and
+are deliberately **not** "fixed" here: the installer module-name handling, the
+synchronous-request lock ordering, and the diagnostic log-option quoting.
+
+### Transport, power management and recovery
+
+- The input IRQ-storm breaker no longer parks the sequencer silently: it logs,
+  clears `ready` and schedules the recovery handler, and that handler
+  re-enables the sequencer it needs, because the ACPI reset path bails out on a
+  parked sequencer and the obvious fix alone would have been a no-op.
+- Suspend clears `ready` and aborts an in-flight synchronous transaction, and a
+  request that races the transition fails with `-ENODEV` instead of waiting out
+  the whole `sync_timeout_ms` and, for descriptor reads, tearing the transport
+  down and scheduling a recovery during the PM transition.
+- Resume runs the raw vendor init before re-enabling the IRQ, and reports a
+  failed init instead of discarding its result.
+- The IRQ enable/disable decision is a real test-and-set, so a suspend racing the
+  terminal error path cannot disable the line twice and leave it masked.
+- `reset_pending` is cleared when the reset request cannot go out and in the
+  hardcoded-descriptor fallback, where no device descriptor will ever arrive to
+  clear it: HID creation is no longer blocked indefinitely.
+- `input_unregister_device()` during the raw to standard fallback runs outside
+  `seq_lock`, so the IRQ thread and poller are not serialized behind it.
+- `std_liveness_recover` runs once per device state instead of once per discovery
+  cycle, and the recovery budget is replenished whenever discovery reaches
+  `DONE`, so a healthy but idle device cannot be power-cycled into the
+  terminal-failure path.
+- The descriptor poller handles the DEVICE_DESC it recovers instead of counting
+  it and dropping the frame.
+
+### Raw handshake and stream monitoring
+
+- Only a raw stream frame (content id `0x0C`, length `>= 3`) confirms the raw
+  handshake: confirming on any frame retired the watchdog and the poller while no
+  heatmap data was flowing, which left raw mode parked with no input and no way
+  back. The policy now lives in one inline predicate with host-test coverage.
+- The stream watchdog keeps ticking through a recovery re-init instead of dying
+  at the first tick that finds the sequencer outside `DONE`.
+- The poller respects `raw_input_beta` exactly like the IRQ path, and the retry
+  budgets are reset when a handshake is confirmed.
+- A late synchronous response can no longer overwrite the response buffer of the
+  transaction that superseded it.
+
+### Diagnostics and installer
+
+- The standard-mode liveness check counts controller activity (IRQs) in the
+  window instead of parsed frames, so frames that arrived while the HID device
+  node was still being created no longer look like silence.
+- The installer fails with an explicit message when `openssl` is missing while
+  re-encoding a legacy PEM signing key as DER, instead of a vague or absent
+  error.
+
 ## 1.6.0 — Surface Laptop 3 (AMD) support, raw-mode streaming backstop, issue #4 diagnostics (2026-09-15)
 
 ### Standard-mode startup liveness, detection only (issue #4)
