@@ -420,6 +420,8 @@ cmd_install() {
 		elif ! openssl x509 -in /var/lib/dkms/mok.pub -inform DER -noout 2>/dev/null; then
 			warn "Existing DKMS signing key at /var/lib/dkms/mok.pub is not DER-encoded; mokutil cannot import it."
 			info "Re-encoding the existing certificate as DER (no new key pair is generated)..."
+			command -v openssl >/dev/null 2>&1 || \
+				fail "openssl is required to re-encode the DKMS signing key as DER (mokutil only accepts DER). Install 'openssl' and retry."
 			openssl x509 -in /var/lib/dkms/mok.pub -out /var/lib/dkms/mok.pub.der -outform DER 2>/dev/null \
 				&& mv /var/lib/dkms/mok.pub.der /var/lib/dkms/mok.pub \
 				|| fail "Could not re-encode the existing signing key as DER."
@@ -742,9 +744,12 @@ cmd_activate() {
 		# Re-encode a legacy PEM certificate for mokutil.
 		if [ -r /var/lib/dkms/mok.pub ] && ! openssl x509 -in /var/lib/dkms/mok.pub -inform DER -noout 2>/dev/null; then
 			warn "Existing DKMS signing key at /var/lib/dkms/mok.pub is not DER-encoded; re-encoding..."
+			command -v openssl >/dev/null 2>&1 || \
+				fail "openssl is required to re-encode the DKMS signing key as DER (mokutil only accepts DER). Install 'openssl' and retry."
 			openssl x509 -in /var/lib/dkms/mok.pub -out /var/lib/dkms/mok.pub.der -outform DER 2>/dev/null \
 				&& mv /var/lib/dkms/mok.pub.der /var/lib/dkms/mok.pub \
-				&& pass "DKMS signing key re-encoded as DER at /var/lib/dkms/mok.pub"
+				&& pass "DKMS signing key re-encoded as DER at /var/lib/dkms/mok.pub" \
+				|| fail "Could not re-encode the existing signing key as DER (mokutil only accepts DER)."
 		fi
 		if [ ! -r /var/lib/dkms/mok.pub ]; then
 			echo ""
