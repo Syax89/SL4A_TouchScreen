@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Raw-mode streaming backstop and installer fixes (contributed by cristinagp, PR #7)
+
+- Raw mode: reaching `DONE` now arms the periodic poller and the handshake
+  watchdog, so a lost edge-triggered IRQ (the data-ready line can fire while
+  the driver is still inside the SET_FEATURE write path) no longer leaves the
+  activation polling forever with zero data. The poller can now confirm the
+  handshake itself instead of waiting for the IRQ path to set the flag.
+- Raw mode: handshake confirmation accepts any data frame, not only heatmap
+  frames with content id `0x0C`; `stream_watchdog_ms` default is now 2000
+  (was 0, disabled) as the Windows-matching interval.
+- Installer: the DKMS MOK certificate is now written DER-encoded (`openssl
+  -outform DER`), which is what `mokutil --import` requires. An existing
+  PEM-encoded certificate is re-encoded in place, at install and at activate,
+  instead of failing the Secure Boot path.
+- Installer: when the selected profile differs from the loaded `raw_mode`
+  value (a load-time-only parameter), `install` now says a reboot is required
+  and skips activation instead of activating with the wrong mode.
+- Installer: `activate` refuses to displace a device only when it is bound to
+  a different driver, so re-activating an already-correctly-bound device is
+  idempotent again.
+- No behavior change for the standard HID profile: every new driver path is
+  gated on `raw_mode_active`, and the installer changes only affect Secure
+  Boot key encoding, profile-change detection and the already-bound check.
+
 ### Support for Surface Laptop 3 (AMD) — MSHW0162
 
 - The HID transport now probes the SL3 AMD touch controller (`MSHW0162`)

@@ -10,6 +10,7 @@ driver/*.mod.o
 driver/*.mod.*
 driver/*.cmd
 driver/.*.cmd
+driver/.*.o.d
 driver/.module*
 driver/Module.symvers
 driver/modules.order
