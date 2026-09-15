@@ -8,6 +8,42 @@ three reports presented with high confidence turned out to be false positives an
 are deliberately **not** "fixed" here: the installer module-name handling, the
 synchronous-request lock ordering, and the diagnostic log-option quoting.
 
+### Raw pipeline (tracker and diagnostics)
+
+- A one-frame gap no longer becomes a real release: re-acquisition while the lift
+  is pending used to restart the debounce unconditionally (`case 3` → state 1),
+  where the hold path requires a substantial blob before recovering the contact.
+  Since a single peak-free frame puts *every* finger into lift, one dropped frame
+  aborted pinches, scrolls and drags by releasing and re-pressing all contacts.
+- The lift-lookback history is cleared whenever a slot starts or frees a contact.
+  It was only ever appended to, so after a slot had been reused a fast tap could
+  report the *previous* contact's position as its lift point, which libinput then
+  classifies as a swipe instead of a tap.
+- `grid_cols`/`grid_rows` are reachable again: the geometry cache was filled from
+  the per-device config at probe (never NULL) and the parameter path only ran when
+  the cache was empty, so both knobs were dead on every boot. The parameters are
+  now an explicit override of the cached geometry.
+- A `dfa_data_offset` that cannot fit the cached grid no longer resets the whole
+  pipeline 100 times a second: the mismatch is reported at a sane rate, the reset
+  is skipped when the offset is the cause (re-learning the geometry cannot help),
+  and the message says what to do instead.
+- Split sub-blobs get the parent's edge weight penalty too. The split path
+  `continue`d over the penalty block, so a bezel artifact wide enough to hold two
+  peaks was published at full weight — exactly the false touch that penalty exists
+  for.
+- The ghost merge is strict (`<`, not `<=`), as in Windows and in the in-tree
+  oracle test, so two blobs exactly at the coalescing radius no longer silently
+  drop one.
+- `mshw0231_raw_input_register()` returns `-ENOMEM` when the input device cannot
+  be allocated. It reported success, which left the driver in "raw mode" with no
+  input device: every frame discarded, nothing said why.
+- The `CALIB:` trace printed coordinates 100× the ones the pipeline actually
+  publishes (it divided by 1000 where emission divides by 100000), and the
+  `CALIB_REF:` trace built `hx` and `hy` from the same byte. Both diagnostics
+  exist to be read during calibration.
+- Comment drift corrected in the tracker (the EMA/deadband/stationary numbers did
+  not match the constants the code uses).
+
 ### Transport, power management and recovery
 
 - The input IRQ-storm breaker no longer parks the sequencer silently: it logs,

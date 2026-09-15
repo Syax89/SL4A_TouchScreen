@@ -68,6 +68,7 @@ extern int sl4a_stub_verbose;
 #define dev_warn(dev, fmt, ...) \
 	do { (void)(dev); if (sl4a_stub_verbose) \
 		fprintf(stderr, "[dev_warn] " fmt, ##__VA_ARGS__); } while (0)
+#define dev_warn_ratelimited(dev, fmt, ...) dev_warn(dev, fmt, ##__VA_ARGS__)
 #define dev_info(dev, fmt, ...) \
 	do { (void)(dev); if (sl4a_stub_verbose) \
 		fprintf(stderr, "[dev_info] " fmt, ##__VA_ARGS__); } while (0)

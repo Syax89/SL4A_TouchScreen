@@ -16,5 +16,8 @@
 #ifndef ENODEV
 #define ENODEV 19
 #endif
+#ifndef ENOMEM
+#define ENOMEM 12
+#endif
 
 #endif

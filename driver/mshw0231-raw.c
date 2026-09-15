@@ -418,6 +418,22 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
  * blob splitting, edge penalty, centroid, and eigenvalue computation.
  *
  * Updates *nlabels and *touched_count. Returns final blob count. */
+/* Edge-contact weight penalty (Windows DLL config):
+ * +0x8D0=0.967 top edge — mild penalty
+ * +0x8D4=0.228 bottom edge — harsh penalty
+ * (panel connector bezel produces false touches).
+ * Top/left/right: keep ~97% weight. Bottom (max_r near nrows): keep ~23%.
+ * One place for both blob paths: the split path used to skip this entirely. */
+static u32 raw_edge_penalised_weight(u32 wsum, s32 min_r, s32 max_r,
+				     s32 min_c, s32 max_c, u32 nrows, u32 ncols)
+{
+	if (max_r >= (s32)nrows - 2)
+		return wsum * HEATMAP_EDGE_PENALTY_BOTTOM / 100;
+	if (min_r <= 1 || min_c <= 1 || max_c >= (s32)ncols - 2)
+		return wsum * HEATMAP_EDGE_PENALTY_TOP / 100;
+	return wsum;
+}
+
 static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 			      u32 ncols, u32 nrows,
 			      u16 *nlabels, int *touched_count,
@@ -631,7 +647,10 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 									s32 sbi = *nlabels;
 									shid->blob_x[sbi] = (u32)(ssx * 100 / ssw);
 									shid->blob_y[sbi] = (u32)(ssy * 100 / ssw);
-									shid->blob_wsum[sbi] = (u32)ssw;
+									/* The parent's edge penalty applies to the sub-blobs too:
+									 * a bezel artifact that shape-splits must not skip it. */
+									shid->blob_wsum[sbi] = raw_edge_penalised_weight((u32)ssw,
+												min_r, max_r, min_c, max_c, nrows, ncols);
 									shid->blob_active[sbi] = true;
 									shid->blob_eigmaj[sbi] = 0;
 									shid->blob_eigmin[sbi] = 0;
@@ -645,18 +664,11 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 					}
 				}
 
-				/* Edge-contact weight penalty (Windows DLL config):
-				 * +0x8D0=0.967 top edge — mild penalty
-				 * +0x8D4=0.228 bottom edge — harsh penalty
-				 * (panel connector bezel produces false touches).
-				 * Top/left/right: keep ~97% weight.
-				 * Bottom (max_r near nrows): keep ~23% weight. */
+				/* Edge-contact weight penalty — see raw_edge_penalised_weight(). */
 				if (min_r <= 1 || max_r >= (s32)nrows - 2 ||
 				    min_c <= 1 || max_c >= (s32)ncols - 2) {
-				if (max_r >= (s32)nrows - 2)
-					shid->blob_wsum[bi] = shid->blob_wsum[bi] * HEATMAP_EDGE_PENALTY_BOTTOM / 100;
-				else
-					shid->blob_wsum[bi] = shid->blob_wsum[bi] * HEATMAP_EDGE_PENALTY_TOP / 100;
+					shid->blob_wsum[bi] = raw_edge_penalised_weight(shid->blob_wsum[bi],
+											min_r, max_r, min_c, max_c, nrows, ncols);
 				}
 
 				shid->blob_active[bi] = true;
@@ -773,7 +785,9 @@ static void raw_ghost_merge(struct spi_hid *shid, struct blob_entry *sorted,
 				continue;
 			dx = (s32)sorted[a].gx - (s32)sorted[b].gx;
 			dy = (s32)sorted[a].gy - (s32)sorted[b].gy;
-			if ((u32)(dx * dx) + (u32)(dy * dy) <= gdsq) {
+			/* Strict, as in Windows and the in-tree oracle test: a
+			 * distance of exactly ghost_dist does not merge. */
+			if ((u32)(dx * dx) + (u32)(dy * dy) < gdsq) {
 				if (sorted[b].w > sorted[a].w) {
 					sorted[a].w = 0;
 					break;
@@ -1004,6 +1018,16 @@ static u32 raw_hungarian_match(struct spi_hid *shid,
  * history ring push, state transitions.
  *
  * Fills new_gx[], new_gy[], new_active[] (each size HEATMAP_MAX_SLOTS). */
+/* A slot's lift-lookback history belongs to one contact: clear it whenever the
+ * slot starts a new contact or frees one, or a fast tap on a reused slot
+ * reports the previous contact's position as its lift point (libinput then sees
+ * a tap as a swipe). */
+static void slot_history_clear(struct spi_hid *shid, u32 s)
+{
+	shid->blob_slot_hcount[s] = 0;
+	shid->blob_slot_hpos[s] = 0;
+}
+
 static void raw_update_slots(struct spi_hid *shid,
 			     const struct blob_entry *sorted, u8 sorted_count,
 			     const u8 *assigned_slot, u32 bmd,
@@ -1056,6 +1080,7 @@ static void raw_update_slots(struct spi_hid *shid,
 
 			switch (shid->blob_slot_state[s]) {
 			case 0:
+				slot_history_clear(shid, s);
 				shid->blob_slot_state[s] = 1;
 				shid->blob_slot_duration[s] = 1;
 				shid->blob_slot_stationary[s] = 0;
@@ -1069,7 +1094,14 @@ static void raw_update_slots(struct spi_hid *shid,
 				shid->blob_slot_duration[s]++;
 				break;
 			case 3:
-				shid->blob_slot_state[s] = 1;
+				/* Re-acquisition while the lift is still pending:
+				 * same guard as hold recovery. Restarting the
+				 * debounce here turned a single dropped frame
+				 * into a release plus re-press for blob_debounce
+				 * frames, which aborts multi-finger gestures. */
+				if (w < HEATMAP_HOLD_RECOVERY_WEIGHT)
+					goto slot_unassigned;
+				shid->blob_slot_state[s] = 2;
 				shid->blob_slot_duration[s] = 1;
 				shid->blob_slot_stationary[s] = 0;
 				break;
@@ -1124,11 +1156,14 @@ static void raw_update_slots(struct spi_hid *shid,
 
 			if (new_active[s]) {
 				/* EMA + deadband + stationary lock.
-				 * EMA alpha=7 (weight 1/8) for smooth tracking.
-				 * Deadband ±80 (0.8 cells, ~3.7 px) suppresses
-				 * antenna-noise jitter during slow holds.
-				 * After 6 consecutive stationary frames the
-				 * position is frozen until a real move occurs. */
+				 * EMA alpha = frame_ema_alpha (default 2,
+				 * weight 1/3) for smooth tracking.
+				 * Deadband ±HEATMAP_DEADBAND_THRESHOLD
+				 * (20 → 0.2 cells) suppresses antenna-noise
+				 * jitter during slow holds. After
+				 * HEATMAP_STATIONARY_FRAMES (2) consecutive
+				 * stationary frames the position is frozen
+				 * until a real move occurs. */
 				if (old_state == 2) {
 					u32 egx = (old_gx * frame_ema_alpha + gx) /
 						  (frame_ema_alpha + 1);
@@ -1177,6 +1212,7 @@ static void raw_update_slots(struct spi_hid *shid,
 slot_unassigned:
 			switch (shid->blob_slot_state[s]) {
 			case 1:
+				slot_history_clear(shid, s);
 				shid->blob_slot_state[s] = 0;
 				shid->blob_slot_duration[s] = 0;
 				break;
@@ -1218,6 +1254,7 @@ slot_unassigned:
 				shid->blob_slot_missed[s]++;
 				if (shid->blob_slot_missed[s] >=
 				    (u32)blob_lift_frames) {
+					slot_history_clear(shid, s);
 					shid->blob_slot_state[s] = 0;
 					shid->blob_slot_missed[s] = 0;
 				}
@@ -1376,6 +1413,16 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 
 	/* The 72×48 default is an unvalidated experimental candidate. It remains
 	 * configurable only for controlled capture comparison, never calibration. */
+	/* Geometry: the module parameters are an explicit override, the cached
+	 * per-device geometry is the default. Without this the parameters were
+	 * unreachable: mshw0231_raw_init() always fills the cache from shid->cfg
+	 * (never NULL), and the auto-detect block below is skipped once it is. */
+	if (configured_cols > 1 &&
+	    (shid->heatmap_grid_cols != configured_cols ||
+	     (configured_rows > 1 && shid->heatmap_grid_rows != configured_rows))) {
+		shid->heatmap_grid_cols = configured_cols;
+		shid->heatmap_grid_rows = configured_rows > 1 ? configured_rows : 0;
+	}
 	if (!shid->heatmap_grid_cols || !shid->heatmap_grid_rows) {
 		if (configured_cols > 1)
 			ncols = configured_cols;
@@ -1415,9 +1462,15 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 		return;
 	}
 	if (cell_count < ncols * nrows) {
-		dev_warn(dev, "HEATMAP: frame has %u cells, need %u for cached grid\n",
-			 cell_count, ncols * nrows);
-		mshw0231_raw_reset(shid);
+		/* A configured dfa_data_offset removes exactly this many cells from
+		 * every frame, so re-learning the geometry cannot help: report it at
+		 * a sane rate and skip the pipeline reset instead of wiping the
+		 * baseline and every slot 100 times per second. */
+		dev_warn_ratelimited(dev,
+			"HEATMAP: frame has %u cells, need %u for cached grid (match grid_cols/grid_rows, or set dfa_data_offset=0)\n",
+			cell_count, ncols * nrows);
+		if (!data_offset)
+			mshw0231_raw_reset(shid);
 		return;
 	}
 	cell_count = ncols * nrows;
@@ -1566,10 +1619,13 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 			u32 screen_gx = swap_xy ? sorted[i].gy : sorted[i].gx;
 			u32 screen_gy = swap_xy ? sorted[i].gx : sorted[i].gy;
 
+			/* Same fixed-point expression as the emission path further
+			 * down: dividing by 1000 here reported coordinates 100×
+			 * the ones actually published. */
 			seq_dbg(shid, 2, "CALIB: blob[%u] grid=(%u,%u) screen=(%u,%u) weight=%u scale=(%ux%u)\n",
 				 i, sorted[i].gx, sorted[i].gy,
-				 (screen_gx * scale_x + 500) / 1000,
-				 (screen_gy * scale_y + 500) / 1000,
+				 (u32)(((s64)screen_gx * scale_x + 50000) / 100000),
+				 (u32)(((s64)screen_gy * scale_y + 50000) / 100000),
 				 sorted[i].w, scale_x, scale_y);
 		}
 		if (sorted_count || touched_count)
@@ -1671,6 +1727,12 @@ int mshw0231_raw_input_register(struct spi_hid *shid)
 			} else {
 				dev_info(dev, "HEATMAP: multitouch input device registered\n");
 			}
+		} else {
+			/* Reporting success here left the driver in "raw mode"
+			 * with no input device: every frame was discarded and
+			 * nothing said why. */
+			dev_err(dev, "HEATMAP: cannot allocate the multitouch input device\n");
+			return -ENOMEM;
 		}
 	}
 	return 0;

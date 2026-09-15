@@ -2560,8 +2560,11 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			}
 		} else if (rl >= 3 && rl - 3 <= avail) {
 			if (shid->raw_mode_active && body[7] == 0x40 && rl - 2 >= 6) {
-				u16 hx = body[8] | (body[10] << 8);
-				u16 hy = body[10] | (body[12] << 8);
+				/* x and y are consecutive 16-bit little-endian
+				 * pairs: using body[10] for both made hx and hy
+				 * share a byte. */
+				u16 hx = body[8] | (body[9] << 8);
+				u16 hy = body[10] | (body[11] << 8);
 				seq_dbg(shid, 2, "CALIB_REF: hid=(%u,%u)\n", hx, hy);
 			}
 			if (shid->hid) {
