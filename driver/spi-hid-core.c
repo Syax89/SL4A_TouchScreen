@@ -1234,7 +1234,7 @@ static void spi_hid_seq_handle_sync_response(struct spi_hid *shid, int type,
 	u64 generation;
 	u8 *body = shid->data_buf;
 	bool pending;
-	bool current;
+	bool owned;
 	u32 read_len;
 
 	lockdep_assert_held(&shid->seq_lock);
@@ -1277,10 +1277,10 @@ static void spi_hid_seq_handle_sync_response(struct spi_hid *shid, int type,
 	 * aborts it, another request supersedes it), and a late frame from the
 	 * previous generation must not land in the current caller's response. */
 	spin_lock_irqsave(&shid->response_lock, flags);
-	current = shid->output_pending && !shid->response_valid &&
+	owned = shid->output_pending && !shid->response_valid &&
 		shid->response_generation == generation;
 	spin_unlock_irqrestore(&shid->response_lock, flags);
-	if (!current) {
+	if (!owned) {
 		dev_warn(&shid->spi->dev,
 			 "SEQ: stale synchronous response type %d ID 0x%x\n",
 			 type, content.content_id);
