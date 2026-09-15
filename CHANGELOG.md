@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — follow-up review of the 1.6.1 fixes (2026-09-15)
+## 1.6.2 — Follow-up review of the 1.6.1 fixes (2026-09-15)
 
 A fourth round of the same campaign reviewed the *corrections* made in 1.6.1,
 which no round had looked at yet: four independent legs (raw pipeline, handshake
