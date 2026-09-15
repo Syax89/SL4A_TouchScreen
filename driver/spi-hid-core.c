@@ -154,6 +154,13 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 		spi_hid_seq_state_name(new_state), new_state,
 		spi_hid_seq_reason_name(reason), reason);
 
+	if (new_state == SPI_HID_SEQ_DONE) {
+		/* Reaching DONE means discovery completed, so the recovery budget
+		 * is replenished: a device that recovers every time must not be
+		 * given up on, while one that never gets here still hits the cap. */
+		shid->attempts = 0;
+	}
+
 	if (new_state == SPI_HID_SEQ_WAIT_DESC)
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 
@@ -691,6 +698,12 @@ static void spi_hid_reset_work(struct work_struct *work)
 	mutex_unlock(&shid->power_lock);
 	if (ret) {
 		dev_err(dev, "failed to send device reset request\n");
+		/* The DEVICE_DESC that clears this flag is never coming: clear it
+		 * here so HID creation is not blocked until the next reset
+		 * response (or forever, on the hardcoded-descriptor fallback). */
+		mutex_lock(&shid->seq_lock);
+		shid->reset_pending = false;
+		mutex_unlock(&shid->seq_lock);
 		schedule_work(&shid->error_work);
 		return;
 	}
@@ -783,6 +796,26 @@ static int spi_hid_send_output_report(struct spi_hid *shid, u32 output_register,
 }
 
 /*
+* Abort a synchronous transaction whose reply can no longer arrive (PM is
+* quiescing the transport). Mirrors spi_hid_complete_response(): closing the
+* transaction and waking the waiter lets the caller fail fast instead of
+* burning the whole sync timeout on a device that cannot answer.
+*/
+static void spi_hid_abort_pending_sync(struct spi_hid *shid)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&shid->response_lock, flags);
+	if (shid->output_pending) {
+		shid->output_pending = false;
+		shid->response_valid = false;
+		shid->response_generation++;
+		complete(&shid->output_done);
+	}
+	spin_unlock_irqrestore(&shid->response_lock, flags);
+}
+
+/*
 * This function shouldn't be called from the interrupt thread context since it
 * waits for completion that gets completed in one of the future runs of the
 * interrupt thread.
@@ -836,6 +869,21 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	 * IRQ thread to process the response. The caller (ll_raw_request)
 	 * expects this release/reacquire pattern.
 	 */
+	/* PM can quiesce the transport between the ready check above and the
+	 * wait below, and with the IRQ disabled nothing will complete this
+	 * transaction: fail it now instead of waiting out the timeout. */
+	if (READ_ONCE(shid->suspended)) {
+		spin_lock_irqsave(&shid->response_lock, flags);
+		if (shid->response_generation == generation) {
+			shid->output_pending = false;
+			shid->response_valid = false;
+			shid->response_generation++;
+		}
+		spin_unlock_irqrestore(&shid->response_lock, flags);
+		dev_dbg(dev, "request aborted, device is suspending\n");
+		ret = -ENODEV;
+		goto out;
+	}
 	mutex_unlock(&shid->lock);
 	ret = wait_for_completion_interruptible_timeout(&shid->output_done,
 			msecs_to_jiffies(sync_timeout_ms));
@@ -850,6 +898,14 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	}
 	spin_unlock_irqrestore(&shid->response_lock, flags);
 	if (ret <= 0 || !response_valid) {
+		/* A suspend that raced this request aborted the transaction: that
+		 * is not a device failure, and scheduling a recovery cycle here
+		 * would fight the PM transition. */
+		if (READ_ONCE(shid->suspended)) {
+			dev_dbg(dev, "request failed, device is suspending\n");
+			ret = -ENODEV;
+			goto out;
+		}
 		if (spi_hid_protocol_sync_timeout_fatal(kind)) {
 			if (ret == 0)
 				dev_err(dev, "response timed out\n");
@@ -1343,6 +1399,7 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, raw_handshake_watchdog.work);
 	struct device *dev = &shid->spi->dev;
+	struct input_dev *stale_input = NULL;
 
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
@@ -1377,8 +1434,11 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		shid->poll_active = false;
 		shid->stream_watchdog_active = false;
 		shid->feat_delay_pending = false;
+		/* Unregistering an input device can sleep, and the IRQ thread and
+		 * poller both need seq_lock: hand the device over here and release
+		 * it after the lock is dropped. */
 		if (shid->touch_input) {
-			input_unregister_device(shid->touch_input);
+			stale_input = shid->touch_input;
 			shid->touch_input = NULL;
 		}
 		if (!shid->hid)
@@ -1419,6 +1479,8 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	raw_handshake_restart_discovery(shid);
 out:
 	mutex_unlock(&shid->seq_lock);
+	if (stale_input)
+		input_unregister_device(stale_input);
 }
 
 /* GET_FEATURE delayed work (Windows: ~3.6 s measured gap between RPT_DESC
@@ -1497,15 +1559,27 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 	}
 	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 9, hdr);
 	if (type == 7) {
-		shid->stat_device_desc++;
-		seq_dbg(shid, 1, "SEQ: poll-work: GOT DEVICE_DESC!\n");
-		/* Re-trigger the IRQ thread to handle it */
+		u16 blen = (((hdr[6] >> 4) & 0xF)) | (hdr[7] << 4);
+
+		blen *= 4;
+		if (blen > SZ_8K)
+			blen = SZ_8K;
+		seq_dbg(shid, 1, "SEQ: poll-work: GOT DEVICE_DESC (blen=%u), handling it here\n",
+			blen);
+		/* The IRQ edge for this frame was lost, so the IRQ thread will never
+		 * see it: run the same handler it would have run, otherwise the
+		 * poller drops the very descriptor it exists to recover. */
+		seq_handle_desc(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
 		seq_dbg(shid, 1, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		shid->keep_powered = true;
+		/* The hardcoded descriptors below mean no DEVICE_DESC will arrive
+		 * to clear this, and create_device_work refuses to run while it is
+		 * set: clear it here or HID is never created. */
+		shid->reset_pending = false;
 		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
 		/* Hardcode and create device */
 		shid->desc.hid_version = 0x0100;
@@ -1661,27 +1735,39 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 		goto out;
 
 	if (!shid->raw_mode_active) {
-		/* One shot. Recovering on silence alone would risk power-cycling
-		 * an idle-but-healthy touchscreen, so it stays opt-in. */
+		/* Once per device state: recovering on silence alone would
+		 * power-cycle an idle-but-healthy touchscreen, and repeating it on
+		 * every discovery cycle spent the reset budget until the driver
+		 * shut the device down for good. Data frames, probe and resume
+		 * restore the allowance. */
 		bool silent = shid->stat_data == shid->stream_watchdog_data;
+		bool recover = silent && std_liveness_recover &&
+			!shid->std_liveness_recovered;
 
 		shid->stream_watchdog_active = false;
-		if (!silent)
+		if (!silent) {
+			shid->std_liveness_recovered = false;
 			dev_info(dev,
 				 "SEQ: standard-mode liveness: %u data frame(s) within %dms of DONE\n",
 				 shid->stat_data - shid->stream_watchdog_data,
 				 std_liveness_ms);
-		else if (std_liveness_recover)
-			dev_warn(dev,
-				 "SEQ: standard-mode liveness: no input data within %dms of DONE, running ACPI recovery\n",
-				 std_liveness_ms);
-		else
+		} else if (std_liveness_recover) {
+			if (!recover)
+				dev_info(dev,
+					 "SEQ: standard-mode liveness: still no input data, recovery already ran for this device state\n");
+			else
+				dev_warn(dev,
+					 "SEQ: standard-mode liveness: no input data within %dms of DONE, running ACPI recovery (once)\n",
+					 std_liveness_ms);
+		} else
 			dev_warn(dev,
 				 "SEQ: standard-mode liveness: no input data within %dms of DONE; the controller may not be streaming (issue #4)\n",
 				 std_liveness_ms);
 
-		if (silent && std_liveness_recover)
+		if (recover) {
+			shid->std_liveness_recovered = true;
 			schedule_work(&shid->error_work);
+		}
 		goto out;
 	}
 
@@ -2927,10 +3013,22 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 
 static void spi_hid_disable_irq(struct spi_hid *shid)
 {
-	if (shid->irq_requested && shid->irq_enabled) {
-		disable_irq(shid->irq);
+	bool disable;
+
+	/* The flag decides who owns the line, and it needs to be a real
+	 * test-and-set: two racing callers (suspend vs the terminal error path)
+	 * could otherwise both disable the line, leaving one enable_irq() for
+	 * two disable_irq() calls and an IRQ that stays masked. The IRQ call
+	 * itself must stay outside seq_lock: disable_irq() waits for the
+	 * handler, and the handler takes that same lock. */
+	mutex_lock(&shid->seq_lock);
+	disable = shid->irq_requested && shid->irq_enabled;
+	if (disable)
 		shid->irq_enabled = false;
-	}
+	mutex_unlock(&shid->seq_lock);
+
+	if (disable)
+		disable_irq(shid->irq);
 }
 
 static void spi_hid_free_irq(struct spi_hid *shid)
@@ -3323,6 +3421,10 @@ static int spi_hid_suspend(struct device *dev)
 	mutex_lock(&shid->seq_lock);
 	WRITE_ONCE(shid->suspended, true);
 	WRITE_ONCE(shid->seq_enabled, false);
+	/* ready must follow the transport down: it is the only gate feature and
+	 * descriptor reads use, so leaving it set let a HID client issue SPI
+	 * traffic against a suspended controller and wait out the sync timeout. */
+	shid->ready = false;
 	shid->poll_active = false;
 	shid->stream_watchdog_active = false;
 	shid->raw_handshake_confirmed = false;
@@ -3331,6 +3433,9 @@ static int spi_hid_suspend(struct device *dev)
 
 	spi_hid_disable_irq(shid);
 	spi_hid_cancel_workers(shid);
+	/* No reply can arrive now: release a synchronous caller immediately
+	 * instead of letting it sit out the full sync timeout. */
+	spi_hid_abort_pending_sync(shid);
 	return 0;
 }
 
@@ -3347,23 +3452,39 @@ static int spi_hid_resume(struct device *dev)
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	shid->raw_probe_attempts = 0;
 	shid->feat_delay_pending = false;
+	shid->std_liveness_recovered = false;
 	mshw0231_raw_reset(shid);
 	WRITE_ONCE(shid->seq_enabled, true);
 	shid->seq_state = SPI_HID_SEQ_WAIT_RESET;
 	WRITE_ONCE(shid->suspended, false);
 	mutex_unlock(&shid->seq_lock);
 
-	if (shid->irq_requested && !shid->irq_enabled) {
-		enable_irq(shid->irq);
-		shid->irq_enabled = true;
-	}
-
+	/* Vendor init before the IRQ is re-enabled: it writes the D2/D0 pair and
+	 * sleeps between the frames, and an IRQ processed in between would let
+	 * the sequencer advance mid-init (a failed init also went unnoticed). */
 	if (shid->raw_mode_active) {
+		int vret = 0;
+
 		mutex_lock(&shid->seq_lock);
 		if (!READ_ONCE(shid->removing) && !READ_ONCE(shid->suspended) &&
 		    READ_ONCE(shid->seq_enabled))
-			spi_hid_vendor_init(shid);
+			vret = spi_hid_vendor_init(shid);
 		mutex_unlock(&shid->seq_lock);
+		if (vret)
+			dev_warn(&spi->dev, "SEQ: resume vendor init failed: %d\n",
+				 vret);
+	}
+
+	{
+		bool arm;
+
+		mutex_lock(&shid->seq_lock);
+		arm = shid->irq_requested && !shid->irq_enabled;
+		if (arm)
+			shid->irq_enabled = true;
+		mutex_unlock(&shid->seq_lock);
+		if (arm)
+			enable_irq(shid->irq);
 	}
 
 	return 0;
