@@ -39,7 +39,7 @@ reply the first 55 payload bytes are not binary32 values; the aligned array that
 follows holds 16 of them (178.0, 182.0, 180.0, 1.0 twice, 90.0, 171.0, 100.0,
 20.0, 172.0, 177.0, 175.0, 2.0).
 
-## Unreleased — second dead-code pass (occurrence audit over the whole repo)
+### second dead-code pass (occurrence audit over the whole repo)
 
 The first cleanup removed what round 4's inventory named; this one is a full
 audit, so every item below is verified twice: word-boundary occurrence counts in
@@ -62,7 +62,7 @@ path confirmed.
   consecutive rejected reads and nothing ever showed the number, which is exactly
   the diagnostic the cold-boot investigation needs.
 
-## Unreleased — installer: quote the `-o` path at the elevation call site
+### installer: quote the `-o` path at the elevation call site
 
 `logs -o` was passed to the elevated child as `${OUT:+-o "$OUT"}`, which bash
 word-splits before the child sees it: a bundle path containing a space arrived as
