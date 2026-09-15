@@ -94,7 +94,8 @@ Extracted from DLL `DAT_1808e0460` (file offset `0x8DF060`):
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `raw_mode` | 0 | Raw heatmap + multi-touch; `sl4a-touch.sh install --raw` enables it experimentally |
-| `skip_getfeat` | 1 | Vendor-init activation path |
+| `skip_getfeat` | 1 | Skip the standard-mode feature-read handshake (no `WAIT_FEATURE`); the raw-mode Report ID 6 configuration read still runs |
+| `wire_double_opcode` | 0 | 0 = Windows-identical frames, 1 = legacy doubled opcode (see `docs/PARAMETERS.md`) |
 | `ema_alpha` | 7 | EMA smoothing weight |
 | `blob_max_distance` | 3 | Hungarian base radius (cells) |
 | `blob_min_weight` | 1000 | Minimum blob weight |

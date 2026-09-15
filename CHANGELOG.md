@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased — host→device frames match the Windows stack; Report ID 6 read
+
+Every command frame the sequencer puts on the bus now reproduces, byte for byte,
+what the Windows stack sends. The reference is the SPB trace
+(`captures/wintrace/surface_init.csv`, TXN 634377432 onwards), whose write frames
+are SET_POWER D0, SET_FEATURE Report ID 0x56, DESCREQ register 1, DESCREQ
+register 2, SET_FEATURE Report ID 0x56 again, GET_FEATURE Report ID 6 and
+SET_FEATURE Report ID 5. The driver carried two differences from all of them:
+
+- a doubled leading opcode (`02 02 ..` instead of `02 ..`) on SET_POWER,
+  DESCREQ, SET_FEATURE and GET_FEATURE;
+- zero padding where Windows sends the constant `0C EE 5B` trailer on the short
+  command bodies (SET_POWER and SET_FEATURE Report ID 5).
+
+Both are gone from the default path. The frames now live in
+`driver/spi-hid-wire-frames.h`, the single source of truth for their bytes; the
+legacy doubled form is still reachable through the new `wire_double_opcode`
+parameter (default `0`), and `setfeat_no_double` keeps working as a deprecated
+alias that opts the SET_FEATURE frame out of doubling, so existing `modprobe.d`
+drop-ins still load. `tests/wire_frames_test.c` compiles that header and compares
+every frame against the reference bytes; it runs in `make -C tests test` without
+`|| true`. It also fails if a local frame table reappears in `spi-hid-core.c`.
+
+The report-descriptor DESCREQ (`seq_handle_desc()`) is fixed the same way: the
+trace shows `02 00 00 02 42 00 00 03 00 00`, and the register keeps coming from
+the device descriptor.
+
+The probe also reads GET_FEATURE Report ID 6 in the Windows order — after the
+report descriptor, before the SET_FEATURE that enables the heatmap. It belongs to
+the raw-mode init sequence, so it runs with `skip_getfeat=Y` as well (the
+installer's raw profile sets it); `skip_getfeat` continues to mean "the
+standard-mode handshake does not wait for a feature reply". The read is diagnostic
+only: the reply is kept in `struct spi_hid_getfeat6` and logged as hex plus
+IEEE-754 values at debug level 2, nothing acts on it, and a failed read never
+delays the handshake. Evidence recorded for the mapping step: in the captured
+reply the first 55 payload bytes are not binary32 values; the aligned array that
+follows holds 16 of them (178.0, 182.0, 180.0, 1.0 twice, 90.0, 171.0, 100.0,
+20.0, 172.0, 177.0, 175.0, 2.0).
+
 ## Unreleased — second dead-code pass (occurrence audit over the whole repo)
 
 The first cleanup removed what round 4's inventory named; this one is a full

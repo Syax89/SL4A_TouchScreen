@@ -28,7 +28,9 @@ With `skip_getfeat=0`, the legacy path waits for the Windows-like ~3.6 s gap
 (measured; the original protocol doc cited ~5.9 s) between RPT_DESC and
 GET_FEATURE before sending the activation command. The
 experimental raw profile uses `skip_getfeat=1` and takes the direct vendor-init
-path instead.
+path instead. Neither mode skips the Report ID 6 configuration read, which
+Windows performs between RPT_DESC and SET_FEATURE ID5 and which the driver now
+logs without acting on its values.
 
 ```
 Host → Device:
@@ -56,8 +58,10 @@ without a labelled replay fixture.
 
 The driver uses a direct vendor-init path:
 1. Write vendor-init command (0xC2 opcode)
-2. After a short stabilization delay, write SET_FEATURE ID5=01
-3. Observe subsequent reports; reliable streaming remains unproven
+2. After a short stabilization delay, write GET_FEATURE Report ID 6 and keep/log
+   the reply (Windows order; diagnostic only, a failed read does not stop here)
+3. Write SET_FEATURE ID5=01
+4. Observe subsequent reports; reliable streaming remains unproven
 
 ### `skip_getfeat=0` (Legacy)
 

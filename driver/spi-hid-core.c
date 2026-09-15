@@ -34,6 +34,7 @@
 
 #include "spi-hid-core.h"
 #include "spi-hid-protocol.h"
+#include "spi-hid-wire-frames.h"
 #include "spi-hid-capimg.h"
 #include "mshw0231-raw.h"
 #include "mshw0231-raw-constants.h"
@@ -52,6 +53,14 @@ _Static_assert(sizeof(hardcoded_report_descriptor) == HARDCODED_RD_SIZE,
 int sl4a_debug_level;
 static int getfeat_delay_ms;  /* RPT_DESC → GET_FEATURE settle time (0 = immediate, safe default) */
 static bool skip_getfeat = true;
+/* Wire format of the host->device sequencer frames; the frames themselves live
+ * in driver/spi-hid-wire-frames.h. 0 (the default) sends the Windows-identical
+ * single-opcode frame, non-zero restores the legacy doubled-opcode form. */
+static bool wire_double_opcode = SPI_HID_WIRE_DOUBLE_DEFAULT;
+/* Deprecated alias: 1 asked for the frame without the doubled opcode, which is
+ * the default now, so it only matters as an override of wire_double_opcode=1.
+ * Kept declared so existing modprobe.d drop-ins keep loading. */
+static bool setfeat_no_double;
 /* Experimental: never write a feature GET_REPORT on the wire while running
  * standard HID. Issue #4 suspects the connect-time feature query is what keeps
  * the controller from ever starting to stream. */
@@ -150,6 +159,12 @@ static const char *spi_hid_seq_state_name(enum spi_hid_seq_state state)
 /* Defined with the other SET_FEATURE plumbing further down; the skip_getfeat
  * paths above it need it. */
 static int spi_hid_seq_write_setfeat(struct spi_hid *shid);
+
+/* Raw-mode Report ID 6 configuration read: the write+read pair used by the
+ * paths with no WAIT_FEATURE state to lean on, and the retain/log half shared
+ * with the reply handler. Defined with the other SET_FEATURE plumbing. */
+static void spi_hid_getfeat6_read(struct spi_hid *shid);
+static void spi_hid_getfeat6_retain(struct spi_hid *shid, const u8 *body, u32 body_len);
 
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason);
@@ -528,64 +543,78 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_data(struct spi_hid *shid, int type, u16 blen);
 
-/* Canonical DESCREQ frame used by every state transition that needs to re-request
- * the device descriptor. Opcode 0x02, register 0x000001, content_id=0, len=3. */
-static const u8 seq_descreq[] = {
-	0x02, 0x02, 0x00, 0x00, 0x01, 0x42,
-	0x00, 0x00, 0x03, 0x00, 0x00
-};
+/* ── Sequencer command frames ──────────────────────────────────────
+ *
+ * Every host->device frame the sequencer sends is built by
+ * driver/spi-hid-wire-frames.h, which holds the Windows bytes as the single
+ * source of truth (asserted byte for byte by tests/wire_frames_test.c). The
+ * wrappers below pick the Windows form by default and the legacy doubled
+ * opcode form when wire_double_opcode=1.
+ *
+ * All of them are called with seq_lock held, like spi_hid_seq_write(). */
 
-/* Shared vendor-init command (19 bytes). Opcode 0x02 (doubled), register 0x000003,
- * content_id=0xC2, len=0x0A, payload 56 BD 0C EE 5B 44 4C. */
-static const u8 vendor_init_cmd[] = {
-	0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00,
-	0x03, 0x0A, 0x00, 0x56, 0xBD, 0x0C, 0xEE,
-	0x5B, 0x44, 0x4C, 0x00, 0x00
-};
+/* Whether command frames use the legacy doubled leading opcode. */
+static bool spi_hid_wire_doubled(void)
+{
+	return wire_double_opcode;
+}
 
-/* Shared SET_FEATURE command (15 bytes, doubled-opcode). */
-static const u8 sf_cmd[] = {
-	0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-	0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
-};
+/* SET_FEATURE decides separately: the deprecated setfeat_no_double=1 asked for
+ * the frame without the doubled opcode, which is the default now, so it can
+ * only take effect as an override of wire_double_opcode=1. */
+static bool spi_hid_wire_doubled_setfeat(void)
+{
+	return wire_double_opcode && !setfeat_no_double;
+}
 
-/* The same command without the doubled leading opcode (setfeat_no_double). */
-static const u8 sf_nd_cmd[] = {
-	0x02, 0x00, 0x00, 0x03, 0x82, 0x00,
-	0x03, 0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
-};
+/* DESCREQ for the device descriptor (register 0x000001), used by every state
+ * transition that needs to re-request it. The report-descriptor DESCREQ
+ * (register 0x000002) is built at its one call site in seq_handle_desc(). */
+static int spi_hid_seq_write_descreq(struct spi_hid *shid)
+{
+	u8 frame[SPI_HID_WIRE_DESCREQ_MAX];
+	unsigned int len = spi_hid_wire_descreq(frame, SPI_HID_WIRE_DESCREQ_DEVICE_REG,
+						spi_hid_wire_doubled());
 
-/* Shared GET_FEATURE command (11 bytes). */
-static const u8 gf_cmd[] = {
-	0x02, 0x02, 0x00, 0x00, 0x03, 0x42,
-	0x00, 0x04, 0x03, 0x00, 0x06
-};
+	return spi_hid_seq_write(shid, frame, (int)len, NULL, 0);
+}
+
+/* SET_FEATURE Report ID 0x56 (vendor init / device key). */
+static int spi_hid_seq_write_vendor_init(struct spi_hid *shid)
+{
+	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(spi_hid_wire_doubled());
+
+	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
+}
+
+/* GET_FEATURE Report ID 6 (probe-time calibration read). */
+static int spi_hid_seq_write_get_feature6(struct spi_hid *shid)
+{
+	struct spi_hid_wire_frame frame = spi_hid_wire_get_feature6(spi_hid_wire_doubled());
+
+	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
+}
 
 /* Windows vendor init: SET_POWER (D2→D0) on command_register 0x0004.
  * Sent on every cold boot / D3→D0 transition before DESCREQ; the device
  * streams DATA type=1 immediately afterward (no DESCREQ needed).
- * Wire format (from surface_init.csv TXN#267):
+ * Wire format from the SPB trace (captures/wintrace/surface_init.csv
+ * TXN 634377432 is the D0 frame; D2 is the same with payload byte 0x02):
  *   D2: 02 00 00 04 82 00 00 04 00 01 02 0C EE 5B
- *   D0: 02 00 00 04 82 00 00 04 00 01 01 00 00 00
- * Uses seq_write (doubled-opcode + V2 body magic 0x82), not spi_hid_set_power
- * (which uses different internal opcode 0x08 encoding). */
+ *   D0: 02 00 00 04 82 00 00 04 00 01 01 0C EE 5B
+ * Uses seq_write (V2 body magic 0x82), not spi_hid_set_power (which uses the
+ * different internal opcode 0x08 encoding). */
 static int spi_hid_vendor_init(struct spi_hid *shid)
 {
-	static const u8 vd2[] = {
-		0x02, 0x02, 0x00, 0x00, 0x04, 0x82, 0x00,
-		0x00, 0x04, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00
-	};
-	static const u8 vd0[] = {
-		0x02, 0x02, 0x00, 0x00, 0x04, 0x82, 0x00,
-		0x00, 0x04, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00
-	};
+	struct spi_hid_wire_frame d2 = spi_hid_wire_set_power_d2(spi_hid_wire_doubled());
+	struct spi_hid_wire_frame d0 = spi_hid_wire_set_power_d0(spi_hid_wire_doubled());
 	int ret;
 
-	ret = spi_hid_seq_write(shid, vd2, sizeof(vd2), NULL, 0);
+	ret = spi_hid_seq_write(shid, d2.bytes, (int)d2.len, NULL, 0);
 	if (ret)
 		return ret;
 	msleep(100);
-	ret = spi_hid_seq_write(shid, vd0, sizeof(vd0), NULL, 0);
+	ret = spi_hid_seq_write(shid, d0.bytes, (int)d0.len, NULL, 0);
 	msleep(100);
 	return ret;
 }
@@ -1145,7 +1174,7 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 	}
 
-	ret = spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
+	ret = spi_hid_seq_write_descreq(shid);
 	if (ret) {
 		dev_warn(&shid->spi->dev, "SEQ: DESCREQ recovery write failed: %d\n", ret);
 		return ret;
@@ -1189,7 +1218,7 @@ static void raw_handshake_restart_discovery(struct spi_hid *shid)
 				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 		return;
 	}
-	if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
+	if (spi_hid_seq_write_descreq(shid)) {
 		dev_warn(dev, "SEQ: raw watchdog DESCREQ retry failed\n");
 		schedule_delayed_work(&shid->raw_handshake_watchdog,
 				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
@@ -1335,10 +1364,14 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 		goto out;
 	}
 	if (skip_getfeat) {
-		seq_dbg(shid, 1, "SEQ: delayed vendor init + SET_FEATURE\n");
-		if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0))
+		seq_dbg(shid, 1, "SEQ: delayed vendor init + GET_FEATURE(6) + SET_FEATURE\n");
+		if (spi_hid_seq_write_vendor_init(shid))
 			goto retry_watchdog;
 		usleep_range(36000, 39000);
+		/* Same Windows order as the inline path: the Report ID 6
+		 * configuration read runs before the heatmap is enabled, and
+		 * regardless of skip_getfeat. */
+		spi_hid_getfeat6_read(shid);
 		if (spi_hid_seq_write_setfeat(shid))
 			goto retry_watchdog;
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FEATURE_REQUEST);
@@ -1349,11 +1382,11 @@ static void spi_hid_feat_delay_work(struct work_struct *work)
 
 	seq_dbg(shid, 1, "SEQ: raw_mode=1 -> vendor init + GET_FEATURE after delay, WAIT_FEATURE\n");
 	usleep_range(68000, 72000);
-	if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0)) {
+	if (spi_hid_seq_write_vendor_init(shid)) {
 		goto retry_watchdog;
 	}
 	usleep_range(36000, 39000);
-	if (spi_hid_seq_write(shid, gf_cmd, sizeof(gf_cmd), NULL, 0)) {
+	if (spi_hid_seq_write_get_feature6(shid)) {
 		goto retry_watchdog;
 	}
 	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_FEATURE, SPI_HID_SEQ_FEATURE_REQUEST);
@@ -1512,7 +1545,7 @@ static void spi_hid_wait_reset_watchdog(struct work_struct *work)
 	dev_warn(dev, "SEQ: no RESET_RSP and no IRQ at all after %d ms, forcing DESCREQ\n",
 		 wait_reset_kick_ms);
 
-	if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
+	if (spi_hid_seq_write_descreq(shid)) {
 		dev_warn(dev, "SEQ: recovery DESCREQ write failed, retrying\n");
 		mod_delayed_work(system_wq, &shid->wait_reset_watchdog,
 				 msecs_to_jiffies(wait_reset_kick_ms));
@@ -1574,34 +1607,160 @@ MODULE_PARM_DESC(sync_timeout_ms,
  * always writes fine at the driver level but the device silently stops responding
  * afterward most of the time. Two testable hypotheses, toggled independently so results
  * aren't conflated: (1) the write happens too fast/at the wrong SPI clock speed for the
- * touch chip to sample correctly; (2) our seq_write() opcode-doubling quirk (needed for
- * DESCREQ/GET_FEATURE) doesn't apply the same way to this specific, longer write. */
+ * touch chip to sample correctly; (2) our seq_write() opcode-doubling quirk doesn't
+ * apply the same way to this specific, longer write. */
 static uint setfeat_speed_hz;
 module_param(setfeat_speed_hz, uint, 0444);
 MODULE_PARM_DESC(setfeat_speed_hz,
 	"Override SPI clock speed (Hz) for the SET_FEATURE write only; 0 = bus default (33.33MHz)");
 
-static bool setfeat_no_double;
+/* Wire format of every host->device sequencer frame (SET_POWER, DESCREQ,
+ * SET_FEATURE, GET_FEATURE). Default 0 sends exactly what the Windows stack
+ * puts on the bus: a single 0x02 opcode and the constant 0C EE 5B trailer.
+ * 1 restores the legacy Linux form with the opcode sent twice and a zeroed
+ * trailer, kept for A/B experiments. */
+module_param(wire_double_opcode, bool, 0444);
+MODULE_PARM_DESC(wire_double_opcode,
+	"Send the legacy doubled leading opcode (02 02 ..) instead of the "
+	"Windows-identical single-opcode frames (default 0)");
+
+/* Deprecated alias, kept so existing modprobe.d drop-ins keep loading:
+ * setfeat_no_double=1 requested the SET_FEATURE frame without the doubled
+ * opcode, which is the default now. Use wire_double_opcode=1 to restore the old
+ * doubled frame; setfeat_no_double=1 then still opts SET_FEATURE back out. */
 module_param(setfeat_no_double, bool, 0444);
 MODULE_PARM_DESC(setfeat_no_double,
-	"Send SET_FEATURE without the leading-opcode-doubling quirk (14 bytes instead of 15)");
+	"Deprecated alias: 1 = send SET_FEATURE without the doubled leading opcode "
+	"(now the default; overrides wire_double_opcode=1 for this frame only)");
 
 /* One place for the SET_FEATURE quirks, so every path that writes it honours
- * setfeat_no_double / setfeat_speed_hz. The two skip_getfeat paths used to send
- * the plain frame at bus speed, which voided both switches for exactly the
- * experiments they exist for. Caller holds seq_lock. */
+ * setfeat_no_double / setfeat_speed_hz / wire_double_opcode. The two
+ * skip_getfeat paths used to send the plain frame at bus speed, which voided
+ * both switches for exactly the experiments they exist for. Caller holds
+ * seq_lock. */
 static int spi_hid_seq_write_setfeat(struct spi_hid *shid)
 {
-	if (setfeat_no_double)
-		return spi_hid_seq_write_speed(shid, sf_nd_cmd, sizeof(sf_nd_cmd),
-					       NULL, 0, setfeat_speed_hz);
-	return spi_hid_seq_write_speed(shid, sf_cmd, sizeof(sf_cmd), NULL, 0,
+	struct spi_hid_wire_frame frame =
+		spi_hid_wire_set_feature5(spi_hid_wire_doubled_setfeat());
+
+	return spi_hid_seq_write_speed(shid, frame.bytes, (int)frame.len, NULL, 0,
 				       setfeat_speed_hz);
+}
+
+/* ── GET_FEATURE Report ID 6 (raw-mode configuration read) ──────────
+ *
+ * Windows reads report ID 6 between the report descriptor and the SET_FEATURE
+ * that enables the heatmap. In the SPB trace the 10-byte frame
+ * 02 00 00 03 42 00 04 03 00 06 is answered ~0.5 ms later with a 122-byte
+ * content body:
+ *
+ *   5 pad | u16 total_length (122) | u8 content_id (6) | 119 payload bytes
+ *
+ * The payload is a block of IEEE-754 binary32 values (in the captured sample a
+ * 55-byte header followed by 16 aligned values). The field layout is not
+ * mapped, so this release only keeps and logs the reply: nothing here may
+ * change device behaviour, and a failed read must never hold up the probe.
+ *
+ * This belongs to the raw-mode init sequence and therefore runs regardless of
+ * skip_getfeat, which only controls whether the standard-mode handshake waits
+ * for the reply (the installer's raw profile sets skip_getfeat=Y). */
+
+/* At most three read attempts, 1 ms apart: the device answered after 0.5 ms in
+ * the trace, so a handful of tries is enough and the whole step stays bounded
+ * at a few milliseconds. */
+#define SPI_HID_GETFEAT6_ATTEMPTS 3
+#define SPI_HID_GETFEAT6_ATTEMPT_US 1000
+
+/* Retain and log an already-read reply. `body` is the 5-byte controller
+ * preamble followed by the content, exactly what spi_hid_seq_read() returns.
+ * Caller holds seq_lock. */
+static void spi_hid_getfeat6_retain(struct spi_hid *shid, const u8 *body, u32 body_len)
+{
+	struct spi_hid_protocol_content content;
+	u32 off;
+
+	if (body_len <= SPI_HID_GETFEAT6_PREAMBLE_LEN ||
+	    spi_hid_protocol_parse_content(body + SPI_HID_GETFEAT6_PREAMBLE_LEN,
+					   body_len - SPI_HID_GETFEAT6_PREAMBLE_LEN,
+					   &content)) {
+		seq_dbg(shid, 1, "SEQ: GET_FEATURE(6) reply not parseable, ignored\n");
+		return;
+	}
+	if (shid->getfeat6.valid)
+		seq_dbg(shid, 2, "SEQ: GET_FEATURE(6) reply replaced\n");
+
+	shid->getfeat6.valid = true;
+	shid->getfeat6.body_len = body_len;
+	shid->getfeat6.total_length = content.total_length;
+	shid->getfeat6.content_id = content.content_id;
+	shid->getfeat6.payload_len = min_t(u16, content.data_length,
+					   SPI_HID_GETFEAT6_PAYLOAD_LEN);
+	memset(shid->getfeat6.payload, 0, sizeof(shid->getfeat6.payload));
+	if (shid->getfeat6.payload_len)
+		memcpy(shid->getfeat6.payload, content.data,
+		       shid->getfeat6.payload_len);
+
+	seq_dbg(shid, 2, "SEQ: GET_FEATURE(6) reply kept: id=%u total=%u payload=%u bytes\n",
+		content.content_id, content.total_length,
+		shid->getfeat6.payload_len);
+	for (off = 0; off < shid->getfeat6.payload_len; off += 32) {
+		u32 chunk = min_t(u32, 32, shid->getfeat6.payload_len - off);
+
+		seq_dbg(shid, 2, "  GET_FEATURE(6) payload+%u: %*ph\n",
+			off, chunk, shid->getfeat6.payload + off);
+	}
+	for (off = 0; off + 4 <= shid->getfeat6.payload_len;
+	     off += 4 * SPI_HID_WIRE_F32_PER_LINE) {
+		char row[SPI_HID_WIRE_F32_ROW_LEN];
+		u32 words = min_t(u32, SPI_HID_WIRE_F32_PER_LINE,
+				  (shid->getfeat6.payload_len - off) / 4);
+
+		spi_hid_wire_fmt_f32_row(shid->getfeat6.payload + off, words * 4,
+					 row, sizeof(row));
+		seq_dbg(shid, 2, "  GET_FEATURE(6) payload as binary32 [%u..%u]: %s\n",
+			off / 4, off / 4 + words - 1, row);
+	}
+}
+
+/* Write the Report ID 6 frame, then read, retain and log the reply without
+ * waiting for an IRQ (the path with no WAIT_FEATURE state to lean on).
+ * Best effort and bounded: the probe continues either way. Caller holds
+ * seq_lock. */
+static void spi_hid_getfeat6_read(struct spi_hid *shid)
+{
+	struct device *dev = &shid->spi->dev;
+	u8 body[SPI_HID_GETFEAT6_READ_LEN];
+	unsigned int attempt;
+
+	if (spi_hid_seq_write_get_feature6(shid)) {
+		dev_warn(dev, "SEQ: GET_FEATURE(6) write failed, continuing\n");
+		return;
+	}
+
+	for (attempt = 0; attempt < SPI_HID_GETFEAT6_ATTEMPTS; attempt++) {
+		usleep_range(SPI_HID_GETFEAT6_ATTEMPT_US,
+			     SPI_HID_GETFEAT6_ATTEMPT_US + 500);
+		memset(body, 0, sizeof(body));
+		if (spi_hid_seq_read(shid, body, sizeof(body))) {
+			dev_warn(dev, "SEQ: GET_FEATURE(6) reply read failed, continuing\n");
+			return;
+		}
+		/* The content ID sits after the pad and the two-byte length: an
+		 * answer to anything else means the device has not staged the
+		 * reply yet. */
+		if (body[SPI_HID_GETFEAT6_PREAMBLE_LEN + 2] == SPI_HID_GETFEAT6_REPORT_ID) {
+			spi_hid_getfeat6_retain(shid, body, sizeof(body));
+			return;
+		}
+	}
+	seq_dbg(shid, 1, "SEQ: GET_FEATURE(6) no reply after %u attempts, continuing\n",
+		SPI_HID_GETFEAT6_ATTEMPTS);
 }
 
 module_param(skip_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_getfeat,
-	"Skip GET_FEATURE, send SET_FEATURE directly after RPT_DESC");
+	"Skip the standard-mode feature-read handshake (no WAIT_FEATURE state). "
+	"The raw-mode Report ID 6 configuration read still runs");
 
 module_param(skip_std_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_std_getfeat,
@@ -2017,7 +2176,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 			u8 body_drain[64];
 			spi_hid_seq_read(shid, body_drain, sizeof(body_drain));
 			seq_dbg(shid, 1, "SEQ: body drain done, forcing DESCREQ@0x000001...\n");
-			spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0);
+			spi_hid_seq_write_descreq(shid);
 			spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_FALLBACK);
 		} else {
 			goto out;
@@ -2097,7 +2256,7 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 			u8 body_drain[64];
 			spi_hid_seq_read(shid, body_drain, sizeof(body_drain));
 		}
-		if (spi_hid_seq_write(shid, seq_descreq, sizeof(seq_descreq), NULL, 0)) {
+		if (spi_hid_seq_write_descreq(shid)) {
 			dev_warn(&shid->spi->dev, "SEQ: fallback DESCREQ write failed\n");
 			return;
 		}
@@ -2152,14 +2311,15 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 				shid->desc.max_output_length);
 		}
 		{
-			u8 dr2[11] = {
-				0x02, 0x02, 0x00, 0x00, 0x02, 0x42,
-				0x00, 0x00, 0x03, 0x00, 0x00
-			};
-			dr2[2] = (shid->desc.report_descriptor_register >> 16) & 0xFF;
-			dr2[3] = (shid->desc.report_descriptor_register >> 8) & 0xFF;
-			dr2[4] = shid->desc.report_descriptor_register & 0xFF;
-			if (spi_hid_seq_write(shid, dr2, sizeof(dr2), NULL, 0)) {
+			/* Report-descriptor DESCREQ: Windows sends
+			 * 02 00 00 02 42 00 00 03 00 00, with the register value
+			 * coming from the device descriptor. */
+			u8 dr2[SPI_HID_WIRE_DESCREQ_MAX];
+			unsigned int dr2_len = spi_hid_wire_descreq(dr2,
+					shid->desc.report_descriptor_register,
+					spi_hid_wire_doubled());
+
+			if (spi_hid_seq_write(shid, dr2, (int)dr2_len, NULL, 0)) {
 				dev_warn(&shid->spi->dev, "SEQ: RPT_DESC request write failed\n");
 				return;
 			}
@@ -2242,13 +2402,19 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				} else {
 					seq_dbg(shid, 1, "SEQ: vendor init (18B, TXN#267) +70ms delay...\n");
 					usleep_range(68000, 72000);
-					if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0)) {
+					if (spi_hid_seq_write_vendor_init(shid)) {
 						dev_warn(&shid->spi->dev, "SEQ: vendor init write failed\n");
 						schedule_delayed_work(&shid->raw_handshake_watchdog,
 							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 						return;
 					}
 					usleep_range(36000, 39000);
+					/* Windows order: the Report ID 6 configuration read sits
+					 * between the report descriptor and the SET_FEATURE that
+					 * enables the heatmap. It belongs to the raw-mode init
+					 * sequence, so it runs even with skip_getfeat=1, is
+					 * best-effort, and never delays the handshake. */
+					spi_hid_getfeat6_read(shid);
 					seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
 					if (spi_hid_seq_write_setfeat(shid)) {
 							dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
@@ -2269,14 +2435,14 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				} else {
 					seq_dbg(shid, 1, "SEQ: vendor init + GET_FEATURE...\n");
 					usleep_range(68000, 72000);
-					if (spi_hid_seq_write(shid, vendor_init_cmd, sizeof(vendor_init_cmd), NULL, 0)) {
+					if (spi_hid_seq_write_vendor_init(shid)) {
 						dev_warn(&shid->spi->dev, "SEQ: vendor init write failed\n");
 						schedule_delayed_work(&shid->raw_handshake_watchdog,
 							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 						return;
 					}
 					usleep_range(36000, 39000);
-					if (spi_hid_seq_write(shid, gf_cmd, sizeof(gf_cmd), NULL, 0)) {
+					if (spi_hid_seq_write_get_feature6(shid)) {
 						dev_warn(&shid->spi->dev, "SEQ: GET_FEATURE write failed\n");
 						schedule_delayed_work(&shid->raw_handshake_watchdog,
 							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
@@ -2320,25 +2486,22 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 	if (type == 5) {
 		u8 body[256] = {};
 		u32 rblen = min_t(u32, blen + 5, sizeof(body));
-		u32 off;
 
 		shid->stat_getfeat_resp++;
 		seq_dbg(shid, 1, "SEQ: GET_FEAT_RESP! reading body (%u bytes)...\n", blen);
-		if (rblen < 3 || spi_hid_seq_read(shid, body, rblen)) {
-			dev_warn(&shid->spi->dev, "SEQ: GET_FEATURE response read failed or was truncated\n");
-			return;
-		}
-		for (off = 0; off < rblen; off += 32) {
-			u32 chunk = min_t(u32, 32, rblen - off);
-			seq_dbg(shid, 3, "  GET_FEAT_RESP[%u..%u]: %*ph\n",
-				 off, off + chunk - 1, chunk, body + off);
-		}
+		/* A failed read is logged and the handshake still completes: the
+		 * Report ID 6 payload is diagnostic only, so probing must not be
+		 * held up by it. */
+		if (rblen >= 3 && !spi_hid_seq_read(shid, body, rblen))
+			spi_hid_getfeat6_retain(shid, body, rblen);
+		else
+			dev_warn(&shid->spi->dev, "SEQ: GET_FEATURE response read failed or was truncated, continuing\n");
 		{
-			usleep_range(4500, 5500);
-			seq_dbg(shid, 1, "SEQ: sending SET_FEATURE speed=%u no_double=%d\n",
-				 setfeat_speed_hz, setfeat_no_double);
 			int ret;
 
+			usleep_range(4500, 5500);
+			seq_dbg(shid, 1, "SEQ: sending SET_FEATURE speed=%u double=%d no_double=%d\n",
+				 setfeat_speed_hz, wire_double_opcode, setfeat_no_double);
 			ret = spi_hid_seq_write_setfeat(shid);
 			if (ret) {
 				dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed: %d\n", ret);

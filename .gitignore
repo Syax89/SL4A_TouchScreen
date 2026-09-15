@@ -68,3 +68,4 @@ docs/decomp/uefi/
 docs/decomp/hidspi_symbols.txt
 docs/decomp/GenericCliDescriptor.xml
 issue4-zorin-logs/
+/tests/wire_frames_test

@@ -11,6 +11,11 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
+/* Wire format constants (DESCREQ registers, Report ID 6 reply layout, the
+ * SET_POWER/SET_FEATURE/GET_FEATURE frames): one definition shared with
+ * tests/wire_frames_test.c. */
+#include "spi-hid-wire-frames.h"
+
 /* Protocol constants */
 #define SPI_HID_DEFAULT_INPUT_REGISTER		0x0000
 #define SPI_HID_SUPPORTED_VERSION		0x0100
@@ -41,6 +46,20 @@
 #define SPI_HID_POWER_MODE_SLEEP		0x02 /* "Doze" - D2 */
 #define SPI_HID_POWER_MODE_OFF			0x03
 #define SPI_HID_POWER_MODE_WAKING_SLEEP		0x04 /* "Suspend" - D3/D3* */
+
+/* Retained Report ID 6 GET_FEATURE reply (the wire layout constants and the
+ * frame itself live in driver/spi-hid-wire-frames.h). The payload is a block of
+ * IEEE-754 binary32 values whose field layout is not mapped yet, so it is kept
+ * verbatim for the next step instead of being interpreted. Diagnostics only:
+ * nothing reads it to decide anything yet. */
+struct spi_hid_getfeat6 {
+	bool valid;                            /* a parseable reply was captured */
+	u32 body_len;                          /* bytes read (preamble included) */
+	u16 total_length;                      /* decoded V0 content length */
+	u8 content_id;                         /* decoded content ID (6) */
+	u16 payload_len;                       /* payload bytes retained */
+	u8 payload[SPI_HID_GETFEAT6_PAYLOAD_LEN];
+};
 
 /* Heatmap blob detection limits */
 #define HEATMAP_MAX_CELLS   4300
@@ -213,6 +232,10 @@ struct spi_hid {
 	u8 wire_report_descriptor[1024];
 	u32 wire_report_descriptor_len;
 	bool wire_report_descriptor_rejected; /* Parse rejected by hid_parse_report */
+
+	/* Report ID 6 GET_FEATURE reply captured during the raw-mode probe.
+	 * Diagnostic only: retained so the fields can be mapped later. */
+	struct spi_hid_getfeat6 getfeat6;
 
 	/* Multi-touch input device created for raw heatmap mode. */
 	struct input_dev *touch_input;

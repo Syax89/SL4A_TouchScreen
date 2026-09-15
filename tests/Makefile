@@ -8,10 +8,17 @@ ifeq ($(SANITIZE),1)
   LDFLAGS += -fsanitize=address,undefined
 endif
 
-all: protocol_test capimg_decoder_host_test c590_atan2_host_test
+all: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test
 
 protocol_test: protocol_test.c ../driver/spi-hid-protocol.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ protocol_test.c
+
+# wire_frames_test compiles the exact header the driver builds its host->device
+# frames from, so it asserts the bytes that go on the wire without needing the
+# kernel headers. It reads ../driver/spi-hid-core.c too, to catch a local frame
+# table reappearing there.
+wire_frames_test: wire_frames_test.c ../driver/spi-hid-wire-frames.h ../driver/spi-hid-core.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ wire_frames_test.c
 
 capimg_decoder_host_test: capimg_decoder_host_test.c ../driver/spi-hid-capimg.c ../driver/spi-hid-capimg.h linux-compat/linux/types.h linux-compat/linux/errno.h linux-compat/linux/kernel.h linux-compat/linux/unaligned.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -Ilinux-compat -o $@ capimg_decoder_host_test.c ../driver/spi-hid-capimg.c
@@ -85,8 +92,9 @@ raw_pipeline_replay_test: raw_pipeline_replay_test.c \
 		$(RAW_STAGE_DIR)/raw_pipeline_replay_test.o $(RAW_STAGE_DIR)/stubs.o \
 		$(RAW_STAGE_DIR)/mshw0231-raw.o $(RAW_STAGE_DIR)/spi-hid-capimg.o -lm
 
-test: protocol_test capimg_decoder_host_test c590_atan2_host_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test
+test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test
 	./protocol_test
+	./wire_frames_test
 	./capimg_decoder_host_test
 	./c590_atan2_host_test
 	./raw_pipeline_math_test
@@ -108,7 +116,7 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test raw_pipeline_m
 replay_fixture_test: fixtures/replay/v1/manifest.json ../tools/decode_v0_capimg.py
 
 clean:
-	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test raw_pipeline_math_test raw_pipeline_replay_test
+	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test
 	rm -rf $(RAW_STAGE_DIR)
 
 .PHONY: all test replay_fixture_test clean
