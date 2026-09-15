@@ -22,6 +22,7 @@ tests/capimg_decoder_host_test
 tests/c590_atan2_host_test
 tests/raw_pipeline_math_test
 tests/raw_pipeline_replay_test
+tests/real_frame_replay_test
 tests/fch-test/*.o
 tests/fch-test/*.ko
 tests/fch-test/*.mod
