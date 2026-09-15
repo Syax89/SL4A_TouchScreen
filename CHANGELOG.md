@@ -26,6 +26,16 @@ check for one of those corrections actually fail.
   sampling window (a superset): a peak two rows from the edge that touches nothing
   was penalised, and a bottom-touching component whose humps sit higher still
   escaped the penalty.
+- The tracker's blob filter applies `blob_min_weight` to the pre-penalty weight
+  (the same value the creation gate uses) instead of the penalised one: with the
+  bottom-edge penalty now live, the second gate would otherwise drop a real
+  bottom contact below the threshold before the tracker could ever see it — the
+  penalty shapes the emitted weight, it does not delete contacts (review R18).
+- Known residual, not changed: an explicit `grid_rows`/`grid_cols` that cannot fit
+  a frame is trusted over the per-device config, so the parameters themselves can
+  leave the raw pipeline idle until they are corrected — that is the documented
+  meaning of "the parameters are an explicit override", and it is preferable to
+  the per-frame reset storm this release removed.
 - The failed re-derive path logs rate-limited, like its sibling message, instead
   of once per frame.
 

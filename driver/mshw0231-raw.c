@@ -1633,7 +1633,7 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 			scale_y = (SCREEN_MAX * 1000) / (screen_y_cells - 1);
 
 		for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
-			if (!shid->blob_active[i] || shid->blob_wsum[i] < blob_min_weight)
+			if (!shid->blob_active[i] || shid->blob_raw_wsum[i] < blob_min_weight)
 				continue;
 			sorted[sorted_count].gx = shid->blob_x[i];
 			sorted[sorted_count].gy = shid->blob_y[i];
