@@ -119,15 +119,25 @@ dkms_installed_version() {
 # names, and `dkms autoinstall` installed whichever ran last on the next kernel
 # update, so an older revision could silently become the one that loads.
 dkms_remove_other_versions() {
-	local keep="$1" line ver
+	local keep="$1" line ver src
 	dkms status -m "$PKG_NAME" 2>/dev/null | while IFS= read -r line; do
 		ver="${line#${PKG_NAME}/}"
 		ver="${ver%%,*}"
 		[ -n "$ver" ] || continue
 		[ "$ver" = "$keep" ] && continue
+		src="/usr/src/${PKG_NAME}-${ver}"
 		info "Removing stale DKMS registration $PKG_NAME/$ver..."
-		dkms remove -m "$PKG_NAME" -v "$ver" --all >/dev/null 2>&1 || true
-		rm -rf "/usr/src/${PKG_NAME}-${ver}"
+		if dkms remove -m "$PKG_NAME" -v "$ver" --all >/dev/null 2>&1; then
+			# Drop the tree only when DKMS let go of it and the tree is
+			# this package's (same ownership marker the uninstall path uses).
+			if [ -f "$src/dkms.conf" ] && grep -q '^PACKAGE_NAME="sl4a-touch"' "$src/dkms.conf"; then
+				rm -rf "$src"
+			else
+				info "Leaving unowned $src untouched"
+			fi
+		else
+			info "DKMS removal of $PKG_NAME/$ver failed; leaving $src for recovery"
+		fi
 	done || true
 }
 
@@ -988,12 +998,17 @@ cmd_logs() {
 		esac
 	done
 
-	# $OUT ends up in a root redirect plus a chmod that follows symlinks: keep
-	# it away from device nodes, symlinks and anything that is not a plain file.
+	# $OUT ends up in a root redirect plus a chmod that follows symlinks: keep it
+	# away from device nodes, symlinks, and files that are not one of our bundles
+	# (this is what keeps `logs -o /etc/shadow` from truncating the file). The
+	# check-to-use window stays open — bash cannot open with O_NOFOLLOW — so the
+	# guard is against mistakes, not against a hostile local user.
 	if [ -n "$OUT" ]; then
 		[ -L "$OUT" ] && fail "refusing to write the bundle through the symlink $OUT"
-		if [ -e "$OUT" ] && [ ! -f "$OUT" ]; then
-			fail "refusing to overwrite $OUT: not a regular file"
+		if [ -e "$OUT" ]; then
+			[ -f "$OUT" ] || fail "refusing to overwrite $OUT: not a regular file"
+			grep -q '^=== SL4A_TouchScreen diagnostic bundle ===' "$OUT" 2>/dev/null || \
+				fail "refusing to overwrite $OUT: it is not a diagnostic bundle (choose another -o path)"
 		fi
 	fi
 
@@ -1096,6 +1111,12 @@ cmd_logs() {
 		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -300
 	} > "$OUT"
 	set -e
+
+	# With `set +e` a failed redirect is silent: without this check the script
+	# would report a bundle it never wrote.
+	if [ ! -s "$OUT" ]; then
+		fail "the diagnostic bundle could not be written to $OUT"
+	fi
 
 	chmod 644 "$OUT" 2>/dev/null || true
 	pass "Diagnostic bundle written to: $OUT"

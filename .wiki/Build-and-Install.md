@@ -23,10 +23,12 @@ given. The installer:
 4. Creates `/etc/modprobe.d/sl4a-spi-hid.conf`
 
 Module signing is delegated to the distribution DKMS configuration. The
-experimental modules are installed as `sl4a-spi-amd` and `sl4a-spi-hid`, export
-no module aliases, and are never bound automatically at boot.
-
-After login, only when a recovery shell or console is available, activate it:
+experimental modules are installed as `sl4a-spi-amd` and `sl4a-spi-hid` and
+export no module aliases, so the kernel never binds them on its own; `install`
+binds them itself when it finishes, and the systemd unit it enables repeats that
+after every boot (after `multi-user.target`, so a failure always leaves a working
+login). Have a recovery shell or local console available before running it, and
+run `activate` by hand if you skipped activation:
 
 ```bash
 sudo ./tools/sl4a-touch.sh activate

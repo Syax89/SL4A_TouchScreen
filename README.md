@@ -122,8 +122,9 @@ default, or the experimental raw multitouch profile) unless `--standard` or
 build-prerequisite preflight and needs no root; `--force` only to investigate
 unsupported hardware.
 
-Only after login, with local/remote recovery access available, activate the
-experimental controller with:
+`install` activates the driver before it returns (Step 7), so have
+local/remote recovery access available *before* running it. The
+experimental controller can also be activated by hand with:
 
 ```bash
 sudo ./tools/sl4a-touch.sh activate
