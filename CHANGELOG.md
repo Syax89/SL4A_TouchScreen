@@ -27,10 +27,9 @@ synchronous-request lock ordering, and the diagnostic log-option quoting.
   clear it: HID creation is no longer blocked indefinitely.
 - `input_unregister_device()` during the raw to standard fallback runs outside
   `seq_lock`, so the IRQ thread and poller are not serialized behind it.
-- `std_liveness_recover` runs once per device state instead of once per discovery
-  cycle, and the recovery budget is replenished whenever discovery reaches
-  `DONE`, so a healthy but idle device cannot be power-cycled into the
-  terminal-failure path.
+- `std_liveness_recover` runs once per boot and once per resume instead of once
+  per discovery cycle, so a healthy but idle device cannot be power-cycled into
+  the terminal-failure path.
 - The descriptor poller handles the DEVICE_DESC it recovers instead of counting
   it and dropping the frame.
 

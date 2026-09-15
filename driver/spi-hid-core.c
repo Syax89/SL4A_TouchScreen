@@ -154,13 +154,6 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 		spi_hid_seq_state_name(new_state), new_state,
 		spi_hid_seq_reason_name(reason), reason);
 
-	if (new_state == SPI_HID_SEQ_DONE) {
-		/* Reaching DONE means discovery completed, so the recovery budget
-		 * is replenished: a device that recovers every time must not be
-		 * given up on, while one that never gets here still hits the cap. */
-		shid->attempts = 0;
-	}
-
 	if (new_state == SPI_HID_SEQ_WAIT_DESC)
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 
@@ -1755,11 +1748,11 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 	}
 
 	if (!shid->raw_mode_active) {
-		/* Once per device state: recovering on silence alone would
-		 * power-cycle an idle-but-healthy touchscreen, and repeating it on
-		 * every discovery cycle spent the reset budget until the driver
-		 * shut the device down for good. Data frames, probe and resume
-		 * restore the allowance. */
+		/* Once per boot and once per resume: recovering on silence alone
+		 * would power-cycle an idle-but-healthy touchscreen, and repeating it
+		 * on every discovery cycle spent the recovery budget until the driver
+		 * shut the device down for good. Observed activity and resume restore
+		 * the allowance (the flag starts zeroed at probe). */
 		bool silent = shid->stat_irq_count == shid->std_liveness_irqs;
 		bool recover = silent && std_liveness_recover &&
 			!shid->std_liveness_recovered;
