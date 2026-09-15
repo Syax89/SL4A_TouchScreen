@@ -1035,7 +1035,14 @@ cmd_logs() {
 		fi
 	fi
 
-	elevate "read the kernel log (dmesg)" logs ${OUT:+-o "$OUT"}
+	# Quote the -o path explicitly: `${OUT:+-o "$OUT"}` unquoted is word-split by
+	# bash, so a filename with a space reaches the elevated child as several
+	# words and is rejected there as an unknown option (review R3-F4).
+	if [ -n "$OUT" ]; then
+		elevate "read the kernel log (dmesg)" logs -o "$OUT"
+	else
+		elevate "read the kernel log (dmesg)" logs
+	fi
 	[ -n "$OUT" ] || OUT="$REPO_DIR/sl4a-touch-diagnostics-$(date +%Y%m%d-%H%M%S).txt"
 
 	header "SL4A_TouchScreen diagnostic collection"
