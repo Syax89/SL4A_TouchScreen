@@ -18,6 +18,7 @@
 #include <linux/list.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/hid.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -1599,6 +1600,27 @@ module_param(stream_watchdog_max_retries, int, 0444);
 MODULE_PARM_DESC(stream_watchdog_max_retries,
 	"Max re-init retries before giving up");
 
+/* ── Standard-mode startup liveness (EXPERIMENTAL, detection only) ── */
+
+/* In standard HID mode the driver reaches DONE and reports ready even when the
+ * controller never starts streaming: the input stream is event driven, so a
+ * device that is silent because nobody touched the screen looks exactly like a
+ * device that never started, and the raw-mode watchdog does not run here.
+ * Issue #4 has a cold boot where the controller only started after a
+ * suspend/resume, leaving the touchscreen dead and the driver quiet about it.
+ *
+ * When enabled, this runs the stream watchdog once after DONE in standard mode
+ * and reports what it saw. It deliberately does NOT recover: "idle" and "dead"
+ * cannot be told apart from the frame counters alone, so a re-init here could
+ * power-cycle a perfectly healthy touchscreen. Enable it to measure a device,
+ * then read dmesg and protocol_stats after a cold boot. */
+static int std_liveness_ms;   /* 0 = off (detection only; see issue #4) */
+module_param(std_liveness_ms, int, 0444);
+MODULE_PARM_DESC(std_liveness_ms,
+	"Experimental standard-mode startup liveness check in ms (0=disable). "
+	"Logs, never recovers, until a healthy idle device is proven to emit "
+	"a startup burst (see issue #4)");
+
 /* ── Runtime recovery ──────────────────────────────────────────── */
 
 static void spi_hid_stream_watchdog_work(struct work_struct *work)
@@ -1612,6 +1634,22 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 		goto out;
 	if (shid->seq_state != SPI_HID_SEQ_DONE)
 		goto out;
+
+	if (!shid->raw_mode_active) {
+		/* Detection only, one shot: report and stop. Recovering here
+		 * would risk power-cycling an idle-but-healthy touchscreen. */
+		shid->stream_watchdog_active = false;
+		if (shid->stat_data == shid->stream_watchdog_data)
+			dev_warn(dev,
+				 "SEQ: standard-mode liveness: no input data within %dms of DONE; the controller may not be streaming (issue #4)\n",
+				 std_liveness_ms);
+		else
+			dev_info(dev,
+				 "SEQ: standard-mode liveness: %u data frame(s) within %dms of DONE\n",
+				 shid->stat_data - shid->stream_watchdog_data,
+				 std_liveness_ms);
+		goto out;
+	}
 
 	if (shid->stat_data != shid->stream_watchdog_data) {
 		shid->stream_watchdog_data = shid->stat_data;
@@ -2159,6 +2197,13 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			}
 		} else {
 			spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
+			if (std_liveness_ms > 0) {
+				shid->stream_watchdog_data = shid->stat_data;
+				shid->stream_watchdog_misses = 0;
+				shid->stream_watchdog_active = true;
+				schedule_delayed_work(&shid->stream_watchdog,
+						msecs_to_jiffies(std_liveness_ms));
+			}
 		}
 	} else if (type == 3) {
 		u8 body[16];
@@ -2509,7 +2554,12 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
 	case HID_REQ_GET_REPORT:
 		ret = spi_hid_get_request(shid, reportnum);
 		if (ret) {
-			dev_err(dev, "failed to get report\n");
+			/* Name the report and the client: the cold-boot feature
+			 * query in issue #4 has never been attributed to a
+			 * specific reader, and the error alone cannot tell a
+			 * userspace client from an internal caller. */
+			dev_err(dev, "failed to get report %u (type %u) for %s: %d\n",
+				reportnum, rtype, current->comm, ret);
 			break;
 		}
 

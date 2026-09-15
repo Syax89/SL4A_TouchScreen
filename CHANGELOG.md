@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Standard-mode startup liveness, detection only (issue #4)
+
+- Standard HID mode could reach `DONE`, report `ready` and create the HID device
+  while the controller had never started streaming, and nothing in the driver
+  would notice: the raw-mode watchdog never runs in standard mode, the poller is
+  armed for raw mode only, and the input stream is event driven, so silence is
+  also the normal idle state. A cold boot that ends this way is silent.
+- New `std_liveness_ms` parameter (diagnostic class, default 0 = off). When set,
+  the driver checks once, that many milliseconds after `DONE`, whether any input
+  frame arrived, and logs the outcome. Detection only on purpose: an idle device
+  is legitimately silent, so recovering on silence alone could power-cycle a
+  healthy touchscreen. Field data before action, see issue #4.
+- A failed feature `GET_REPORT` now names the report id, the report type and the
+  calling process, so the cold-boot feature query in issue #4 can finally be
+  attributed to a real client instead of "a HID client".
+- No behavior change with default parameters: the check is off unless enabled.
+
 ### Raw-mode streaming backstop and installer fixes (contributed by cristinagp, PR #7)
 
 - Raw mode: reaching `DONE` now arms the periodic poller and the handshake
