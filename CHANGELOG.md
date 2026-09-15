@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Windows alignment analysis, replay harness, and a refuted transplant
+
+`docs/WINDOWS-ALIGNMENT.md` records, value by value, what the raw pipeline already
+shares with the Windows detector of device 0x0C19 and what does not. Most of it is
+already aligned: the c590 lookup table (zeroed at the resting byte 180), the 0.04
+noise floor, the 0.02 low threshold, the candidate-count gate 2, the frame-age gate 3
+(`blob_debounce`), extended search off, the 72x48 grid, a 30-frame baseline, the
+6-cell ghost radius, the 23%/97% edge penalties and the 5x5 centroid.
+
+`tests/real_frame_replay_test.c` replays a real Windows touch session (537 frames,
+44 with three or more fingers) through the driver's own decoder and pipeline; it
+takes the corpus path as an argument and skips when it is absent, so no Microsoft
+data enters the repository.
+
+Applying the remaining gap - the per-cell 0.1 gate (record +0x1fe = 135, = 1000 in
+our units) - was implemented and then **reverted, because the corpus measured it as a
+regression**: frames with a deficit 45 -> 63, contacts lost in frames with three or
+more fingers 24 -> 42, cases fixed 0, and `raw_pipeline_replay_test` 58 passed/0
+failed -> 43/26 because the synthetic fixtures do not clear 0.1 with a multi-cell
+footprint. At 0.1 a real fingertip footprint collapses to one or two cells, which the
+candidate gate (`+0x1fa` = 2, unchanged and not ours to change) then rejects.
+
+Conclusion: the 135/1000 value is real, but transplanting it into a
+mask -> connected-components -> pixel-count pipeline is the wrong mapping. In the DLL
+it validates a candidate against its five-cell neighbourhood. The next attempt
+belongs there, not in the mask.
+
+### Not verified
+
+No hardware run: every number above is a host replay of a recovered capture. The
+second frame-age gate (record +0x1fc = 5) has no established semantics and stays an
+open item in `docs/PARAMETERS.md`. The association radii, ghost radii, Hungarian
+costs, split constants and EMA alphas still have no source in the binary and are
+documented as invented rather than derived.
+
 ## 1.7.0 — host→device frames match the Windows stack; Report ID 6 read
 
 Every command frame the sequencer puts on the bus now reproduces, byte for byte,

@@ -62,6 +62,16 @@ still triggers recovery.
 `touch_signal_mode` and
 `touch_threshold_pct` are currently unused placeholders.
 
+### Frame-age gates (open item)
+
+The Windows PSDB record carries **two** frame-age gates: `+0x1fb = 3` and
+`+0x1fc = 5`. We implement the `3` as `blob_debounce` (both count frames before a
+new contact is published); the `5` has **no counterpart**. Its semantics are not
+established — it could be a release/hold bound or a second age test — so it is
+recorded here as an open item rather than guessed into a knob. `hold_frames`
+therefore keeps its default of `0`; do not raise it to `5` until the Windows
+meaning of `+0x1fc` is decoded. See `docs/WINDOWS-ALIGNMENT.md`.
+
 ## Per-device defaults (selected by ACPI ID at probe)
 
 The probe logs a `device config:` line in dmesg with the active geometry.

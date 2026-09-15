@@ -10,6 +10,13 @@ endif
 
 all: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test
 
+# Real Windows touch-session corpus: 537 SPB wire frames extracted from the
+# recovered surface_touch.csv capture (~/sl4a-analysis/raw-corpus). It is
+# Microsoft-derived capture data, so it is deliberately NOT committed here;
+# when the file is missing the replay tool prints SKIP and exits 0 (the test
+# recipe also runs it behind `|| true`, like the other optional contracts).
+REAL_FRAMES ?= $(HOME)/sl4a-analysis/raw-corpus/surface_touch-frames.txt
+
 protocol_test: protocol_test.c ../driver/spi-hid-protocol.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ protocol_test.c
 
@@ -92,13 +99,51 @@ raw_pipeline_replay_test: raw_pipeline_replay_test.c \
 		$(RAW_STAGE_DIR)/raw_pipeline_replay_test.o $(RAW_STAGE_DIR)/stubs.o \
 		$(RAW_STAGE_DIR)/mshw0231-raw.o $(RAW_STAGE_DIR)/spi-hid-capimg.o -lm
 
-test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test
+# ── real_frame_replay_test: replays the real Windows touch session ──
+#
+# Same host-build idea as raw_pipeline_replay_test (stage the driver .c, let
+# the stub spi-hid-core.h shadow the real one, link the real
+# driver/spi-hid-capimg.c), with one difference: the test file #includes the
+# staged copy of mshw0231-raw.c instead of linking it as a separate object.
+# Attributing a lost contact to a pipeline stage needs the driver's static
+# stage functions (raw_detect_peaks, raw_ccl_flood_fill, raw_ghost_merge) and
+# its module params, and those are not visible from another translation unit.
+# Because driver code and harness code then share one TU, that TU is compiled
+# with -Wno-sign-compare on top of -Wall -Wextra -Werror: mshw0231-raw.c
+# cannot pass the strict flag (the .o rule above carries the same exception).
+real_frame_replay_test: real_frame_replay_test.c \
+		$(RAW_STAGE_DIR)/mshw0231-raw.c \
+		../driver/spi-hid-capimg.c \
+		$(RAW_STUB_DIR)/stubs.c \
+		$(RAW_STUB_DIR)/spi-hid-core.h \
+		$(RAW_STUB_DIR)/mt_record.h \
+		../driver/mshw0231-raw.h ../driver/mshw0231-raw-constants.h ../driver/spi-hid-capimg.h \
+		linux-compat/linux/input.h linux-compat/linux/input/mt.h linux-compat/linux/jiffies.h \
+		linux-compat/linux/slab.h linux-compat/linux/module.h linux-compat/linux/math.h \
+		linux-compat/linux/string.h linux-compat/linux/kernel.h linux-compat/linux/types.h \
+		linux-compat/linux/errno.h
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -Wno-sign-compare \
+		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
+		-c -o $(RAW_STAGE_DIR)/real_frame_replay_test.o real_frame_replay_test.c
+	$(CC) -std=gnu11 -Wall -Wextra -Werror \
+		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
+		-c -o $(RAW_STAGE_DIR)/real_frame_replay_stubs.o $(RAW_STUB_DIR)/stubs.c
+	$(CC) -std=gnu11 -Wall -Wextra -Werror \
+		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
+		-c -o $(RAW_STAGE_DIR)/real_frame_replay_capimg.o ../driver/spi-hid-capimg.c
+	$(CC) $(LDFLAGS) -o $@ \
+		$(RAW_STAGE_DIR)/real_frame_replay_test.o \
+		$(RAW_STAGE_DIR)/real_frame_replay_stubs.o \
+		$(RAW_STAGE_DIR)/real_frame_replay_capimg.o -lm
+
+test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test replay_fixture_test
 	./protocol_test
 	./wire_frames_test
 	./capimg_decoder_host_test
 	./c590_atan2_host_test
 	./raw_pipeline_math_test
 	./raw_pipeline_replay_test
+	./real_frame_replay_test $(REAL_FRAMES) || true
 	$(PYTHON) boot_binding_safety_test.py
 	$(PYTHON) spi_amd_ownership_safety_test.py
 	$(PYTHON) raw_capture_export_test.py
@@ -116,7 +161,7 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 replay_fixture_test: fixtures/replay/v1/manifest.json ../tools/decode_v0_capimg.py
 
 clean:
-	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test
+	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test
 	rm -rf $(RAW_STAGE_DIR)
 
 .PHONY: all test replay_fixture_test clean
