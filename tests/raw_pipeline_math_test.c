@@ -353,7 +353,11 @@ static void test_jump_rejection(void)
 /* Mirrors the branch in raw_compute_signal(): raw >= base recovers toward the
  * resting value at 12.5%, raw < base decays one count every HEATMAP_DRIFT_DIV
  * frames. Without the decay the baseline was monotone non-decreasing, so any
- * downward drift left `rise` positive across the panel until a reload. */
+ * downward drift left `rise` positive across the panel until a reload.
+ * This model documents the rule; `raw_pipeline_replay_test` runs the driver's
+ * own code for the same behaviour (with cfg present, alpha comes from the
+ * per-device config: 7 on SL4/SL3, which is what the model passes here — the
+ * alpha 2 default only applies when cfg is NULL, i.e. host tests). */
 typedef struct { u8 base; u16 drift_div; } bl_sim;
 
 static void bl_sim_update(bl_sim *s, u8 raw, u8 alpha)
