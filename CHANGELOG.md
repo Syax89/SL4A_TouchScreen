@@ -71,6 +71,40 @@ three arguments and `cmd_logs` rejected the second as an unknown option. The
 The contract test now pins the quoted call and the absence of the expansion
 (reverting it fails the suite).
 
+## 1.7.0
+
+### The command frames match the Windows stack byte for byte
+
+Every host->device frame the sequencer path builds carries a single `0x02`
+write opcode and the constant `0C EE 5B` trailer. The reference is the SPB
+trace `captures/wintrace/surface_init.csv`, whose seven host->device frames are
+now reproduced byte for byte and length for length: the doubled leading opcode
+and the zero padding were ours, never Windows'.
+
+The old form stays reachable with `wire_double_opcode=1`, and
+`setfeat_no_double` keeps working as a legacy alias for the SET_FEATURE frame.
+
+### The probe reads the panel configuration
+
+In the Windows order -- after the report descriptor, before the SET_FEATURE
+that enables the stream -- the driver asks for Report ID 6 and keeps the
+119-byte answer (a 55-byte header plus 16 IEEE-754 values), logged at debug
+level 2 as hex and one binary32 per four bytes. Nothing acts on the values
+yet; they are the input for the detector thresholds. A failed read logs and
+continues, and the `skip_getfeat` early return that could stall the handshake
+is gone.
+
+### Tests
+
+`tests/wire_frames_test.c` pins both wire modes against the reference bytes and
+fails if the doubled opcode comes back.
+
+### Not verified
+
+The module cannot be compiled on the development host (no kernel headers): the
+`kernel-build` CI job is the compile gate. No hardware run yet -- the wire
+behaviour is asserted against the trace bytes only.
+
 ## 1.6.3 — housekeeping: dead code, build string, FSM model (2026-09-15)
 
 Round 4's inventory listed the parts of the driver no code path can reach. They

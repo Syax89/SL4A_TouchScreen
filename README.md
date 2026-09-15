@@ -5,7 +5,7 @@ implementing the MSHW0231 / MSHW0162 V0 HID-over-SPI transport and an
 experimental raw multitouch pipeline on the AMD Cezanne FCH SPI controller.
 
 [![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/Syax89/SL4A_TouchScreen)
-[![Release](https://img.shields.io/badge/release-1.6.3-brightgreen)](VERSION)
+[![Release](https://img.shields.io/badge/release-1.7.0-brightgreen)](VERSION)
 [![CI](https://github.com/Syax89/SL4A_TouchScreen/actions/workflows/ci.yml/badge.svg)](https://github.com/Syax89/SL4A_TouchScreen/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue)](LICENSE)
 
