@@ -62,6 +62,7 @@
 
 #include "spi-hid-core.h"
 #include "mshw0231-raw.h"
+#include "mshw0231-raw-constants.h"
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/jiffies.h>
@@ -359,6 +360,50 @@ static void test_hold_and_move(void)
 	teardown_device(&shid);
 }
 
+/* ── Real-pipeline check: the resting baseline decays downward ──────── */
+
+/* The `raw_pipeline_math_test` model only documents the rule. This one runs the
+ * driver's own code end to end: 30 resting frames establish the baseline, then
+ * the resting level drops and the baseline has to follow it down. Before the
+ * decay existed the baseline was monotone non-decreasing, so the signal stayed
+ * positive across the whole panel and the pipeline published phantom contacts
+ * until a reload — this assertion is what fails if that ever comes back. */
+static void test_baseline_decay_real_pipeline(void)
+{
+	struct spi_hid shid;
+	struct spi_device spidev;
+	unsigned char buf[FRAME_BYTES];
+	u8 base_after;
+	u32 i;
+
+	mt_record_reset();
+	setup_device(&shid, &spidev);
+
+	memset(buf, 200, sizeof(buf));
+	for (i = 0; i < 30; i++)
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.heatmap_have_baseline, "baseline established from constant resting frames");
+	CHECK(shid.heatmap_baseline[0] == 200, "baseline holds the resting level, got %u",
+	      shid.heatmap_baseline[0]);
+
+	/* Resting level drops by 50 counts and stays there. */
+	memset(buf, 150, sizeof(buf));
+	for (i = 0; i < HEATMAP_DRIFT_DIV; i++)
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.heatmap_baseline[0] == 199,
+	      "baseline decays one count after HEATMAP_DRIFT_DIV frames, got %u",
+	      shid.heatmap_baseline[0]);
+
+	base_after = shid.heatmap_baseline[0];
+	for (i = 0; i < 10 * (u32)HEATMAP_DRIFT_DIV; i++)
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.heatmap_baseline[0] == (u8)(base_after - 10),
+	      "baseline keeps following the resting level down, got %u (expected %u)",
+	      shid.heatmap_baseline[0], (unsigned)(u8)(base_after - 10));
+
+	teardown_device(&shid);
+}
+
 int main(void)
 {
 	printf("raw_pipeline_replay_test: running (real driver/mshw0231-raw.c)...\n");
@@ -383,6 +428,9 @@ int main(void)
 
 	printf("-- hold and move --\n");
 	test_hold_and_move();
+
+	printf("-- baseline decay (resting level drops) --\n");
+	test_baseline_decay_real_pipeline();
 
 	printf("raw_pipeline_replay_test: %d assertions passed, %d failures\n",
 	       passed, failed);

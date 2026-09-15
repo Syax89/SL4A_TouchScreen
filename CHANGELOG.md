@@ -37,6 +37,19 @@ following were verified against the source before being changed:
 - `SPI_HID_SEQ_VENDOR_INIT` is documented as unreachable: no path sets it, so the
   vendor handler belongs to the decompiled state map, not to live code.
 
+### Raw pipeline (heatmap baseline)
+
+- The heatmap baseline gains the slow downward decay its own comment promised:
+  the resting value was only ever raised (acquisition kept the per-cell maximum,
+  the per-frame update only recovered upward), so once the resting level drifted
+  down the computed signal stayed positive across whole areas of the panel and
+  the pipeline published phantom contacts until a module reload or a resume. The
+  decay is one raw count per `HEATMAP_DRIFT_DIV` frames (about 2.5 s at 100 Hz),
+  slow enough not to fade a held finger, and a cell resting on its own value
+  stops decaying. Covered by a host-model assertion in `raw_pipeline_math_test` and by a
+  real-pipeline check in `raw_pipeline_replay_test` (falsified: neutralising the
+  branch makes that check fail).
+
 ### Transport, power management and recovery
 
 - The input IRQ-storm breaker no longer parks the sequencer silently: it logs,

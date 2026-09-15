@@ -131,6 +131,7 @@ void mshw0231_raw_reset(struct spi_hid *shid)
 
 	shid->heatmap_have_baseline = false;
 	shid->heatmap_baseline_frames = 0;
+	shid->heatmap_drift_div = HEATMAP_DRIFT_DIV;
 	memset(shid->heatmap_baseline, 0, sizeof(shid->heatmap_baseline));
 	memset(shid->blob_slot_state, 0, sizeof(shid->blob_slot_state));
 	memset(shid->blob_slot_duration, 0, sizeof(shid->blob_slot_duration));
@@ -210,6 +211,7 @@ void mshw0231_raw_init(struct spi_hid *shid)
 						  : HEATMAP_BASELINE_FRAMES;
 	shid->heatmap_baseline_alpha = shid->cfg ? shid->cfg->heatmap_baseline_alpha
 						 : HEATMAP_EMA_ALPHA_DEFAULT;
+	shid->heatmap_drift_div = HEATMAP_DRIFT_DIV;
 	if (!shid->heatmap_grid_cols && shid->cfg) {
 		shid->heatmap_grid_cols = shid->cfg->grid_cols;
 		shid->heatmap_grid_rows = shid->cfg->grid_rows;
@@ -282,6 +284,7 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 			       u8 content_id)
 {
 	u32 i;
+	bool decay_now = false;
 
 	if (!shid->heatmap_have_baseline) {
 		if (content_id == 0x0C && cell_count >= 1000) {
@@ -308,6 +311,10 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 	 *    baseline within a few frames and stops being detected. Allow only a
 	 *    very slow decay (~1 count / many frames) to track genuine downward
 	 *    thermal drift without swallowing touches. */
+	if (--shid->heatmap_drift_div == 0) {
+		shid->heatmap_drift_div = HEATMAP_DRIFT_DIV;
+		decay_now = true;
+	}
 	for (i = 0; i < cell_count && i < HEATMAP_MAX_CELLS; i++) {
 		u8 base = shid->heatmap_baseline[i];
 		u8 raw = data[data_offset + i];
@@ -315,6 +322,8 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 		if (raw >= base) {
 			u16 cur = (u16)base * shid->heatmap_baseline_alpha + (u16)raw;
 			shid->heatmap_baseline[i] = (u8)(cur / 8);
+		} else if (decay_now) {
+			shid->heatmap_baseline[i] = base - 1;
 		}
 	}
 
