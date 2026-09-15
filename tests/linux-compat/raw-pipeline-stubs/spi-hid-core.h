@@ -92,6 +92,7 @@ struct spi_hid {
 	u32 heatmap_content_id;
 	u16 heatmap_grid_cols;
 	u16 heatmap_grid_rows;
+	bool heatmap_grid_mismatch;
 	const struct spi_hid_dev_cfg *cfg;
 	u16 heatmap_baseline_needed;
 	u8  heatmap_baseline_alpha;

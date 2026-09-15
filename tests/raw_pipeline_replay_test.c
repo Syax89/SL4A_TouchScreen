@@ -404,6 +404,88 @@ static void test_baseline_decay_real_pipeline(void)
 	teardown_device(&shid);
 }
 
+/* ── Real-pipeline check: the recovery guard uses the pre-penalty weight ── */
+
+/* A 7x7 fingertip cone centred at (44,16): Chebyshev rings with raw values
+ * chosen so the c590 rise is 400 / 311 / 267 / 222 — one strict maximum (so the
+ * split path stays out of the way) and every ring above the 200-count touched
+ * floor. The bottom row of the cone is the panel's last row. */
+static void build_bottom_cone(unsigned char *buf)
+{
+	static const unsigned char ring_raw[4] = { 132, 136, 138, 140 };
+	int r, c;
+
+	memset(buf, 150, FRAME_BYTES);
+	for (r = 41; r <= 47; r++) {
+		for (c = 13; c <= 19; c++) {
+			int dr = r - 44, dc = c - 16, d;
+
+			if (dr < 0)
+				dr = -dr;
+			if (dc < 0)
+				dc = -dc;
+			d = dr > dc ? dr : dc;
+			buf[(u32)r * 72 + (u32)c] = ring_raw[d];
+		}
+	}
+}
+
+/* The guard that lets a blob re-claim a slot must compare the weight *before*
+ * the bottom-edge penalty (23%): a real finger on the last rows carries a
+ * pre-penalty weight above HEATMAP_HOLD_RECOVERY_WEIGHT and a penalised one
+ * below it, so a guard on the penalised value lets a dropped frame abort the
+ * contact (release + re-press, which gestures see as a new touch). This drives
+ * the driver's own pipeline with a blob on the bottom rows, drops two frames and
+ * requires the slot to come back on the next one: it fails if the guard compares
+ * the penalised `blob_wsum` instead of `blob_raw_wsum`. The same blob also pins
+ * the bbox maximum, whose absence used to disable both the penalty and the
+ * ellipse (uint/s32 comparison bug). */
+static void test_recovery_guard_real_pipeline(void)
+{
+	struct spi_hid shid;
+	struct spi_device spidev;
+	unsigned char buf[FRAME_BYTES];
+	u32 i;
+
+	mt_record_reset();
+	setup_device(&shid, &spidev);
+
+	memset(buf, 150, sizeof(buf));
+	for (i = 0; i < 30; i++)
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.heatmap_have_baseline, "guard: baseline established");
+
+	build_bottom_cone(buf);
+	for (i = 0; i < 3; i++)   /* blob_debounce frames claim the slot */
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.blob_slot_state[0] == 2,
+	      "guard: bottom-edge blob claims slot 0 (state %u, raw %u, penalised %u)",
+	      shid.blob_slot_state[0], shid.blob_raw_wsum[0], shid.blob_wsum[0]);
+	CHECK(shid.blob_wsum[0] < shid.blob_raw_wsum[0],
+	      "guard: a bottom-edge blob is penalised (raw %u, penalised %u)",
+	      shid.blob_raw_wsum[0], shid.blob_wsum[0]);
+	CHECK(shid.blob_eigmaj[0] > 0 && shid.blob_eigmin[0] > 0,
+	      "guard: the blob's second moments are computed (maj %d, min %d)",
+	      shid.blob_eigmaj[0], shid.blob_eigmin[0]);
+
+	/* Two dropped frames (hold_frames=0 → hold → lift-pending), then the
+	 * finger again while the lift is still pending. */
+	memset(buf, 150, sizeof(buf));
+	mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.blob_slot_state[0] == 3,
+	      "guard: two missed frames leave the slot lift-pending (state %u)",
+	      shid.blob_slot_state[0]);
+
+	build_bottom_cone(buf);
+	mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.blob_slot_state[0] == 2,
+	      "guard: recovery compares the pre-penalty weight (state %u, raw %u, penalised %u)",
+	      shid.blob_slot_state[0], shid.blob_raw_wsum[0], shid.blob_wsum[0]);
+
+	teardown_device(&shid);
+}
+
 int main(void)
 {
 	printf("raw_pipeline_replay_test: running (real driver/mshw0231-raw.c)...\n");
@@ -431,6 +513,9 @@ int main(void)
 
 	printf("-- baseline decay (resting level drops) --\n");
 	test_baseline_decay_real_pipeline();
+
+	printf("-- recovery guard uses the pre-penalty weight --\n");
+	test_recovery_guard_real_pipeline();
 
 	printf("raw_pipeline_replay_test: %d assertions passed, %d failures\n",
 	       passed, failed);

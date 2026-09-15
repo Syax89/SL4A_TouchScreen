@@ -1639,6 +1639,9 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		shid->ready = true;
 		shid->keep_powered = true;
 		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
+		/* Parity with the raw fallback: a client waiting on `ready` must be
+		 * woken here too (review R15). */
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		/* Hardcode and create device */
 		shid->desc.hid_version = 0x0100;
 		shid->desc.report_descriptor_length = 936;
@@ -1671,13 +1674,17 @@ out:
 static void spi_hid_arm_wait_reset_watchdog(struct spi_hid *shid)
 {
 	lockdep_assert_held(&shid->seq_lock);
+	/* `irq_requested` too: before the line is armed no edge can be counted, so
+	 * arming then would let a short interval kick a device that was never given
+	 * the chance to signal (probe settles for 300 ms after the state is set).
+	 * Probe re-arms once the IRQ is up (review R15). */
 	if (wait_reset_kick_ms <= 0 || !shid->works_initialized ||
 	    READ_ONCE(shid->suspended) || READ_ONCE(shid->removing) ||
-	    shid->raw_mode_active)
+	    !READ_ONCE(shid->irq_requested) || shid->raw_mode_active)
 		return;
 
 	shid->wait_reset_kicks = 0;
-	shid->wait_reset_irqs = shid->stat_irq_edges;
+	shid->wait_reset_irqs = READ_ONCE(shid->stat_irq_edges);
 	mod_delayed_work(system_wq, &shid->wait_reset_watchdog,
 			 msecs_to_jiffies(wait_reset_kick_ms));
 }
@@ -2439,6 +2446,9 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		}
 		seq_dbg(shid, 1, "SEQ: report descriptor received, shid->hid=%p, scheduling create_device_work...\n", shid->hid);
 		shid->ready = true;
+		/* Every flip of `ready` wakes pollers of the attribute (the rest of
+		 * the file does; this happy path was the one exception). */
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		shid->keep_powered = true;
 		if (!shid->hid && !shid->raw_mode_active) {
 			bool queued = schedule_work(&shid->create_device_work);
@@ -2581,6 +2591,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: got DATA! Creating HID device...\n");
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		shid->keep_powered = true;
 		if (!shid->hid)
 			schedule_work(&shid->create_device_work);
@@ -2601,6 +2612,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		shid->desc.version_id = 0x0100;
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
+		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		shid->keep_powered = true;
 		if (!shid->hid) {
 			seq_dbg(shid, 1, "SEQ: creating HID device with hardcoded descriptors...\n");
@@ -2782,11 +2794,12 @@ static int spi_hid_ll_power(struct hid_device *hid, int level)
 	int ret = 0;
 
 	/* `hid` is published by the HID lifecycle (create/disconnect), not by
-	 * `shid->lock`: every other reader tests it unlocked too, so the lock
-	 * only looked like it protected something. The test is a courtesy check
-	 * and a stale read only decides the return code. `level` is ignored on
-	 * purpose: the transport keeps running across HID suspend, and the D2/D0
-	 * traffic belongs to the sequencer, not to the HID core. */
+	 * `shid->lock`, and the other readers take `seq_lock` rather than this
+	 * lock: taking `shid->lock` here only looked like it protected something.
+	 * The test is a courtesy check and a stale read only decides the return
+	 * code. `level` is ignored on purpose: the transport keeps running across
+	 * HID suspend, and the D2/D0 traffic belongs to the sequencer, not to the
+	 * HID core. */
 	if (!READ_ONCE(shid->hid))
 		ret = -ENODEV;
 
@@ -3548,6 +3561,11 @@ static int spi_hid_probe(struct spi_device *spi)
 	}
 	shid->irq_requested = true;
 	shid->irq_enabled = true;
+	/* Only now can an edge be counted, so only now does the backstop's "no IRQ
+	 * at all" clock mean anything (issue #4). */
+	mutex_lock(&shid->seq_lock);
+	spi_hid_arm_wait_reset_watchdog(shid);
+	mutex_unlock(&shid->seq_lock);
 	dev_info(dev, "SEQ: IRQ armed (state=WAIT_RESET, zero touch)\n");
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_IRQ_ARMED, 0);
 	dev_info(dev, "TRACE[hid] probe complete: d3 -> %s\n",

@@ -1,5 +1,76 @@
 # Changelog
 
+## Unreleased — follow-up review of the 1.6.1 fixes (2026-09-15)
+
+A fourth round of the same campaign reviewed the *corrections* made in 1.6.1,
+which no round had looked at yet: four independent legs (raw pipeline, handshake
+and backstop, installer and docs, whole-release coherence). Every finding below
+was verified against the source first; two are behaviour bugs the 1.6.1
+corrections introduced, and one is a much older bug found while trying to make a
+check for one of those corrections actually fail.
+
+### Raw pipeline
+
+- The blob bounding-box **maximum was never tracked**: the bounds are `s32`
+  starting at -1 while the cell indices are `u32`, so `r > max_r` was evaluated
+  unsigned and stayed false forever. Two features were silently dead: the
+  bottom/right **edge penalty** (the 23% bezel suppression inherited from the
+  Windows DLL config) and the **second-moment ellipse**, so MAJOR/MINOR/
+  ORIENTATION were always 0 for unsplit blobs.
+- The `dfa_data_offset` geometry drop is latched per mismatch episode and the
+  parameter override refuses a geometry that cannot fit the frame: with
+  `grid_cols`/`grid_rows` set next to an impossible offset the override re-armed
+  the cache every frame, so the pipeline was reset once per frame and every held
+  contact was released at 100 Hz — the storm the 1.6.1 fix believed it removed.
+- Split sub-blobs are penalised by their own extent, not by the peak's ±2
+  sampling window (a superset): a peak two rows from the edge that touches nothing
+  was penalised, and a bottom-touching component whose humps sit higher still
+  escaped the penalty.
+- The failed re-derive path logs rate-limited, like its sibling message, instead
+  of once per frame.
+
+### Standard-mode recovery (issue #4)
+
+- The WAIT_RESET backstop arms only once the IRQ is requested, and probe arms it
+  after `request_threaded_irq()`: arming during probe's 300 ms settle let an
+  opt-in interval shorter than that window kick a device that had no chance to
+  answer — a spurious DESCREQ, and the hardcoded-descriptor fallback behind it.
+- The arm snapshots the IRQ-edge counter with `READ_ONCE`, like the watchdog's own
+  read.
+- Every remaining `ready = true` site notifies pollers (the poll-work type-3
+  fallback, both VENDOR_INIT paths and the normal report-descriptor path were the
+  exceptions the 1.6.1 commit message claimed did not exist).
+
+### Installer and docs
+
+- The diagnostic bundle is verified by the redirect's own exit status and by its
+  last section: a `> "$OUT"` that cannot be opened keeps the previous (non-empty)
+  file, so a size check alone could announce a bundle that was never written.
+- `-o` refuses an empty path, and "is this one of ours" looks at the first line
+  only instead of grepping the whole file.
+- `dkms status`'s `sl4a-touch/<version>: added` shape (no comma) parses as a
+  version; without it `dkms remove -v` failed on the stray suffix and the stale
+  registration survived the upgrade meant to clean it up. Only a plausible
+  version reaches `dkms remove`/`rm -rf`, and a removal that fails is a `warn`
+  naming the consequence instead of an `info` line.
+- `cleanup_staged_install()` applies the same ownership marker as the other two
+  removal paths, and the `PACKAGE_NAME` markers are anchored.
+- The interactive menu survives a terminal without `cuu`/`ed`/`cnorm`, the
+  `set -e` abort the earlier fix missed.
+- "Install complete" prints after Step 7 rather than before it, and the two paths
+  that skip activation (MOK key not enrolled, profile change) are described in
+  the README and ROLLBACK instead of being contradicted by them.
+
+### Checks
+
+- `raw_pipeline_replay_test` gained a driver-level recovery-guard check (a
+  bottom-edge blob, two dropped frames, the slot must come back) and pins the edge
+  penalty and the ellipse; the constant-mirror assertion in
+  `raw_pipeline_math_test` that could not fail is gone.
+- New `installer_recovery_contract_test.py` pins the installer's failure-path
+  strings and the DKMS version parse. Every check added here was verified to fail
+  with its fix reverted.
+
 ## 1.6.1 — Review-campaign fixes, raw pipeline and installer (2026-09-15)
 
 Fixes from a double-blind multi-agent review campaign over the 1.6.0 revision.
@@ -30,8 +101,10 @@ following were verified against the source before being changed:
   raw mode: it follows the same `raw_mode_active` gate as the normal descriptor
   path, instead of giving userspace two publishers for one panel.
 - `SET_REPORT` and `output_report` re-check `suspended`/`removing` under the lock,
-  so a client cannot block in `spi_sync` against a controller that has just been
-  quiesced; `ll_power` no longer pretends `shid->lock` protects the `hid` pointer;
+  which narrows the window in which a client can block in `spi_sync` against a
+  controller that has just been quiesced (it does not close it: a suspend landing
+  after the check is bounded by the SPI core's own failure path); `ll_power` no
+  longer pretends `shid->lock` protects the `hid` pointer;
   a negative `getfeat_delay_ms` is clamped at probe instead of wrapping the
   handshake watchdog into the far future.
 - `SPI_HID_SEQ_VENDOR_INIT` is documented as unreachable: no path sets it, so the
@@ -65,8 +138,8 @@ following were verified against the source before being changed:
   the per-device config at probe (never NULL) and the parameter path only ran when
   the cache was empty, so both knobs were dead on every boot. The parameters are
   now an explicit override of the cached geometry.
-- A `dfa_data_offset` that cannot fit the cached grid: see above (the third
-  bullet under this heading).
+- A `dfa_data_offset` that cannot fit the cached grid: the bullet below in this
+  section (the pipeline used to reset ~100 times a second).
 - Split sub-blobs are edge-penalised by their own window instead of skipping the
   penalty: the split path `continue`d over it, so a bezel artifact wide enough for
   two peaks was published at full weight. The tracker's recovery guard, on the
@@ -141,9 +214,6 @@ following were verified against the source before being changed:
   failed init instead of discarding its result.
 - The IRQ enable/disable decision is a real test-and-set, so a suspend racing the
   terminal error path cannot disable the line twice and leave it masked.
-- `reset_pending` is cleared when the reset request cannot go out and in the
-  hardcoded-descriptor fallback, where no device descriptor will ever arrive to
-  clear it: HID creation is no longer blocked indefinitely.
 - `input_unregister_device()` during the raw to standard fallback runs outside
   `seq_lock`, so the IRQ thread and poller are not serialized behind it.
 - `std_liveness_recover` runs once per boot and once per resume instead of once
@@ -190,9 +260,12 @@ following were verified against the source before being changed:
 ### Noted, deliberately not changed
 
 - `spi_hid_reset_work` is never scheduled anywhere in the tree (only `INIT_WORK`
-  and `cancel_work_sync` reference it), so `reset_pending` is never set and the
-  code around it is unreachable. This surfaced while verifying a reviewer's claim
-  about that flag; removing the machinery is left to a separate cleanup rather
+  and `cancel_work_sync` reference it), so `reset_pending` is never set, the
+  clearing sites around it are unreachable, and the entry that used to describe
+  them here was removed by the follow-up review for describing behaviour that
+  cannot happen. The same review also lists the never-scheduled
+  `refresh_device_work` (whose `ready = true` is dead) and the write-only
+  `keep_powered` flag. Removing the machinery is left to a separate cleanup rather
   than folded into these fixes.
 
 ## 1.6.0 — Surface Laptop 3 (AMD) support, raw-mode streaming backstop, issue #4 diagnostics (2026-09-15)
