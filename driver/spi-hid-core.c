@@ -1234,6 +1234,7 @@ static void spi_hid_seq_handle_sync_response(struct spi_hid *shid, int type,
 	u64 generation;
 	u8 *body = shid->data_buf;
 	bool pending;
+	bool current;
 	u32 read_len;
 
 	lockdep_assert_held(&shid->seq_lock);
@@ -1269,6 +1270,20 @@ static void spi_hid_seq_handle_sync_response(struct spi_hid *shid, int type,
 	if (spi_hid_protocol_parse_content(body + 5, blen, &content)) {
 		dev_warn(&shid->spi->dev,
 			 "SEQ: malformed synchronous response type %d\n", type);
+		return;
+	}
+	/* Re-check ownership right before touching the shared buffer: the
+	 * transaction can be closed while the body above is being read (PM
+	 * aborts it, another request supersedes it), and a late frame from the
+	 * previous generation must not land in the current caller's response. */
+	spin_lock_irqsave(&shid->response_lock, flags);
+	current = shid->output_pending && !shid->response_valid &&
+		shid->response_generation == generation;
+	spin_unlock_irqrestore(&shid->response_lock, flags);
+	if (!current) {
+		dev_warn(&shid->spi->dev,
+			 "SEQ: stale synchronous response type %d ID 0x%x\n",
+			 type, content.content_id);
 		return;
 	}
 	memcpy(shid->response.body, body + 5, SPI_HID_INPUT_BODY_LEN);
@@ -1731,8 +1746,13 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
 	    !READ_ONCE(shid->seq_enabled) || !shid->stream_watchdog_active)
 		goto out;
-	if (shid->seq_state != SPI_HID_SEQ_DONE)
-		goto out;
+	if (shid->seq_state != SPI_HID_SEQ_DONE) {
+		/* Normal while a re-init is in flight (the recovery path parks the
+		 * sequencer at WAIT_RESET/WAIT_DESC): keep the timer alive, or this
+		 * single tick kills the stall monitor for good, because the arm
+		 * sites skip re-arming while the active flag is still set. */
+		goto resched;
+	}
 
 	if (!shid->raw_mode_active) {
 		/* Once per device state: recovering on silence alone would
@@ -1885,11 +1905,16 @@ static void spi_hid_poll_work(struct work_struct *work)
 			seq_dbg(shid, 2, "SEQ: poller cid=0x%02x len=%u\n",
 				 shid->data_buf[7], rl);
 
-			if (shid->raw_mode_active && rl >= 3 && !shid->raw_handshake_confirmed) {
+			if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
+			    spi_hid_protocol_raw_confirms_handshake(shid->data_buf[7], rl)) {
 				shid->raw_handshake_confirmed = true;
 				cancel_delayed_work(&shid->raw_handshake_watchdog);
 				cancel_delayed_work(&shid->raw_probe_retry_work);
-				seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed by poller (id=0x%02x)\n",
+				shid->raw_probe_attempts = 0;
+				shid->stream_watchdog_reinits = 0;
+				if (stream_watchdog_ms > 0)
+					shid->poll_active = false;
+				seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed by poller (raw frame id=0x%02x)\n",
 					shid->data_buf[7]);
 			}
 
@@ -1911,10 +1936,14 @@ static void spi_hid_poll_work(struct work_struct *work)
 					schedule_delayed_work(&shid->stream_watchdog,
 							      msecs_to_jiffies(stream_watchdog_ms));
 				}
-				ret = mshw0231_raw_consume_v0(shid, &shid->data_buf[5], rblen - 5);
-				if (ret) {
-					dev_warn(dev, "SEQ: poller CapImg decode failed: %d (rblen=%u)\n", ret, rblen);
-					shid->stat_frames_dropped++;
+				/* Same gate as the IRQ path: raw_input_beta decides
+				 * whether CapImg frames are published as input. */
+				if (raw_input_beta) {
+					ret = mshw0231_raw_consume_v0(shid, &shid->data_buf[5], rblen - 5);
+					if (ret) {
+						dev_warn(dev, "SEQ: poller CapImg decode failed: %d (rblen=%u)\n", ret, rblen);
+						shid->stat_frames_dropped++;
+					}
 				}
 		} else if (rl > 3 && rl - 3 <= avail) {
 			if (shid->hid) {
@@ -2498,13 +2527,26 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			return;
 		}
 
-		/* Confirm raw-mode handshake on any data frame (not just heatmap), since device
-		 * may send standard HID reports without type-0x0C frames. */
-		if (shid->raw_mode_active && rl >= 3 && !shid->raw_handshake_confirmed) {
+		/* Only the raw stream frame confirms the handshake: confirming on
+		 * any frame retired the watchdog/poller while no heatmap data was
+		 * flowing, and the driver then sat in raw mode with no input and
+		 * no recovery left. */
+		if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
+		    spi_hid_protocol_raw_confirms_handshake(body[7], rl)) {
 			shid->raw_handshake_confirmed = true;
 			cancel_delayed_work(&shid->raw_handshake_watchdog);
 			cancel_delayed_work(&shid->raw_probe_retry_work);
-			seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed (first data frame: id=0x%02x)\n", body[7]);
+			/* Confirmation is progress: hand the retry budgets back so a
+			 * later stall is not judged by an old failure. */
+			shid->raw_probe_attempts = 0;
+			shid->stream_watchdog_reinits = 0;
+			/* The IRQ path just proved it delivers, so the 20 ms poll
+			 * loop is redundant; keep it while the stream watchdog is
+			 * disabled, where the poller is the only backstop left. */
+			if (stream_watchdog_ms > 0)
+				shid->poll_active = false;
+			seq_dbg(shid, 1, "SEQ: raw_mode handshake confirmed (raw frame id=0x%02x)\n",
+				body[7]);
 		}
 
 		if (shid->raw_mode_active && body[7] == 0x0C && shid->touch_input) {

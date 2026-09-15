@@ -127,6 +127,17 @@ static inline int spi_hid_protocol_parse_content(const spi_hid_proto_u8 *body,
 	return 0;
 }
 
+/* Whether a frame in raw mode confirms the experimental handshake and may
+ * cancel the watchdog/poller backstop. Only the raw heatmap stream counts:
+ * confirming on any frame let a standard HID report (or a stray one) retire
+ * the recovery while no heatmap data was flowing, leaving raw mode parked
+ * with no input and no way back. */
+static inline int spi_hid_protocol_raw_confirms_handshake(spi_hid_proto_u8 content_id,
+		unsigned int report_length)
+{
+	return report_length >= 3 && content_id == SPI_HID_RAW_CAPTURE_CONTENT_ID;
+}
+
 static inline int spi_hid_protocol_validate_raw_capture(
 		const spi_hid_proto_u8 *body, unsigned int body_length,
 		struct spi_hid_protocol_content *content)

@@ -380,6 +380,25 @@ static void test_sync_timeout_policy(void)
 	      "sync policy: default strictly exceeds the old hardcoded 1000 ms");
 }
 
+/* ── Raw-mode handshake confirmation policy ────────────────────── */
+
+static void test_raw_confirmation_policy(void)
+{
+	/* Only the raw heatmap stream may retire the watchdog/poller backstop. */
+	CHECK(spi_hid_protocol_raw_confirms_handshake(0x0c, 3) == 1,
+	      "raw stream frame confirms the handshake");
+	CHECK(spi_hid_protocol_raw_confirms_handshake(0x0c, SPI_HID_RAW_CAPTURE_TOTAL_LENGTH) == 1,
+	      "full raw capture frame confirms the handshake");
+	CHECK(spi_hid_protocol_raw_confirms_handshake(0x01, 9) == 0,
+	      "standard HID report must not confirm the handshake");
+	CHECK(spi_hid_protocol_raw_confirms_handshake(0x40, 9) == 0,
+	      "calibration frame must not confirm the handshake");
+	CHECK(spi_hid_protocol_raw_confirms_handshake(0x0c, 2) == 0,
+	      "raw frame too short for a report id must not confirm");
+	CHECK(spi_hid_protocol_raw_confirms_handshake(0xff, 4302) == 0,
+	      "unknown content id must not confirm");
+}
+
 int main(void)
 {
 	fprintf(stderr, "protocol_test: running...\n");
@@ -395,6 +414,7 @@ int main(void)
 	test_output_length_boundaries();
 	test_header_offsets();
 	test_sync_timeout_policy();
+	test_raw_confirmation_policy();
 	test_fuzz_roundtrip();
 	test_fuzz_output_roundtrip();
 
