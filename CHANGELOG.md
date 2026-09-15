@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — dead-code removal
+
+Round 4's inventory listed the parts of the driver no code path can reach. They
+are gone rather than annotated, so the next reader does not have to prove their
+innocence again:
+
+- `reset_work` / `spi_hid_reset_work()` and `reset_pending`: nothing ever
+  scheduled the work, so the flag it set was never observed and its two readers
+  were dead branches — the live device reset is the sequencer's own recovery.
+- `refresh_device_work` / `spi_hid_refresh_device_work()` and
+  `refresh_in_progress`: the report-descriptor refresh and HID re-creation worker
+  was never queued.
+- `keep_powered`: written in six places, read nowhere. Suspend-time power gating
+  needs an implementation, not a field.
+- The trace events for both workers stay in `spi-hid_trace.h` (tracing ABI, zero
+  cost when unused) and the unreachable `VENDOR_INIT` handler stays with them: it
+  documents a state of the decompiled protocol map, and the raw-mode gates added
+  there are correct if the state is ever wired up.
+
+Also fixes the build string shipped in 1.6.2: `VERSION` moved to 1.6.2 while
+`SL4A_DRIVER_VERSION` stayed at 1.6.1. The host-test version check caught it on
+`main` (the release commit failed CI for exactly this), and bumping the define is
+part of the release steps now.
+
 ## 1.6.2 — Follow-up review of the 1.6.1 fixes (2026-09-15)
 
 A fourth round of the same campaign reviewed the *corrections* made in 1.6.1,
