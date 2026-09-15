@@ -152,14 +152,6 @@ struct spi_hid {
 	 */
 	bool ready;
 	bool hid_creating;            /* HID exists but hid_add_device() is in progress */
-	bool reset_pending;           /* Reject HID creation until a new descriptor arrives */
-	/*
-	 * refresh_in_progress is set to true while the refresh_device worker thread
-	 * is destroying and recreating the hidraw device. When this flag is set to
-	 * true, the ll_close and ll_open functions will not cause power state changes
-	 */
-	bool refresh_in_progress;
-
 	bool irq_requested;         /* request_threaded_irq() succeeded */
 	bool irq_enabled;           /* Driver has not disabled the requested IRQ */
 	bool suspended;             /* PM has quiesced driver I/O */
@@ -176,9 +168,7 @@ struct spi_hid {
 	struct pinctrl_state *pinctrl_reset;   /* Reset pin state */
 	struct pinctrl_state *pinctrl_active;  /* Active (default) pin state */
 	struct pinctrl_state *pinctrl_sleep;   /* Sleep pin state */
-	struct work_struct reset_work;          /* Software reset work */
 	struct work_struct create_device_work;  /* HID device creation work */
-	struct work_struct refresh_device_work; /* HID device refresh work */
 	struct work_struct error_work;          /* Error handling work */
 
 	/*
@@ -211,7 +201,6 @@ struct spi_hid {
 
 	u32 dir_count;                /* Counter for descriptor reads */
 	u32 powered;                  /* Power state transitions completed */
-	bool keep_powered;           /* Prevent suspend power-off */
 
 	/*
 	 * IRQ-driven startup sequencer state machine. Mirrors HidSpiCx WDF

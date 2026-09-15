@@ -420,7 +420,6 @@ static void spi_hid_stop_hid(struct spi_hid *shid)
 	/* Stop possible publishers before detaching the sequencer-visible HID. */
 	if (shid->works_initialized) {
 		cancel_work_sync(&shid->create_device_work);
-		cancel_work_sync(&shid->refresh_device_work);
 	}
 	hid = spi_hid_disconnect_hid(shid);
 	if (hid)
@@ -563,8 +562,8 @@ out:
 		}
 	}
 	if (terminal_failure) {
-		/* refresh_device_work also needs power_lock. Never wait for it while
-		 * holding that lock, otherwise exhausted recovery deadlocks. */
+		/* The worker on the other side takes power_lock. Never wait for it
+		 * while holding that lock, otherwise exhausted recovery deadlocks. */
 		mutex_lock(&shid->seq_lock);
 		WRITE_ONCE(shid->seq_enabled, false);
 		shid->poll_active = false;
@@ -671,59 +670,6 @@ static void spi_hid_error_work(struct work_struct *work)
 	ret = spi_hid_error_handler(shid);
 	if (ret)
 		dev_err(dev, "%s: error handler failed\n", __func__);
-}
-
-/**
- * Handle the reset response from the FW by sending a request for the device
- * descriptor.
- * @shid: a pointer to the driver context
- */
-static void spi_hid_reset_work(struct work_struct *work)
-{
-	struct spi_hid *shid =
-		container_of(work, struct spi_hid, reset_work);
-	struct device *dev = &shid->spi->dev;
-	struct spi_hid_output_buf *buf = &shid->output;
-	int ret;
-
-	trace_spi_hid_reset_work(shid);
-
-	dev_dbg(dev, "reset handler\n");
-	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended))
-		return;
-	mutex_lock(&shid->seq_lock);
-	shid->reset_pending = true;
-	mutex_unlock(&shid->seq_lock);
-	/* A reset invalidates the descriptor used by a queued HID creation. */
-	cancel_work_sync(&shid->create_device_work);
-	if (shid->ready) {
-		dev_err(dev, "Spontaneous FW reset!");
-		shid->ready = false;
-		shid->dir_count++;
-		sysfs_notify(&dev->kobj, NULL, "ready");
-	}
-
-	mutex_lock(&shid->power_lock);
-	if (shid->power_state != SPI_HID_POWER_MODE_OFF) {
-		u16 body_len = round_up(sizeof(buf->body) + 2, 4);
-
-		buf->body[0] = 0x00; /* content_type = COMMAND */
-		buf->body[1] = 0x04; /* content_length = 4 (len16+ContentID+opcode) */
-		buf->body[2] = 0x00;
-		buf->body[3] = 0x00; /* content_id = 0 */
-		buf->content[0] = 0x01; /* RESET command opcode */
-		buf->content[1] = 0x00; /* padding/reserved */
-		ret = spi_hid_output_header(buf->header, shid->desc.command_register, body_len);
-		if (!ret)
-			ret = spi_hid_output(shid, buf, sizeof(buf->header) + body_len);
-	} else
-		ret = -ESHUTDOWN;
-	mutex_unlock(&shid->power_lock);
-	if (ret) {
-		dev_err(dev, "failed to send device reset request\n");
-		schedule_work(&shid->error_work);
-		return;
-	}
 }
 
 static bool spi_hid_complete_response(struct spi_hid *shid, u8 report_type,
@@ -1017,7 +963,7 @@ static int spi_hid_create_device(struct spi_hid *shid)
 	 * sequencer must not feed reports until registration has completed. */
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
-	    shid->reset_pending || shid->hid || shid->hid_creating) {
+	    shid->hid || shid->hid_creating) {
 		mutex_unlock(&shid->seq_lock);
 		hid_destroy_device(hid);
 		return -ESHUTDOWN;
@@ -1097,76 +1043,6 @@ static void spi_hid_create_device_work(struct work_struct *work)
 
 	shid->attempts = 0;
 	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
-}
-
-static void spi_hid_refresh_device_work(struct work_struct *work)
-{
-	struct spi_hid *shid =
-		container_of(work, struct spi_hid, refresh_device_work);
-	struct device *dev = &shid->spi->dev;
-	struct hid_device *hid;
-	int ret;
-	u32 new_crc32;
-
-	trace_spi_hid_refresh_device_work(shid);
-	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended))
-		return;
-
-	dev_dbg(dev, "refresh device work\n");
-
-	if (shid->desc.hid_version != SPI_HID_SUPPORTED_VERSION) {
-		dev_err(dev, "Unsupported device descriptor version %4x\n",
-			shid->desc.hid_version);
-		schedule_work(&shid->error_work);
-		return;
-	}
-
-	mutex_lock(&shid->power_lock);
-
-	if (shid->power_state == SPI_HID_POWER_MODE_OFF)
-		goto out;
-
-	mutex_lock(&shid->lock);
-	ret = spi_hid_report_descriptor_request(shid);
-	mutex_unlock(&shid->lock);
-	if (ret < 0) {
-		dev_err(dev, "Refresh: failed report descriptor request, error %d", ret);
-		goto out;
-	}
-
-	new_crc32 = crc32_le(0, (unsigned char const *) shid->response.content, (size_t)ret);
-	if (new_crc32 == shid->report_descriptor_crc32)
-	{
-		dev_err(dev, "Refresh device work - returning\n");
-		shid->ready = true;
-		sysfs_notify(&dev->kobj, NULL, "ready");
-		goto out;
-	}
-
-	dev_err(dev, "Re-creating the HID device\n");
-
-	shid->report_descriptor_crc32 = new_crc32;
-	shid->refresh_in_progress = true;
-
-	hid = spi_hid_disconnect_hid(shid);
-	if (hid) {
-		hid_destroy_device(hid);
-	}
-
-	ret = spi_hid_create_device(shid);
-	if (ret) {
-		dev_err(dev, "Failed to create hid device\n");
-		goto out;
-	}
-
-	shid->ready = true;
-	sysfs_notify(&dev->kobj, NULL, "ready");
-
-out:
-	/* This worker owns the flag for its entire lifetime. In particular, a
-	 * failed HID recreation must not leave input delivery permanently gated. */
-	shid->refresh_in_progress = false;
-	mutex_unlock(&shid->power_lock);
 }
 
 static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
@@ -1637,7 +1513,6 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		seq_dbg(shid, 1, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
-		shid->keep_powered = true;
 		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
 		/* Parity with the raw fallback: a client waiting on `ready` must be
 		 * woken here too (review R15). */
@@ -2369,7 +2244,6 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 				return;
 			}
 			spi_hid_parse_dev_desc(&raw, &shid->desc);
-			shid->reset_pending = false;
 			seq_dbg(shid, 2, "SEQ: vid=0x%04X pid=0x%04X ver=0x%04X inp=0x%04X out=0x%04X cmd=0x%04X rpt_len=%u max_in=%u max_out=%u\n",
 				shid->desc.vendor_id, shid->desc.product_id,
 				shid->desc.version_id, shid->desc.input_register,
@@ -2452,7 +2326,6 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		/* Every flip of `ready` wakes pollers of the attribute (the rest of
 		 * the file does; this happy path was the one exception). */
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
-		shid->keep_powered = true;
 		if (!shid->hid && !shid->raw_mode_active) {
 			bool queued = schedule_work(&shid->create_device_work);
 			seq_dbg(shid, 1, "SEQ: scheduled create_device_work, queued=%d\n", queued);
@@ -2595,7 +2468,6 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
-		shid->keep_powered = true;
 		if (!shid->hid && !shid->raw_mode_active)
 			schedule_work(&shid->create_device_work);
 		seq_handle_data(shid, type, blen);
@@ -2616,7 +2488,6 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
-		shid->keep_powered = true;
 		if (!shid->hid && !shid->raw_mode_active) {
 			seq_dbg(shid, 1, "SEQ: creating HID device with hardcoded descriptors...\n");
 			schedule_work(&shid->create_device_work);
@@ -3148,7 +3019,7 @@ static DEVICE_ATTR_RO(baseline_status);
 
 /* Single source for what bug reports say about the build. The suite checks this
  * string against VERSION: it reported "v1.0" for nine releases (review R17c). */
-#define SL4A_DRIVER_VERSION "1.6.1"
+#define SL4A_DRIVER_VERSION "1.6.2"
 
 static ssize_t build_info_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -3240,9 +3111,7 @@ static void spi_hid_cancel_workers(struct spi_hid *shid)
 	cancel_delayed_work_sync(&shid->feat_delay_work);
 	cancel_delayed_work_sync(&shid->stream_watchdog);
 	cancel_delayed_work_sync(&shid->wait_reset_watchdog);
-	cancel_work_sync(&shid->reset_work);
 	cancel_work_sync(&shid->create_device_work);
-	cancel_work_sync(&shid->refresh_device_work);
 	cancel_work_sync(&shid->error_work);
 }
 
@@ -3419,9 +3288,7 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	shid->hid_desc_addr = shid->device_descriptor_register;
 
-	INIT_WORK(&shid->reset_work, spi_hid_reset_work);
 	INIT_WORK(&shid->create_device_work, spi_hid_create_device_work);
-	INIT_WORK(&shid->refresh_device_work, spi_hid_refresh_device_work);
 	INIT_WORK(&shid->error_work, spi_hid_error_work);
 	INIT_DELAYED_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
 	INIT_DELAYED_WORK(&shid->raw_handshake_watchdog, spi_hid_raw_handshake_watchdog);
@@ -3520,7 +3387,6 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->seq_enabled = true;
 	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_PROBE);
 	shid->ready = shid->seq_state >= SPI_HID_SEQ_DONE ? true : false;
-	shid->keep_powered = true;
 	mutex_unlock(&shid->seq_lock);
 
 	/* Wait for device to stabilize after ACPI _INI power-on.
@@ -3705,7 +3571,6 @@ static int spi_hid_resume(struct device *dev)
 	seq_dbg(shid, 1, "PM: resume\n");
 	mutex_lock(&shid->seq_lock);
 	shid->ready = false;
-	shid->keep_powered = false;
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	shid->raw_probe_attempts = 0;
