@@ -260,10 +260,21 @@ Commands:
                       --dry-run   Validate and print the selected profile.
                       --force     Continue even if expected hardware/DMI is
                                   not detected.
+                      --repair    If a file at one of the tool's own paths
+                                  (the modprobe conf, the boot unit) is not
+                                  ours, move it aside to <path>.unowned-<time>
+                                  and continue. Nothing is deleted; without
+                                  this, install and uninstall both refuse and
+                                  the machine is stuck until you move the file
+                                  yourself.
 
-  uninstall         Remove the installed driver, its DKMS registration, and
+  uninstall [--repair]
+                    Remove the installed driver, its DKMS registration, and
                     the boot-activation service. Loaded modules are left
                     running until reboot.
+                      --repair    Move aside (never delete) a file at one of the
+                                  tool's own paths that is not ours, instead of
+                                  leaving it in place to block install.
 
   activate          Load and bind the modules right now. install already
                     sets this up to happen automatically on every future
@@ -366,8 +377,18 @@ fi
 
 # ── install ──────────────────────────────────────────────────────────────
 
+quarantine_unowned() {
+	local f="$1" dest
+	dest="$f.unowned-$(date +%Y%m%d-%H%M%S)"
+	if mv "$f" "$dest" 2>/dev/null; then
+		info "Moved the unowned $f aside to $dest (--repair); nothing was deleted"
+	else
+		fail "could not move unowned $f aside — rename or remove it by hand"
+	fi
+}
+
 cmd_install() {
-	local MODE="install" PROFILE="" FORCE=0
+	local MODE="install" PROFILE="" FORCE=0 REPAIR=0
 	for arg in "$@"; do
 		case "$arg" in
 			--check) MODE="check" ;;
@@ -375,6 +396,13 @@ cmd_install() {
 			--raw) PROFILE="raw" ;;
 			--standard) PROFILE="standard" ;;
 			--force) FORCE=1 ;;
+			--repair)
+				# A file at one of our paths that carries no ownership marker
+				# blocks install at the guard below AND uninstall at its own
+				# guard, so the only way out was one hand-typed rm on a machine
+				# that may have no driver at all. This is the documented escape:
+				# move it aside, never delete it (review round 9, T59).
+				REPAIR=1 ;;
 			*) fail "unknown install option: $arg (see --help)" ;;
 		esac
 	done
@@ -502,10 +530,11 @@ cmd_install() {
 	# switch to sudo instead of prompting a second time under the child
 	# process.
 	elevate "build and install kernel modules, and write /etc/modprobe.d config" \
-		install "--$PROFILE" $([ "$FORCE" -eq 1 ] && echo --force)
+		install "--$PROFILE" $([ "$FORCE" -eq 1 ] && echo --force) $([ "$REPAIR" -eq 1 ] && echo --repair)
 
 	if [ -e "$MODPROBE_CONF" ] && ! grep -q '^# SL4A_TouchScreen' "$MODPROBE_CONF"; then
-		fail "refusing to replace unowned $MODPROBE_CONF"
+		[ "$REPAIR" -eq 1 ] || fail "refusing to replace unowned $MODPROBE_CONF — it is not ours. Move it aside yourself, or re-run with '--repair' to have it moved aside for you (nothing is deleted)"
+		quarantine_unowned "$MODPROBE_CONF"
 	fi
 
 	local skip_activate=0
@@ -807,7 +836,8 @@ EOF
 	# Same ownership guard the modprobe config gets: never clobber a file at
 	# this path that this tool did not write.
 	if [ -e "$SYSTEMD_UNIT" ] && ! grep -q '^# SL4A_TouchScreen' "$SYSTEMD_UNIT"; then
-		fail "refusing to replace unowned $SYSTEMD_UNIT"
+		[ "$REPAIR" -eq 1 ] || fail "refusing to replace unowned $SYSTEMD_UNIT — it is not ours. Move it aside yourself, or re-run with '--repair' to have it moved aside for you (nothing is deleted)"
+		quarantine_unowned "$SYSTEMD_UNIT"
 	fi
 	install -m 0644 "$tmp_config" "$SYSTEMD_UNIT"
 	rm -f "$tmp_config"
@@ -930,6 +960,18 @@ cmd_uninstall() {
 
 	header "SL4A_TouchScreen driver uninstaller"
 
+	# Same escape as install: without --repair this command leaves a
+	# marker-less file at one of our paths in place and still reports success,
+	# so the state that blocks install is exactly the state uninstall cannot
+	# clear. (review round 9, T59)
+	local REPAIR=0
+	for arg in "$@"; do
+		case "$arg" in
+			--repair) REPAIR=1 ;;
+			*) fail "unknown uninstall option: $arg (see --help)" ;;
+		esac
+	done
+
 	if [ -f "$SYSTEMD_UNIT" ]; then
 		if grep -q '^# SL4A_TouchScreen' "$SYSTEMD_UNIT"; then
 			info "Disabling and removing the boot-activation service..."
@@ -938,7 +980,11 @@ cmd_uninstall() {
 			systemctl daemon-reload
 			pass "Boot-activation service removed"
 		else
-			info "Leaving unowned $SYSTEMD_UNIT untouched"
+			if [ "$REPAIR" -eq 1 ]; then
+				quarantine_unowned "$SYSTEMD_UNIT"
+			else
+				info "Leaving unowned $SYSTEMD_UNIT untouched (re-run with '--repair' to move it aside so install can proceed)"
+			fi
 		fi
 	fi
 
@@ -948,7 +994,11 @@ cmd_uninstall() {
 			rm -f "$MODPROBE_CONF"
 			pass "Modprobe config removed"
 		else
-			info "Leaving unowned $MODPROBE_CONF untouched"
+			if [ "$REPAIR" -eq 1 ]; then
+				quarantine_unowned "$MODPROBE_CONF"
+			else
+				info "Leaving unowned $MODPROBE_CONF untouched (re-run with '--repair' to move it aside so install can proceed)"
+			fi
 		fi
 	fi
 

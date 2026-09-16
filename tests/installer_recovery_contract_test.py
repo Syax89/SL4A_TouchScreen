@@ -178,6 +178,21 @@ assert "Installed modules were built from $head_built" in tool, \
     "status no longer reports which revision the installed modules came from"
 # F11: the profile was read with a whole-file grep, so a commented-out option
 # could decide the answer.
+# Round-9 T59: a marker-less file at one of our own paths blocked install AND
+# uninstall, with no documented escape — the user had to find and delete it by
+# hand on a machine that could have no driver at all. The escape must exist,
+# must move the file aside rather than delete it, must be passed through the
+# elevation re-exec, and must be named in the failure message.
+assert "quarantine_unowned() {" in tool and 'mv "$f" "$dest"' in tool, \
+    "the --repair escape is gone: an unowned file at our path is a dead end again"
+assert 'dest="$f.unowned-$(date' in tool, \
+    "--repair no longer keeps the file it moves aside"
+assert "&& echo --repair" in tool, \
+    "install no longer passes --repair through the elevate re-exec, so it is a no-op"
+assert "re-run with '--repair'" in tool, \
+    "the refusal no longer tells the user how to get unstuck"
+assert '--repair) REPAIR=1 ;;' in tool, \
+    "uninstall no longer accepts --repair"
 assert "options[[:space:]]+sl4a_spi_hid" in tool, \
     "the profile is read from anywhere in the config file again"
 
