@@ -2922,15 +2922,20 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			}
 		}
 		{
-			u32 off = 0, len;
+			u32 off, len;
 
-			while (off + 3 < rblen && body[off] == 0xFF)
-				off++;
-			if (off + 3 > rblen) {
+			/* Same helper as the DEVICE_DESC path: it skips both shapes of
+			 * preamble and lands on the content. The prefix-blind loop this
+			 * replaces did not advance on a raw-mode body — off stopped at 3
+			 * instead of 11, the copy took the prefix and preamble as if they
+			 * were the descriptor, and stat_wire_patches counted it as a wire
+			 * success. Silent twice over: the wrong bytes are identical to the
+			 * hardcoded copy, so nothing downstream noticed. */
+			off = (u32)spi_hid_protocol_body_offset(body, (int)rblen);
+			if (off >= rblen) {
 				dev_warn(&shid->spi->dev, "SEQ: RPT_DESC body has no content header\n");
 				return;
 			}
-			off += 3;
 			/* The layer boundary here is load-bearing and invisible when it is
 			 * crossed. `rblen` counts the FRAME (the header's word count,
 			 * padded to a 4-byte word); `report_descriptor_length` counts the
