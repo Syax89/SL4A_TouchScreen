@@ -299,6 +299,7 @@ struct spi_hid {
 
 	u8 *data_buf;              /* pre-allocated for seq_thread body reads */
 	u8 *read_tx_buf;           /* request buffer, padded like the reference */
+	u16 std_input_register;    /* the descriptor's own input register (raw overrides it) */
 	u8 read_resp_type;         /* content type of the request being read back */
 	u8 read_resp_content_id;   /* and its content id (0/0 = descriptor) */
 	u32 read_tx_len;
