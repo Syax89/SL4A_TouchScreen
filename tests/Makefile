@@ -82,7 +82,7 @@ raw_pipeline_replay_test: raw_pipeline_replay_test.c \
 		linux-compat/linux/input.h linux-compat/linux/input/mt.h linux-compat/linux/jiffies.h \
 		linux-compat/linux/slab.h linux-compat/linux/module.h linux-compat/linux/math.h \
 		linux-compat/linux/string.h linux-compat/linux/kernel.h linux-compat/linux/types.h \
-		linux-compat/linux/errno.h
+		linux-compat/linux/errno.h linux-compat/linux/unaligned.h
 	$(CC) -std=gnu11 -Wall -Wextra -Werror \
 		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
 		-c -o $(RAW_STAGE_DIR)/raw_pipeline_replay_test.o raw_pipeline_replay_test.c
@@ -121,7 +121,7 @@ real_frame_replay_test: real_frame_replay_test.c \
 		linux-compat/linux/input.h linux-compat/linux/input/mt.h linux-compat/linux/jiffies.h \
 		linux-compat/linux/slab.h linux-compat/linux/module.h linux-compat/linux/math.h \
 		linux-compat/linux/string.h linux-compat/linux/kernel.h linux-compat/linux/types.h \
-		linux-compat/linux/errno.h
+		linux-compat/linux/errno.h linux-compat/linux/unaligned.h
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -Wno-sign-compare \
 		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
 		-c -o $(RAW_STAGE_DIR)/real_frame_replay_test.o real_frame_replay_test.c
