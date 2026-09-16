@@ -514,6 +514,17 @@ def main():
     # The body offset helper returns the struct offset; an `off += 3` after it
     # reads three bytes late and rejects every real descriptor (8+3+28 > 37 on
     # the capture's 37-byte body). This exact mistake shipped once.
+    # The body-offset helper returns the STRUCT offset; the guard must not add
+    # the content header a second time. 8 + 3 + 28 > 37 rejected the capture's
+    # 37-byte body once, in a batch that claimed to fix discovery, so both
+    # halves are pinned — and the shape of this check is proven by mutation.
+    if "off + 3 + required" in core_src:
+        print("FAIL body offset: the guard adds the reserved 3 a second time")
+        failures += 1
+    if "off + required > rblen" not in core_src:
+        print("FAIL body offset: the guard no longer fits the capture's 37-byte body")
+        failures += 1
+
     for _name in ("self_panel_reset", "self_panel_desc"):
         if f"static const u8 {_name}[12]" not in core_src:
             print(f"FAIL self-check: {_name} missing from the probe's frame-typing self-check")
