@@ -1385,61 +1385,12 @@ static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *r
 {
 	return spi_hid_seq_write_speed(shid, buf, len, rx, rx_len, 0);
 }
+/* The logic lives in spi-hid-protocol.h: the host test harness calls it with
+ * real buffers, which is the one form of this check that a comment, an `#if 0`
+ * block or a string literal cannot satisfy. */
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
-	int type;
-
-	/* A genuine reset frame has NO sync byte: its first byte is the type
-	 * itself, and Windows tests exactly that (VerifyResetResponse: msg[0] == 3).
-	 * No sync-less frame can ever satisfy the nibble rule below — the version
-	 * nibble is 2, so a type-3 frame would need first byte 0x32 — which means
-	 * that until now the type-3 arms had NO reachable producer at all: a device
-	 * announcing resets was answered with descriptor requests instead. Read at
-	 * the fixed 5-byte preamble offset, which is where a legacy read response
-	 * puts its first frame byte (field: ff ff ff ff ff 03 00 00 00). One blind
-	 * leg proved this arithmetic against a python port of find_header; the
-	 * narrowing below is unsatisfiable-proof only because this detector exists.
-	 * ponytail: fixed offset 5, tied to the 5-byte approval the panel answers. */
-	{
-		int i;
-
-		/* The whole pattern, not one byte: `03 00 00 00` is the ACK/reset
-		 * shape this repo already parses in userspace (tools/parse_spi.py:
-		 * "Check for ACK pattern (03 00 00 00) without 0x5A"). A single
-		 * byte == 3 is not enough — an adversarial leg showed a body byte
-		 * at that position would be read as a reset. Scanning a small
-		 * window instead of a fixed index also removes the fragility of
-		 * depending on one preamble length: the frame's first byte is
-		 * where the pattern starts, whatever the preamble was.
-		 * ponytail: window 4..7 covers the preamble lengths this driver
-		 * produces; widen only if a caller ever reads with another one. */
-		for (i = 4; i <= 7 && i + 3 < len; i++) {
-			if (rx[i] == 3 && rx[i + 1] == 0 &&
-			    rx[i + 2] == 0 && rx[i + 3] == 0) {
-				if (hdr_off)
-					*hdr_off = i;
-				return 3;
-			}
-		}
-	}
-
-	type = spi_hid_protocol_find_header(rx, len, hdr_off);
-
-	/* Windows' VerifyResetResponse tests the WHOLE first byte of a message
-	 * (msg[0] == 3, hidspicx_dd64). This parser derives the type from the high
-	 * nibble of the byte before the 0x5A sync, and the two rules disagree on the
-	 * device's idle frame `32 10 00 5a`: the nibble rule calls it a type-3
-	 * RESET_RSP, the driver answered it with a DESCREQ, the device answered with
-	 * another reset, and the field bundle (16:52) shows the loop running 47
-	 * times in one pass. Narrow the rule here, in the one function every reader
-	 * goes through, so no caller can be left with the old behaviour.
-	 * The genuine reset frames carry byte 0 == 3 and no sync byte, so they are
-	 * detected by their own path and are unaffected by this. */
-	if (type == 3 && hdr_off && *hdr_off >= 0 && rx[*hdr_off] != 3) {
-		*hdr_off = -1;
-		return -1;
-	}
-	return type;
+	return spi_hid_protocol_frame_type(rx, len, hdr_off);
 }
 
 /* The reference's reaction to a reset, taken from the V0 state machine's own

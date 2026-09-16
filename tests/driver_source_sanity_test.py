@@ -220,30 +220,18 @@ def check_control_flow_pins():
     # `32 10 00 5a` — which, unguarded, is answered as a reset with a DESCREQ, 47
     # times in one field pass. And the reference's reaction to a real reset is
     # named in the PDB: ResettingSyncEntry — ResetDevice, then a 2000 ms timer.
-    # The narrowing must live in the SHARED helper (spi_hid_seq_hdr_type), which
-    # every frame reader calls — not at one call site, where the other readers
-    # keep the old behaviour. A previous fix of exactly this kind was later shown
-    # to guard one path while the siblings stayed broken.
-    hdrfn = (core_code.split("static int spi_hid_seq_hdr_type", 1)[1].split("\n}", 1)[0]
-             if "static int spi_hid_seq_hdr_type" in core_code else "")
-    # The narrow rule needs a satisfiable pass branch, and the only frame that
-    # can satisfy it is the sync-less one whose first byte is 3 — Windows' own
-    # test. Without this detector the type-3 arms have no reachable producer at
-    # all (the version nibble is 2, so a sync-based type 3 implies byte0 0x32):
-    # exactly the state a blind leg proved this code was in.
-    if "rx[i] == 3" not in hdrfn or "rx[i + 1] == 0" not in hdrfn:
-        print("FAIL driver/spi-hid-core.c: the genuine reset detector is gone or weakened — "
-              "a sync-less `03 00 00 00` IS the reset (VerifyResetResponse: msg[0] == 3, "
-              "and tools/parse_spi.py parses the same pattern in userspace). One bare "
-              "byte == 3 is not enough: a body byte would read as a reset. Without the "
-              "detector every type-3 path is unreachable and a device announcing resets "
-              "is answered with descriptor requests")
-        failures += 1
-    if "!= 3" not in hdrfn:
-        print("FAIL driver/spi-hid-core.c: spi_hid_seq_hdr_type() no longer narrows a "
-              "nibble-only type 3 to Windows' whole-first-byte rule (msg[0] == 3) — the "
-              "idle frame `32 10 00 5a` will be answered as a reset again, and the field "
-              "bundle 16:52 shows that loop running 47 times in one pass")
+    # The detector's LOGIC is not pinned by text any more: it lives in
+    # spi-hid-protocol.h and tests/wire_frames_test.c calls it with the buffers
+    # the field produced. That is the one form of this check a comment, an
+    # `#if 0` block or a string literal cannot satisfy — five text pins in this
+    # file were demonstrated decorative by adversarial legs. What remains here is
+    # the routing, which a call-based test cannot see: if the driver stops going
+    # through that function, the host test would still pass while the driver used
+    # something else.
+    if "spi_hid_protocol_frame_type" not in core_code:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_hdr_type() no longer routes through "
+              "spi_hid_protocol_frame_type() — the frame typing the driver runs is no "
+              "longer the one the host test exercises with real buffers")
         failures += 1
     if "spi_hid_seq_reset_like_reference(shid)" not in core_code:
         print("FAIL driver/spi-hid-core.c: the reset reaction is gone (reference: "

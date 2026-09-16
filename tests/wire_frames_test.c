@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "../driver/spi-hid-wire-frames.h"
+#include "../driver/spi-hid-protocol.h"
 
 /* The default wire mode is the whole point: the frames must be the Windows
  * ones unless wire_double_opcode is set explicitly. */
@@ -458,6 +459,45 @@ static void test_read_approval_frame(void)
 	n = spi_hid_wire_read_approval_variant(buf, 0x0003, 0x00, 0x00, 2);
 	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "variant 2 is nine bytes");
 	CHECK(buf[3] == 0x03, "variant 2 carries the register in both places");
+
+	/* The frame typing itself, called with the buffers the field produced.
+	 * These assertions are the reason the logic moved into the protocol
+	 * header: five pins on this repository were demonstrated decorative by
+	 * adversarial legs — satisfied by a comment, by an `#if 0` block, by a
+	 * string literal — while the real code was neutralised. A call cannot be
+	 * satisfied by text: if the detector disappears or weakens, this fails to
+	 * compile or fails here. */
+	{
+		/* The device's idle frame: type 3 by the sync nibble, NOT a reset. */
+		static const uint8_t idle[9] = {
+			0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10, 0x00, 0x5a
+		};
+		/* The reset, from the field bundle: no sync byte, pattern 03 00 00 00 */
+		static const uint8_t reset[9] = {
+			0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00
+		};
+		/* A 3 with anything else behind it is data, not a reset. */
+		static const uint8_t data3[9] = {
+			0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x01, 0x02, 0x03
+		};
+		/* The ordinary path still works: 0x12 before the sync → type 1, DATA */
+		static const uint8_t data[7] = {
+			0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x5a
+		};
+		int off = -1;
+
+		CHECK(spi_hid_protocol_frame_type(idle, sizeof(idle), &off) == -1,
+		      "the idle frame 32 10 00 5a is not a reset");
+		off = -1;
+		CHECK(spi_hid_protocol_frame_type(reset, sizeof(reset), &off) == 3,
+		      "the sync-less 03 00 00 00 is a reset");
+		CHECK(off == 5, "and its frame starts where the preamble ends");
+		CHECK(spi_hid_protocol_frame_type(data3, sizeof(data3), NULL) == -1,
+		      "a bare 3 with data behind it is not a reset");
+		off = -1;
+		CHECK(spi_hid_protocol_frame_type(data, sizeof(data), &off) == 1,
+		      "an ordinary sync frame still types as DATA");
+	}
 }
 
 int main(void)
