@@ -1387,7 +1387,26 @@ static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *r
 }
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
-	int type = spi_hid_protocol_find_header(rx, len, hdr_off);
+	int type;
+
+	/* A genuine reset frame has NO sync byte: its first byte is the type
+	 * itself, and Windows tests exactly that (VerifyResetResponse: msg[0] == 3).
+	 * No sync-less frame can ever satisfy the nibble rule below — the version
+	 * nibble is 2, so a type-3 frame would need first byte 0x32 — which means
+	 * that until now the type-3 arms had NO reachable producer at all: a device
+	 * announcing resets was answered with descriptor requests instead. Read at
+	 * the fixed 5-byte preamble offset, which is where a legacy read response
+	 * puts its first frame byte (field: ff ff ff ff ff 03 00 00 00). One blind
+	 * leg proved this arithmetic against a python port of find_header; the
+	 * narrowing below is unsatisfiable-proof only because this detector exists.
+	 * ponytail: fixed offset 5, tied to the 5-byte approval the panel answers. */
+	if (len > 5 && rx[5] == 3) {
+		if (hdr_off)
+			*hdr_off = 5;
+		return 3;
+	}
+
+	type = spi_hid_protocol_find_header(rx, len, hdr_off);
 
 	/* Windows' VerifyResetResponse tests the WHOLE first byte of a message
 	 * (msg[0] == 3, hidspicx_dd64). This parser derives the type from the high
