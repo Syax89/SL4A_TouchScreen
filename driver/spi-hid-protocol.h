@@ -184,15 +184,20 @@ static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
 static inline int spi_hid_protocol_frame_type(const spi_hid_proto_u8 *rx, int len,
 					      int *hdr_off)
 {
-	int i, type;
+	int type;
 
-	for (i = 4; i <= 7 && i + 3 < len; i++) {
-		if (rx[i] == 3 && rx[i + 1] == 0 &&
-		    rx[i + 2] == 0 && rx[i + 3] == 0) {
-			if (hdr_off)
-				*hdr_off = i;
-			return 3;
-		}
+	/* The preamble this driver produces is exactly five bytes — the legacy read
+	 * approval — so a response's first frame byte is at index 5 and nowhere
+	 * else. An earlier version scanned 4..7, which for a nine-byte read could
+	 * only ever reach 4 and 5: the upper half was dead, and the index-4 slot
+	 * added false-positive surface for a preamble no caller produces. A
+	 * cross-family leg found both.
+	 * ponytail: fixed at 5; if a caller ever reads with another preamble, this
+	 * is the line to generalise. */
+	if (len > 8 && rx[5] == 3 && rx[6] == 0 && rx[7] == 0 && rx[8] == 0) {
+		if (hdr_off)
+			*hdr_off = 5;
+		return 3;
 	}
 
 	type = spi_hid_protocol_find_header(rx, len, hdr_off);

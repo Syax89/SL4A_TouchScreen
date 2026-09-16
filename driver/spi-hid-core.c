@@ -2943,9 +2943,14 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		u8 body[20];
 
 		shid->stat_reset_rsp++;
-		seq_dbg(shid, 1, "SEQ: Device reset detected in DONE. Re-initializing sequencer...\n");
 		if (spi_hid_seq_read(shid, body, sizeof(body)))
 			return;
+		/* Through the same gate as the other reset sites: a leg found this
+		 * arm answering at full speed while the IRQ path was rate-limited,
+		 * i.e. exactly where a storm hits hardest. */
+		if (!spi_hid_seq_reset_like_reference(shid))
+			return;
+		seq_dbg(shid, 1, "SEQ: Device reset detected in DONE. Re-initializing sequencer...\n");
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_DEVICE_RESET);
 		return;
 	}
@@ -3643,6 +3648,34 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err1;
 	}
 	dev_info(dev, "HID desc reg = 0x%08x\n", shid->device_descriptor_register);
+
+	/* Behavioural self-check at probe, on the two frames the field produced.
+	 * A cross-family leg showed that a host test cannot see a divergence
+	 * confined to THIS translation unit (a `#undef`/`#define` of the function
+	 * name, or an early return): tests/wire_frames_test.c stayed green while
+	 * the shipped driver would never detect a reset. This runs inside the
+	 * driver's own TU, and its result lands in the diagnostics bundle — the one
+	 * channel that reports what the shipped code actually does. */
+	{
+		static const u8 self_idle[9] = {
+			0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10, 0x00, 0x5a
+		};
+		static const u8 self_reset[9] = {
+			0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00
+		};
+		int self_off = -1;
+		bool self_ok;
+
+		self_ok = spi_hid_seq_hdr_type(self_idle, sizeof(self_idle), &self_off) == -1;
+		self_off = -1;
+		self_ok = self_ok &&
+			  spi_hid_seq_hdr_type(self_reset, sizeof(self_reset), &self_off) == 3 &&
+			  self_off == 5;
+		if (self_ok)
+			dev_info(dev, "self-check: frame typing ok (idle frame rejected, sync-less reset recognised at offset 5)\n");
+		else
+			dev_err(dev, "self-check: FRAME TYPING BROKEN — the idle frame or the sync-less reset is misread; resets will not be recognised and discovery will stall\n");
+	}
 	/* The DESCREQ that starts discovery is built from the compile-time
 	 * constant, so a device whose _DSM names another register can never
 	 * answer with a DEVICE_DESC. No capture and nothing in the DLL analysis
