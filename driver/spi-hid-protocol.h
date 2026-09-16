@@ -161,17 +161,15 @@ static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
 	return -1;
 }
 
-/* Frame type of a received buffer, including the frame that carries no sync
- * byte at all: `03 00 00 00` IS the reset (Windows' VerifyResetResponse tests
- * msg[0] == 3, and tools/parse_spi.py parses the same pattern from userspace).
- * A single byte == 3 is not enough — a body byte at that position would read as
- * a reset — and scanning a window instead of a fixed index keeps the answer
- * independent of the preamble length.
+/* Frame type of a received buffer, by the sync-based rule alone: high nibble is
+ * the type, and the version nibble is 2. `32 10 00 5A` therefore types as 3 at
+ * offset 5 — and the reference's own boot trace labels exactly that frame its
+ * RESET_RSP, so the rule needs no help.
  *
- * The narrowing at the end is the other half: the sync-based parser takes the
- * type from the high nibble and the version nibble is 2, so a type-3 frame by
- * that rule would need first byte 0x32 — which is this device's idle frame, and
- * must NOT be answered as a reset.
+ * A sync-less `03 00 00 00` is NOT a frame: it is the DRAIN answering the read
+ * after a reset (the trace's second read). Typing it as a reset, and rejecting
+ * `32 10 00 5A` in the same breath, were the two inversions this function
+ * carried until the trace bytes were finally read with the right tool.
  *
  * This body lives here rather than in spi-hid-core.c so the host test harness
  * can call it with real buffers and assert on the values. Five pins in this
