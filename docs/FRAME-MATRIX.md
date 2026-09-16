@@ -58,9 +58,17 @@ never in doubt after the parser learned to print bytes.
 **An apparent conflict, resolved.** V0's `ConfigurePowerTransfer` builds a frame
 in a zeroed buffer — `02 <reg> 82 00 00 04 00 01 <D0\|D2>` at length 14, tail
 zeros — which looks like a contradiction with the ETW-cited `0C EE 5B`. It is
-not: the register comes from a different source in V0 and it never emits this
-trailer, so the two functions build **different commands**. The wire capture wins
-for the frame it captures; V0 wins for the frame it builds.
+not — and this paragraph said the opposite until a leg reconstructed both
+frames from their bytes: the two functions build the **same command**. Indices
+0..10 are identical in V0's form and this driver's shipped form; they differ
+only in the three tail bytes. V0 allocates a zeroed buffer and never writes a
+tail, which is why its excerpt ends in zeros; the capture shows the tail this
+device is actually sent (TXN 634377432, the 14-byte SET_POWER D0 buffer), and the
+capture wins for what reaches the device. The same leg found the one open
+point the old sentence hid: the **suspend** path (`spi_hid_set_power`) still
+sends the V0 zero tail for the same opcode, register and selector, and no
+sleep/resume capture exists to adjudicate — do not align one with the other
+without that capture.
 
 ## The honest limit of every register claim here
 
