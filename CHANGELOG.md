@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Resume, counters and a diagnostic that no longer lies about the frame
+
+The same review campaign's second batch, on the same rule (every finding
+reproduced against the source, and against the kernel's own sources when the
+finding was about the kernel).
+
+**Raw mode had no timer after resume.** `spi_hid_resume()` assigns
+`WAIT_RESET` directly rather than through `spi_hid_seq_set_state()`, and the
+watchdog it arms there returns immediately in raw mode — so a controller that
+came back from resume without a `RESET_RSP` had nothing watching it and the
+panel stayed dead until the next suspend/resume cycle. It now arms the raw
+handshake watchdog too.
+
+**Two sysfs attributes that could only ever report zero.** `bus_error_count`
+had no increment anywhere, and `device_initiated_reset_count` printed
+`dir_count` — descriptor reads, a different thing, whose increment was removed
+long ago. The first now counts failed protocol transfers (and keeps the last
+error code), the second reports what its name says: the device-initiated reset
+count the sequencer already tracks. The diagnostic bundle reads both, so a
+report that showed a healthy zero was showing nothing at all.
+
+**`ready` went down without a notification on suspend and resume** while every
+other flip of that bit notifies, leaving a client blocked on the attribute
+asleep until its timeout.
+
+**`perf_mode` was writable and unread.** Nothing in the driver consumes
+`shid->perf_mode`, so writing it changed nothing; the attribute is read-only
+until something does.
+
+**`heatmap_debug` printed `cells = len - 2`.** `heatmap_len` *is* the cell
+count (both callers pass the raster length), so a 3456-cell frame advertised
+3454 cells in the very line one reads when a frame looks wrong.
+
+**A `_DSM` register mismatch now speaks up.** The `DESCREQ` that starts
+discovery is built from a compile-time constant while the descriptor register
+the firmware reports was only ever logged; if a machine reports a different
+value, discovery would fail silently. It now warns with both values.
+
 ### Raw discovery can no longer stall in silence, and two field traps
 
 Three fixes from a review campaign over the whole driver (several independent
