@@ -161,4 +161,46 @@ static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
 	return -1;
 }
 
+/* Frame type of a received buffer, including the frame that carries no sync
+ * byte at all: `03 00 00 00` IS the reset (Windows' VerifyResetResponse tests
+ * msg[0] == 3, and tools/parse_spi.py parses the same pattern from userspace).
+ * A single byte == 3 is not enough — a body byte at that position would read as
+ * a reset — and scanning a window instead of a fixed index keeps the answer
+ * independent of the preamble length.
+ *
+ * The narrowing at the end is the other half: the sync-based parser takes the
+ * type from the high nibble and the version nibble is 2, so a type-3 frame by
+ * that rule would need first byte 0x32 — which is this device's idle frame, and
+ * must NOT be answered as a reset.
+ *
+ * This body lives here rather than in spi-hid-core.c so the host test harness
+ * can call it with real buffers and assert on the values. Five pins in this
+ * repository were demonstrated decorative by adversarial legs — satisfied by a
+ * comment, by an `#if 0` block, by a string literal — and a function call is
+ * the one form of this check that text cannot satisfy.
+ *
+ * ponytail: window 4..7 covers the preamble lengths this driver produces;
+ * widen only if a caller ever reads with another one. */
+static inline int spi_hid_protocol_frame_type(const spi_hid_proto_u8 *rx, int len,
+					      int *hdr_off)
+{
+	int i, type;
+
+	for (i = 4; i <= 7 && i + 3 < len; i++) {
+		if (rx[i] == 3 && rx[i + 1] == 0 &&
+		    rx[i + 2] == 0 && rx[i + 3] == 0) {
+			if (hdr_off)
+				*hdr_off = i;
+			return 3;
+		}
+	}
+
+	type = spi_hid_protocol_find_header(rx, len, hdr_off);
+	if (type == 3 && hdr_off && *hdr_off >= 0 && rx[*hdr_off] != 3) {
+		*hdr_off = -1;
+		return -1;
+	}
+	return type;
+}
+
 #endif /* SPI_HID_PROTOCOL_H */

@@ -24,7 +24,7 @@ protocol_test: protocol_test.c ../driver/spi-hid-protocol.h
 # frames from, so it asserts the bytes that go on the wire without needing the
 # kernel headers. It reads ../driver/spi-hid-core.c too, to catch a local frame
 # table reappearing there.
-wire_frames_test: wire_frames_test.c ../driver/spi-hid-wire-frames.h ../driver/spi-hid-core.c
+wire_frames_test: wire_frames_test.c ../driver/spi-hid-wire-frames.h ../driver/spi-hid-core.c ../driver/spi-hid-protocol.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ wire_frames_test.c
 
 capimg_decoder_host_test: capimg_decoder_host_test.c ../driver/spi-hid-capimg.c ../driver/spi-hid-capimg.h linux-compat/linux/types.h linux-compat/linux/errno.h linux-compat/linux/kernel.h linux-compat/linux/unaligned.h
