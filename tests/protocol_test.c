@@ -37,6 +37,7 @@ static void test_decode_all_types(void)
 		{{0x52,0x10,0x00,0x5a}, 5, 4},    /* GET_FEAT_RESP */
 		{{0x72,0x80,0x00,0x5a}, 7, 32},   /* DEVICE_DESC */
 		{{0x82,0xb0,0x0e,0x5a}, 8, 940},  /* RPT_DESC, 940B */
+		{{0x12,0x40,0x43,0x5a}, 1, 4304},  /* raw stream frame, 4304B (TXN#873) — the swap discriminator */
 	};
 	int n = (int)(sizeof(vectors) / sizeof(vectors[0]));
 
