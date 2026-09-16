@@ -67,6 +67,7 @@ def check_control_flow_pins():
     """
     failures = 0
     core = (ROOT / "driver/spi-hid-core.c").read_text()
+    wire = (ROOT / "driver" / "spi-hid-wire-frames.h").read_text()
 
     # 1. spi_hid_ll_parse(): the mutex_unlock must not be the body of an `else`.
     # A dangling `else` had put the unlock in the success branch only, so a
@@ -137,6 +138,33 @@ def check_control_flow_pins():
         print("FAIL driver/spi-hid-core.c: the descriptor poller no longer tries "
               "both registers (responses live on the output register, events on "
               "the input one)")
+        failures += 1
+
+    # 6. the read approval frame: nine bytes, the register at offset 7, the
+    # address field zero. The device decodes the register from that offset; a
+    # five-byte frame carrying it in the address field asks for register 0 and
+    # is answered with the device's RESET_RSP — which is how discovery stalled
+    # while the host thought it was asking for the descriptor.
+    read_reg = core.split("static int spi_hid_seq_read_reg", 1)[1].split("\n}", 1)[0]
+    if "spi_hid_wire_read_approval" not in read_reg:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_reg() builds the read "
+              "approval inline again instead of through the builder the byte-level "
+              "test covers")
+        failures += 1
+    if "spi_hid_wire_read_approval" in wire:
+        approval = wire.split("spi_hid_wire_read_approval", 1)[1].split("\n}", 1)[0]
+        for needle, why in (
+            ("out[7] = reg & 0xff", "the register no longer sits at offset 7"),
+            ("out[1] = 0x00", "the address field is no longer zero"),
+            ("SPI_HID_WIRE_OPCODE_READ", "the read opcode is gone"),
+        ):
+            if needle not in approval:
+                print(f"FAIL driver/spi-hid-wire-frames.h: spi_hid_wire_read_approval(): {why} "
+                      "— the device reads the register from offset 7 and ignores the "
+                      "address field, so the frame would ask for register 0")
+                failures += 1
+    else:
+        print("FAIL driver/spi-hid-wire-frames.h: spi_hid_wire_read_approval() is gone")
         failures += 1
 
     return failures

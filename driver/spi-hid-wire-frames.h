@@ -194,6 +194,35 @@ static inline struct spi_hid_wire_frame spi_hid_wire_get_feature6(int double_opc
 	return SPI_HID_WIRE_PICK(plain, doubled, double_opcode);
 }
 
+/* The read approval, from the traces:
+ *
+ *	0B 00 00 00 FF 00 00 0R 00 [00 ...]
+ *
+ * Nine fixed bytes — the register is a single byte at offset 7, the address
+ * field (bytes 1..3) is zero — then the request is clocked out padded with
+ * zeros to the length of the response, so `out` must be a zeroed buffer of at
+ * least the response length. The device decodes the register from offset 7: a
+ * frame that carries it in the address field, or one that stops after five
+ * bytes, is a request for register 0 — answered with RESET_RSP, never with the
+ * descriptor. */
+#define SPI_HID_WIRE_OPCODE_READ 0x0B
+#define SPI_HID_READ_APPROVAL_LEN 9
+
+static inline unsigned int spi_hid_wire_read_approval(SPI_HID_WIRE_U8 *out,
+		unsigned int reg)
+{
+	out[0] = SPI_HID_WIRE_OPCODE_READ;
+	out[1] = 0x00;
+	out[2] = 0x00;
+	out[3] = 0x00;
+	out[4] = 0xFF;
+	out[5] = 0x00;
+	out[6] = 0x00;
+	out[7] = reg & 0xff;
+	out[8] = 0x00;
+	return SPI_HID_READ_APPROVAL_LEN;
+}
+
 /* DESCREQ for `reg`: the device-descriptor register 0x000001
  * (02 00 00 01 42 00 00 03 00 00) or the report-descriptor register 0x000002
  * that the device descriptor reports (02 00 00 02 42 00 00 03 00 00).

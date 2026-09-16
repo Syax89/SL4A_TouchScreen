@@ -298,6 +298,8 @@ struct spi_hid {
 	s16 c590_lut[256];	/* pre-computed c590 signal lookup table */
 
 	u8 *data_buf;              /* pre-allocated for seq_thread body reads */
+	u8 *read_tx_buf;           /* request buffer, padded like the reference */
+	u32 read_tx_len;
 	u32 data_buf_len;
 
 	/* Passive raw capture: never changes device state or interprets payloads. */

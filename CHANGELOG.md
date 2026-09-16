@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### The read approval asked the wrong question
+
+The descriptor never arrived because of the frame that asks for it, not because
+of where the answer was looked for.
+
+The traces are unambiguous about the shape of a read. Every read in
+`traces/surface_boot_auto.csv` is a single message, two transfers, request
+length equal to response length:
+
+```
+#0003 xfers=2 tx_len=9   tx=0B 00 00 00 FF 00 00 03 00
+                         rx=FF FF FF FF FF 72 80 00 5A   v0 type=0x7 body=32B
+#0004 xfers=2 tx_len=37  tx=0B 00 00 00 FF 00 00 03 00 00 …
+                         rx=FF FF FF FF FF 1F 00 00 1C … (DEVICE_DESC body)
+#0006 xfers=2 tx_len=9   tx=0B 00 00 00 FF 00 00 03 00
+                         rx=FF FF FF FF FF 82 B0 0E 5A   v0 type=0x8 body=940B
+#0007 xfers=2 tx_len=945 tx=0B 00 00 00 FF 00 00 03 00 00 …
+                         rx=FF FF FF FF FF AB 03 00 75 …  (report descriptor)
+```
+
+The register is a **single byte at offset 7**, the address field (bytes 1..3) is
+zero, and the request is clocked out **padded with zeros to the length of the
+response** — nine bytes for a four-byte header, `5 + body` for a body.
+
+`spi_hid_seq_read_reg()` built a five-byte frame with the register in the
+address field instead. The device decodes the register from offset 7, so every
+read it received was a request for register 0: it answered with its RESET_RSP,
+which is exactly what the field bundles show (`reset_rsp == irq_count`, the
+RESET_RSP loop in `WAIT_DESC`) and why the read of register 3 changed nothing.
+The request buffers now come from `read_tx_buf` (zeroed once, first nine bytes
+rewritten per read) and the frame is built like the reference.
+
+Read requests are byte-compared against the traces for the first time in this
+release; nothing in the host test suite can clock real SPI, so the pin in
+`tests/driver_source_sanity_test.py` guards the offset and the zeroed address
+field against a rewrite.
+
 ### The descriptor request was answered all along — on the other register
 
 The field bundle showed the recovery chain working and the raw handshake still
