@@ -136,14 +136,13 @@ real_frame_replay_test: real_frame_replay_test.c \
 		$(RAW_STAGE_DIR)/real_frame_replay_stubs.o \
 		$(RAW_STAGE_DIR)/real_frame_replay_capimg.o -lm
 
-test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test replay_fixture_test
+test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test
 	./protocol_test
 	./wire_frames_test
 	./capimg_decoder_host_test
 	./c590_atan2_host_test
 	./raw_pipeline_math_test
 	./raw_pipeline_replay_test
-	./real_frame_replay_test $(REAL_FRAMES) || true
 	$(PYTHON) boot_binding_safety_test.py
 	$(PYTHON) spi_amd_ownership_safety_test.py
 	$(PYTHON) raw_capture_export_test.py
@@ -154,12 +153,21 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 	$(PYTHON) diagnostic_bundle_contract_test.py
 	$(PYTHON) diagnostic_bundle_frame_test.py
 	$(PYTHON) installer_recovery_contract_test.py
-	$(PYTHON) raw_transition_safety_test.py || true
-	$(PYTHON) isolated_set_safety_test.py || true
-	$(PYTHON) surface_tracker_oracle_test.py || true
-	$(PYTHON) post_set_timeline_test.py || true
-	$(PYTHON) raw_corpus_test.py || true
-	$(PYTHON) v0_capimg_decoder_test.py || true
+
+# Checks that need something this repository does not ship: the Windows touch
+# corpus, the offline analyzers, the capture harnesses. They skip (and therefore
+# pass) when their input is absent, so they cannot be part of the CI gate — a
+# green `make test` has to mean something. Run them by hand on a machine that
+# has the corpora: their SKIP/FAIL output is the whole point, and that is why
+# they are not behind `|| true` here.
+local-checks: raw_pipeline_replay_test real_frame_replay_test
+	./real_frame_replay_test $(REAL_FRAMES)
+	$(PYTHON) raw_transition_safety_test.py
+	$(PYTHON) isolated_set_safety_test.py
+	$(PYTHON) surface_tracker_oracle_test.py
+	$(PYTHON) post_set_timeline_test.py
+	$(PYTHON) raw_corpus_test.py
+	$(PYTHON) v0_capimg_decoder_test.py
 
 replay_fixture_test: fixtures/replay/v1/manifest.json ../tools/decode_v0_capimg.py
 
@@ -167,4 +175,4 @@ clean:
 	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test
 	rm -rf $(RAW_STAGE_DIR)
 
-.PHONY: all test replay_fixture_test clean
+.PHONY: all test local-checks replay_fixture_test clean

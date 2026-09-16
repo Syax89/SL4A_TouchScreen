@@ -183,20 +183,24 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 	if (new_state == SPI_HID_SEQ_WAIT_RESET)
 		spi_hid_arm_wait_reset_watchdog(shid);
 
-	/* Raw mode, one state later: a device that never answers the DESCREQ —
-	 * or answers every IRQ with RESET_RSP, as the field unit does — parks in
-	 * WAIT_DESC where nothing else is armed. descreq_work only re-reads the
-	 * input register (the IRQ thread drains each frame first), and the raw
-	 * watchdog used to be armed at DONE only, so the stall was silent and
-	 * permanent at every debug level. WAIT_RPT is the same shape: device
-	 * descriptor received, report descriptor never. Armed before the
-	 * unchanged-state early return because the RESET_RSP loop re-enters
-	 * WAIT_DESC with the state unchanged; schedule_delayed_work() is a no-op
-	 * on an already-pending work item, so the timeout starts on first entry.
-	 * The watchdog's own WAIT_FEATURE defer keeps a slow-but-live handshake
-	 * from being interrupted. */
+	/* Raw mode, every pre-DONE state: a device that never answers the
+	 * DESCREQ — or answers every IRQ with RESET_RSP, as the field unit does —
+	 * parks in WAIT_DESC where nothing else is armed. descreq_work only
+	 * re-reads the input register (the IRQ thread drains each frame first),
+	 * and the raw watchdog used to be armed at DONE only, so the stall was
+	 * silent and permanent at every debug level. WAIT_RPT has the same shape
+	 * (device descriptor received, report descriptor never), and WAIT_RESET
+	 * at cold probe is the last one (a controller that never sends a
+	 * RESET_RSP at all — the resume path arms this separately because it
+	 * assigns the state directly). Armed before the unchanged-state early
+	 * return because the RESET_RSP loop re-enters WAIT_DESC with the state
+	 * unchanged; schedule_delayed_work() is a no-op on an already-pending
+	 * work item, so the timeout starts on first entry. The watchdog's own
+	 * WAIT_FEATURE defer keeps a slow-but-live handshake from being
+	 * interrupted. */
 	if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
-	    (new_state == SPI_HID_SEQ_WAIT_DESC || new_state == SPI_HID_SEQ_WAIT_RPT))
+	    (new_state == SPI_HID_SEQ_WAIT_RESET ||
+	     new_state == SPI_HID_SEQ_WAIT_DESC || new_state == SPI_HID_SEQ_WAIT_RPT))
 		schedule_delayed_work(&shid->raw_handshake_watchdog,
 				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 
@@ -1053,6 +1057,10 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 		shid->seq_state);
 
 	ret = spi_sync(shid->spi, &msg);
+	if (ret) {
+		shid->bus_error_count++;
+		shid->bus_last_error = ret;
+	}
 	seq_dbg(shid, 2, "read complete reg=0x%06x ret=%d\n", reg, ret);
 	seq_dbg(shid, 3, "SEQ: read reg=0x%06x len=%d ret=%d raw=[%*ph]\n",
 		reg, rx_len, ret, min(rx_len, 16), rx);
@@ -1168,6 +1176,13 @@ static int spi_hid_seq_write_speed(struct spi_hid *shid, const u8 *buf, int len,
 
 	ret = spi_sync(shid->spi, &msg);
 	seq_dbg(shid, 2, "write complete op=0x%02x ret=%d\n", buf[0], ret);
+	if (ret) {
+		/* bus_error_count/bus_last_error are what the sysfs attribute and
+		 * the diagnostic bundle read; without this they could only ever
+		 * report 0. */
+		shid->bus_error_count++;
+		shid->bus_last_error = ret;
+	}
 	return ret;
 }
 
@@ -1243,8 +1258,12 @@ static void raw_handshake_restart_discovery(struct spi_hid *shid)
 		return;
 	}
 	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
-	schedule_delayed_work(&shid->raw_handshake_watchdog,
-			      msecs_to_jiffies(getfeat_delay_ms + RAW_HANDSHAKE_TIMEOUT_MS + 1000));
+	/* mod_, not schedule_: entering WAIT_DESC already armed the same work at
+	 * RAW_HANDSHAKE_TIMEOUT_MS, and schedule_delayed_work() on a pending
+	 * item is a no-op — which silently turned the intended extra
+	 * getfeat_delay_ms + 1000 ms of settling time into nothing. */
+	mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
+			 msecs_to_jiffies(getfeat_delay_ms + RAW_HANDSHAKE_TIMEOUT_MS + 1000));
 }
 
 /* Cold-boot retry continuation: fires RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS
@@ -2103,7 +2122,7 @@ static ssize_t heatmap_debug_show(struct device *dev,
 	off += sysfs_emit_at(buf, off,
 		"content_id=0x%02x len=%u cells=%u grid=%ux%u\n",
 		snapshot_cid, snapshot_len,
-		snapshot_len - 2,
+		snapshot_len,
 		snapshot_cols, snapshot_rows);
 	for (i = 0; i < snapshot_len && off < PAGE_SIZE - 4; i += 32) {
 		u32 chunk = min_t(u32, 32, snapshot_len - i);
@@ -3078,7 +3097,12 @@ static ssize_t device_initiated_reset_count_show(struct device *dev,
 {
 	struct spi_hid *shid = dev_get_drvdata(dev);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", shid->dir_count);
+	/* What the name says: every RESET_RSP the device sends is, by
+	 * definition, a reset the device initiated, and that is what the
+	 * sequencer counts. shid->dir_count counted descriptor reads — a
+	 * different thing, whose increment was removed long ago — so this
+	 * attribute could only ever report 0. */
+	return snprintf(buf, PAGE_SIZE, "%u\n", shid->stat_reset_rsp);
 }
 static DEVICE_ATTR_RO(device_initiated_reset_count);
 
@@ -3094,29 +3118,10 @@ spi_hid_perf_mode_show(struct device *dev, struct device_attribute *attr, char *
 	return count;
 }
 
-static ssize_t
-spi_hid_perf_mode_store(struct device *dev,
-			struct device_attribute *attr,
-			const char *buf,
-			size_t size)
-{
-	struct spi_hid *shid = dev_get_drvdata(dev);
-	unsigned long flags;
-
-	u8 perf_mode;
-
-	if (kstrtou8(buf, 10, &perf_mode))
-		return -EINVAL;
-
-	spin_lock_irqsave(&shid->input_lock, flags);
-	shid->perf_mode = perf_mode;
-
-	spin_unlock_irqrestore(&shid->input_lock, flags);
-
-	return size;
-}
-
-static DEVICE_ATTR_RW(spi_hid_perf_mode);
+/* Read-only on purpose: nothing in the driver reads shid->perf_mode, so the
+ * writable attribute only let users set a value that changed nothing. Wire it
+ * up (or drop it) when something actually consumes it. */
+static DEVICE_ATTR_RO(spi_hid_perf_mode);
 
 static ssize_t seq_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -3357,6 +3362,16 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err1;
 	}
 	dev_info(dev, "HID desc reg = 0x%08x\n", shid->device_descriptor_register);
+	/* The DESCREQ that starts discovery is built from the compile-time
+	 * constant, so a device whose _DSM names another register can never
+	 * answer with a DEVICE_DESC. No capture and nothing in the DLL analysis
+	 * has ever seen a different value, so this is a warning, not a
+	 * behaviour change: if a machine does report one, discovery failing
+	 * silently is the one thing it must not do. */
+	if (shid->device_descriptor_register != SPI_HID_WIRE_DESCREQ_DEVICE_REG)
+		dev_warn(dev, "SEQ: _DSM reports device-descriptor register 0x%08x while the DESCREQ targets 0x%08x; discovery cannot work until the two agree\n",
+			 shid->device_descriptor_register,
+			 SPI_HID_WIRE_DESCREQ_DEVICE_REG);
 	seq_dbg(shid, 1, "probe descriptor address obtained\n");
 
 	/*
@@ -3687,8 +3702,13 @@ static int spi_hid_suspend(struct device *dev)
 	WRITE_ONCE(shid->seq_enabled, false);
 	/* ready must follow the transport down: it is the only gate feature and
 	 * descriptor reads use, so leaving it set let a HID client issue SPI
-	 * traffic against a suspended controller and wait out the sync timeout. */
-	shid->ready = false;
+	 * traffic against a suspended controller and wait out the sync timeout.
+	 * Notified like every other flip of this bit: a client blocked on the
+	 * attribute needs the wakeup to re-read it. */
+	if (shid->ready) {
+		shid->ready = false;
+		sysfs_notify(&dev->kobj, NULL, "ready");
+	}
 	shid->poll_active = false;
 	shid->stream_watchdog_active = false;
 	shid->raw_handshake_confirmed = false;
@@ -3710,7 +3730,10 @@ static int spi_hid_resume(struct device *dev)
 
 	seq_dbg(shid, 1, "PM: resume\n");
 	mutex_lock(&shid->seq_lock);
-	shid->ready = false;
+	if (shid->ready) {
+		shid->ready = false;
+		sysfs_notify(&dev->kobj, NULL, "ready");
+	}
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	shid->raw_probe_attempts = 0;
@@ -3723,6 +3746,13 @@ static int spi_hid_resume(struct device *dev)
 	/* Standard mode: the device now owes us a RESET_RSP and nothing else is
 	 * armed if it stays quiet. */
 	spi_hid_arm_wait_reset_watchdog(shid);
+	/* Raw mode: that arm returns immediately there, so a controller coming
+	 * back from resume without a RESET_RSP had no timer at all and the panel
+	 * stayed dead until the next suspend/resume. The raw watchdog is a no-op
+	 * once the handshake is confirmed, so arming it here is safe. */
+	if (shid->raw_mode_active && !shid->raw_handshake_confirmed)
+		schedule_delayed_work(&shid->raw_handshake_watchdog,
+				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 	mutex_unlock(&shid->seq_lock);
 
 	/* Vendor init before the IRQ is re-enabled: it writes the D2/D0 pair and

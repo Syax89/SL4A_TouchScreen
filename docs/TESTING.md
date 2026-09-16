@@ -20,17 +20,24 @@ the recorded lifecycle-evidence classifications.
 Six research checks (raw_transition_safety_test, isolated_set_safety_test,
 post_set_timeline_test, surface_tracker_oracle_test, raw_corpus_test, and
 v0_capimg_decoder_test) call `skip_optional_contract()` when their untracked
-corpus, analyzer, or harness is absent. They are kept on disk for future
-implementation but are excluded from the CI gate. Their empty or unused
-Makefile targets (raw_corpus_test, raw_capture_export_test,
-v0_capimg_decoder_test) were also removed.
+corpus, analyzer, or harness is absent, and `real_frame_replay_test` skips the
+same way when the Windows frame corpus is missing. Because a skip is a pass,
+they are **not** part of `make test`: they live in `make local-checks`, which is
+what to run on a machine that has the corpora, and where a SKIP or a FAIL is
+information rather than a green tick that means nothing.
 
 ## CI
 
-GitHub Actions checks tracked whitespace, runs the normal and ASan/UBSan host
-gates, and compiles the modules out-of-tree against Ubuntu generic headers. The
-kernel job is a compile smoke test only: it does not load modules or qualify a
-kernel, DKMS lifecycle, Secure Boot, or Surface hardware behavior.
+GitHub Actions checks tracked whitespace, runs the `make test` host gate twice
+(plain and with `SANITIZE=1`), and compiles the modules out-of-tree: once
+against Ubuntu generic headers and once inside an Arch container, so the
+version-guarded signatures are pinned from both sides of the kernel API change
+(`kernel-build`, `kernel-build-current`). `SANITIZE=1` instruments the C
+targets built from `$(CFLAGS)`/`$(LDFLAGS)`; the raw-pipeline and replay targets
+carry their own flags and are not instrumented — their coverage comes from the
+replay fixtures instead. The kernel jobs are compile smoke tests only: they do
+not load modules or qualify a kernel, DKMS lifecycle, Secure Boot, or Surface
+hardware behavior.
 
 ## Hardware Evidence Helpers
 

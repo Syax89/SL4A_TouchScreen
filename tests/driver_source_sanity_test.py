@@ -91,9 +91,24 @@ def check_control_flow_pins():
               "the raw watchdog for WAIT_DESC/WAIT_RPT (pre-DONE stall is silent "
               "and permanent again)")
         failures += 1
+    elif "SPI_HID_SEQ_WAIT_RESET ||" not in body:
+        print("FAIL driver/spi-hid-core.c: the raw watchdog no longer covers "
+              "WAIT_RESET at cold probe (a controller that never sends a "
+              "RESET_RSP has no timer at all)")
+        failures += 1
     elif body.index("raw_handshake_watchdog") > body.index("if (old_state == new_state)"):
         print("FAIL driver/spi-hid-core.c: the pre-DONE watchdog arm sits after "
               "the unchanged-state return, so a re-entered WAIT_DESC never arms it")
+        failures += 1
+
+    # 3. spi_hid_resume(): it assigns the state directly instead of going
+    # through spi_hid_seq_set_state(), and the standard-mode arm it does call is
+    # a no-op in raw mode — so without its own arm a controller that comes back
+    # from resume without a RESET_RSP has no timer at all and stays dead.
+    body = core.split("static int spi_hid_resume", 1)[1].split("\n}", 1)[0]
+    if "raw_handshake_watchdog" not in body:
+        print("FAIL driver/spi-hid-core.c: spi_hid_resume() no longer arms the raw "
+              "watchdog (raw mode has no timer for a silent post-resume controller)")
         failures += 1
 
     return failures
