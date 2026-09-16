@@ -303,6 +303,14 @@ static const char *spi_hid_power_mode_string(u8 power_state)
  * Set device power state via SET_POWER command.
  * raw_buf[14] = power mode (ACTIVE/SLEEP/OFF).
  * Called under power_lock mutex.
+ *
+ * ponytail: this path sends V0's zero tail while the boot sequencer sends the
+ * trailer form (`0C EE 5B`) for the same opcode, register and selector. No
+ * sleep/resume capture exists in traces/ or captures/ to say which this device
+ * expects, so neither is "corrected" to match the other without one. A leg
+ * flagged this as the real open point under a docs sentence that claimed the
+ * two forms were different commands — they are not: indices 0..10 are the
+ * same, only the three tail bytes differ.
  */
 static int spi_hid_set_power(struct spi_hid *shid, u8 power_mode)
 {
