@@ -1307,8 +1307,26 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * the request path, which asks for register 3 — the register the reference
 	 * reads them from too.
 	 *
-	 * Standard mode is untouched: it never overrides the register. */
-	if (shid->raw_mode_active)
+	 * Standard mode is untouched: it never overrides the register.
+	 *
+	 * Register 0 is where the device answers its resets and the whole
+	 * handshake — the reference reads it there at boot (`0B 00 00 00 FF 00 00
+	 * 00 00` answers the RESET_RSP). The stream register is the OTHER half:
+	 * input_register is 0x0A in raw mode, and spi_hid_poll_work reads the
+	 * heatmap frames from it once the sequencer is DONE — which is the very
+	 * gate that poller carries (`seq_state != SPI_HID_SEQ_DONE` reschedules
+	 * without reading). So DONE is the crossover, and it is the only
+	 * discriminator that is neither sticky (raw_stream_armed, falsified by one
+	 * field run) nor unreachable (WAIT_RESET, which this driver only ever
+	 * sits in at boot).
+	 *
+	 * Both directions of this mistake are silent: pointing the handshake at
+	 * 0x0A produced a reset frame nine bytes out of position in every field
+	 * log, and pointing the stream at 0 is a poller that reads zeros forever.
+	 * A double-check leg found the second half of that sentence by auditing
+	 * this function's own claim that the stream used explicit calls — it did
+	 * not, and the claim was mine. */
+	if (shid->raw_mode_active && shid->seq_state != SPI_HID_SEQ_DONE)
 		reg = 0;
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
