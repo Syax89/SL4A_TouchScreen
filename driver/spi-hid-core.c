@@ -1387,7 +1387,39 @@ static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *r
 }
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
-	return spi_hid_protocol_find_header(rx, len, hdr_off);
+	int type = spi_hid_protocol_find_header(rx, len, hdr_off);
+
+	/* Windows' VerifyResetResponse tests the WHOLE first byte of a message
+	 * (msg[0] == 3, hidspicx_dd64). This parser derives the type from the high
+	 * nibble of the byte before the 0x5A sync, and the two rules disagree on the
+	 * device's idle frame `32 10 00 5a`: the nibble rule calls it a type-3
+	 * RESET_RSP, the driver answered it with a DESCREQ, the device answered with
+	 * another reset, and the field bundle (16:52) shows the loop running 47
+	 * times in one pass. Narrow the rule here, in the one function every reader
+	 * goes through, so no caller can be left with the old behaviour.
+	 * The genuine reset frames carry byte 0 == 3 and no sync byte, so they are
+	 * detected by their own path and are unaffected by this. */
+	if (type == 3 && hdr_off && *hdr_off >= 0 && rx[*hdr_off] != 3) {
+		*hdr_off = -1;
+		return -1;
+	}
+	return type;
+}
+
+/* The reference's reaction to a reset, taken from the V0 state machine's own
+ * symbol names (hidspi_8080_ResettingSyncEntry): increment the counter, call
+ * Fdo::ResetDevice(), and on success start a 2000 ms timer before the next
+ * state. Our equivalent of ResetDevice is the power sequence the probe already
+ * uses (stop + D2 + D0) — it is what puts the device back into a known session.
+ * The 2000 ms is the reference's own constant, seen twice in this file's notes,
+ * so it is measured rather than chosen.
+ * ponytail: no FDO-level reset exists on this stack; if the device still resets
+ * through this, the next step is a full re-probe, not a longer wait. */
+static void spi_hid_seq_reset_like_reference(struct spi_hid *shid)
+{
+	seq_dbg(shid, 1, "SEQ: RESET_RSP — resetting like the reference (ResettingSyncEntry: ResetDevice then a 2000 ms timer)\n");
+	spi_hid_vendor_init(shid);
+	msleep(2000);
 }
 
 static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
@@ -2494,6 +2526,8 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
+	/* spi_hid_seq_hdr_type() already narrowed a nibble-only type 3 down to
+	 * Windows' rule, so a `32 10 00 5a` idle frame arrives here as -1. */
 	seq_dbg(shid, 2, "SEQ[state=%s(%d)] type=%d hdr=[%*ph] dt=%lld us%s\n",
 		 spi_hid_seq_state_name(shid->seq_state), shid->seq_state,
 		 type, 4, &hdr[5], dbg_dt_us,
@@ -2571,6 +2605,7 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 			return;
 		seq_dbg(shid, 3, "SEQ[WAIT_RESET]: RESET_RSP body-drain=[%*ph], sending DESCREQ\n",
 			 20, body);
+		spi_hid_seq_reset_like_reference(shid);
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: DESCREQ sent, waiting for DEVICE_DESC IRQ\n");
@@ -2665,6 +2700,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_DESC, sending DESCREQ directly\n");
+		spi_hid_seq_reset_like_reference(shid);
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 		seq_dbg(shid, 1, "SEQ: DESCREQ sent synchronously, waiting for next IRQ\n");
@@ -2808,6 +2844,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_RPT, sending DESCREQ directly\n");
+		spi_hid_seq_reset_like_reference(shid);
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
 }
@@ -2849,6 +2886,7 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_FEATURE, sending DESCREQ directly\n");
+		spi_hid_seq_reset_like_reference(shid);
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
 }

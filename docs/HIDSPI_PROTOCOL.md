@@ -29,6 +29,13 @@ Each SPI exchange has a request (host→device) and response (device→host).
 
 ### Report Types (header byte 0, upper nibble)
 
+**One exception, and it is the one that matters at startup.** A message whose
+**first byte is `3`** is a reset response: the reference tests the whole byte
+(`VerifyResetResponse` compares `msg[0]` against 3), not a nibble. The device's
+idle frame `32 10 00 5a` shares the nibble but is not a reset — and treating it
+as one makes the driver answer a device that is merely idle with a descriptor
+request, which the device answers with another reset.
+
 These correspond to the `SPI_HID_REPORT_TYPE_*` constants defined
 in `driver/spi-hid-core.h`.
 
