@@ -122,28 +122,23 @@ bound_driver() {
 INSTALLED_HEAD_STAMP="/var/lib/sl4a-touch/installed-head"
 
 stamp_installed_head() {
+	# Atomic, and only on success: the redirect used to truncate first, so a git
+	# that refused (dubious ownership under sudo is the documented path) left a
+	# zero-byte stamp, installed_head returned an empty string, and every bundle
+	# then printed a false MISMATCH while hunt rebuilt on every single run.
+	local head tmp="$INSTALLED_HEAD_STAMP.$$" pre="${1:-}"
 	mkdir -p "$(dirname "$INSTALLED_HEAD_STAMP")" 2>/dev/null || true
-	git -C "$REPO_DIR" rev-parse HEAD >"$INSTALLED_HEAD_STAMP" 2>/dev/null || true
-}
-
-# Re-stage the checkout into the DKMS source tree and rebuild. `dkms build`
-# alone rebuilds whatever is *staged*, and staging is a copy install made at
-# install time — so a rebuild that skips the copy would rebuild the old sources
-# and stamp them as the new revision, which is worse than not rebuilding.
-# Same three steps as install (copy, build, install); no profile, no service.
-restage_and_rebuild() {
-	echo "→ Staging the checkout into $SRC_DEST and rebuilding..."
-	mkdir -p "$SRC_DEST" || fail "cannot create $SRC_DEST"
-	cp -a "$DRIVER_DIR"/. "$SRC_DEST"/ || fail "cannot stage the driver sources"
-	rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c 2>/dev/null || true
-	dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS build failed"
-	dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS install failed"
-	depmod -a 2>/dev/null || true
-	stamp_installed_head
+	head="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)" || return 0
+	[ -n "$head" ] || return 0
+	$pre sh -c 'cat >"$1"' _ "$tmp" <<< "$head" 2>/dev/null || return 0
+	$pre mv -f "$tmp" "$INSTALLED_HEAD_STAMP" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
 }
 
 installed_head() {
-	cat "$INSTALLED_HEAD_STAMP" 2>/dev/null || echo "unknown"
+	local head
+	head="$(cat "$INSTALLED_HEAD_STAMP" 2>/dev/null)" || head=""
+	[ -n "$head" ] || head="unknown"
+	echo "$head"
 }
 
 dkms_installed_version() {
@@ -195,9 +190,9 @@ dkms_remove_other_versions() {
 
 modprobe_profile() {
 	[ -f "$MODPROBE_CONF" ] || { echo "none"; return; }
-	if grep -q 'raw_mode=Y' "$MODPROBE_CONF" 2>/dev/null; then
+	if grep -qE '^options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=Y' "$MODPROBE_CONF" 2>/dev/null; then
 		echo "raw"
-	elif grep -q 'raw_mode=N' "$MODPROBE_CONF" 2>/dev/null; then
+	elif grep -qE '^options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=N' "$MODPROBE_CONF" 2>/dev/null; then
 		echo "standard"
 	else
 		echo "unknown"
@@ -672,10 +667,16 @@ cmd_install() {
 	# behind, so "existing driver state was left unchanged" is literally true.
 	stage_failed() {
 		[ "$already_added" -eq 1 ] || cleanup_staged_install
+		if [ "$legacy_removed" -eq 1 ]; then
+			# The legacy artifact is already uninstalled at this point, so
+			# "existing driver state was left unchanged" would be false.
+			fail "$1 — note: the previous driver artifact was already removed from DKMS, so nothing is installed right now; re-run 'install' once the cause above is fixed"
+		fi
 		fail "$1"
 	}
 
 	local already_added=0
+	local legacy_removed=0
 	if [ -e "$SRC_DEST" ]; then
 		if dkms status -m "$PKG_NAME" -v "$PKG_VERSION" 2>/dev/null | grep -q "installed"; then
 			if grep -q '^obj-m += sl4a-spi-amd.o$' "$SRC_DEST/Kbuild" && \
@@ -692,7 +693,15 @@ cmd_install() {
 			else
 				info "Replacing the package's legacy spi-amd artifact with the opt-in controller module..."
 				dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all || fail "could not remove the package's legacy DKMS artifact"
-				rm -rf "$SRC_DEST"
+				legacy_removed=1
+				# Same ownership rule as the other two removal paths: never delete
+				# a tree that carries someone else's dkms.conf.
+				if [ -f "$SRC_DEST/dkms.conf" ] && \
+				   ! grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$SRC_DEST/dkms.conf"; then
+					info "Leaving unowned $SRC_DEST untouched"
+				else
+					rm -rf "$SRC_DEST"
+				fi
 			fi
 		else
 			# Left behind by an interrupted run: recoverable, not a dead end.
@@ -1142,6 +1151,19 @@ cmd_status() {
 		else
 			warn "DKMS installed version: $installed for kernel $kernel (this checkout is $PKG_VERSION — run 'install' to upgrade)"
 		fi
+	# The version string never moves between commits, so "matches this checkout"
+	# read off it alone is a claim this tool documents as meaningless: both the
+	# loaded module and the installed file can be three commits old together.
+	local head_now head_built
+	head_now="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+	head_built="$(installed_head)"
+	if [ "$head_built" = "$head_now" ]; then
+		pass "Installed modules were built from $head_built (this checkout)"
+	elif [ "$head_built" = "unknown" ]; then
+		warn "No installed-revision stamp — run 'install' so a bundle can say which build it describes"
+	else
+		warn "Installed modules were built from $head_built, this checkout is $head_now — run 'install' (or 'hunt')"
+	fi
 	else
 		info "Not installed via DKMS for the running kernel ($kernel) — run 'install' to install"
 	fi
@@ -1227,8 +1249,14 @@ run_host_self_tests() {
 	[ -d "$REPO_DIR/tests" ] || { echo "skipped: no tests directory"; return 0; }
 	echo "$ make -C tests test"
 	local out rc
+	# This runs under `set -e -o pipefail` from a diagnostic path: a failing
+	# suite used to abort hunt mid-variant, before the driver was put back.
+	local had_errexit=0
+	case "$-" in *e*) had_errexit=1 ;; esac
+	set +e +o pipefail
 	out="$(make -C "$REPO_DIR/tests" test 2>&1)"
 	rc=$?
+	[ "$had_errexit" -eq 1 ] && set -e -o pipefail || true
 	echo "$out" | grep -E 'PASS|FAIL|assertions' | tail -n 12
 	if [ "$rc" = 0 ]; then
 		echo "suite result: PASS"
@@ -1544,7 +1572,7 @@ cmd_rebuild() {
 	$SUDO mkdir -p "/lib/modules/$(uname -r)/updates/dkms"
 	$SUDO cp -f "$DRIVER_DIR/sl4a-spi-amd.ko" "$DRIVER_DIR/sl4a-spi-hid.ko" "/lib/modules/$(uname -r)/updates/dkms/"
 	$SUDO depmod -a
-	stamp_installed_head
+	stamp_installed_head "$SUDO"
 	pass "Modules installed"
 
 	echo ""
@@ -1571,10 +1599,25 @@ cmd_hunt() {
 	done
 	[ "$(id -u)" = 0 ] || fail "hunt needs root (it unloads and loads the driver): run it with sudo"
 
+	# -o feeds a root redirect. logs -o guards its path; this command took the
+	# user's word for it, so `sudo hunt -o /etc/shadow` would truncate it.
+	if [ -n "$OUT" ]; then
+		case "$OUT" in -*) OUT="./$OUT" ;; esac
+		if [ -e "$OUT" ]; then
+			[ -f "$OUT" ] && [ ! -L "$OUT" ] || fail "$OUT is not a regular file; refusing to write it"
+			if [ -s "$OUT" ]; then
+				head -n 1 "$OUT" | grep -q SL4A_TouchScreen || \
+					fail "$OUT does not look like a diagnostic file of ours; refusing to overwrite it"
+			fi
+		fi
+	fi
+
 	[ -n "$OUT" ] || OUT="/tmp/sl4a-hunt-$(date +%Y%m%d-%H%M%S).txt"
 
 	local SYSFS_DIR
-	SYSFS_DIR="$(ls -d /sys/bus/spi/devices/*MSHW0231* 2>/dev/null | head -1)"
+	# Any supported Surface panel, not just the SL4 one: a glob matching nothing
+	# turned every counter unreadable and the verdict then blamed the device.
+	SYSFS_DIR="$(ls -d /sys/bus/spi/devices/*MSHW* 2>/dev/null | head -1)"
 
 	# The installed profile's own parameters, minus the two this command sets.
 	local opts
@@ -1606,6 +1649,8 @@ cmd_hunt() {
 
 		for variant in 0 1 2; do
 			echo "--- variant $variant ---"
+			local dmesg_mark
+			dmesg_mark="$(dmesg 2>/dev/null | wc -l)"
 			modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null || true
 			sleep 1
 			modprobe sl4a_spi_amd 2>/dev/null || true
@@ -1620,7 +1665,10 @@ cmd_hunt() {
 				cat "$SYSFS_DIR/$f" 2>/dev/null || echo "(unavailable)"
 			done
 			echo "-- dmesg, this load only (the read bytes are here)"
-			dmesg | grep -i 'sl4a_spi_hid' | tail -n 60
+			# `|| true` is load-bearing: under `set -e -o pipefail` a grep that
+			# matches nothing (every modprobe in this variant failed, say) aborted
+			# hunt after it had unloaded the driver and before putting it back.
+			dmesg 2>/dev/null | tail -n +"$((dmesg_mark + 1))" | grep -i sl4a_spi_hid | tail -n 60 || true
 			echo ""
 			echo "VERDICT: $(hunt_verdict "$variant" "$SYSFS_DIR")"
 			echo ""
@@ -1649,6 +1697,18 @@ cmd_hunt() {
 # answers the question on its own.
 hunt_verdict() {
 	local variant="$1" dir="$2" rr dd
+	# No counters at all is not the same as counters at zero: the device
+	# name is matched by glob, so on another panel (SL3 is MSHW0162) every
+	# counter is unreadable — and this function used to write "silent" into
+	# the artifact anyway, a diagnostic claiming a measurement never taken.
+	if [ -z "$dir" ] || [ ! -r "$dir/protocol_stats" ]; then
+		echo "variant $variant: NO COUNTERS READ (sysfs not found for this panel) — nothing was measured"
+		return 0
+	fi
+	if [ -z "$(cat "$dir/protocol_stats" 2>/dev/null)" ]; then
+		echo "variant $variant: NO COUNTERS READ (protocol_stats unreadable) — nothing was measured"
+		return 0
+	fi
 	rr="$(awk -F= '/^reset_rsp=/{gsub(/ /, "", $2); print $2}' "$dir/protocol_stats" 2>/dev/null)"
 	dd="$(awk -F= '/^device_desc=/{gsub(/ /, "", $2); print $2}' "$dir/protocol_stats" 2>/dev/null)"
 	if [ "${dd:-0}" != "0" ] && [ -n "${dd:-}" ]; then

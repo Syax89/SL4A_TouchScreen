@@ -144,6 +144,43 @@ assert "MISMATCH — the installed modules predate this checkout" in tool, \
     "a stale installed module no longer produces a warning in the bundle"
 assert "run_host_self_tests" in tool and "suite result: PASS" in tool, \
     "the bundle no longer runs the host suite, so its result is not collected"
+# ── the installer review's findings (leg 2026-09-16) ───────────────────────
+# F1: under `set -e -o pipefail` a dmesg|grep that matches nothing aborted hunt
+# after it unloaded the driver and before it put the module back.
+assert "| grep -i sl4a_spi_hid | tail -n 60 || true" in tool, \
+    "the hunt dmesg pipeline is unguarded again: a variant with no log lines \
+     aborts the sweep with the driver unloaded"
+# F2: a glob that matches no panel made every counter unreadable, and the
+# verdict then recorded "silent" — a measurement that was never taken.
+assert "NO COUNTERS READ" in tool and "MSHW*" in tool, \
+    "the hunt verdict can claim silence without having read a counter"
+# F3: the suite runs inside a diagnostic path; it must not propagate failure.
+assert "had_errexit" in tool, \
+    "run_host_self_tests no longer respects the caller's errexit state"
+# F4: -o fed a root redirect with none of the guards logs -o has.
+assert "does not look like a diagnostic file of ours" in tool, \
+    "hunt -o overwrites any path as root again"
+# F5: the stamp redirect truncated before git ran, so a git refusal left an
+# empty stamp and every bundle printed a false MISMATCH.
+assert "INSTALLED_HEAD_STAMP.$$" in tool and '|| head=""' in tool, \
+    "the revision stamp is written non-atomically again"
+# F6: rebuild's stamp write must use the same privilege as its copy step.
+assert 'stamp_installed_head "$SUDO"' in tool, \
+    "rebuild stamps unprivileged, so a non-root rebuild records nothing"
+# F7: the legacy migration removes the old artifact before the build and lied
+# about it in the failure message.
+assert "legacy_removed" in tool and "nothing is installed right now" in tool, \
+    "the legacy migration path can leave the machine without a driver and \
+     report that state as unchanged"
+# F8: status claimed "matches this checkout" from a version string that never
+# moves between commits.
+assert "Installed modules were built from $head_built" in tool, \
+    "status no longer reports which revision the installed modules came from"
+# F11: the profile was read with a whole-file grep, so a commented-out option
+# could decide the answer.
+assert "options[[:space:]]+sl4a_spi_hid" in tool, \
+    "the profile is read from anywhere in the config file again"
+
 assert "rm -f \"$INSTALLED_HEAD_STAMP\"" in tool, \
     "uninstall leaves the revision stamp behind, so the next check lies"
 
