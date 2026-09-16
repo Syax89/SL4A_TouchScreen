@@ -1304,7 +1304,8 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * was not answering on yet. That is the one thing the field has never
 	 * tested, and it needs no new frame: only the destination.
 	 *
-	 * Standard mode is untouched: it never overrides the register.
+	 * In standard mode the descriptor's own register stands: the force at probe
+	 * is raw-only, for exactly this reason.
 	 *
 	 * Neither a flag nor a state gate: in raw mode this function ALWAYS reads
 	 * register 0. The field settled it, twice. First a sticky flag (one run
@@ -1321,7 +1322,8 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * the request path, which asks for register 3 — the register the reference
 	 * reads them from too.
 	 *
-	 * Standard mode is untouched: it never overrides the register.
+	 * In standard mode the descriptor's own register stands: the force at probe
+	 * is raw-only, for exactly this reason.
 	 *
 	 * Which register a read goes to is a property of the PHASE, and the
 	 * reference's boot trace names all three of them:
@@ -4049,7 +4051,14 @@ static int spi_hid_probe(struct spi_device *spi)
 	if (shid->desc.input_register && shid->desc.input_register != SPI_HID_RAW_STREAM_REGISTER)
 		dev_info(dev, "SEQ: stream register 0x%06x in the descriptor, 0x%02x in the reference\n",
 			 shid->desc.input_register, SPI_HID_RAW_STREAM_REGISTER);
-	shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;
+	/* Only the raw path's: in standard mode the descriptor's own input
+	 * register must stand, because the pre-DESC handshake reads reach registers
+	 * the capture names (0 for the reset, 3 for the descriptor) and this force
+	 * would send every one of them to the stream register instead. A leg found
+	 * the window: probe to first DEVICE_DESC, self-healing on a successful
+	 * parse, with every handshake read misdirected until then. */
+	if (shid->raw_mode_active)
+		shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;
 	/* The enable is NOT sent here any more: it is sent when the sequencer
 	 * reaches DONE, after the descriptor exchange, as the reference does. See
 	 * spi_hid_raw_stream_arm(). */
