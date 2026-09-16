@@ -1292,15 +1292,23 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 *
 	 * Standard mode is untouched: it never overrides the register.
 	 *
-	 * The condition is the STATE, not a flag: `raw_stream_armed` was the first
-	 * version of this and it was sticky — one run reaching DONE set it for the
-	 * rest of the session, so every later reset read went to the stream
-	 * register again and the field log showed exactly that (141 reads on 0x0a,
-	 * none on 0). WAIT_RESET is when the reference reads register 0: its reset
-	 * and drain, before any descriptor request. Every other state keeps the
-	 * register its caller asked for, which for the descriptor's own responses
-	 * is register 3 — the same one the reference reads them from. */
-	if (shid->raw_mode_active && shid->seq_state == SPI_HID_SEQ_WAIT_RESET)
+	 * Neither a flag nor a state gate: in raw mode this function ALWAYS reads
+	 * register 0. The field settled it, twice. First a sticky flag (one run
+	 * reaching DONE fixed it for the session: 141 reads on 0x0a, none on 0),
+	 * then a state gate (the driver sits in WAIT_DESC, never in WAIT_RESET:
+	 * still zero reads on 0). And the reason was in the bytes all along — the
+	 * WAIT_DESC read answers `01 ff ee ff ff ff ff ff 32`, a reset frame nine
+	 * bytes out of position, because it was read from the stream register. On
+	 * register 0 the same frame arrives aligned, exactly as the reference reads
+	 * it (`02 10 00 5A` behind its five-byte preamble).
+	 *
+	 * Nothing else needs this function's register: the stream register is read
+	 * by the raw path's own explicit calls, and the descriptor's responses by
+	 * the request path, which asks for register 3 — the register the reference
+	 * reads them from too.
+	 *
+	 * Standard mode is untouched: it never overrides the register. */
+	if (shid->raw_mode_active)
 		reg = 0;
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
