@@ -253,6 +253,7 @@ struct spi_hid {
 	/* Multi-touch input device created for raw heatmap mode. */
 	struct input_dev *touch_input;
 	bool raw_mode_active;           /* Device is in raw heatmap mode */
+	bool raw_stream_armed;          /* stream enable sent — once, after the descriptor (the reference's order) */
 	u8 *heatmap_buf;                /* Last captured raw frame buffer, kmalloc'd */
 	u32 heatmap_len;                /* byte length of the last raw frame */
 	u32 heatmap_capacity;           /* allocated byte capacity of heatmap_buf */

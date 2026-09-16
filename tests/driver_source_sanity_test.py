@@ -235,6 +235,18 @@ def check_control_flow_pins():
               "spi_hid_protocol_frame_type() — the frame typing the driver runs is no "
               "longer the one the host test exercises with real buffers")
         failures += 1
+    # The stream enable must not run before the descriptor exchange: the
+    # reference configures the stream after it (boot trace TXN#9+), and doing
+    # it first is what this driver did while the device answered every DESCREQ
+    # with a reset. One call site, inside the idempotent arming helper.
+    if core_code.count("spi_hid_raw_enable_stream(shid);") != 1:
+        print("FAIL driver/spi-hid-core.c: the stream enable must be called from exactly one "
+              "place — the arming helper that runs at DONE — not from probe setup")
+        failures += 1
+    if core_code.count("spi_hid_raw_stream_arm(shid);") < 1:
+        print("FAIL driver/spi-hid-core.c: nothing arms the raw stream any more")
+        failures += 1
+
     # Duplicate definitions. Slice arithmetic of mine once duplicated 850 lines
     # of spi-hid-core.c; the host suite never compiles that translation unit, so
     # local runs stayed green and only the kernel build caught it. The rule is
