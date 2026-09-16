@@ -537,6 +537,33 @@ static void test_read_approval_frame(void)
 		      "the panel's prefixed descriptor types as 7");
 		CHECK(off == 8, "at the same offset");
 	}
+
+	{
+		/* The length encoding, derived from the capture and spanning four
+		 * orders of magnitude: a 12-bit little-endian count of 4-byte words,
+		 * low four bits in the high nibble of byte 1, high eight in byte 2.
+		 * The middle two are the proof: any swap of the bytes or the nibbles
+		 * changes their decoded length, and both were measured on the wire
+		 * (940 = the report descriptor's body, 4304 = one raw stream frame). */
+		static const struct {
+			unsigned char h[4];
+			unsigned int want;
+		} lv[] = {
+			{ { 0x32, 0x10, 0x00, 0x5a }, 4 },    /* RESET_RSP, 4-byte body */
+			{ { 0x72, 0x80, 0x00, 0x5a }, 32 },   /* DEVICE_DESC */
+			{ { 0x82, 0xb0, 0x0e, 0x5a }, 940 },  /* report descriptor body */
+			{ { 0x12, 0x40, 0x43, 0x5a }, 4304 }, /* raw-mode stream frame */
+		};
+		unsigned int k;
+
+		for (k = 0; k < sizeof(lv) / sizeof(lv[0]); k++) {
+			struct spi_hid_protocol_header h;
+
+			spi_hid_protocol_decode_header(lv[k].h, &h);
+			CHECK(h.report_length == lv[k].want,
+			      "the captured length encoding decodes to the measured body length");
+		}
+	}
 }
 
 int main(void)
