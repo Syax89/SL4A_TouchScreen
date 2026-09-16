@@ -52,8 +52,13 @@
 #define SPI_HID_WIRE_OPCODE 0x02
 
 /* Constant key/check field carried in the trailer of the short command
- * bodies. It is byte-identical on every reference frame and must never be
- * "computed" or replaced with zero padding. */
+ * bodies. It must never be "computed", derived from anything, or replaced by
+ * zero padding on a whim: it is the device key material the reference uses.
+ * It is NOT, however, universal — a leg found the same SET_FEATURE 5 frame on
+ * the bus with the trailer (surface_init.csv) and with a zero tail
+ * (surface_boot_auto.csv:3087), so "byte-identical on every reference frame"
+ * was too strong and is gone. What this driver emits for those frames matches
+ * the capture it was written from; the inconsistency lives in the reference. */
 #define SPI_HID_WIRE_TRAILER_0 0x0C
 #define SPI_HID_WIRE_TRAILER_1 0xEE
 #define SPI_HID_WIRE_TRAILER_2 0x5B
