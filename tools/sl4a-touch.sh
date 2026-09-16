@@ -616,8 +616,14 @@ cmd_install() {
 		sed -i "s|#VERSION#|${PKG_VERSION}|" "$SRC_DEST/dkms.conf"
 
 		dkms add -m "$PKG_NAME" -v "$PKG_VERSION" || { cleanup_staged_install; fail "DKMS add failed; existing driver state was left unchanged"; }
-		dkms build -m "$PKG_NAME" -v "$PKG_VERSION" || { cleanup_staged_install; fail "DKMS build failed; existing driver state was left unchanged"; }
-		dkms install -m "$PKG_NAME" -v "$PKG_VERSION" || { cleanup_staged_install; fail "DKMS install failed; existing driver state was left unchanged"; }
+		# --force on both: DKMS caches the built module per (module, version,
+		# kernel), and VERSION does not change between commits, so a plain
+		# `dkms build` after a pull answers "already built" and installs the
+		# STALE object. The module on the machine then silently stops matching
+		# the checkout (field: a 1.7.0+main install whose loaded module had
+		# none of the new attributes).
+		dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || { cleanup_staged_install; fail "DKMS build failed; existing driver state was left unchanged"; }
+		dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || { cleanup_staged_install; fail "DKMS install failed; existing driver state was left unchanged"; }
 		pass "sl4a-spi-amd.ko + sl4a-spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
 
 		info "Step 4: Updating module dependencies..."
@@ -1101,6 +1107,15 @@ cmd_logs() {
 
 		echo "--- Loaded modules ---"
 		lsmod | grep -i sl4a || echo "(not loaded)"
+
+		# What the kernel would load, so a module older than the checkout is
+		# visible here: DKMS reuses a cached build when VERSION has not moved,
+		# and srcversion changes with every source edit.
+		echo "--- Module objects ---"
+		for mod in sl4a_spi_amd sl4a_spi_hid; do
+			modinfo "$mod" 2>/dev/null | grep -E "^(filename|version|srcversion|vermagic):" \
+				|| echo "$mod: modinfo failed"
+		done
 		echo ""
 
 		echo "--- Module parameters ---"
@@ -1173,8 +1188,8 @@ cmd_logs() {
 		fi
 
 		echo ""
-		echo "--- dmesg (driver-related lines) ---"
-		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -300
+		echo "--- dmesg (driver-related lines, last 1000) ---"
+		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -1000
 	} > "$OUT"
 	bundle_status=$?
 	set -e -o pipefail

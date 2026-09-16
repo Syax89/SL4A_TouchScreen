@@ -31,6 +31,11 @@ assert 'cat "$spidev/heatmap_debug"' in tool    # ...and still collects somethin
 assert tool.index("--- Last captured frame ---") < tool.index('} > "$OUT"'), \
     "the frame section must be inside the bundle redirect"
 
+# ── tool: module identity and a wide enough dmesg window ──
+assert "--- Module objects ---" in tool, "a stale module must be visible in the bundle"
+assert "srcversion" in tool, "srcversion moves with every source edit: that is the staleness signal"
+assert "last 1000)" in tool, "300 lines hid the boot-time handshake once the debug level went up"
+
 # ── tool: the rest of the driver's readable stats ──
 for name in ("build_info", "ready", "bus_error_count", "device_initiated_reset_count"):
     assert name in tool, f"{name} missing from the bundle's sysfs stats"

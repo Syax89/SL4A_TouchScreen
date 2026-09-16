@@ -54,4 +54,12 @@ for seq in ("tput civis", "tput cuu", "tput ed", "tput cnorm"):
         if line.strip().startswith(seq):
             assert line.rstrip().endswith("|| true"), line
 
+# A pull that leaves VERSION unchanged must still rebuild: DKMS caches the built
+# module per (module, version, kernel), so a plain `dkms build` answers "already
+# built" and reinstalls the stale object — the loaded module then silently stops
+# matching the checkout (found in the field: an install whose module carried
+# none of the new attributes).
+assert 'dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force' in tool
+assert 'dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force' in tool
+
 print("installer recovery contract: PASS")
