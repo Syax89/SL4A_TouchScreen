@@ -587,13 +587,20 @@ cmd_install() {
 	# registration keeps building the same module names on every kernel update.
 	dkms_remove_other_versions "$PKG_VERSION"
 
-	local profile_only=0
+	local already_added=0
 	if [ -e "$SRC_DEST" ]; then
 		if dkms status -m "$PKG_NAME" -v "$PKG_VERSION" 2>/dev/null | grep -q "installed"; then
 			if grep -q '^obj-m += sl4a-spi-amd.o$' "$SRC_DEST/Kbuild" && \
 			   grep -q '^obj-m += sl4a-spi-hid.o$' "$SRC_DEST/Kbuild"; then
-				info "DKMS version $PKG_NAME/$PKG_VERSION is already installed; updating only the $PROFILE profile"
-				profile_only=1
+				# Same version already registered: re-stage and rebuild
+				# anyway. VERSION does not change between commits, so
+				# "already installed" says nothing about whether the module
+				# on the machine matches this checkout — trusting it is how
+				# a pull used to leave a stale module running. `dkms add`
+				# would refuse an entry that already exists, so it is
+				# skipped below instead of failing the install.
+				info "DKMS version $PKG_NAME/$PKG_VERSION is already registered; rebuilding from this checkout"
+				already_added=1
 			else
 				info "Replacing the package's legacy spi-amd artifact with the opt-in controller module..."
 				dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all || fail "could not remove the package's legacy DKMS artifact"
@@ -606,30 +613,32 @@ cmd_install() {
 		fi
 	fi
 
-	if [ "$profile_only" -eq 0 ]; then
-		mkdir -p "$SRC_DEST"
-		cp -a "$DRIVER_DIR"/. "$SRC_DEST"/
-		rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c \
-		      "$SRC_DEST"/*.mod.o "$SRC_DEST"/Module.symvers "$SRC_DEST"/modules.order \
-		      "$SRC_DEST"/.*.cmd 2>/dev/null || true
-		rm -f "$SRC_DEST/test_harness.c" "$SRC_DEST/sl4a-touch.service" "$SRC_DEST/sl4a-touch-load.sh" 2>/dev/null || true
-		sed -i "s|#VERSION#|${PKG_VERSION}|" "$SRC_DEST/dkms.conf"
+	mkdir -p "$SRC_DEST"
+	cp -a "$DRIVER_DIR"/. "$SRC_DEST"/
+	rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c \
+	      "$SRC_DEST"/*.mod.o "$SRC_DEST"/Module.symvers "$SRC_DEST"/modules.order \
+	      "$SRC_DEST"/.*.cmd 2>/dev/null || true
+	rm -f "$SRC_DEST/test_harness.c" "$SRC_DEST/sl4a-touch.service" "$SRC_DEST/sl4a-touch-load.sh" 2>/dev/null || true
+	sed -i "s|#VERSION#|${PKG_VERSION}|" "$SRC_DEST/dkms.conf"
 
+	if [ "$already_added" -eq 0 ]; then
 		dkms add -m "$PKG_NAME" -v "$PKG_VERSION" || { cleanup_staged_install; fail "DKMS add failed; existing driver state was left unchanged"; }
-		# --force on both: DKMS caches the built module per (module, version,
-		# kernel), and VERSION does not change between commits, so a plain
-		# `dkms build` after a pull answers "already built" and installs the
-		# STALE object. The module on the machine then silently stops matching
-		# the checkout (field: a 1.7.0+main install whose loaded module had
-		# none of the new attributes).
-		dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || { cleanup_staged_install; fail "DKMS build failed; existing driver state was left unchanged"; }
-		dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || { cleanup_staged_install; fail "DKMS install failed; existing driver state was left unchanged"; }
-		pass "sl4a-spi-amd.ko + sl4a-spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
-
-		info "Step 4: Updating module dependencies..."
-		depmod -a
-		pass "Module dependencies updated"
+	else
+		pass "Reusing the DKMS entry already registered for $PKG_NAME/$PKG_VERSION"
 	fi
+	# --force on both: DKMS caches the built module per (module, version,
+	# kernel), and VERSION does not change between commits, so a plain
+	# `dkms build` after a pull answers "already built" and installs the
+	# STALE object. The module on the machine then silently stops matching
+	# the checkout (field: a 1.7.0+main install whose loaded module had
+	# none of the new attributes).
+	dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || { cleanup_staged_install; fail "DKMS build failed; existing driver state was left unchanged"; }
+	dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || { cleanup_staged_install; fail "DKMS install failed; existing driver state was left unchanged"; }
+	pass "sl4a-spi-amd.ko + sl4a-spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
+
+	info "Step 4: Updating module dependencies..."
+	depmod -a
+	pass "Module dependencies updated"
 
 	info "Step 5: Writing the $PROFILE profile to $MODPROBE_CONF..."
 	local tmp_config

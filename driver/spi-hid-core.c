@@ -183,6 +183,23 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 	if (new_state == SPI_HID_SEQ_WAIT_RESET)
 		spi_hid_arm_wait_reset_watchdog(shid);
 
+	/* Raw mode, one state later: a device that never answers the DESCREQ —
+	 * or answers every IRQ with RESET_RSP, as the field unit does — parks in
+	 * WAIT_DESC where nothing else is armed. descreq_work only re-reads the
+	 * input register (the IRQ thread drains each frame first), and the raw
+	 * watchdog used to be armed at DONE only, so the stall was silent and
+	 * permanent at every debug level. WAIT_RPT is the same shape: device
+	 * descriptor received, report descriptor never. Armed before the
+	 * unchanged-state early return because the RESET_RSP loop re-enters
+	 * WAIT_DESC with the state unchanged; schedule_delayed_work() is a no-op
+	 * on an already-pending work item, so the timeout starts on first entry.
+	 * The watchdog's own WAIT_FEATURE defer keeps a slow-but-live handshake
+	 * from being interrupted. */
+	if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
+	    (new_state == SPI_HID_SEQ_WAIT_DESC || new_state == SPI_HID_SEQ_WAIT_RPT))
+		schedule_delayed_work(&shid->raw_handshake_watchdog,
+				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+
 	if (old_state == new_state)
 		return;
 
@@ -2831,8 +2848,11 @@ static int spi_hid_ll_parse(struct hid_device *hid)
 	ret = hid_parse_report(hid, (__u8 *) shid->response.content, HARDCODED_RD_SIZE);
 	if (ret)
 		dev_err(dev, "failed parsing report: %d\n", ret);
-	else
 
+	/* Unconditional on purpose: the dangling `else` this used to carry put
+	 * the unlock in the success branch only, so a failed parse of the
+	 * hardcoded descriptor returned with shid->lock held — a mutex every
+	 * later lock taker (IRQ thread, sysfs readers, remove) waits on forever. */
 	mutex_unlock(&shid->lock);
 	return ret;
 }

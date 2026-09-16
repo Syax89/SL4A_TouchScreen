@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Raw discovery can no longer stall in silence, and two field traps
+
+Three fixes from a review campaign over the whole driver (several independent
+reviewers, one copy of the tree each, findings verified one by one against the
+source before being acted on).
+
+**A device that stalls before `DONE` had no timer and said nothing.** In raw
+mode the handshake watchdog was armed only at `DONE` and in the post-report
+paths, so a device that answers the `DESCREQ` with nothing — or, as the field
+unit does, with a `RESET_RSP` on every IRQ — left the sequencer parked in
+`WAIT_DESC` forever: `descreq_work` only re-reads the input register (the IRQ
+thread drains each frame first, so it always reads an empty one), the
+unchanged-state early return in `spi_hid_seq_set_state()` re-armed nothing, and
+the only trace of the loop sat behind `sl4a_debug_level`, which is 0 by default.
+The symptom was a touchscreen that never produced a frame, counters frozen at
+`device_desc=0 … reset_rsp == irq_count`, and a dmesg with nothing in it. The
+watchdog is now armed on entering `WAIT_DESC` and `WAIT_RPT` in raw mode, before
+the unchanged-state return, so the stall ends the way every other raw stall
+does: a level-0 warning, the Windows-style `SET_POWER(D2→D0)` re-discovery, and
+— when the retries are exhausted — the automatic fall back to standard HID,
+which is what gives the panel its touch back instead of leaving it dead.
+
+**`spi_hid_ll_parse()` returned with its mutex held.** A dangling `else` made the
+`mutex_unlock()` conditional on the hardcoded report descriptor parsing
+successfully; on the failure path the function returned with `shid->lock` held,
+so the next lock taker (IRQ thread, any sysfs reader, removal) waited forever.
+Reachable whenever the device-read descriptor fails to parse *and* the
+hardcoded one does not parse either.
+
+**`install` skipped the rebuild it was supposed to do.** After a pull, with the
+DKMS version already registered, `install` took a branch that rewrote the
+profile and skipped the build entirely — the `--force` added earlier to defeat
+DKMS's "already built" cache sat on the branch that path bypasses. VERSION does
+not change between commits, so "already installed" said nothing about whether
+the module on the machine matched the checkout, which is exactly how a stale
+module survived an install. The staging step now always re-copies the sources
+and rebuilds; only `dkms add` is skipped when the entry already exists.
+
 ### Diagnostic bundle carries the last captured frame
 
 `sudo ./tools/sl4a-touch.sh logs` now writes the last captured frame into the
@@ -19,8 +57,9 @@ in as many reads as the reader asks for, holding the same `seq_lock` as
 callback is version-guarded for kernels ≥ 6.16, where the bin_attribute
 callback lost its non-const argument: the unguarded signature would turn into a
 hard `-Werror=incompatible-pointer-types` build failure on current
-Arch/CachyOS/Fedora kernels, which the CI job (Ubuntu 24.04, 6.8 headers) cannot
-see.
+Arch/CachyOS/Fedora kernels. CI builds against those headers too (the
+`kernel-build-current` job), so the guard is pinned from both sides: 6.8 headers
+on Ubuntu and whatever the Arch container ships today.
 
 The bundle reads the attribute once and labels it with the bytes it just read,
 so the count always describes the hex below it; an empty attribute says there is
