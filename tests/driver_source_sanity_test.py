@@ -235,50 +235,33 @@ def check_control_flow_pins():
               "spi_hid_protocol_frame_type() — the frame typing the driver runs is no "
               "longer the one the host test exercises with real buffers")
         failures += 1
-    if "spi_hid_seq_reset_like_reference(shid)" not in core_code:
-        print("FAIL driver/spi-hid-core.c: the reset reaction is gone (reference: "
-              "ResettingSyncEntry — ResetDevice then a 2000 ms timer)")
+    # 6b. The reset path, as the reference's own trace shows it: a nine-byte
+    # read of register 0 answers with 32 10 00 5A (RESET_RSP), the next read
+    # drains it (03 00 00 00), and the DESCREQ follows ~156 us later. No wait,
+    # no rate limit, no device reset — I shipped all three, and the device
+    # behaved correctly the whole time. The reset-path checks below are the
+    # ones that survive: the sites must still recover, and they must not sleep.
+    if core_code.count("spi_hid_seq_restart_discovery(shid,") < 4:
+        print("FAIL driver/spi-hid-core.c: fewer than four reset sites recover "
+              "(WAIT_RESET, WAIT_DESC, WAIT_RPT/WAIT_FEATURE, DONE)")
         failures += 1
-    else:
-        if core_code.count("spi_hid_seq_reset_like_reference(shid);") < 5:
-            print("FAIL driver/spi-hid-core.c: not every RESET_RSP site honours the reset "
-                  "reaction (WAIT_RESET, WAIT_DESC, WAIT_RPT, WAIT_FEATURE)")
-            failures += 1
-        # The 2000 ms lives in the work item now, and it must be OUTSIDE the
-        # lock: the inline version it replaced was measured at ~2.25 s under
-        # seq_lock with the IRQ masked, against a ~208 ms storm. Text cannot
-        # prove ordering, so this compares indices — and the mutation proof
-        # (moving the sleep above the unlock) is what makes the check honest.
-        rw = (core_code.split("void spi_hid_seq_reset_work", 1)[1].split("\n}", 1)[0]
-              if "void spi_hid_seq_reset_work" in core_code else "")
-        if "msleep(2000)" not in rw:
-            print("FAIL driver/spi-hid-core.c: the reset work lost the reference's 2000 ms "
-                  "wait (ResettingSyncEntry arms a 2000 ms timer before the next state)")
-            failures += 1
-        else:
-            # The property is ADJACENCY: the wait must directly follow a release
-            # of seq_lock. Comparing indices was vacuous — the guard branch's own
-            # unlock sits textually before the sleep, so the check passed while a
-            # mutation held the lock across the wait (found by mutation, not by a
-            # leg, which is the only reason I trust it now). Whitespace is
-            # collapsed, so the check is about order, not formatting.
-            flat = " ".join(rw.split())
-            if "mutex_unlock(&shid->seq_lock); msleep(2000);" not in flat:
-                print("FAIL driver/spi-hid-core.c: the reset work no longer releases seq_lock "
-                      "immediately before the 2000 ms wait — the IRQ thread is blocked for "
-                      "the whole wait, which is the livelock a verifier measured")
-                failures += 1
-        if "delayed_work_pending(&shid->reset_work)" not in core_code:
-            print("FAIL driver/spi-hid-core.c: the reset reaction no longer coalesces, so a "
-                  "storm schedules one reset per RESET_RSP")
-            failures += 1
-        if "INIT_DELAYED_WORK(&shid->reset_work" not in core_code:
-            print("FAIL driver/spi-hid-core.c: the reset work is never initialised")
-            failures += 1
-        if "cancel_delayed_work_sync(&shid->reset_work)" not in core_code:
-            print("FAIL driver/spi-hid-core.c: the reset work is never cancelled — it can run "
-                  "against a device that is going away")
-            failures += 1
+    hdrfn = (core_code.split("static int spi_hid_seq_hdr_type", 1)[1].split("\n}", 1)[0]
+             if "static int spi_hid_seq_hdr_type" in core_code else "")
+    if "spi_hid_protocol_frame_type" not in hdrfn:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_hdr_type() no longer routes through "
+              "spi_hid_protocol_frame_type() — the typing the driver runs would no longer be "
+              "the one the host test exercises")
+        failures += 1
+    # A pin against a defect CLASS, kept because the defect was nearly shipped:
+    # the reference continues 156 us after a reset, so nothing in this path may
+    # sleep. A 2000 ms wait here is not a timeout, it is a delay the panel does
+    # not have — and under seq_lock it is a livelock.
+    rp = core_code.split("static int spi_hid_seq_restart_discovery", 1)[1].split("\n}", 1)[0]
+    if "msleep" in rp or "udelay" in rp:
+        print("FAIL driver/spi-hid-core.c: the reset recovery path sleeps — the reference "
+              "continues 156 us after draining a reset, and a wait here (especially under "
+              "seq_lock) is the livelock this campaign already measured once")
+        failures += 1
 
     if "spi_hid_wire_read_approval" in wire:
         approval = wire.split("spi_hid_wire_read_approval_variant", 1)[1].split("\n}", 1)[0]
