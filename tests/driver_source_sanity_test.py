@@ -123,6 +123,22 @@ def check_control_flow_pins():
               "will reject version 0 and power the panel down instead)")
         failures += 1
 
+    # 5. the descriptor response path. Windows answers a request on the output
+    # register (the boot trace reads the DEVICE_DESC and the RPT_DESC from
+    # register 3 right after the request, with no interrupt in between), while
+    # the device pushes its events on the input register. Reading only the input
+    # register is what kept the field unit in WAIT_DESC forever.
+    if "spi_hid_seq_read_resp" not in core:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_resp() is gone; the "
+              "descriptor bodies would only ever be read from the input register")
+        failures += 1
+    body = core.split("static void spi_hid_seq_descreq_work", 1)[1].split("\n}", 1)[0]
+    if "desc.output_register" not in body or "desc.input_register" not in body:
+        print("FAIL driver/spi-hid-core.c: the descriptor poller no longer tries "
+              "both registers (responses live on the output register, events on "
+              "the input one)")
+        failures += 1
+
     return failures
 
 

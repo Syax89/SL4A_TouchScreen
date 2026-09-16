@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### The descriptor request was answered all along — on the other register
+
+The field bundle showed the recovery chain working and the raw handshake still
+failing, with `device_desc=0` and every IRQ carrying a `RESET_RSP`. The Windows
+boot trace (`traces/surface_boot_auto.csv`, decoded with
+`tools/parse_spb_csv.py`) has the answer, and it is four lines long:
+
+```
+#0002  write op=0x02 reg=0x000001  tx=02 00 00 01 42 00 00 03 00 00   ← the DESCREQ
+#0003  read  op=0x0B reg=0x000003  rx=... 72 80 00 5A    v0 type=0x7 body=32B   ← DEVICE_DESC
+#0004  read  op=0x0B reg=0x000003  rx=... 1F 00 00 1C ...                    ← its body
+#0005  write op=0x02 reg=0x000002  tx=02 00 00 02 42 00 00 03 00 00   ← the report-descriptor request
+#0006  read  op=0x0B reg=0x000003  rx=... 82 B0 0E 5A    v0 type=0x8 body=940B  ← RPT_DESC
+#0007  read  op=0x0B reg=0x000003  rx=... AB 03 00 75 08 ...                  ← its body
+```
+
+Windows **writes the request and then reads the answer from register 3** — no
+interrupt in between (the trace's GPIO events sit before and after, not inside
+the exchange). The request frames this driver emits are already byte-identical
+to those (`tx_len=10`, `02 00 00 01 42 00 00 03 00 00`); what differed is where
+the answer was looked for. The driver read **everything** from
+`desc.input_register` (register 0) and waited for the device to push responses
+there. On the field unit register 0 only ever yields `RESET_RSP`, so the
+request was answered into a register nobody read: discovery looped in
+`WAIT_DESC` from boot until the retry budget ran out.
+
+`spi_hid_seq_read_resp()` now reads a response from the output register (3 on
+MSHW0231, the register Windows used) and falls back to the input register — so
+a device, or a build older than this one, that answers on the input register
+keeps working. The descriptor poller does the same at the header level: it
+takes the first register whose read yields a frame header, and it now runs in
+`WAIT_RPT` too, which makes the report descriptor findable with the same
+mechanism. The register that produced each frame is logged at
+`sl4a_debug_level=2`, so the next bundle says which side answered.
+
 ### The raw fallback could never have worked, and now it does
 
 The bundle from the field test showed the recovery chain doing exactly what it

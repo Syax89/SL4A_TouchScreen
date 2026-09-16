@@ -1101,6 +1101,39 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len);
 }
 
+/*
+ * Read a request's response.
+ *
+ * Windows reads it from the output register: in the boot trace it writes the
+ * DESCREQ to the descriptor register and then reads the DEVICE_DESC (type 7)
+ * and its body from register 3 — a plain read, no interrupt in between — and
+ * the report descriptor (type 8) the same way. The device pushes its own
+ * events (RESET_RSP) on the input register, which is where this driver read
+ * everything. On the field unit that register only ever yields RESET_RSP, so
+ * the response was never seen and discovery stayed in WAIT_DESC forever.
+ *
+ * Both registers are tried, response register first: a device (or a build
+ * older than this one) may still answer on the input register, and the caller
+ * only sees the first read that succeeded.
+ */
+static int spi_hid_seq_read_resp(struct spi_hid *shid, u8 *rx, int rx_len)
+{
+	u32 resp_reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+	int ret;
+
+	if (resp_reg != shid->desc.input_register) {
+		ret = spi_hid_seq_read_reg(shid, resp_reg, rx, rx_len);
+		if (!ret) {
+			seq_dbg(shid, 2, "SEQ: response read from register 0x%06x\n",
+				resp_reg);
+			return 0;
+		}
+		seq_dbg(shid, 2, "SEQ: register 0x%06x read failed (%d), trying the input register\n",
+			resp_reg, ret);
+	}
+	return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len);
+}
+
 /* Drain and stage a synchronous HID response received by the active
  * sequencer. The five-byte controller preamble is retained in data_buf. */
 static void spi_hid_seq_handle_sync_response(struct spi_hid *shid, int type,
@@ -1479,27 +1512,41 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
 	u8 hdr[9];
+	u32 resp_reg;
 	int type, hdr_off;
+	int i, got = -1;
 
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
 	    !READ_ONCE(shid->seq_enabled) ||
-	    shid->seq_state != SPI_HID_SEQ_WAIT_DESC)
+	    (shid->seq_state != SPI_HID_SEQ_WAIT_DESC &&
+	     shid->seq_state != SPI_HID_SEQ_WAIT_RPT))
 		goto out;
 
-	seq_dbg(shid, 1, "SEQ: poll-work: reading for DEVICE_DESC...\n");
-	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
-		seq_dbg(shid, 1, "SEQ: poll-work: read failed, retrying...\n");
+	/* Both registers can carry a frame (see spi_hid_seq_read_resp): the one
+	 * a device answers requests on, and the one it pushes its own events on.
+	 * This poller used to read the input register only, so a device that
+	 * answers on the other stayed in discovery forever. Take the first
+	 * register whose read yields a frame header. */
+	resp_reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+	for (i = 0; i < 2 && got < 0; i++) {
+		u32 reg = i == 0 ? resp_reg : shid->desc.input_register;
+
+		if (i == 1 && reg == resp_reg)
+			break;
+		if (spi_hid_seq_read_reg(shid, reg, hdr, sizeof(hdr)))
+			continue;
+		type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
+		if (type >= 0 && hdr_off == 5)
+			got = i;
+	}
+	if (got < 0) {
+		seq_dbg(shid, 2, "SEQ: poll-work: no frame header on either register, retrying...\n");
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 		goto out;
 	}
-	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && hdr_off != 5) {
-		seq_dbg(shid, 1, "SEQ: poll-work: header at unexpected offset %d\n", hdr_off);
-		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
-		goto out;
-	}
-	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 9, hdr);
+	seq_dbg(shid, 2, "SEQ: poll-work: type=%d reg=0x%06x raw=[%*ph]\n", type,
+		got == 0 ? resp_reg : shid->desc.input_register, 9, hdr);
 	if (type == 7) {
 		u16 blen = (((hdr[6] >> 4) & 0xF)) | (hdr[7] << 4);
 
@@ -1512,6 +1559,16 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		 * see it: run the same handler it would have run, otherwise the
 		 * poller drops the very descriptor it exists to recover. */
 		seq_handle_desc(shid, type, blen);
+	} else if (type == 8) {
+		u16 blen = (((hdr[6] >> 4) & 0xF)) | (hdr[7] << 4);
+
+		blen *= 4;
+		if (blen > SZ_8K)
+			blen = SZ_8K;
+		seq_dbg(shid, 1, "SEQ: poll-work: GOT RPT_DESC (blen=%u), handling it here\n",
+			blen);
+		/* Same handler the IRQ thread would have run for this state. */
+		seq_handle_rpt(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
 		seq_dbg(shid, 1, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
@@ -2390,7 +2447,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 
 		shid->stat_device_desc++;
 		seq_dbg(shid, 1, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
-		if (rblen < 3 || spi_hid_seq_read(shid, body, rblen)) {
+		if (rblen < 3 || spi_hid_seq_read_resp(shid, body, rblen)) {
 			dev_warn(&shid->spi->dev, "SEQ: DEVICE_DESC read failed or was truncated\n");
 			return;
 		}
@@ -2465,7 +2522,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 
 		shid->stat_rpt_desc++;
 		seq_dbg(shid, 1, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
-		if (rblen < 3 || spi_hid_seq_read(shid, body, rblen)) {
+		if (rblen < 3 || spi_hid_seq_read_resp(shid, body, rblen)) {
 			dev_warn(&shid->spi->dev, "SEQ: RPT_DESC read failed or was truncated\n");
 			return;
 		}
