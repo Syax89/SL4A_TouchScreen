@@ -91,6 +91,11 @@ def check_control_flow_pins():
               "the raw watchdog for WAIT_DESC/WAIT_RPT (pre-DONE stall is silent "
               "and permanent again)")
         failures += 1
+    elif "SPI_HID_SEQ_WAIT_RESET ||" not in body:
+        print("FAIL driver/spi-hid-core.c: the raw watchdog no longer covers "
+              "WAIT_RESET at cold probe (a controller that never sends a "
+              "RESET_RSP has no timer at all)")
+        failures += 1
     elif body.index("raw_handshake_watchdog") > body.index("if (old_state == new_state)"):
         print("FAIL driver/spi-hid-core.c: the pre-DONE watchdog arm sits after "
               "the unchanged-state return, so a re-entered WAIT_DESC never arms it")

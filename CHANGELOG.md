@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Recovery coverage, finished for raw mode, mapped for everything else
+
+A recovery-matrix review (every timer × state × profile × knob, read back out of
+the code) closed the last raw-mode gap and documented the rest:
+
+- the raw watchdog now also covers `WAIT_RESET` at cold probe, so a controller
+  that never sends a `RESET_RSP` at all is no longer the one silent case in raw
+  mode (the resume path already armed it);
+- the intended extra settling delay in the watchdog's own recovery path was
+  dead code: `schedule_delayed_work()` on an already-pending item is a no-op, so
+  the `getfeat_delay_ms + 1000 ms` re-arm silently became nothing. It uses
+  `mod_delayed_work()` now, which is what the comment always said;
+- `docs/RECOVERY-MATRIX.md` is the map: which timer covers which state, in which
+  profile, what it logs at level 0 — and the eight (state × profile × knob)
+  combinations that end in a stall with nothing watching, five of them in
+  standard mode, where the shipped defaults (`wait_reset_kick_ms=0`,
+  `std_liveness_ms=0`) leave every silent state uncovered. It also lists the
+  exact lines a raw-mode bundle should show when the device stalls, so the next
+  report can be checked against it without raising the debug level.
+
+Standard-mode recovery is deliberately *not* changed here: that profile is the
+one that works on the field machine, and widening its timers is a behaviour
+change to make against hardware, not blind.
+
 ### Resume, counters and a diagnostic that no longer lies about the frame
 
 The same review campaign's second batch, on the same rule (every finding

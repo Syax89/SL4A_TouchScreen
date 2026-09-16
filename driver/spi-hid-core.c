@@ -183,20 +183,24 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 	if (new_state == SPI_HID_SEQ_WAIT_RESET)
 		spi_hid_arm_wait_reset_watchdog(shid);
 
-	/* Raw mode, one state later: a device that never answers the DESCREQ —
-	 * or answers every IRQ with RESET_RSP, as the field unit does — parks in
-	 * WAIT_DESC where nothing else is armed. descreq_work only re-reads the
-	 * input register (the IRQ thread drains each frame first), and the raw
-	 * watchdog used to be armed at DONE only, so the stall was silent and
-	 * permanent at every debug level. WAIT_RPT is the same shape: device
-	 * descriptor received, report descriptor never. Armed before the
-	 * unchanged-state early return because the RESET_RSP loop re-enters
-	 * WAIT_DESC with the state unchanged; schedule_delayed_work() is a no-op
-	 * on an already-pending work item, so the timeout starts on first entry.
-	 * The watchdog's own WAIT_FEATURE defer keeps a slow-but-live handshake
-	 * from being interrupted. */
+	/* Raw mode, every pre-DONE state: a device that never answers the
+	 * DESCREQ — or answers every IRQ with RESET_RSP, as the field unit does —
+	 * parks in WAIT_DESC where nothing else is armed. descreq_work only
+	 * re-reads the input register (the IRQ thread drains each frame first),
+	 * and the raw watchdog used to be armed at DONE only, so the stall was
+	 * silent and permanent at every debug level. WAIT_RPT has the same shape
+	 * (device descriptor received, report descriptor never), and WAIT_RESET
+	 * at cold probe is the last one (a controller that never sends a
+	 * RESET_RSP at all — the resume path arms this separately because it
+	 * assigns the state directly). Armed before the unchanged-state early
+	 * return because the RESET_RSP loop re-enters WAIT_DESC with the state
+	 * unchanged; schedule_delayed_work() is a no-op on an already-pending
+	 * work item, so the timeout starts on first entry. The watchdog's own
+	 * WAIT_FEATURE defer keeps a slow-but-live handshake from being
+	 * interrupted. */
 	if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
-	    (new_state == SPI_HID_SEQ_WAIT_DESC || new_state == SPI_HID_SEQ_WAIT_RPT))
+	    (new_state == SPI_HID_SEQ_WAIT_RESET ||
+	     new_state == SPI_HID_SEQ_WAIT_DESC || new_state == SPI_HID_SEQ_WAIT_RPT))
 		schedule_delayed_work(&shid->raw_handshake_watchdog,
 				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 
@@ -1254,8 +1258,12 @@ static void raw_handshake_restart_discovery(struct spi_hid *shid)
 		return;
 	}
 	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_DESC, SPI_HID_SEQ_WATCHDOG);
-	schedule_delayed_work(&shid->raw_handshake_watchdog,
-			      msecs_to_jiffies(getfeat_delay_ms + RAW_HANDSHAKE_TIMEOUT_MS + 1000));
+	/* mod_, not schedule_: entering WAIT_DESC already armed the same work at
+	 * RAW_HANDSHAKE_TIMEOUT_MS, and schedule_delayed_work() on a pending
+	 * item is a no-op — which silently turned the intended extra
+	 * getfeat_delay_ms + 1000 ms of settling time into nothing. */
+	mod_delayed_work(system_wq, &shid->raw_handshake_watchdog,
+			 msecs_to_jiffies(getfeat_delay_ms + RAW_HANDSHAKE_TIMEOUT_MS + 1000));
 }
 
 /* Cold-boot retry continuation: fires RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS
