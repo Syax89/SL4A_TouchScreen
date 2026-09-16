@@ -1553,8 +1553,8 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		blen *= 4;
 		if (blen > SZ_8K)
 			blen = SZ_8K;
-		seq_dbg(shid, 1, "SEQ: poll-work: GOT DEVICE_DESC (blen=%u), handling it here\n",
-			blen);
+		dev_info(&shid->spi->dev, "SEQ: poll-work: GOT DEVICE_DESC (blen=%u), handling it here\n",
+			 blen);
 		/* The IRQ edge for this frame was lost, so the IRQ thread will never
 		 * see it: run the same handler it would have run, otherwise the
 		 * poller drops the very descriptor it exists to recover. */
@@ -1565,8 +1565,8 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		blen *= 4;
 		if (blen > SZ_8K)
 			blen = SZ_8K;
-		seq_dbg(shid, 1, "SEQ: poll-work: GOT RPT_DESC (blen=%u), handling it here\n",
-			blen);
+		dev_info(&shid->spi->dev, "SEQ: poll-work: GOT RPT_DESC (blen=%u), handling it here\n",
+			 blen);
 		/* Same handler the IRQ thread would have run for this state. */
 		seq_handle_rpt(shid, type, blen);
 	} else if (type == 3) {
@@ -2446,7 +2446,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_device_desc++;
-		seq_dbg(shid, 1, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
+		dev_info(&shid->spi->dev, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
 		if (rblen < 3 || spi_hid_seq_read_resp(shid, body, rblen)) {
 			dev_warn(&shid->spi->dev, "SEQ: DEVICE_DESC read failed or was truncated\n");
 			return;
@@ -2521,7 +2521,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		u32 rblen = min_t(u32, blen + 5, sizeof(body));
 
 		shid->stat_rpt_desc++;
-		seq_dbg(shid, 1, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
+		dev_info(&shid->spi->dev, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
 		if (rblen < 3 || spi_hid_seq_read_resp(shid, body, rblen)) {
 			dev_warn(&shid->spi->dev, "SEQ: RPT_DESC read failed or was truncated\n");
 			return;
