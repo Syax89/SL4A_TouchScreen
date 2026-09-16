@@ -169,6 +169,25 @@ def check_control_flow_pins():
         print("FAIL driver/spi-hid-wire-frames.h: spi_hid_wire_read_approval() is gone")
         failures += 1
 
+    # 7. the raw stream enable, and the content id rule.
+    # The reference enables the stream with one SET_FEATURE (#0531) — content id
+    # 0x56 on register 0x0A, payload BD 0C EE 5B 44 4C 00 — and names a content
+    # id only when it reads a body. Without the enable the device never streams;
+    # with the id on a header read the frame differs from the reference.
+    for needle, why in (
+        ("SPI_HID_CONTENT_TYPE_SET_FEATURE", "the stream enable no longer sends SET_FEATURE"),
+        ("SPI_HID_RAW_STREAM_CONTENT_ID", "the stream enable no longer names content id 0x56"),
+        ("0xBD, 0x0C, 0xEE, 0x5B", "the stream enable payload is no longer the reference's"),
+        ("SPI_HID_RAW_STREAM_REGISTER 0x0A", "the stream register is no longer 0x0A"),
+    ):
+        if needle not in core:
+            print(f"FAIL driver/spi-hid-core.c: {why} (trace #0531 / #0004-#0873)")
+            failures += 1
+    if "rx_len > SPI_HID_READ_APPROVAL_LEN ?" not in read_reg:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_reg() names a content id "
+              "on nine-byte reads again — the reference names it only on bodies")
+        failures += 1
+
     return failures
 
 

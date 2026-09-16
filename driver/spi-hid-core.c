@@ -1030,6 +1030,48 @@ static void spi_hid_create_device_work(struct work_struct *work)
 	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
 }
 
+/*
+ * Enable the raw stream.
+ *
+ * The reference sends this SET_FEATURE after the handshake and before it starts
+ * reading the stream — boot trace #0531, byte for byte:
+ *
+ *	02 00 00 03 C2 | 00 03 0A 00 56 BD 0C EE 5B 44 4C 00 00
+ *	                 |  pad  |  |  |  \_____ payload (7) ____/
+ *	                 |  SET_FEATURE
+ *	                 |     |  content id 0x56
+ *	                 |     register to stream from (0x0A)
+ *	                 total content length (10 = 7 + 3)
+ *
+ * Without it the device does not stream and every read of that register has
+ * nothing to answer with, however well formed the read is.
+ */
+static const u8 spi_hid_raw_enable_payload[] = {
+	0xBD, 0x0C, 0xEE, 0x5B, 0x44, 0x4C, 0x00,
+};
+
+#define SPI_HID_RAW_STREAM_REGISTER 0x0A
+#define SPI_HID_RAW_STREAM_CONTENT_ID 0x56
+
+static int spi_hid_raw_enable_stream(struct spi_hid *shid)
+{
+	struct spi_hid_output_report report = {
+		.content_type = SPI_HID_CONTENT_TYPE_SET_FEATURE,
+		.content_length = sizeof(spi_hid_raw_enable_payload),
+		.content_id = SPI_HID_RAW_STREAM_CONTENT_ID,
+		.content = (u8 *)spi_hid_raw_enable_payload,
+	};
+
+	if (!shid->raw_mode_active)
+		return 0;
+
+	dev_info(&shid->spi->dev,
+		 "SEQ: enabling the raw stream (SET_FEATURE 0x%02x on register 0x%02x)\n",
+		 SPI_HID_RAW_STREAM_CONTENT_ID, SPI_HID_RAW_STREAM_REGISTER);
+
+	return spi_hid_send_output_report(shid, shid->desc.output_register, &report);
+}
+
 static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
 {
 	struct spi_hid_output_report report = {
@@ -1094,8 +1136,11 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 		return -ENOMEM;
 	}
 
+	/* The reference names the content id only when it reads a body; a
+	 * nine-byte read (a header) carries none, whatever request it answers. */
 	n = spi_hid_wire_read_approval(tx, reg, shid->read_resp_type,
-				       shid->read_resp_content_id);
+				       rx_len > SPI_HID_READ_APPROVAL_LEN ?
+				       shid->read_resp_content_id : 0);
 	tx_len = (u32)rx_len < n ? n : (u32)rx_len;
 	tx_len = min(tx_len, shid->read_tx_len);
 
@@ -3676,6 +3721,17 @@ static int spi_hid_probe(struct spi_device *spi)
 	ret = mshw0231_raw_input_register(shid);
 	if (ret)
 		goto err1_touch;
+
+	/* The stream register is not in the device descriptor — the 32 bytes of
+	 * the real one (boot trace #0004) do not contain it — while the trace
+	 * reads every stream frame from 0x0A. The raw path is this device's, so
+	 * it sets it here; if the descriptor said something else, say so: that
+	 * difference is worth seeing in a bundle. */
+	if (shid->desc.input_register && shid->desc.input_register != SPI_HID_RAW_STREAM_REGISTER)
+		dev_info(dev, "SEQ: stream register 0x%06x in the descriptor, 0x%02x in the reference\n",
+			 shid->desc.input_register, SPI_HID_RAW_STREAM_REGISTER);
+	shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;
+	spi_hid_raw_enable_stream(shid);
 
 	mshw0231_raw_init(shid);
 	mshw0231_raw_reset(shid);

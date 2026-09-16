@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### The stream was never switched on
+
+With the read frame correct and the responses readable, the traces showed one
+write that this driver has never sent: the SET_FEATURE that enables the raw
+stream.
+
+```
+#0531  02 00 00 03 C2 | 00 03 0A 00 56 BD 0C EE 5B 44 4C 00 00
+```
+
+That is `send_output_report(register 3, content type SET_FEATURE, content id
+0x56, payload BD 0C EE 5B 44 4C 00)` — a frame this driver's own encoder
+produces byte for byte — sent *before* the stream is read. Without it the
+device does not stream, so every read of the stream register has nothing to
+answer with, however well formed the read is.
+
+The stream register itself is **0x0A** and it is not in the device descriptor:
+the 32 real bytes (trace #0004) do not contain it, and the trace reads every
+stream frame from 0x0A (4309 bytes = 5 + 4304, content id 0x56, after a
+nine-byte header read that says `type 0x1 body 4304`). The raw probe sets it,
+and logs it when the descriptor disagrees — a difference worth seeing in a
+bundle.
+
+Two smaller corrections from the same traces: the content id is named only when
+the host reads a **body** (nine-byte header reads carry none), and the enable
+resets/records the pair like every other request, so the stream reads that
+follow ask for the request they belong to.
+
 ### The read approval now names the request it reads the response of
 
 With the register at the right offset, the rest of the frame became visible in
