@@ -321,8 +321,11 @@ static int spi_hid_set_power(struct spi_hid *shid, u8 power_mode)
 	};
 	int ret;
 
-	if (shid->desc.command_register == 0)
+	if (shid->desc.command_register == 0) {
+		dev_warn(&shid->spi->dev, "spi-hid: power state %u not sent: the descriptor has no command register\n",
+			 power_mode);
 		return 0;
+	}
 
 	raw_buf[1] = (shid->desc.command_register >> 16) & 0xff;
 	raw_buf[2] = (shid->desc.command_register >> 8) & 0xff;
@@ -1050,11 +1053,14 @@ static void spi_hid_use_hardcoded_desc(struct spi_hid *shid)
 	 * buffer's own size). */
 	shid->desc.max_input_length = 0x2000;
 	shid->desc.output_register = 0x0003;
-	shid->desc.max_output_length = 0x0100;
+	/* 0x0200 is what the device's own descriptor declares; the fallback
+	 * used to say 0x0100, a value the wire never carries. */
+	shid->desc.max_output_length = 0x0200;
 	shid->desc.command_register = 0x0004;
 	shid->desc.vendor_id = 0x045E;
 	shid->desc.product_id = 0x0C19;
-	shid->desc.version_id = 0x0100;
+	/* 0x0004 is the wire value (the field is only logged, never gated). */
+	shid->desc.version_id = 0x0004;
 }
 
 static void spi_hid_create_device_work(struct work_struct *work)
@@ -2792,8 +2798,13 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 			u32 off = 0;
 			u32 required = sizeof(raw);
 
-			while (off + 3 < rblen && body[off] == 0xFF)
-				off++;
+			off = (u32)spi_hid_protocol_body_offset(body, (int)rblen);
+			/* The offset is logged at the default level on purpose: whether a
+			 * body arrives with this panel's prefix is exactly what the field
+			 * has never shown, and a line the field has to reveal cannot sit
+			 * behind a debug knob. */
+			dev_info(&shid->spi->dev, "SEQ: DEVICE_DESC parse offset %u (first bytes %02x %02x %02x)\n",
+				 off, body[0], rblen > 1 ? body[1] : 0, rblen > 2 ? body[2] : 0);
 			/* Reserved bytes are not consumed by spi_hid_parse_dev_desc().
 			 * Some V0 replies end immediately after wFlags. */
 			if (off + 3 + required > rblen) {
@@ -2897,8 +2908,11 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			if (off < rblen && len > 0 && off + len <= rblen) {
 				memcpy(shid->wire_report_descriptor, body + off, len);
 				shid->wire_report_descriptor_len = len;
+				shid->stat_wire_patches++;
 				dev_info(&shid->spi->dev, "SEQ: report descriptor %u bytes read from wire\n", len);
 			} else {
+				dev_warn(&shid->spi->dev, "SEQ: report descriptor copy did not fit (off %u len %u rblen %u), using the hardcoded copy\n",
+					 off, len, rblen);
 				shid->wire_report_descriptor_len = 0;
 			}
 		}

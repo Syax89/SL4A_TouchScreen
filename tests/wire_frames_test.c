@@ -399,6 +399,27 @@ static void test_driver_uses_header(void)
 	free(core);
 }
 
+static void test_body_offset(void)
+{
+	/* Body offset: the reference's FF preamble and this panel's 3-byte prefix
+	 * must both land on the structure. Same eight bytes, two shapes — and a
+	 * body with neither shape must not land there. */
+	static const unsigned char ref_body[12] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x01 };
+	static const unsigned char panel_body[15] = {
+		0x01, 0x03, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 0x00, 0x1c,
+		0x00, 0x00, 0x01 };
+	static const unsigned char junk[12] = {
+		0x55, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+	CHECK(spi_hid_protocol_body_offset(ref_body, sizeof(ref_body)) == 8,
+	      "the reference body parses after its five-byte preamble");
+	CHECK(spi_hid_protocol_body_offset(panel_body, sizeof(panel_body)) == 11,
+	      "the panel's prefixed body parses past prefix + preamble + content header");
+	CHECK(spi_hid_protocol_body_offset(junk, sizeof(junk)) != 8,
+	      "a body with neither shape does not land on the structure");
+}
+
 static void test_read_approval_frame(void)
 {
 	/* The read approval: nine bytes, register at offset 7, address field
@@ -577,6 +598,7 @@ int main(void)
 	test_f32_formatting();
 	test_driver_uses_header();
 	test_read_approval_frame();
+	test_body_offset();
 
 	fprintf(stderr, "wire_frames_test: %u assertions, %u failures\n",
 		g_passed, g_failed);

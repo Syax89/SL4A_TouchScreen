@@ -83,6 +83,24 @@ static inline void spi_hid_protocol_decode_header(const spi_hid_proto_u8 raw[4],
 	header->sync_const = raw[3];
 }
 
+/* Where the device-descriptor structure starts in a body read. The reference's
+ * bodies begin with a five-byte FF preamble; this panel prefixes every answer
+ * with three bytes (01 <status> EE), and no body read from it has been seen
+ * yet — so BOTH shapes are accepted, and the offset is returned rather than
+ * assumed. A prefixed body used to parse at byte 3, land on the preamble, and
+ * fail validation: the caller never left discovery and nothing said why. */
+static inline int spi_hid_protocol_body_offset(const spi_hid_proto_u8 *body,
+					       int len)
+{
+	int off = 0;
+
+	if (len >= 3 && body[0] == 0x01 && body[2] == 0xEE)
+		off = 3;
+	while (off + 3 < len && body[off] == 0xFF)
+		off++;
+	return off + 3;
+}
+
 static inline int spi_hid_protocol_encode_output_header(spi_hid_proto_u8 raw[6],
 		unsigned int output_register, spi_hid_proto_u16 output_length)
 {

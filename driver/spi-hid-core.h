@@ -367,7 +367,7 @@ struct spi_hid {
 	u32 stat_frames_dropped;
 	u32 stat_irq_count;
 	u32 stat_irq_edges;                       /* Hard-IRQ edges seen (top half) */
-	u32 stat_wire_patches; /* descriptor bytes patched (0 = 100% wire-read) */
+	u32 stat_wire_patches; /* descriptors taken from the wire; 0 while the hardcoded copy is in use */
 	ktime_t seq_dbg_last_irq;
 	enum spi_hid_seq_state seq_dbg_last_state;
 	bool seq_dbg_expect_fast;
