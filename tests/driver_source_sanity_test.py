@@ -235,6 +235,31 @@ def check_control_flow_pins():
               "spi_hid_protocol_frame_type() — the frame typing the driver runs is no "
               "longer the one the host test exercises with real buffers")
         failures += 1
+    # Duplicate definitions. Slice arithmetic of mine once duplicated 850 lines
+    # of spi-hid-core.c; the host suite never compiles that translation unit, so
+    # local runs stayed green and only the kernel build caught it. The rule is
+    # one line and would have caught it in a second: every function is defined
+    # exactly once, and prototypes (lines ending in ';') do not count.
+    import re as _re
+
+    _lines = core_code.splitlines()
+    defs = {}
+    for _i, _line in enumerate(_lines, 1):
+        _m = _re.match(r"\s*static\s+[A-Za-z_][\w ]*?(\w+)\s*\(", _line)
+        # A DEFINITION is a matching line whose next line opens the body. This is
+        # stricter than "does not end in ';'" on purpose: a prototype split over
+        # two lines (spi_hid_seq_set_state) ends with a comma, not a semicolon,
+        # and counting it was the false positive in this check's first draft.
+        if (_m and _i < len(_lines)
+                and _lines[_i].strip() == "{"):
+            defs.setdefault(_m.group(1), []).append(_i)
+    _dups = {k: v for k, v in defs.items() if len(v) > 1}
+    if _dups:
+        print(f"FAIL driver/spi-hid-core.c: functions defined more than once "
+              f"{dict(list(_dups.items())[:4])} — the file was assembled by concatenation, "
+              f"not edited")
+        failures += 1
+
     # 6b. The reset path, as the reference's own trace shows it: a nine-byte
     # read of register 0 answers with 32 10 00 5A (RESET_RSP), the next read
     # drains it (03 00 00 00), and the DESCREQ follows ~156 us later. No wait,

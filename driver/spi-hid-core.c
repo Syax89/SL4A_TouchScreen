@@ -2595,11 +2595,10 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 			return;
 		seq_dbg(shid, 3, "SEQ[WAIT_RESET]: RESET_RSP body-drain=[%*ph], sending DESCREQ\n",
 			 20, body);
-		/* Reference-shaped reaction, scheduled: the device reset and the
-		 * 2000 ms wait belong off this thread — a verifier measured the inline
-		 * version at ~2.25 s under seq_lock with the IRQ masked, against a
-		 * device that resets every ~208 ms. The work sends the DESCREQ when
-		 * the wait is over. */
+		/* Immediate, because the reference is immediate: its reset is answered
+		 * by the drain above and the DESCREQ follows ~156 us later. The 2000 ms
+		 * this code once waited is Windows' TIMEOUT, not a delay — and a wait
+		 * here would be the livelock this campaign measured once already. */
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: RESET_RSP drained, DESCREQ sent (the reference: ~156 us later, no wait)\n");
@@ -2694,11 +2693,10 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_DESC, sending DESCREQ directly\n");
-		/* Reference-shaped reaction, scheduled: the device reset and the
-		 * 2000 ms wait belong off this thread — a verifier measured the inline
-		 * version at ~2.25 s under seq_lock with the IRQ masked, against a
-		 * device that resets every ~208 ms. The work sends the DESCREQ when
-		 * the wait is over. */
+		/* Immediate, because the reference is immediate: its reset is answered
+		 * by the drain above and the DESCREQ follows ~156 us later. The 2000 ms
+		 * this code once waited is Windows' TIMEOUT, not a delay — and a wait
+		 * here would be the livelock this campaign measured once already. */
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP drained, DESCREQ sent synchronously\n");
@@ -2842,11 +2840,10 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_RPT, sending DESCREQ directly\n");
-		/* Reference-shaped reaction, scheduled: the device reset and the
-		 * 2000 ms wait belong off this thread — a verifier measured the inline
-		 * version at ~2.25 s under seq_lock with the IRQ masked, against a
-		 * device that resets every ~208 ms. The work sends the DESCREQ when
-		 * the wait is over. */
+		/* Immediate, because the reference is immediate: its reset is answered
+		 * by the drain above and the DESCREQ follows ~156 us later. The 2000 ms
+		 * this code once waited is Windows' TIMEOUT, not a delay — and a wait
+		 * here would be the livelock this campaign measured once already. */
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 	}
@@ -2889,11 +2886,10 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_FEATURE, sending DESCREQ directly\n");
-		/* Reference-shaped reaction, scheduled: the device reset and the
-		 * 2000 ms wait belong off this thread — a verifier measured the inline
-		 * version at ~2.25 s under seq_lock with the IRQ masked, against a
-		 * device that resets every ~208 ms. The work sends the DESCREQ when
-		 * the wait is over. */
+		/* Immediate, because the reference is immediate: its reset is answered
+		 * by the drain above and the DESCREQ follows ~156 us later. The 2000 ms
+		 * this code once waited is Windows' TIMEOUT, not a delay — and a wait
+		 * here would be the livelock this campaign measured once already. */
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 	}
@@ -2941,9 +2937,9 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		shid->stat_reset_rsp++;
 		if (spi_hid_seq_read(shid, body, sizeof(body)))
 			return;
-		/* Through the same gate as the other reset sites: a leg found this
-		 * arm answering at full speed while the IRQ path was rate-limited,
-		 * i.e. exactly where a storm hits hardest. */
+		/* The same recovery as the other four reset sites: the drain above,
+		 * then the DESCREQ immediately. No gate, no wait — the reference
+		 * answers a reset this way from every state it can happen in. */
 		seq_dbg(shid, 1, "SEQ: Device reset detected in DONE. Re-initializing sequencer...\n");
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_DEVICE_RESET);
 		return;
@@ -3666,9 +3662,9 @@ static int spi_hid_probe(struct spi_device *spi)
 		self_ok = self_ok &&
 			  spi_hid_seq_hdr_type(self_drain, sizeof(self_drain), NULL) == -1;
 		if (self_ok)
-			dev_info(dev, "self-check: frame typing ok (idle frame rejected, sync-less reset recognised at offset 5)\n");
+			dev_info(dev, "self-check: frame typing ok (the reference's RESET_RSP 32 10 00 5a types as 3 at offset 5; the drain 03 00 00 00 is not a frame)\n");
 		else
-			dev_err(dev, "self-check: FRAME TYPING BROKEN — the idle frame or the sync-less reset is misread; resets will not be recognised and discovery will stall\n");
+			dev_err(dev, "self-check: FRAME TYPING BROKEN — the reset 32 10 00 5a is not typed as 3, or the drain 03 00 00 00 is treated as a frame; resets will be misread and discovery will stall\n");
 	}
 	/* The DESCREQ that starts discovery is built from the compile-time
 	 * constant, so a device whose _DSM names another register can never
