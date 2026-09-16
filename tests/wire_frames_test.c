@@ -95,6 +95,10 @@ static const uint8_t old_vendor_init[] = {
 	0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00, 0x03, 0x0A, 0x00,
 	0x56, 0xBD, 0x0C, 0xEE, 0x5B, 0x44, 0x4C, 0x00, 0x00
 };
+static const uint8_t old_vendor_stop[] = {
+	0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00, 0x03, 0x0A, 0x00,
+	0x56, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00
+};
 static const uint8_t old_set_feature5[] = {
 	0x02, 0x02, 0x00, 0x00, 0x03, 0x82, 0x00, 0x03,
 	0x04, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00
@@ -186,6 +190,10 @@ static void test_doubled_frames_unchanged(void)
 		    old_setpower_d0, sizeof(old_setpower_d0));
 	check_frame("legacy SET_FEATURE 0x56", spi_hid_wire_vendor_init(1),
 		    old_vendor_init, sizeof(old_vendor_init));
+	/* The stop is the enable with an all-FF payload: nothing else separates
+	 * them, so nothing else can be allowed to drift. */
+	check_frame("legacy SET_FEATURE 0x56 STOP", spi_hid_wire_vendor_stop(1),
+		    old_vendor_stop, sizeof(old_vendor_stop));
 	check_frame("legacy SET_FEATURE 5", spi_hid_wire_set_feature5(1),
 		    old_set_feature5, sizeof(old_set_feature5));
 	check_frame("legacy GET_FEATURE 6", spi_hid_wire_get_feature6(1),
@@ -432,6 +440,24 @@ static void test_read_approval_frame(void)
 	CHECK(n == 10, "a read approval that names a request is ten bytes");
 	CHECK(!memcmp(buf, want_stream, sizeof(want_stream)),
 	      "stream read approval is 0B 00 00 00 FF 00 03 0A 00 56");
+
+	/* All three variants, through the function the driver actually calls.
+	 * The wrapper above builds variant 0 only, so every pin on it stayed
+	 * green while the LEGACY branch — the one the default once selected —
+	 * had no coverage at all. */
+	memset(buf, 0xAA, sizeof(buf));
+	n = spi_hid_wire_read_approval_variant(buf, 0x0003, 0x00, 0x00, 0);
+	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "variant 0 is nine bytes");
+	CHECK(!memcmp(buf, want3, sizeof(want3)), "variant 0 is the reference frame");
+	memset(buf, 0xAA, sizeof(buf));
+	n = spi_hid_wire_read_approval_variant(buf, 0x0003, 0x00, 0x00, 1);
+	CHECK(n == 5, "variant 1 (legacy) is five bytes");
+	CHECK(buf[0] == 0x0B && buf[1] == 0x00 && buf[2] == 0x00 && buf[3] == 0x03 &&
+	      buf[4] == 0xFF, "variant 1 carries the register in the address field");
+	memset(buf, 0xAA, sizeof(buf));
+	n = spi_hid_wire_read_approval_variant(buf, 0x0003, 0x00, 0x00, 2);
+	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "variant 2 is nine bytes");
+	CHECK(buf[3] == 0x03, "variant 2 carries the register in both places");
 }
 
 int main(void)

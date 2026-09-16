@@ -442,10 +442,15 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 			 * The request bytes are known, so whichever region still holds
 			 * them is the wrong one, and a region holding a frame header the
 			 * request never contained is where the device wrote. */
-			pr_info("spi-amd: TRACE peek tx_len=%u 0x80=[%*ph] 0x84=[%*ph] 0x89=[%*ph]\n",
+			/* The third label is computed, not hardcoded: it is
+			 * 0x80 + tx_len + 1, which equals 0x89 only for an
+			 * eight-byte request. A hardcoded label lied about the
+			 * address for every other length. */
+			pr_info("spi-amd: TRACE peek tx_len=%u 0x%02x=[%*ph] 0x84=[%*ph] 0x%02x=[%*ph]\n",
 				tx_len,
-				16, base + fifo_pos,
+				0x80u + (unsigned int)tx_len, 16, base + fifo_pos,
 				16, base + fifo_pos + 4,
+				0x80u + (unsigned int)tx_len + 1u,
 				16, base + fifo_pos + tx_len + 1);
 		}
 		u8 scratch[80];

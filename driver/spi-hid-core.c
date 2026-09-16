@@ -1137,10 +1137,24 @@ static int spi_hid_set_request(struct spi_hid *shid,
  * one the hardware accepted. */
 /* Default LEGACY: the only shape the device answers. Measured on the panel
  * (frame sweep 2026-09-16): variant 0 (reference, register at offset 7) is
- * silent, variant 2 is silent, variant 1 (register in bytes 1-3) gets
- * answers — reset_rsp=47, stream frames on register 0x0A. The trace-derived
- * shape was wrong about the read request, and only the device could say so. */
-static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;
+ * showed variant 0 silent, variant 2 silent, variant 1 (register in bytes
+ * 1-3) answered with reset_rsp=47 and stream frames on register 0x0A. That
+ * measured the DEVICE'S STATE, not the correct frame: the device was still
+ * streaming from an earlier enable, and a device that is answered but not
+ * addressed hands over its default content.
+ *
+ * The five-byte form cannot carry a content type (offset 6) or a content id
+ * (offset 9), so a descriptor read and a feature read go out byte-identical
+ * (`0B 00 00 03 FF`) and the device cannot tell them apart — found
+ * independently by two review legs, and it is exactly what the header comment
+ * on the builder says: a five-byte frame "is a request for register 0 —
+ * answered with RESET_RSP, never with the descriptor".
+ *
+ * So the default is the reference's nine-byte frame, the one whose bytes are
+ * in the capture. The stop frame above removes the stream state that made the
+ * crude form look necessary. `hunt` still tries all three variants on the
+ * hardware in one run, so the field remains the arbiter. */
+static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;
 
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {
