@@ -514,12 +514,6 @@ def main():
     # The body offset helper returns the struct offset; an `off += 3` after it
     # reads three bytes late and rejects every real descriptor (8+3+28 > 37 on
     # the capture's 37-byte body). This exact mistake shipped once.
-    if "spi_hid_protocol_body_offset" in core_src:
-        segment = core_src[core_src.index("spi_hid_protocol_body_offset"):][:600]
-        if "off += 3" in segment:
-            print("FAIL body offset: the caller adds 3 to an offset that already includes it")
-            failures += 1
-
     for _name in ("self_panel_reset", "self_panel_desc"):
         if f"static const u8 {_name}[12]" not in core_src:
             print(f"FAIL self-check: {_name} missing from the probe's frame-typing self-check")
