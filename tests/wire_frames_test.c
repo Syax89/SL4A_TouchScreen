@@ -460,6 +460,18 @@ static void test_read_approval_frame(void)
 	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "variant 2 is nine bytes");
 	CHECK(buf[3] == 0x03, "variant 2 carries the register in both places");
 
+	/* The frame the reference sends FIRST, at boot, before it asks for
+	 * anything: its own read of REGISTER 0, `0B 00 00 00 FF 00 00 00 00` in
+	 * tools/parse_spi.py's output (surface_boot_auto.csv). The device answers
+	 * it with the reset frame, and the whole campaign's read-register
+	 * confusion ends in this assertion — it was the one frame with no test. */
+	memset(buf, 0xAA, sizeof(buf));
+	n = spi_hid_wire_read_approval_variant(buf, 0x0000, 0x00, 0x00, 0);
+	CHECK(n == 9 && buf[0] == 0x0B && buf[1] == 0x00 && buf[2] == 0x00 &&
+	      buf[3] == 0x00 && buf[4] == 0xFF && buf[5] == 0x00 && buf[6] == 0x00 &&
+	      buf[7] == 0x00 && buf[8] == 0x00,
+	      "register 0 in the reference shape is the reference's own first read");
+
 	/* The frame typing itself, called with the buffers the field produced.
 	 * These assertions are the reason the logic moved into the protocol
 	 * header: five pins on this repository were demonstrated decorative by
