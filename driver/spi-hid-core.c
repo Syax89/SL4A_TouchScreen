@@ -1571,7 +1571,8 @@ out:
  *   byte[0]      content_id (0x0C)
  *   byte[1..2]   SurfaceSwitch (16-bit timestamp)
  *   byte[3..25]  frame metadata (23 bytes)
- *   byte[26..]   capacitive node magnitudes (288 columns, row-major, 1 byte each)
+ *   byte[26..]   capacitive node magnitudes (72 columns x 48 rows, row-major,
+ *                1 byte each, 72-byte row stride)
  * Each byte is an index into the c590 signal lookup table.
  * Row count is auto-detected from the payload size. */
 #define HEATMAP_DFT_META_LEN  23
