@@ -119,6 +119,10 @@ assert "cannot load it (ExecStart points at" in tool, \
 assert "is NOT the build just installed" in tool
 assert 'sudo modprobe -r sl4a-spi-hid sl4a-spi-amd && sudo ./tools/sl4a-touch.sh activate' in tool
 assert '"/sys/module/$mod/srcversion"' in tool
+assert "Unloading the previous build and loading the new one" in tool and \
+    "modprobe -r sl4a_spi_hid sl4a_spi_amd" in tool, \
+    "install detected a running build that is not the installed one but only " \
+    "described the reload instead of doing it"
 
 # `logs -o -x`: the path reaches head/grep/chmod as well as the redirect, and a
 # dash-leading one is read as an option (bundle written, completion check

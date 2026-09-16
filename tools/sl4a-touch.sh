@@ -807,9 +807,32 @@ EOF
 				echo "  A loaded module is not replaced by modprobe: the previous build"
 				echo "  stays in memory, bound to the touchscreen, until it is unloaded"
 				echo "  or the machine reboots."
-				echo "  To load the new build now:"
-				echo "    sudo modprobe -r sl4a-spi-hid sl4a-spi-amd && sudo ./tools/sl4a-touch.sh activate"
-				echo "  or simply reboot — the boot unit loads the new build automatically."
+				# Act on it instead of describing it: the panel is dead while
+				# the old build is bound to it, and unloading is the step the
+				# user would otherwise do by hand. An unload that fails is not
+				# fatal — a client can hold the device — so the reboot remains
+				# the advertised way out.
+				info "Unloading the previous build and loading the new one..."
+				if modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null; then
+					cmd_activate
+					stale=""
+					for mod in sl4a_spi_amd sl4a_spi_hid; do
+						loaded_src="$(cat "/sys/module/$mod/srcversion" 2>/dev/null || true)"
+						installed_src="$(modinfo -F srcversion "$mod" 2>/dev/null || true)"
+						if [ -n "$loaded_src" ] && [ -n "$installed_src" ] && \
+						   [ "$loaded_src" != "$installed_src" ]; then
+							stale="${stale:+$stale, }${mod//_/-}"
+						fi
+					done
+				fi
+				if [ -n "$stale" ]; then
+					warn "Still running the previous build ($stale)."
+					echo "  To load the new build by hand:"
+					echo "    sudo modprobe -r sl4a-spi-hid sl4a-spi-amd && sudo ./tools/sl4a-touch.sh activate"
+					echo "  or simply reboot — the boot unit loads the new build automatically."
+				else
+					pass "The new build is the one running now"
+				fi
 			fi
 		fi
 	fi
