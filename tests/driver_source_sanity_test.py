@@ -146,6 +146,11 @@ def check_control_flow_pins():
     # is answered with the device's RESET_RSP — which is how discovery stalled
     # while the host thought it was asking for the descriptor.
     read_reg = core.split("static int spi_hid_seq_read_reg", 1)[1].split("\n}", 1)[0]
+    if "rx_len < n ? n :" in read_reg or "tx_len = (u32)rx_len" in read_reg:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_reg() pads the request "
+              "to the response length again — that clocks stray bytes out and the "
+              "device stops answering (field bundle: RESET_RSP per second -> none)")
+        failures += 1
     if "shid->read_resp_type" not in read_reg or "shid->read_resp_content_id" not in read_reg:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_reg() no longer names the "
               "request it reads the response of (read_resp_type/_content_id, offsets "
