@@ -35,8 +35,10 @@
  */
 
 #ifdef __KERNEL__
-#include <string.h>
 #include <linux/kernel.h>
+#ifndef __KERNEL__
+#include <string.h>	/* memcmp in the host tests */
+#endif
 #include <linux/types.h>
 #define SPI_HID_WIRE_U8 u8
 #else
@@ -219,7 +221,16 @@ static inline unsigned int spi_hid_wire_read_approval_variant(
 		SPI_HID_WIRE_U8 content_type, SPI_HID_WIRE_U8 content_id,
 		int variant)
 {
-	memset(out, 0, SPI_HID_READ_APPROVAL_LEN + 1);
+	out[0] = 0;
+	out[1] = 0;
+	out[2] = 0;
+	out[3] = 0;
+	out[4] = 0;
+	out[5] = 0;
+	out[6] = 0;
+	out[7] = 0;
+	out[8] = 0;
+	out[9] = 0;
 
 	if (variant == 1) {
 		/* Legacy: five bytes, register in the address field. The device

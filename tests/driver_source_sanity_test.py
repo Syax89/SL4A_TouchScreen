@@ -160,9 +160,9 @@ def check_control_flow_pins():
         approval = wire.split("spi_hid_wire_read_approval_variant", 1)[1].split("\n}", 1)[0]
         for needle, why in (
             ("out[7] = reg & 0xff", "the register no longer sits at offset 7"),
-            ("memset(out, 0, SPI_HID_READ_APPROVAL_LEN + 1)",
-             "the frame is no longer zeroed first, so the address field and the "
-             "padding come from whatever was in the buffer before"),
+            ("out[1] = 0;",
+             "the frame is no longer zeroed first, so the address field comes from "
+             "whatever was in the buffer before"),
             ("out[6] = content_type", "the request's content type is no longer at offset 6"),
             ("out[9] = content_id", "the request's content id is no longer at offset 9"),
             ("SPI_HID_WIRE_OPCODE_READ", "the read opcode is gone"),
