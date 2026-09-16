@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+### The management tool: an upgrade that cannot take the driver away, and a bundle that answers the question
+
+Ten findings from the same campaign about `tools/sl4a-touch.sh`.
+
+**An upgrade used to remove the working driver before building the new one.**
+`install` dropped every other DKMS registration of the package *first* — with
+`dkms remove`, which also uninstalls the module objects the running system
+boots from — and only then built. A build failure therefore left the machine
+with no registered driver at all, while the message said the existing driver
+state had been left unchanged. The removal now happens after the new version
+has been built *and* installed (and the new version is installed once more
+after it, because removing a version deletes the shared `/updates/dkms`
+objects both versions record). The failure path only cleans up when this run
+created the DKMS entry: with a version that was already registered — the usual
+case, since VERSION does not move between commits — a failed attempt now leaves
+the working module exactly where it was, and the message is true.
+
+**`status` answered for the wrong kernel.** `dkms status` was consulted without
+`-k`, so an entry installed for another kernel made the tool claim the checkout
+matched. It is pinned to the running kernel now and says which one it means.
+
+**The boot-activation promise was never checked.** The tool enabled the unit and
+announced that every future boot would be covered, without asking whether the
+unit can load at all — a checkout that has since moved or been deleted fails
+that unit with `203/EXEC` at every boot. `install` now verifies it
+(`systemd-analyze verify`) and fails loudly instead of promising; `status`
+separates enabled from enabled-and-loadable.
+
+**A completed activation could still be the previous build.** `modprobe` is a
+no-op on a loaded module, so the freshly installed driver was not necessarily
+the one answering. The tool compares the running module's `srcversion` with the
+installed one and, when they differ, prints the way out (`modprobe -r … &&
+activate`, or a reboot) instead of implying the new build is live.
+
+**`logs -o` with a path starting with a dash** wrote the bundle and then failed
+its own completion check, because the path reached `head`/`grep` as an option
+and those read stdin. The path is normalised once, before anything uses it.
+
+**The bundle now carries the identity of the module that is loaded**, not just
+the one on disk: `/sys/module/*/srcversion` against `modinfo -F srcversion`, in
+its own section labelled as the first thing to read — that comparison is the
+stale-module answer, and `lsmod` alone never gave it. `build_info` is labelled
+as the checkout/toolchain string it is rather than looking like a module
+version.
+
+**The bundle's git section** no longer swallows stderr, so "git refused" (the
+usual case when run as root against a user-owned checkout) is distinguishable
+from a clean tree and from local modifications.
+
+**`VERSION` is validated before anything interpolates it**: `1.0.&` used to
+stage `PACKAGE_VERSION="1.0.#VERSION#"` (sed expands `&`) and a space split the
+DKMS build line.
+
 ### Recovery coverage, finished for raw mode, mapped for everything else
 
 A recovery-matrix review (every timer × state × profile × knob, read back out of
