@@ -210,9 +210,9 @@ Commands:
                     the driver is currently loaded and bound.
 
   logs [-o FILE]    Collect a diagnostic bundle (versions, dkms/modprobe
-                    state, driver sysfs stats, filtered dmesg) into a single
-                    text file for bug reports. Default output path is
-                    printed at the end.
+                    state, driver sysfs stats, the last captured frame as raw
+                    bytes, filtered dmesg) into a single text file for bug
+                    reports. Default output path is printed at the end.
 
   rebuild           Developer use only: rebuild the .ko files against the
                     running kernel and drop them directly into
@@ -1119,12 +1119,31 @@ cmd_logs() {
 				local spidev
 				spidev=$(find /sys/devices -maxdepth 6 -path "*spi-${ts_id}:00" -type d 2>/dev/null | head -1)
 				if [ -n "$spidev" ]; then
-					for f in lifecycle_status seq_state protocol_stats baseline_status; do
+					for f in build_info ready lifecycle_status seq_state protocol_stats baseline_status \
+						 bus_error_count device_initiated_reset_count; do
 						if [ -r "$spidev/$f" ]; then
 							echo "-- $f --"
 							cat "$spidev/$f"
 						fi
 					done
+
+					# Frame data, so a report can be analysed without asking for
+					# anything else. heatmap_raw is the binary attribute and
+					# carries the whole body; heatmap_debug is the one-page hex
+					# view kept for older modules, and cuts the frame tail.
+					echo ""
+					echo "--- Last captured frame ---"
+					if [ -r "$spidev/heatmap_raw" ]; then
+						local frame_bytes
+						frame_bytes=$(wc -c < "$spidev/heatmap_raw")
+						echo "-- heatmap_raw ($frame_bytes bytes, complete) --"
+						od -An -v -tx1 -w32 "$spidev/heatmap_raw" 2>/dev/null
+					elif [ -r "$spidev/heatmap_debug" ]; then
+						echo "-- heatmap_debug (hex, truncated to one page: this module has no heatmap_raw) --"
+						cat "$spidev/heatmap_debug"
+					else
+						echo "(no frame attribute: driver not bound, or no frame captured yet)"
+					fi
 				else
 					echo "(spi-${ts_id}:00 sysfs node not found — driver not bound)"
 				fi

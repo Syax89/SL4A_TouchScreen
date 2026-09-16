@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Diagnostic bundle carries the last captured frame
+
+`sudo ./tools/sl4a-touch.sh logs` now writes the last captured frame into the
+bundle as raw bytes, so a problem report can be analysed from the bundle alone.
+The frame could not come from `heatmap_debug`: a sysfs `show()` attribute is
+limited to one page and the 4304-byte V0 body does not fit, so the frame's tail
+— where the per-frame lists sit — was cut. The driver now exposes the same
+buffer as the `heatmap_raw` binary attribute, which streams the whole body in as
+many reads as the reader asks for; the bundle falls back to the truncated
+`heatmap_debug` hex view, labelled as such, on modules that predate it, and says
+so explicitly when no frame has been captured yet. The bundle also picks up
+`build_info`, `ready` and the two error counters, and `sl4a_debug_level=2`
+continues to add the per-blob lines through dmesg.
+
+`tests/diagnostic_bundle_contract_test.py` pins both halves: the tool's section
+and fallback, and the driver's attribute with its create/remove pair.
+
 ### Windows alignment analysis, replay harness, and a refuted transplant
 
 `docs/WINDOWS-ALIGNMENT.md` records, value by value, what the raw pipeline already

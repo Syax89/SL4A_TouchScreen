@@ -2096,6 +2096,39 @@ static ssize_t heatmap_debug_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(heatmap_debug);
 
+/*
+ * The complete last captured frame, as raw bytes.
+ *
+ * heatmap_debug carries the same frame as hex, but a sysfs show() attribute is
+ * limited to one page, and the V0 body (4304 bytes) does not fit: its tail —
+ * the part a frame analysis needs — is cut. This binary attribute streams the
+ * whole buffer instead, in as many reads as the reader asks for, so the
+ * diagnostic bundle can carry a frame that is complete.
+ *
+ * No new state and no new locking: same buffer, same length, same seq_lock as
+ * heatmap_debug. Reading it on a driver without a captured frame yields EOF.
+ */
+static ssize_t heatmap_raw_read(struct file *filp, struct kobject *kobj,
+				struct bin_attribute *attr, char *buf,
+				loff_t off, size_t count)
+{
+	struct spi_hid *shid = dev_get_drvdata(kobj_to_dev(kobj));
+	size_t n = 0;
+
+	if (!shid)
+		return -ENODEV;
+
+	mutex_lock(&shid->seq_lock);
+	if (shid->heatmap_buf && off < shid->heatmap_len) {
+		n = min_t(size_t, count, shid->heatmap_len - (u32)off);
+		memcpy(buf, shid->heatmap_buf + off, n);
+	}
+	mutex_unlock(&shid->seq_lock);
+
+	return n;
+}
+static BIN_ATTR_RO(heatmap_raw, SPI_HID_RAW_CAPTURE_BODY_LENGTH);
+
 static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
@@ -3267,6 +3300,14 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err0;
 	}
 
+	/* Separate call: sysfs_create_files() takes struct attribute pointers and
+	 * cannot carry the binary-frame attribute. err1 removes both. */
+	ret = sysfs_create_bin_file(&dev->kobj, &bin_attr_heatmap_raw);
+	if (ret) {
+		dev_err(dev, "Unable to create the heatmap_raw attribute\n");
+		goto err1;
+	}
+
 	ret = spi_hid_get_descriptor_reg(dev, &shid->device_descriptor_register);
 	if (ret) {
 		dev_err(dev, "failed to get HID descriptor register address\n");
@@ -3529,6 +3570,7 @@ err1:
 		input_unregister_device(shid->touch_input);
 		shid->touch_input = NULL;
 	}
+	sysfs_remove_bin_file(&dev->kobj, &bin_attr_heatmap_raw);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 	mutex_lock(&shid->seq_lock);
 	kfree(shid->heatmap_buf);
@@ -3575,6 +3617,7 @@ static void spi_hid_remove(struct spi_device *spi)
 		input_unregister_device(shid->touch_input);
 		shid->touch_input = NULL;
 	}
+	sysfs_remove_bin_file(&dev->kobj, &bin_attr_heatmap_raw);
 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
 	mutex_lock(&shid->seq_lock);
 	kfree(shid->heatmap_buf);
