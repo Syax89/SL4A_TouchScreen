@@ -1761,16 +1761,17 @@ out:
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
-	/* SIXTEEN, not nine. The field unit answers every read with a three-byte
-	 * prefix (01 <status> EE — 230-odd samples, no exception, and no occurrence
-	 * in any reference capture), and behind it either a full reference-framed
-	 * message or nothing but status bytes. A nine-byte read truncates that
-	 * message at its first header byte: every log so far ends at `… ff ff ff
-	 * ff 32`, which is a frame cut off mid-header. Widening the read is
-	 * instrumentation, not a parser change: the header still sits at offset 5
-	 * for the reference path, the offset-5 gates are untouched, and the next
-	 * field bundle shows whether the bytes after it are the message. */
-	u8 hdr[16];
+	/* NINE, as the reference reads it — and the widening to sixteen that this
+	 * was an hour ago is REVERTED, because a leg found what it would have
+	 * cost: Windows clocks nine bytes for a header read and pads its transmit
+	 * to the receive length; changing the length changes the transfer shape,
+	 * so a field comparison against the reference frame would have been
+	 * measuring two things at once. The bytes behind the prefix stay
+	 * unmeasured until the Windows frame itself has been sent: variant 0,
+	 * register 0, nine bytes (`0B 00 00 00 FF 00 00 00 00`), which the raw
+	 * capture confirms as row 64 of surface_boot_auto.csv and which the host
+	 * test pins byte for byte. */
+	u8 hdr[9];
 	u32 resp_reg;
 	int type, hdr_off;
 	int i, got = -1;
@@ -2320,16 +2321,17 @@ static void spi_hid_poll_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, poll_work);
 	struct device *dev = &shid->spi->dev;
-	/* SIXTEEN, not nine. The field unit answers every read with a three-byte
-	 * prefix (01 <status> EE — 230-odd samples, no exception, and no occurrence
-	 * in any reference capture), and behind it either a full reference-framed
-	 * message or nothing but status bytes. A nine-byte read truncates that
-	 * message at its first header byte: every log so far ends at `… ff ff ff
-	 * ff 32`, which is a frame cut off mid-header. Widening the read is
-	 * instrumentation, not a parser change: the header still sits at offset 5
-	 * for the reference path, the offset-5 gates are untouched, and the next
-	 * field bundle shows whether the bytes after it are the message. */
-	u8 hdr[16];
+	/* NINE, as the reference reads it — and the widening to sixteen that this
+	 * was an hour ago is REVERTED, because a leg found what it would have
+	 * cost: Windows clocks nine bytes for a header read and pads its transmit
+	 * to the receive length; changing the length changes the transfer shape,
+	 * so a field comparison against the reference frame would have been
+	 * measuring two things at once. The bytes behind the prefix stay
+	 * unmeasured until the Windows frame itself has been sent: variant 0,
+	 * register 0, nine bytes (`0B 00 00 00 FF 00 00 00 00`), which the raw
+	 * capture confirms as row 64 of surface_boot_auto.csv and which the host
+	 * test pins byte for byte. */
+	u8 hdr[9];
 	int type, ret, hdr_off;
 	u16 blen;
 
@@ -2556,16 +2558,17 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	/* SIXTEEN, not nine. The field unit answers every read with a three-byte
-	 * prefix (01 <status> EE — 230-odd samples, no exception, and no occurrence
-	 * in any reference capture), and behind it either a full reference-framed
-	 * message or nothing but status bytes. A nine-byte read truncates that
-	 * message at its first header byte: every log so far ends at `… ff ff ff
-	 * ff 32`, which is a frame cut off mid-header. Widening the read is
-	 * instrumentation, not a parser change: the header still sits at offset 5
-	 * for the reference path, the offset-5 gates are untouched, and the next
-	 * field bundle shows whether the bytes after it are the message. */
-	u8 hdr[16]; int type; u16 blen = 0;
+	/* NINE, as the reference reads it — and the widening to sixteen that this
+	 * was an hour ago is REVERTED, because a leg found what it would have
+	 * cost: Windows clocks nine bytes for a header read and pads its transmit
+	 * to the receive length; changing the length changes the transfer shape,
+	 * so a field comparison against the reference frame would have been
+	 * measuring two things at once. The bytes behind the prefix stay
+	 * unmeasured until the Windows frame itself has been sent: variant 0,
+	 * register 0, nine bytes (`0B 00 00 00 FF 00 00 00 00`), which the raw
+	 * capture confirms as row 64 of surface_boot_auto.csv and which the host
+	 * test pins byte for byte. */
+	u8 hdr[9]; int type; u16 blen = 0;
 	int hdr_off;
 	s64 dbg_dt_us;
 	irqreturn_t result = IRQ_HANDLED;
