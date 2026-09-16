@@ -1323,7 +1323,7 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * are recorded in the field bundles — a sticky flag (141 reads on 0x0a,
 	 * none on 0), then a state gate the driver never entered (310 reads in
 	 * WAIT_DESC, one in WAIT_RESET). What the field's answers actually contain
-	 * is a three-byte prefix and the reference frame behind it with its sync at
+	 * is three leading bytes on this panel's raw-mode answers and the reference frame behind them, sync at
 	 * eleven, which is why the read had to grow — not a frame "nine bytes out
 	 * of position", a reading a leg disproved with a harness over this header.
 	 * See docs/FRAME-MATRIX.md.
@@ -1794,8 +1794,10 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
 	/* SIXTEEN, and this time for a measured reason. This panel answers every
-	 * read with a three-byte prefix (`01 <status> EE`) and then the same frame
-	 * the reference device sends; the frame's own header begins at offset 8
+	 * read with three leading bytes (`01 <status> EE`) — measured on this panel's
+	 * raw-mode answers only, never in a capture, because every capture records
+	 * the reference driver's standard-mode traffic — and then the same frame the
+	 * reference device sends; the frame's own header begins at offset 8
 	 * and its sync byte, which is what the typing code gates on, sits at
 	 * ELEVEN. A nine-byte read therefore cannot see a frame by construction:
 	 * the field's logs end at `... ff ff ff 32`, the frame's first header
@@ -2356,8 +2358,10 @@ static void spi_hid_poll_work(struct work_struct *work)
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, poll_work);
 	struct device *dev = &shid->spi->dev;
 	/* SIXTEEN, and this time for a measured reason. This panel answers every
-	 * read with a three-byte prefix (`01 <status> EE`) and then the same frame
-	 * the reference device sends; the frame's own header begins at offset 8
+	 * read with three leading bytes (`01 <status> EE`) — measured on this panel's
+	 * raw-mode answers only, never in a capture, because every capture records
+	 * the reference driver's standard-mode traffic — and then the same frame the
+	 * reference device sends; the frame's own header begins at offset 8
 	 * and its sync byte, which is what the typing code gates on, sits at
 	 * ELEVEN. A nine-byte read therefore cannot see a frame by construction:
 	 * the field's logs end at `... ff ff ff 32`, the frame's first header
@@ -2595,8 +2599,10 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
 	/* SIXTEEN, and this time for a measured reason. This panel answers every
-	 * read with a three-byte prefix (`01 <status> EE`) and then the same frame
-	 * the reference device sends; the frame's own header begins at offset 8
+	 * read with three leading bytes (`01 <status> EE`) — measured on this panel's
+	 * raw-mode answers only, never in a capture, because every capture records
+	 * the reference driver's standard-mode traffic — and then the same frame the
+	 * reference device sends; the frame's own header begins at offset 8
 	 * and its sync byte, which is what the typing code gates on, sits at
 	 * ELEVEN. A nine-byte read therefore cannot see a frame by construction:
 	 * the field's logs end at `... ff ff ff 32`, the frame's first header
@@ -2661,8 +2667,10 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	shid->seq_dbg_last_irq = ktime_get();
 
 	/* Sixteen bytes, measured: the reference's own frames put their header at
-	 * offset 5, but THIS panel prefixes every answer with three bytes, so the
-	 * header lands at 8 and the sync the typing code gates on at ELEVEN. Nine
+	 * offset 5 in every capture, but this unit's raw-mode reads arrive with three
+	 * leading bytes (`01 <status> EE`), so the header lands at 8 and the sync the
+	 * typing code gates on at ELEVEN. No capture shows that shape: they record
+	 * standard-mode traffic, a question this one never asks. Nine
 	 * bytes can never contain a frame from this device; sixteen holds the
 	 * header's fourth byte and the first body byte as well. */
 	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
@@ -3835,7 +3843,8 @@ static int spi_hid_probe(struct spi_device *spi)
 			0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00
 		};
 		/* And this panel's answers, verbatim from the field bundles: three-byte
-		 * prefix (01 <status> EE) then the same frame, sync at ELEVEN — beyond
+		 * three leading bytes seen on this unit's raw-mode reads, then the same
+		 * frame with the sync at ELEVEN — beyond
 		 * every nine-byte read the driver made until now. */
 		static const u8 self_panel_reset[12] = {
 			0x01, 0xff, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10,
