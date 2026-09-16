@@ -62,4 +62,16 @@ for seq in ("tput civis", "tput cuu", "tput ed", "tput cnorm"):
 assert 'dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force' in tool
 assert 'dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force' in tool
 
+# ... and both must be reachable. An early skip when the DKMS version matched
+# was what made the --force above dead code: after a pull, install reported
+# success and left the previously built (stale) module in place.
+assert "profile_only" not in tool, \
+    "the version-match build skip is back; the --force rebuild below is unreachable again"
+assert "already registered; rebuilding from this checkout" in tool, \
+    "install no longer says it rebuilds a matching DKMS version"
+assert tool.index("already_added=1") < tool.index('dkms build -m "$PKG_NAME"'), \
+    "the rebuild must follow the already-registered branch"
+assert 'if [ "$already_added" -eq 0 ]; then' in tool, \
+    "dkms add must stay conditional: it refuses an entry that already exists"
+
 print("installer recovery contract: PASS")

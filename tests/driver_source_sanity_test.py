@@ -59,8 +59,48 @@ def strip_comments_and_strings(text):
     return "".join(out), None
 
 
-def main():
+def check_control_flow_pins():
+    """Two control-flow shapes this campaign already paid for, pinned cheaply.
+
+    Neither needs kernel headers: both are shapes in a function body, so this
+    catches them minutes before the CI kernel build would (on another machine).
+    """
     failures = 0
+    core = (ROOT / "driver/spi-hid-core.c").read_text()
+
+    # 1. spi_hid_ll_parse(): the mutex_unlock must not be the body of an `else`.
+    # A dangling `else` had put the unlock in the success branch only, so a
+    # failed hardcoded-descriptor parse returned with shid->lock held — and
+    # every later lock taker (IRQ thread, sysfs readers, remove) waits forever.
+    body = core.split("static int spi_hid_ll_parse", 1)[1].split("\n}", 1)[0]
+    tail = body.rsplit("HARDCODED_RD_SIZE);", 1)[-1].split("mutex_unlock", 1)[0]
+    tail, _ = strip_comments_and_strings(tail)
+    if "else" in tail:
+        print("FAIL driver/spi-hid-core.c: spi_hid_ll_parse() — mutex_unlock is "
+              "conditional again (dangling else), so the parse-failure path "
+              "returns holding shid->lock")
+        failures += 1
+
+    # 2. spi_hid_seq_set_state(): the raw discovery watchdog must be armed for
+    # WAIT_DESC/WAIT_RPT *before* the unchanged-state early return — the
+    # RESET_RSP loop re-enters WAIT_DESC with the state unchanged, which is the
+    # field stall: silent at level 0, and permanent.
+    body = core.split("spi_hid_seq_set_state(struct spi_hid *shid", 1)[1].split("\n}", 1)[0]
+    if "SPI_HID_SEQ_WAIT_DESC || new_state == SPI_HID_SEQ_WAIT_RPT" not in body:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_set_state() no longer arms "
+              "the raw watchdog for WAIT_DESC/WAIT_RPT (pre-DONE stall is silent "
+              "and permanent again)")
+        failures += 1
+    elif body.index("raw_handshake_watchdog") > body.index("if (old_state == new_state)"):
+        print("FAIL driver/spi-hid-core.c: the pre-DONE watchdog arm sits after "
+              "the unchanged-state return, so a re-entered WAIT_DESC never arms it")
+        failures += 1
+
+    return failures
+
+
+def main():
+    failures = check_control_flow_pins()
     for path in FILES:
         text = path.read_text()
         stripped, unterminated = strip_comments_and_strings(text)
