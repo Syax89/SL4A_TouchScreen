@@ -228,9 +228,12 @@ static inline struct spi_hid_wire_frame spi_hid_wire_get_feature6(int double_opc
  *	0B 00 00 00 FF 00 00 0R 00 [00 ...]
  *
  * Nine fixed bytes — the register is a single byte at offset 7, the address
- * field (bytes 1..3) is zero — then the request is clocked out padded with
- * zeros to the length of the response, so `out` must be a zeroed buffer of at
- * least the response length. The device decodes the register from offset 7: a
+ * field (bytes 1..3) is zero. This builder writes ONLY those nine bytes (ten
+ * when the content id is non-zero) and clocks nothing extra: the padded form
+ * was removed, and a reader who trusts this comment would reintroduce a request
+ * the transport rejects. `out` is still expected to be a zeroed buffer large
+ * enough for a padded reference frame, because the same buffer serves reads
+ * whose length the caller sets separately. The device decodes the register from offset 7: a
  * frame that carries it in the address field, or one that stops after five
  * bytes, is a request for register 0 — answered with RESET_RSP, never with the
  * descriptor. */

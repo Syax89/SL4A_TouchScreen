@@ -79,9 +79,13 @@ length equal to response length:
                          rx=FF FF FF FF FF AB 03 00 75 …  (report descriptor)
 ```
 
-The register is a **single byte at offset 7**, the address field (bytes 1..3) is
-zero, and the request is clocked out **padded with zeros to the length of the
-response** — nine bytes for a four-byte header, `5 + body` for a body.
+The register is a **single byte at offset 7** and the address field (bytes 1..3)
+is zero. (An earlier revision of this paragraph said the request is clocked out
+padded with zeros to the response length. The reference's capture shows lengths
+at the SpbCx transfer-descriptor layer only — it records no TX_COUNT/RX_COUNT,
+so it cannot show the wire — and this driver deliberately clocks the frame
+alone; see the comment in `spi_hid_seq_read_reg`, and the two legs that split
+on the wire question.)
 
 `spi_hid_seq_read_reg()` built a five-byte frame with the register in the
 address field instead. The device decodes the register from offset 7, so every
