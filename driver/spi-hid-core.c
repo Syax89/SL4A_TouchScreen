@@ -1058,23 +1058,43 @@ static int spi_hid_set_request(struct spi_hid *shid,
 
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {
-	u8 tx[5];
+	u8 *tx = shid->read_tx_buf;
+	u32 tx_len;
 	struct spi_transfer xf[2];
 	struct spi_message msg;
 	int ret;
 
 	lockdep_assert_held(&shid->seq_lock);
 
-	tx[0] = 0x0B;
-	tx[1] = (reg >> 16) & 0xff;
-	tx[2] = (reg >> 8) & 0xff;
-	tx[3] = reg & 0xff;
-	tx[4] = 0xFF;
+	/* The reference read approval, from the traces: nine bytes, the register
+	 * at offset 7, the address field (bytes 1..3) zero, and the request
+	 * clocked out padded with zeros to the length of the response it asks
+	 * for (nine bytes for a four-byte header, 5 + body for a body).
+	 *
+	 *   tx = 0B 00 00 00 FF 00 00 0R 00 [00 ...]
+	 *         ^  ^^^^^^^^^  ^        ^
+	 *         |  address=0  |        register
+	 *         opcode       placeholder
+	 *
+	 * The device decodes the register from offset 7. A five-byte frame with
+	 * the register in the address field — what this function used to build —
+	 * asks for register 0 and is answered with the device's RESET_RSP, which
+	 * is why discovery never saw a descriptor and why every read looked like
+	 * a reset. */
+	if (!tx || !shid->read_tx_len) {
+		seq_dbg(shid, 1, "SEQ: read reg=0x%06x without a request buffer\n", reg);
+		return -ENOMEM;
+	}
+
+	spi_hid_wire_read_approval(tx, reg);
+	tx_len = (u32)rx_len < SPI_HID_READ_APPROVAL_LEN ? SPI_HID_READ_APPROVAL_LEN
+							  : (u32)rx_len;
+	tx_len = min(tx_len, shid->read_tx_len);
 
 	memset(rx, 0, rx_len);
 	memset(xf, 0, sizeof(xf));
 	xf[0].tx_buf = tx;
-	xf[0].len = 5;
+	xf[0].len = tx_len;
 	xf[1].rx_buf = rx;
 	xf[1].len = rx_len;
 
@@ -1559,6 +1579,12 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		 * see it: run the same handler it would have run, otherwise the
 		 * poller drops the very descriptor it exists to recover. */
 		seq_handle_desc(shid, type, blen);
+		/* Keep polling: the reference asks for the report descriptor and
+		 * reads it back straight away instead of waiting for an interrupt,
+		 * and without this the poller stops here — leaving WAIT_RPT with no
+		 * timer at all. */
+		if (shid->seq_state == SPI_HID_SEQ_WAIT_RPT)
+			schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(20));
 	} else if (type == 8) {
 		u16 blen = (((hdr[6] >> 4) & 0xF)) | (hdr[7] << 4);
 
@@ -3650,6 +3676,17 @@ static int spi_hid_probe(struct spi_device *spi)
 		ret = -ENOMEM;
 		goto err1;
 	}
+
+	/* Request buffer for spi_hid_seq_read_reg(): the read approval is clocked
+	 * out padded to the length of the response (the reference does the same),
+	 * so it is zeroed once and only its first nine bytes are rewritten. */
+	shid->read_tx_buf = devm_kmalloc(dev, 8200, GFP_KERNEL);
+	shid->read_tx_len = 8200;
+	if (!shid->read_tx_buf) {
+		ret = -ENOMEM;
+		goto err1;
+	}
+	memset(shid->read_tx_buf, 0, shid->read_tx_len);
 
 	seq_dbg(shid, 1, "request IRQ begin flags=0x%lx\n", irqflags);
 	ret = request_threaded_irq(shid->irq, spi_hid_dev_irq, spi_hid_seq_thread,

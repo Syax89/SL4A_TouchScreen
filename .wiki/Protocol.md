@@ -40,7 +40,7 @@ The content_id determines how the remainder of the frame is interpreted:
 |------------|--------|-------------|
 | 0x07 | DESCREQ | Device descriptor request response |
 | 0x08 | DEVICE_DESC | Hardware descriptor register |
-| 0x0B | RPT_DESC | Report descriptor |
+| 0x0B | read approval | Host reads a register: the register is one byte at offset 7 of the request, the answer comes back on the same transaction |
 | 0x0F | COMMAND | Feature / SET_REPORT command |
 | 0x11 | INPUT_REPORT | Input data (touch/pen) |
 

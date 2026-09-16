@@ -381,6 +381,31 @@ static void test_driver_uses_header(void)
 	free(core);
 }
 
+static void test_read_approval_frame(void)
+{
+	/* The read approval: nine bytes, register at offset 7, address field
+	 * zero. Byte-level guard on the frame that asks the device for a
+	 * descriptor; the traces are the reference (0B 00 00 00 FF 00 00 0R 00). */
+	static const SPI_HID_WIRE_U8 want3[SPI_HID_READ_APPROVAL_LEN] = {
+		0x0B, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x03, 0x00
+	};
+	static const SPI_HID_WIRE_U8 want4[SPI_HID_READ_APPROVAL_LEN] = {
+		0x0B, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x04, 0x00
+	};
+	SPI_HID_WIRE_U8 buf[16];
+	unsigned int n;
+
+	memset(buf, 0xAA, sizeof(buf));
+	n = spi_hid_wire_read_approval(buf, 0x0003);
+	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "read approval length is nine bytes");
+	CHECK(!memcmp(buf, want3, sizeof(want3)),
+	      "read approval for register 3 is 0B 00 00 00 FF 00 00 03 00");
+	n = spi_hid_wire_read_approval(buf, 0x0004);
+	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "read approval length is nine bytes");
+	CHECK(!memcmp(buf, want4, sizeof(want4)),
+	      "read approval for register 4 is 0B 00 00 00 FF 00 00 04 00");
+}
+
 int main(void)
 {
 	fprintf(stderr, "wire_frames_test: running...\n");
@@ -391,6 +416,7 @@ int main(void)
 	test_getfeat6_layout();
 	test_f32_formatting();
 	test_driver_uses_header();
+	test_read_approval_frame();
 
 	fprintf(stderr, "wire_frames_test: %u assertions, %u failures\n",
 		g_passed, g_failed);

@@ -41,7 +41,7 @@ The `content_id` field (first 2 bytes of data) identifies the message type:
 | 0x01 | DESCREQ | TX: [01 00 0A 00 ...] |
 | 0x07 | DESCREQ_RESP | RX: [07 00 1E 00 ...] |
 | 0x08 | DEVICE_DESC | RX: [08 00 ...] |
-| 0x0B | RPT_DESC | RX: [0B 00 ... 936 bytes] |
+| 0x0B | read approval | host asks for a register (the register sits at offset 7 of the request); the response carries the frame type |
 | 0x0F | COMMAND | TX/RX: [0F 00 ...] |
 | 0x11 | INPUT_REPORT | RX: [11 00 ... heatmap data] |
 
@@ -70,7 +70,7 @@ Key trace files used during development:
 TX: DESCREQ [01 00 0A 00 00 00 01 00 00 00 00 00]
 RX: DEVICE_DESC [07 00 1E 00 ... 28 bytes descriptor]
 TX: DESCREQ2 [01 00 ...]
-RX: RPT_DESC [0B 00 ... 936 bytes report descriptor]
+type 0x8 = RPT_DESC [5-byte preamble + header + 940-byte report descriptor]
 --- ~3.6s gap (measured) ---
 TX: GET_FEATURE [0F 00 ...]
 RX: FEATURE_RESP [0F 00 ...]
