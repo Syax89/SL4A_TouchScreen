@@ -514,6 +514,32 @@ def main():
     # The body offset helper returns the struct offset; an `off += 3` after it
     # reads three bytes late and rejects every real descriptor (8+3+28 > 37 on
     # the capture's 37-byte body). This exact mistake shipped once.
+    # The caller side too: inside seq_handle_desc the helper's result is the
+    # struct offset, so neither an `off += 3` nor a `+ 3` in the guard may
+    # reappear. A leg demonstrated this exact mutation as suite-green once.
+    # Anchor on the DEFINITION — the prototype has no braces, and an earlier
+    # version of this check walked into the next function's body instead.
+    _needle, _pos, _fn = "static void seq_handle_desc(", -1, ""
+    while True:
+        _pos = core_src.find(_needle, _pos + 1)
+        if _pos < 0:
+            break
+        _cand = core_src[_pos:]
+        if _cand[:_cand.index("\n")].rstrip().endswith(";") is False:
+            _depth, _end = 0, len(_cand)
+            for _i, _ch in enumerate(_cand):
+                if _ch == "{":
+                    _depth += 1
+                elif _ch == "}":
+                    _depth -= 1
+                    if _depth == 0:
+                        _end = _i
+                        break
+            _fn = _cand[:_end]
+            break
+    if _fn and ("off += 3" in _fn or "off + 3 + required" in _fn):
+        print("FAIL body offset: seq_handle_desc adds the content header a second time")
+        failures += 1
     # The body-offset helper returns the STRUCT offset; the guard must not add
     # the content header a second time. 8 + 3 + 28 > 37 rejected the capture's
     # 37-byte body once, in a batch that claimed to fix discovery, so both
