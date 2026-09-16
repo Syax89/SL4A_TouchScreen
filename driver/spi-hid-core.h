@@ -189,6 +189,7 @@ struct spi_hid {
 	int irq;                    /* GPIO interrupt line number */
 	struct gpio_desc *gpiod;    /* GPIO descriptor for device interrupt */
 	struct delayed_work descreq_work; /* DESCREQ retry work */
+	struct delayed_work reset_work;   /* reference-shaped reset reaction (ResetDevice + 2000 ms, off the IRQ thread) */
 	u32 wait_reset_kicks;             /* Standard-mode WAIT_RESET kicks used */
 	u32 wait_reset_irqs;              /* IRQ-edge snapshot taken when the kick timer was armed */
 
