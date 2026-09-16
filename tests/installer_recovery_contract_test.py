@@ -69,7 +69,11 @@ assert "profile_only" not in tool, \
     "the version-match build skip is back; the --force rebuild below is unreachable again"
 assert "already registered; rebuilding from this checkout" in tool, \
     "install no longer says it rebuilds a matching DKMS version"
-assert tool.index("already_added=1") < tool.index('dkms build -m "$PKG_NAME"'), \
+# Scoped to the install path: hunt's rebuild helper also stages and builds, and
+# a global index() then compared the helper's copy against install's branch.
+# The claim is about install's sequence, so measure it inside install.
+_install = tool[tool.index("Step 3: Staging"):]
+assert _install.index("already_added=1") < _install.index('dkms build -m "$PKG_NAME"'), \
     "the rebuild must follow the already-registered branch"
 assert 'if [ "$already_added" -eq 0 ]; then' in tool, \
     "dkms add must stay conditional: it refuses an entry that already exists"
