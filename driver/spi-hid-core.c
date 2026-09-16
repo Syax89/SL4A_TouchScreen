@@ -1472,6 +1472,15 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		}
 		dev_err(dev, "SEQ: raw_mode handshake failed after %d attempts, falling back to standard HID\n",
 			shid->raw_probe_attempts + 1);
+		/* 0x0A is the raw stream's register and nothing else: the standard
+		 * HID input reports are read from the descriptor's own register.
+		 * Leaving the override in place made the standard path read the
+		 * wrong register, which is a panel that answers nothing — the
+		 * fallback worked before that override existed. */
+		shid->desc.input_register = shid->std_input_register ?
+			shid->std_input_register : SPI_HID_DEFAULT_INPUT_REGISTER;
+		dev_info(dev, "SEQ: standard HID reads register 0x%06x again\n",
+			 shid->desc.input_register);
 		/* The descriptor is NOT "already acquired" here, whatever the old
 		 * comment said: this branch runs because discovery never finished,
 		 * so desc is zero and create_device_work() would reject version 0,
@@ -3748,6 +3757,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	 * reads every stream frame from 0x0A. The raw path is this device's, so
 	 * it sets it here; if the descriptor said something else, say so: that
 	 * difference is worth seeing in a bundle. */
+	shid->std_input_register = shid->desc.input_register;
 	if (shid->desc.input_register && shid->desc.input_register != SPI_HID_RAW_STREAM_REGISTER)
 		dev_info(dev, "SEQ: stream register 0x%06x in the descriptor, 0x%02x in the reference\n",
 			 shid->desc.input_register, SPI_HID_RAW_STREAM_REGISTER);
