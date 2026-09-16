@@ -48,6 +48,12 @@ assert "#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)" in core
 assert "#define SPI_HID_BIN_ATTR_PTR struct bin_attribute *attr" in core
 assert "#define SPI_HID_BIN_ATTR_PTR const struct bin_attribute *attr" in core
 assert "SPI_HID_BIN_ATTR_PTR, char *buf," in core
+assert "#include <linux/version.h>" in core, \
+    "the guard evaluates LINUX_VERSION_CODE: without linux/version.h it is 0/undefined " \
+    "and the #else branch is taken on every kernel (-Wundef, then a hard " \
+    "-Werror=incompatible-pointer-types build failure)"
+assert core.index("#include <linux/version.h>") < core.index("LINUX_VERSION_CODE"), \
+    "linux/version.h has to be included before the guard, not after it"
 
 # ── driver: the read handler is complete and consistent with heatmap_debug ──
 body = core[core.index("static ssize_t heatmap_raw_read("):]

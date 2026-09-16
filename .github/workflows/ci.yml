@@ -55,3 +55,32 @@ jobs:
           make -C "$KDIR" M="$GITHUB_WORKSPACE/driver" modules
           test -s driver/sl4a-spi-amd.ko
           test -s driver/sl4a-spi-hid.ko
+
+  # The job above builds against Ubuntu 24.04's 6.8 headers. The driver also
+  # targets Arch/CachyOS/Fedora, whose kernels run ahead of LTS and where the
+  # kernel APIs do change — 6.16 made the bin_attribute callback's attribute
+  # const, so a stale signature is a hard -Werror build failure there, not a
+  # warning. Build against current headers too: version guards belong in CI,
+  # not on a user's machine.
+  kernel-build-current:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install current kernel headers
+        run: |
+          pacman -Sy --noconfirm --needed archlinux-keyring
+          pacman -S --noconfirm --needed base-devel git linux-headers
+      - name: Build external modules
+        run: |
+          for candidate in /usr/lib/modules/*/build; do
+            if [ -f "$candidate/Makefile" ]; then
+              KDIR="$candidate"
+            fi
+          done
+          test -n "${KDIR:-}"
+          echo "building against $(basename "$(dirname "$KDIR")")"
+          make -C "$KDIR" M="$GITHUB_WORKSPACE/driver" clean
+          make -C "$KDIR" M="$GITHUB_WORKSPACE/driver" modules
+          test -s driver/sl4a-spi-amd.ko
+          test -s driver/sl4a-spi-hid.ko

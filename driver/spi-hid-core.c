@@ -18,6 +18,7 @@
 #include <linux/list.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/version.h>	/* LINUX_VERSION_CODE, for the guarded callbacks */
 #include <linux/sched.h>
 #include <linux/hid.h>
 #include <linux/mutex.h>
