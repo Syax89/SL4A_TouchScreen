@@ -53,6 +53,13 @@ static const uint8_t ref_vendor_init[] = {
 	0x02, 0x00, 0x00, 0x03, 0xC2, 0x00, 0x03, 0x0A,
 	0x00, 0x56, 0xBD, 0x0C, 0xEE, 0x5B, 0x44, 0x4C, 0x00, 0x00
 };
+/* SET_FEATURE Report ID 0x56 with an all-FF payload: the reference's stream
+ * stop / re-enumeration teardown (surface_init.csv txn #0257). Same frame as
+ * the enable above, six bytes different. */
+static const uint8_t ref_vendor_stop[] = {
+	0x02, 0x00, 0x00, 0x03, 0xC2, 0x00, 0x03, 0x0A,
+	0x00, 0x56, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00
+};
 /* SET_FEATURE Report ID 5, payload 01, 14 bytes (TXN 634502470). */
 static const uint8_t ref_set_feature5[] = {
 	0x02, 0x00, 0x00, 0x03, 0x82, 0x00, 0x03, 0x04,
@@ -155,6 +162,8 @@ static void test_default_frames_match_windows(void)
 		    ref_setpower_d0, sizeof(ref_setpower_d0));
 	check_frame("SET_FEATURE 0x56", spi_hid_wire_vendor_init(SPI_HID_WIRE_DOUBLE_DEFAULT),
 		    ref_vendor_init, sizeof(ref_vendor_init));
+	check_frame("SET_FEATURE 0x56 all-FF stop", spi_hid_wire_vendor_stop(SPI_HID_WIRE_DOUBLE_DEFAULT),
+		    ref_vendor_stop, sizeof(ref_vendor_stop));
 	check_frame("SET_FEATURE 5", spi_hid_wire_set_feature5(SPI_HID_WIRE_DOUBLE_DEFAULT),
 		    ref_set_feature5, sizeof(ref_set_feature5));
 	check_frame("GET_FEATURE 6", spi_hid_wire_get_feature6(SPI_HID_WIRE_DOUBLE_DEFAULT),
