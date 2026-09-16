@@ -254,6 +254,21 @@ def check_control_flow_pins():
             failures += 1
 
 
+    # 10. the read-path peeks all three candidate regions. The RX offset for a
+    # read command is an open question (fixed 0x84 in the decomp's three-byte
+    # example, tx_len + 1 in ours) and only the field can answer it; if this
+    # line disappears the next bundle cannot either.
+    amd = (ROOT / "driver" / "spi-amd.c").read_text()
+    for needle, why in (
+        ("TRACE peek tx_len=", "the read-path region peek is gone"),
+        ("0x84=[%*ph]", "the fixed-0x84 candidate is no longer logged"),
+        ("0x89=[%*ph]", "the tx_len+1 candidate is no longer logged"),
+    ):
+        if needle not in amd:
+            print(f"FAIL driver/spi-amd.c: {why} — the RX offset question goes "
+                  f"back to being settled by argument")
+            failures += 1
+
     return failures
 
 

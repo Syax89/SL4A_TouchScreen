@@ -428,6 +428,26 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 			read_off = fifo_pos + tx_len + 1;
 		else
 			read_off = fifo_pos + 4;
+
+		if (opcode == 0x0B && debug_trace >= 3) {
+			/* Where does the answer actually land? The decomp reads a fixed
+			 * 0x84, but its example command is three bytes long, where
+			 * 0x80 + 3 + 1 and 0x80 + 4 are the same address — it cannot
+			 * tell a fixed command area from tx_len + 1. Our requests are
+			 * eight bytes and the two differ, and the field bundle showed
+			 * the bytes we currently read back are leftovers of an earlier
+			 * write (the vendor-init payload), not an answer.
+			 *
+			 * So peek every candidate instead of settling it by argument.
+			 * The request bytes are known, so whichever region still holds
+			 * them is the wrong one, and a region holding a frame header the
+			 * request never contained is where the device wrote. */
+			pr_info("spi-amd: TRACE peek tx_len=%u 0x80=[%*ph] 0x84=[%*ph] 0x89=[%*ph]\n",
+				tx_len,
+				16, base + fifo_pos,
+				16, base + fifo_pos + 4,
+				16, base + fifo_pos + tx_len + 1);
+		}
 		u8 scratch[80];
 		u8 *dst = rx_data ? rx_data : scratch;
 		u32 rmax = min_t(u32, rx_len, AMD_SPI_FIFO_SIZE);
