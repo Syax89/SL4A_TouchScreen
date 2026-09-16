@@ -69,7 +69,11 @@ assert "profile_only" not in tool, \
     "the version-match build skip is back; the --force rebuild below is unreachable again"
 assert "already registered; rebuilding from this checkout" in tool, \
     "install no longer says it rebuilds a matching DKMS version"
-assert tool.index("already_added=1") < tool.index('dkms build -m "$PKG_NAME"'), \
+# Scoped to the install path: hunt's rebuild helper also stages and builds, and
+# a global index() then compared the helper's copy against install's branch.
+# The claim is about install's sequence, so measure it inside install.
+_install = tool[tool.index("Step 3: Staging"):]
+assert _install.index("already_added=1") < _install.index('dkms build -m "$PKG_NAME"'), \
     "the rebuild must follow the already-registered branch"
 assert 'if [ "$already_added" -eq 0 ]; then' in tool, \
     "dkms add must stay conditional: it refuses an entry that already exists"
@@ -128,6 +132,10 @@ assert "stamp_installed_head" in tool and "installed_head()" in tool, \
     "the installed-revision stamp is gone: nothing can tell a stale module"
 assert 'if [ "$head_built" != "$head_now" ]' in tool, \
     "hunt no longer rebuilds a stale module before sweeping"
+assert "restage_and_rebuild" in tool and 'cp -a "$DRIVER_DIR"/. "$SRC_DEST"/' in tool, \
+    "the rebuild no longer re-stages the checkout: it would stamp the new " \
+    "revision onto the old sources"
+
 assert "Modules built from revision:" in tool, \
     "the sweep file no longer records the revision the modules came from"
 
