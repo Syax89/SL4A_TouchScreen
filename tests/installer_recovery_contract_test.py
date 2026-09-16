@@ -121,6 +121,16 @@ assert 'sudo modprobe -r sl4a-spi-hid sl4a-spi-amd && sudo ./tools/sl4a-touch.sh
 assert '"/sys/module/$mod/srcversion"' in tool
 # hunt: the bisect is one command, and the file it writes carries a verdict
 # per variant — otherwise the diagnosis costs the user a shell session again.
+# hunt must not sweep a module built before the last pull: reloading does not
+# rebuild, and a sweep against a three-commit-old driver describes a revision
+# that no longer exists. The stamp plus the rebuild branch is the guard.
+assert "stamp_installed_head" in tool and "installed_head()" in tool, \
+    "the installed-revision stamp is gone: nothing can tell a stale module"
+assert 'if [ "$head_built" != "$head_now" ]' in tool, \
+    "hunt no longer rebuilds a stale module before sweeping"
+assert "Modules built from revision:" in tool, \
+    "the sweep file no longer records the revision the modules came from"
+
 assert "cmd_hunt" in tool and "hunt_verdict" in tool and \
     'read_frame_variant="$variant"' in tool, \
     "the frame hunt is gone: a read-shape bisect would need hand commands"
