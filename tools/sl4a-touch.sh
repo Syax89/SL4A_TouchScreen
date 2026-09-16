@@ -1590,7 +1590,7 @@ cmd_logs() {
 		run_host_self_tests
 		echo ""
 		echo "--- dmesg (driver-related lines, last 1000) ---"
-		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -1000
+		dmesg | grep -iE "sl4a|spi-amd|MSHW0231|MSHW0162|AMDI0060" | tail -1000
 	} > "$OUT"
 	bundle_status=$?
 	set -e -o pipefail
@@ -1757,14 +1757,17 @@ cmd_hunt() {
 			# matches nothing (every modprobe in this variant failed, say) aborted
 			# hunt after it had unloaded the driver and before putting it back.
 			local win
-			win="$(dmesg 2>/dev/null | tail -n +"$((dmesg_mark + 1))" | grep -i sl4a_spi_hid | tail -n 60)" || true
+			# The spi-amd prefix matters: the controller layer logs the read
+			# regions (peek) under its own name, and filtering it out threw
+			# away exactly the line the RX-region question needs answered.
+			win="$(dmesg 2>/dev/null | tail -n +"$((dmesg_mark + 1))" | grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60)" || true
 			if [ -n "$win" ]; then
 				echo "$win"
 			else
 				# Ring buffer wrapped between the mark and now: the arithmetic
 				# yields nothing while the lines still exist. Say so, then show them.
 				echo "(no lines after the mark — the ring may have wrapped; last 60 driver lines)"
-				dmesg 2>/dev/null | grep -i sl4a_spi_hid | tail -n 60 || true
+				dmesg 2>/dev/null | grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60 || true
 			fi
 			echo ""
 			echo "VERDICT: $(hunt_verdict "$variant" "$SYSFS_DIR")"

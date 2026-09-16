@@ -192,7 +192,7 @@ assert tool.index("restage_and_rebuild() {") < tool.index("\t\trestage_and_rebui
 # ── the installer review's findings (leg 2026-09-16) ───────────────────────
 # F1: under `set -e -o pipefail` a dmesg|grep that matches nothing aborted hunt
 # after it unloaded the driver and before it put the module back.
-assert "| grep -i sl4a_spi_hid | tail -n 60 || true" in tool, \
+assert '| grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60 || true' in tool, \
     "the hunt dmesg pipeline is unguarded again: a variant with no log lines \
      aborts the sweep with the driver unloaded"
 # F2: a glob that matches no panel made every counter unreadable, and the
