@@ -170,11 +170,18 @@ static void spi_hid_getfeat6_retain(struct spi_hid *shid, const u8 *body, u32 bo
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason);
 static void spi_hid_arm_wait_reset_watchdog(struct spi_hid *shid);
+/* Called by spi_hid_seq_set_state(), which sits above its definition. */
+static void spi_hid_raw_stream_arm(struct spi_hid *shid);
 
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason)
 {
 	enum spi_hid_seq_state old_state = shid->seq_state;
+
+	/* DONE means the descriptor exchange concluded — which is when the
+	 * reference configures the stream. Idempotent, no-op outside raw mode. */
+	if (new_state == SPI_HID_SEQ_DONE)
+		spi_hid_raw_stream_arm(shid);
 
 	/* Standard mode has no other timer covering a device that never answers
 	 * power-up or resume with a RESET_RSP. Armed before the unchanged-state
@@ -1100,6 +1107,23 @@ static int spi_hid_raw_enable_stream(struct spi_hid *shid)
 		 SPI_HID_RAW_STREAM_CONTENT_ID, SPI_HID_RAW_STREAM_REGISTER);
 
 	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
+}
+
+/* The stream is enabled when the DESCRIPTOR has arrived, not before — the
+ * reference's boot order, from its own warm boot: the descriptor exchange and
+ * its two body reads come first (TXN#1-8), the stream configuration after
+ * (TXN#9+). This driver enabled the stream during probe setup, before the
+ * device had been asked for its descriptor at all, and in the last field run
+ * the device answered every DESCREQ with a reset — 47 of them. Deferring costs
+ * nothing when no descriptor arrives (there is no stream data either way) and
+ * it is the one order nobody has tried. Idempotent, because the descriptor
+ * arrives on more than one path. */
+static void spi_hid_raw_stream_arm(struct spi_hid *shid)
+{
+	if (shid->raw_stream_armed)
+		return;
+	shid->raw_stream_armed = true;
+	spi_hid_raw_enable_stream(shid);
 }
 
 static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
@@ -3882,7 +3906,9 @@ static int spi_hid_probe(struct spi_device *spi)
 		dev_info(dev, "SEQ: stream register 0x%06x in the descriptor, 0x%02x in the reference\n",
 			 shid->desc.input_register, SPI_HID_RAW_STREAM_REGISTER);
 	shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;
-	spi_hid_raw_enable_stream(shid);
+	/* The enable is NOT sent here any more: it is sent when the sequencer
+	 * reaches DONE, after the descriptor exchange, as the reference does. See
+	 * spi_hid_raw_stream_arm(). */
 
 	mshw0231_raw_init(shid);
 	mshw0231_raw_reset(shid);
