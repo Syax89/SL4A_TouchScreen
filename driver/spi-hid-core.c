@@ -1359,7 +1359,13 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 		if (shid->seq_state == SPI_HID_SEQ_WAIT_RESET)
 			reg = 0;                      /* the reset, and its drain */
 		else if (shid->seq_state != SPI_HID_SEQ_DONE)
-			reg = shid->desc.output_register;  /* the descriptor: header and body */
+			/* Same fallback the body read has always used. Before the
+			 * DEVICE_DESC is parsed this field is still zero, and reading the
+			 * descriptor header from register 0 gets a RESET_RSP back — the
+			 * loop that keeps discovery in WAIT_DESC on a faithful device.
+			 * The comment here used to claim header and body read the same
+			 * register; they did not. */
+			reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
 	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
@@ -2826,7 +2832,11 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 					 rblen);
 				return;
 			}
-			off += 3;
+			/* No further step: the helper returns the STRUCT offset (the
+			 * preamble and the content header are already behind it). Adding
+			 * three here — as this code did until a leg computed 8+3+28 > 37
+			 * against the capture's 37-byte body — reads the struct three
+			 * bytes late and rejects every descriptor the device sends. */
 			seq_dbg(shid, 2, "SEQ: parsing at rx+%u\n", off);
 			memcpy(&raw, body + off,
 			       min_t(u32, sizeof(raw), rblen > off ? rblen - off : 0));
