@@ -146,16 +146,18 @@ def check_control_flow_pins():
     # is answered with the device's RESET_RSP — which is how discovery stalled
     # while the host thought it was asking for the descriptor.
     read_reg = core.split("static int spi_hid_seq_read_reg", 1)[1].split("\n}", 1)[0]
-    if "spi_hid_wire_read_approval" not in read_reg:
-        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_reg() builds the read "
-              "approval inline again instead of through the builder the byte-level "
-              "test covers")
+    if "shid->read_resp_type" not in read_reg or "shid->read_resp_content_id" not in read_reg:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_reg() no longer names the "
+              "request it reads the response of (read_resp_type/_content_id, offsets "
+              "6 and 8 of the read approval)")
         failures += 1
     if "spi_hid_wire_read_approval" in wire:
         approval = wire.split("spi_hid_wire_read_approval", 1)[1].split("\n}", 1)[0]
         for needle, why in (
             ("out[7] = reg & 0xff", "the register no longer sits at offset 7"),
             ("out[1] = 0x00", "the address field is no longer zero"),
+            ("out[6] = content_type", "the request's content type is no longer at offset 6"),
+            ("out[9] = content_id", "the request's content id is no longer at offset 9"),
             ("SPI_HID_WIRE_OPCODE_READ", "the read opcode is gone"),
         ):
             if needle not in approval:

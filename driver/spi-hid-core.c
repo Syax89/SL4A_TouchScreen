@@ -594,6 +594,8 @@ static bool spi_hid_wire_doubled_setfeat(void)
  * (register 0x000002) is built at its one call site in seq_handle_desc(). */
 static int spi_hid_seq_write_descreq(struct spi_hid *shid)
 {
+	shid->read_resp_type = 0;
+	shid->read_resp_content_id = 0;
 	u8 frame[SPI_HID_WIRE_DESCREQ_MAX];
 	unsigned int len = spi_hid_wire_descreq(frame, SPI_HID_WIRE_DESCREQ_DEVICE_REG,
 						spi_hid_wire_doubled());
@@ -794,6 +796,11 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	reinit_completion(&shid->output_done);
 	shid->expected_response_type = expected_response_type;
 	shid->expected_response_id = report->content_id;
+	/* The read approval has to name the request it reads the response of: the
+	 * reference writes that request's content type at offset 6 and its content
+	 * id at offset 8 (GET_FEATURE/6, SET_FEATURE/0x56, descriptors 0/0). */
+	shid->read_resp_type = report->content_type;
+	shid->read_resp_content_id = report->content_id;
 	shid->output_pending = true;
 	shid->response_valid = false;
 	spin_unlock_irqrestore(&shid->response_lock, flags);
@@ -1060,6 +1067,7 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 {
 	u8 *tx = shid->read_tx_buf;
 	u32 tx_len;
+	unsigned int n;
 	struct spi_transfer xf[2];
 	struct spi_message msg;
 	int ret;
@@ -1086,9 +1094,9 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 		return -ENOMEM;
 	}
 
-	spi_hid_wire_read_approval(tx, reg);
-	tx_len = (u32)rx_len < SPI_HID_READ_APPROVAL_LEN ? SPI_HID_READ_APPROVAL_LEN
-							  : (u32)rx_len;
+	n = spi_hid_wire_read_approval(tx, reg, shid->read_resp_type,
+				       shid->read_resp_content_id);
+	tx_len = (u32)rx_len < n ? n : (u32)rx_len;
 	tx_len = min(tx_len, shid->read_tx_len);
 
 	memset(rx, 0, rx_len);
@@ -1279,6 +1287,8 @@ static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 
 static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 {
+	shid->read_resp_type = 0;
+	shid->read_resp_content_id = 0;
 	int ret;
 
 	/* Re-discovery means the touchscreen is not usable until it completes:

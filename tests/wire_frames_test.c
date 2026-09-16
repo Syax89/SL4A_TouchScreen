@@ -392,18 +392,37 @@ static void test_read_approval_frame(void)
 	static const SPI_HID_WIRE_U8 want4[SPI_HID_READ_APPROVAL_LEN] = {
 		0x0B, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x04, 0x00
 	};
+	/* The same frame while reading a response back: the content type of the
+	 * request goes at offset 6 and its content id at offset 8
+	 * (GET_FEATURE(6) then the stream's SET_FEATURE on register 0x0A). */
+	static const SPI_HID_WIRE_U8 want_getfeat6[10] = {
+		0x0B, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x04, 0x03, 0x00, 0x06
+	};
+	static const SPI_HID_WIRE_U8 want_stream[10] = {
+		0x0B, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x03, 0x0A, 0x00, 0x56
+	};
 	SPI_HID_WIRE_U8 buf[16];
 	unsigned int n;
 
 	memset(buf, 0xAA, sizeof(buf));
-	n = spi_hid_wire_read_approval(buf, 0x0003);
+	n = spi_hid_wire_read_approval(buf, 0x0003, 0x00, 0x00);
 	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "read approval length is nine bytes");
 	CHECK(!memcmp(buf, want3, sizeof(want3)),
-	      "read approval for register 3 is 0B 00 00 00 FF 00 00 03 00");
-	n = spi_hid_wire_read_approval(buf, 0x0004);
+	      "descriptor read approval is 0B 00 00 00 FF 00 00 03 00");
+	n = spi_hid_wire_read_approval(buf, 0x0004, 0x00, 0x00);
 	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "read approval length is nine bytes");
 	CHECK(!memcmp(buf, want4, sizeof(want4)),
-	      "read approval for register 4 is 0B 00 00 00 FF 00 00 04 00");
+	      "descriptor read approval is 0B 00 00 00 FF 00 00 04 00");
+	memset(buf, 0xAA, sizeof(buf));
+	n = spi_hid_wire_read_approval(buf, 0x0003, 0x04, 0x06);
+	CHECK(n == 10, "a read approval that names a request is ten bytes");
+	CHECK(!memcmp(buf, want_getfeat6, sizeof(want_getfeat6)),
+	      "GET_FEATURE(6) read approval is 0B 00 00 00 FF 00 04 03 00 06");
+	memset(buf, 0xAA, sizeof(buf));
+	n = spi_hid_wire_read_approval(buf, 0x000A, 0x03, 0x56);
+	CHECK(n == 10, "a read approval that names a request is ten bytes");
+	CHECK(!memcmp(buf, want_stream, sizeof(want_stream)),
+	      "stream read approval is 0B 00 00 00 FF 00 03 0A 00 56");
 }
 
 int main(void)
