@@ -1434,11 +1434,32 @@ static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
  * so it is measured rather than chosen.
  * ponytail: no FDO-level reset exists on this stack; if the device still resets
  * through this, the next step is a full re-probe, not a longer wait. */
-static void spi_hid_seq_reset_like_reference(struct spi_hid *shid)
+static bool spi_hid_seq_reset_like_reference(struct spi_hid *shid)
 {
-	seq_dbg(shid, 1, "SEQ: RESET_RSP — resetting like the reference (ResettingSyncEntry: ResetDevice then a 2000 ms timer)\n");
-	spi_hid_vendor_init(shid);
-	msleep(2000);
+	const unsigned long gap = msecs_to_jiffies(2000);
+
+	/* The reference's reaction to a reset is ResetDevice followed by a 2000 ms
+	 * timer (ResettingSyncEntry). An adversarial leg measured what an inline
+	 * wait costs HERE: ~2.25 s under seq_lock with the IRQ masked, with 2000 ms
+	 * also the value of both watchdog constants — and the field storm arrives
+	 * every ~208 ms, so sleeping per reset would livelock the driver.
+	 *
+	 * Same constant, a shape that cannot lock anything: the 2000 ms is a
+	 * MINIMUM GAP between reactions. That is what breaks the loop — one DESCREQ
+	 * per 2 s instead of five per second, so the driver stops feeding the storm
+	 * that produced the resets in the first place.
+	 *
+	 * ponytail: gap only, no device reset yet. The full reference shape — the
+	 * reset itself and the wait, off the IRQ thread in a state of its own — is
+	 * queued; an inline wait must not ship. */
+	if (shid->last_reset_reaction &&
+	    time_before(jiffies, shid->last_reset_reaction + gap)) {
+		seq_dbg(shid, 2, "SEQ: RESET_RSP inside the %u ms reaction gap, not answering\n",
+			jiffies_to_msecs(gap));
+		return false;
+	}
+	shid->last_reset_reaction = jiffies;
+	return true;
 }
 
 static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
@@ -2624,7 +2645,8 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 			return;
 		seq_dbg(shid, 3, "SEQ[WAIT_RESET]: RESET_RSP body-drain=[%*ph], sending DESCREQ\n",
 			 20, body);
-		spi_hid_seq_reset_like_reference(shid);
+		if (!spi_hid_seq_reset_like_reference(shid))
+			return;
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: DESCREQ sent, waiting for DEVICE_DESC IRQ\n");
@@ -2719,7 +2741,8 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_DESC, sending DESCREQ directly\n");
-		spi_hid_seq_reset_like_reference(shid);
+		if (!spi_hid_seq_reset_like_reference(shid))
+			return;
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
 			return;
 		seq_dbg(shid, 1, "SEQ: DESCREQ sent synchronously, waiting for next IRQ\n");
@@ -2863,7 +2886,8 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_RPT, sending DESCREQ directly\n");
-		spi_hid_seq_reset_like_reference(shid);
+		if (!spi_hid_seq_reset_like_reference(shid))
+			return;
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
 }
@@ -2905,7 +2929,8 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		if (rblen && spi_hid_seq_read(shid, body, rblen))
 			return;
 		seq_dbg(shid, 1, "SEQ: RESET_RSP in WAIT_FEATURE, sending DESCREQ directly\n");
-		spi_hid_seq_reset_like_reference(shid);
+		if (!spi_hid_seq_reset_like_reference(shid))
+			return;
 		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 	}
 }
