@@ -603,6 +603,13 @@ static int spi_hid_seq_write_descreq(struct spi_hid *shid)
 	return spi_hid_seq_write(shid, frame, (int)len, NULL, 0);
 }
 
+/* The raw stream: the reference reads it from register 0x0A with content id
+ * 0x56 (boot trace #0004-#0873 — 4309 bytes = 5 + 4304 after a nine-byte
+ * header read that says 'type 0x1 body 4304'). Both are used by the reads and
+ * by the enable below, so they sit here, before either. */
+#define SPI_HID_RAW_STREAM_REGISTER 0x0A
+#define SPI_HID_RAW_STREAM_CONTENT_ID 0x56
+
 /* SET_FEATURE Report ID 0x56 (vendor init / device key). */
 static int spi_hid_seq_write_vendor_init(struct spi_hid *shid)
 {
@@ -1057,9 +1064,6 @@ static void spi_hid_create_device_work(struct work_struct *work)
  * Without it the device does not stream and every read of that register has
  * nothing to answer with, however well formed the read is.
  */
-#define SPI_HID_RAW_STREAM_REGISTER 0x0A
-#define SPI_HID_RAW_STREAM_CONTENT_ID 0x56
-
 static int spi_hid_raw_enable_stream(struct spi_hid *shid)
 {
 	/* The plain vendor-init frame is exactly the reference's enable
