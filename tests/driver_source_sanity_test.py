@@ -14,6 +14,7 @@ the kernel headers would have said.
 """
 
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -157,10 +158,12 @@ def check_control_flow_pins():
               "6 and 8 of the read approval)")
         failures += 1
     if "spi_hid_wire_read_approval" in wire:
-        approval = wire.split("spi_hid_wire_read_approval", 1)[1].split("\n}", 1)[0]
+        approval = wire.split("spi_hid_wire_read_approval_variant", 1)[1].split("\n}", 1)[0]
         for needle, why in (
             ("out[7] = reg & 0xff", "the register no longer sits at offset 7"),
-            ("out[1] = 0x00", "the address field is no longer zero"),
+            ("out[1] = 0;",
+             "the frame is no longer zeroed first, so the address field comes from "
+             "whatever was in the buffer before"),
             ("out[6] = content_type", "the request's content type is no longer at offset 6"),
             ("out[9] = content_id", "the request's content id is no longer at offset 9"),
             ("SPI_HID_WIRE_OPCODE_READ", "the read opcode is gone"),
@@ -229,6 +232,27 @@ def check_control_flow_pins():
                   f"70-byte FIFO and the segment math is the only thing that "
                   f"makes them work")
             failures += 1
+
+    # 9. a module parameter must be declared above the code that reads it. Twice
+    # in this campaign one was added next to its neighbours and used higher up
+    # the file; only the kernel build noticed, minutes later on CI. Comments and
+    # strings are stripped and the match is a whole identifier, so `raw_mode` is
+    # not confused with `raw_mode_active` — and the first mention has to be a
+    # declaration line, not a use inside a function.
+    code, _ = strip_comments_and_strings(core)
+    for m in re.finditer(r"module_param\((\w+)", code):
+        name = m.group(1)
+        first = re.search(r"\b" + re.escape(name) + r"\b", code)
+        if first is None:
+            continue
+        line = code[:first.start()].rsplit("\n", 1)[-1].strip()
+        if not line.startswith(("static", "int", "bool", "unsigned", "char",
+                                "u8", "u16", "u32", "u64", "const", "struct")):
+            print(f"FAIL driver/spi-hid-core.c: '{name}' is first mentioned as "
+                  f"'{line[:60]}', not as a declaration — the kernel build will "
+                  f"reject the use above the declaration")
+            failures += 1
+
 
     return failures
 

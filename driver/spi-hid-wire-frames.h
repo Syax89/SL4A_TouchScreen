@@ -36,6 +36,9 @@
 
 #ifdef __KERNEL__
 #include <linux/kernel.h>
+#ifndef __KERNEL__
+#include <string.h>	/* memcmp in the host tests */
+#endif
 #include <linux/types.h>
 #define SPI_HID_WIRE_U8 u8
 #else
@@ -213,24 +216,57 @@ static inline struct spi_hid_wire_frame spi_hid_wire_get_feature6(int double_opc
  * (0B 00 00 00 FF 00 04 03 00 06), SET_FEATURE/0x56 for the stream
  * (0B 00 00 00 FF 00 03 0A 00 56). The reference puts them there; the device
  * answers the read the request's response belongs to. */
+static inline unsigned int spi_hid_wire_read_approval_variant(
+		SPI_HID_WIRE_U8 *out, unsigned int reg,
+		SPI_HID_WIRE_U8 content_type, SPI_HID_WIRE_U8 content_id,
+		int variant)
+{
+	out[0] = 0;
+	out[1] = 0;
+	out[2] = 0;
+	out[3] = 0;
+	out[4] = 0;
+	out[5] = 0;
+	out[6] = 0;
+	out[7] = 0;
+	out[8] = 0;
+	out[9] = 0;
+
+	if (variant == 1) {
+		/* Legacy: five bytes, register in the address field. The device
+		 * answers this one on the field unit (with a RESET_RSP), which is
+		 * the only reason it is kept. */
+		out[0] = SPI_HID_WIRE_OPCODE_READ;
+		out[1] = (reg >> 16) & 0xff;
+		out[2] = (reg >> 8) & 0xff;
+		out[3] = reg & 0xff;
+		out[4] = 0xFF;
+		return 5;
+	}
+
+	out[0] = SPI_HID_WIRE_OPCODE_READ;
+	out[4] = 0xFF;
+	out[6] = content_type;
+	out[7] = reg & 0xff;
+	out[9] = content_id;
+	if (variant == 2) {
+		/* Both: the address field carries it as well, for a device that
+		 * reads it there and ignores offset 7. */
+		out[1] = (reg >> 16) & 0xff;
+		out[2] = (reg >> 8) & 0xff;
+		out[3] = reg & 0xff;
+	}
+	/* The reference trims the trailing zero: a descriptor read (content id
+	 * zero) is nine bytes, one that names a request is ten. */
+	return content_id ? SPI_HID_READ_APPROVAL_LEN + 1 : SPI_HID_READ_APPROVAL_LEN;
+}
+
 static inline unsigned int spi_hid_wire_read_approval(SPI_HID_WIRE_U8 *out,
 		unsigned int reg, SPI_HID_WIRE_U8 content_type,
 		SPI_HID_WIRE_U8 content_id)
 {
-	out[0] = SPI_HID_WIRE_OPCODE_READ;
-	out[1] = 0x00;
-	out[2] = 0x00;
-	out[3] = 0x00;
-	out[4] = 0xFF;
-	out[5] = 0x00;
-	out[6] = content_type;
-	out[7] = reg & 0xff;
-	out[8] = 0x00;
-	out[9] = content_id;
-	/* The reference trims the trailing zero: a descriptor read (content id
-	 * zero) is nine bytes, one that names a request is ten. The buffer is
-	 * then clocked out padded to the length of the response anyway. */
-	return content_id ? SPI_HID_READ_APPROVAL_LEN + 1 : SPI_HID_READ_APPROVAL_LEN;
+	return spi_hid_wire_read_approval_variant(out, reg, content_type,
+						  content_id, 0);
 }
 
 /* DESCREQ for `reg`: the device-descriptor register 0x000001

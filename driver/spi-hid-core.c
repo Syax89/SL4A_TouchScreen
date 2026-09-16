@@ -1115,6 +1115,13 @@ static int spi_hid_set_request(struct spi_hid *shid,
 			shid->desc.output_register, &report);
 }
 
+/* Which shape the read approval has. The traces put the register at offset 7
+ * with the address field zero; the field device answers nothing to that and
+ * something to the older five-byte shape. A frame that silences a device is
+ * not settled by argument: one reload per variant, and the bundle says which
+ * one the hardware accepted. */
+static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;
+
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {
 	u8 *tx = shid->read_tx_buf;
@@ -1148,9 +1155,10 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 
 	/* The reference names the content id only when it reads a body; a
 	 * nine-byte read (a header) carries none, whatever request it answers. */
-	n = spi_hid_wire_read_approval(tx, reg, shid->read_resp_type,
-				       rx_len > SPI_HID_READ_APPROVAL_LEN ?
-				       shid->read_resp_content_id : 0);
+	n = spi_hid_wire_read_approval_variant(tx, reg, shid->read_resp_type,
+					       rx_len > SPI_HID_READ_APPROVAL_LEN ?
+					       shid->read_resp_content_id : 0,
+					       read_frame_variant);
 	/* The request is the frame and nothing more. The trace's `tx_len` for a
 	 * body read is the length of the SPB *buffer*, not what the reference
 	 * clocks out — its controller segments the transfer (TX_COUNT=3 per
@@ -1812,6 +1820,10 @@ out:
 
 /* ── Operating mode ────────────────────────────────────────────── */
 static bool raw_mode;
+module_param(read_frame_variant, int, 0444);
+MODULE_PARM_DESC(read_frame_variant,
+	"Read approval shape: 0=reference (register at offset 7), 1=legacy (5 bytes, register in the address field), 2=both");
+
 module_param(raw_mode, bool, 0444);
 MODULE_PARM_DESC(raw_mode,
 	"0 = standard HID mode (single-touch, Report ID 0x40); "
@@ -1828,6 +1840,7 @@ MODULE_PARM_DESC(acpi_probe_power_cycle,
 	"Experimental ACPI _PS3->_PS0 power cycle at probe (default disabled)");
 
 module_param(sync_timeout_ms, int, 0444);
+
 MODULE_PARM_DESC(sync_timeout_ms,
 	"Timeout in ms for synchronous requests (default 6000: covers the ~3.6 s measured device "
 	"settle before feature queries are answered; the original protocol doc cited ~5.9 s)");

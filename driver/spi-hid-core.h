@@ -18,6 +18,19 @@
 
 /* Protocol constants */
 #define SPI_HID_DEFAULT_INPUT_REGISTER		0x0000
+
+/* The read approval's shape is the one frame the traces and the field
+ * disagree on: the trace's bytes put the register at offset 7 with the
+ * address field zero, while the device answers *something* only to the older
+ * five-byte shape (register in the address field). A frame that silences the
+ * device cannot be settled from here — the hardware has to choose, one reload
+ * per variant, so this is a knob, not a guess:
+ *   0 = the reference (nine/ten bytes, address zero, register at offset 7)
+ *   1 = legacy (five bytes, register in the address field)
+ *   2 = both (nine/ten bytes, register in the address field and at offset 7) */
+#define SPI_HID_READ_FRAME_REFERENCE	0
+#define SPI_HID_READ_FRAME_LEGACY	1
+#define SPI_HID_READ_FRAME_BOTH		2
 #define SPI_HID_SUPPORTED_VERSION		0x0100
 
 /* Protocol message size constants */
