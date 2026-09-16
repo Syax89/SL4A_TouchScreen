@@ -415,7 +415,7 @@ static void test_body_offset(void)
 	CHECK(spi_hid_protocol_body_offset(ref_body, sizeof(ref_body)) == 8,
 	      "the reference body parses after its five-byte preamble");
 	CHECK(spi_hid_protocol_body_offset(panel_body, sizeof(panel_body)) == 11,
-	      "the panel's prefixed body parses past prefix + preamble + content header");
+	      "the raw-mode body shape parses past prefix + preamble + content header");
 	CHECK(spi_hid_protocol_body_offset(junk, sizeof(junk)) != 8,
 	      "a body with neither shape does not land on the structure");
 }
@@ -537,7 +537,9 @@ static void test_read_approval_frame(void)
 		off = -1;
 		CHECK(spi_hid_protocol_frame_type(data, sizeof(data), &off) == 1,
 		      "an ordinary sync frame still types as DATA");
-		/* The panel's own answer family, verbatim from the field bundles: a
+		/* The raw-mode answer family, verbatim from the field bundles — no
+		 * capture shows this shape, because captures record standard-mode
+		 * traffic. The assertions hold for the shape the field produces: a
 		 * three-byte native prefix (01 <status> EE) followed by the same frame
 		 * the reference device sends. The header sits at offset 8 and the sync
 		 * at 11 — invisible to a nine-byte read, which is why no field payload
@@ -551,11 +553,11 @@ static void test_read_approval_frame(void)
 
 		off = -1;
 		CHECK(spi_hid_protocol_frame_type(prefixed_reset, sizeof(prefixed_reset), &off) == 3,
-		      "the panel's prefixed reset types as 3");
+		      "the raw-mode prefixed reset types as 3");
 		CHECK(off == 8, "and its frame starts three bytes past the reference offset");
 		off = -1;
 		CHECK(spi_hid_protocol_frame_type(prefixed_desc, sizeof(prefixed_desc), &off) == 7,
-		      "the panel's prefixed descriptor types as 7");
+		      "the raw-mode prefixed descriptor types as 7");
 		CHECK(off == 8, "at the same offset");
 	}
 

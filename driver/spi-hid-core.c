@@ -3831,7 +3831,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	 * A LATER leg found the check itself decorative: it tested only the
 	 * reference traces' buffers, so it printed "frame typing ok" through days
 	 * in which every frame this driver actually received typed as -1. The
-	 * panel's own answers are in the check now — a prefix of three bytes and
+	 * raw-mode answers are in the check now — a prefix of three bytes and
 	 * the reference frame behind it, header at offset 8 — because they are
 	 * the shapes a regression here would silence. */
 	{
