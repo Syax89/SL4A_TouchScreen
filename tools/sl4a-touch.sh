@@ -915,6 +915,8 @@ EOF
 # ── uninstall ────────────────────────────────────────────────────────────
 
 cmd_uninstall() {
+	# Nothing is installed afterwards, so the stamp must not outlive it.
+	rm -f "$INSTALLED_HEAD_STAMP" 2>/dev/null || true
 	elevate "remove the DKMS registration and /etc/modprobe.d config" uninstall "$@"
 
 	header "SL4A_TouchScreen driver uninstaller"
@@ -1213,6 +1215,32 @@ cmd_status() {
 
 # ── logs ─────────────────────────────────────────────────────────────────
 
+# Everything that can be checked on this machine without hardware, in one
+# place: the bundle carries the result instead of a reviewer asking for a
+# command the user has no reason to know to run.
+run_host_self_tests() {
+	echo "--- Self-tests (feasible on this machine) ---"
+	if ! command -v make >/dev/null 2>&1 || ! command -v cc >/dev/null 2>&1; then
+		echo "skipped: make/cc not installed"
+		return 0
+	fi
+	[ -d "$REPO_DIR/tests" ] || { echo "skipped: no tests directory"; return 0; }
+	echo "$ make -C tests test"
+	local out rc
+	out="$(make -C "$REPO_DIR/tests" test 2>&1)"
+	rc=$?
+	echo "$out" | grep -E 'PASS|FAIL|assertions' | tail -n 12
+	if [ "$rc" = 0 ]; then
+		echo "suite result: PASS"
+	else
+		echo "suite result: FAIL (exit $rc) — last 40 lines:"
+		echo "$out" | tail -n 40
+	fi
+	# Leave no build output behind, least of all root-owned files in the user's
+	# checkout when this ran under sudo.
+	make -C "$REPO_DIR/tests" clean >/dev/null 2>&1 || true
+}
+
 cmd_logs() {
 	local OUT=""
 	while [ $# -gt 0 ]; do
@@ -1343,6 +1371,26 @@ cmd_logs() {
 		# moves with every source edit, so the running module's own srcversion
 		# against the installed one is the staleness answer (review R26-7).
 		echo ""
+		echo "--- Installed revision vs this checkout (what srcversion cannot see) ---"
+		# srcversion compares the loaded module with the file on disk; both can be
+		# three commits old together. Only the build-time stamp knows which
+		# revision the modules came from, and a bundle that does not say it gets
+		# read as if it came from the checkout beside it — which cost this
+		# campaign four rounds of field testing against a module that no longer
+		# existed in git.
+		local head_now head_built
+		head_now="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+		head_built="$(installed_head)"
+		echo "checkout:                $head_now"
+		echo "installed modules built: $head_built"
+		if [ "$head_built" = "$head_now" ]; then
+			echo "the installed modules were built from this exact checkout"
+		else
+			echo "MISMATCH — the installed modules predate this checkout, so every figure"
+			echo "below describes ${head_built:0:8}, not ${head_now:0:8}. Run 'install', or 'hunt'"
+			echo "which rebuilds by itself, before reading anything into these counters."
+		fi
+		echo ""
 		echo "--- Loaded vs installed module (srcversion — read first) ---"
 		for mod in sl4a_spi_amd sl4a_spi_hid; do
 			local loaded_src disk_src
@@ -1448,6 +1496,8 @@ cmd_logs() {
 			echo "(mokutil not available)"
 		fi
 
+		echo ""
+		run_host_self_tests
 		echo ""
 		echo "--- dmesg (driver-related lines, last 1000) ---"
 		dmesg | grep -iE "sl4a|MSHW0231|MSHW0162|AMDI0060" | tail -1000
@@ -1577,6 +1627,8 @@ cmd_hunt() {
 			info "variant $variant done"
 		done
 
+		run_host_self_tests
+		echo ""
 		echo "--- module objects (which build ran) ---"
 		modinfo sl4a_spi_hid 2>/dev/null | head -4
 		echo ""
