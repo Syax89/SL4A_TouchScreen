@@ -255,11 +255,19 @@ def check_control_flow_pins():
             print("FAIL driver/spi-hid-core.c: the reset work lost the reference's 2000 ms "
                   "wait (ResettingSyncEntry arms a 2000 ms timer before the next state)")
             failures += 1
-        elif rw.index("msleep(2000)") < rw.rindex("mutex_unlock", 0, rw.index("msleep(2000)")):
-            print("FAIL driver/spi-hid-core.c: the reset work sleeps while still holding "
-                  "seq_lock — the IRQ thread is blocked for the whole wait, which is the "
-                  "livelock a verifier measured")
-            failures += 1
+        else:
+            # The property is ADJACENCY: the wait must directly follow a release
+            # of seq_lock. Comparing indices was vacuous — the guard branch's own
+            # unlock sits textually before the sleep, so the check passed while a
+            # mutation held the lock across the wait (found by mutation, not by a
+            # leg, which is the only reason I trust it now). Whitespace is
+            # collapsed, so the check is about order, not formatting.
+            flat = " ".join(rw.split())
+            if "mutex_unlock(&shid->seq_lock); msleep(2000);" not in flat:
+                print("FAIL driver/spi-hid-core.c: the reset work no longer releases seq_lock "
+                      "immediately before the 2000 ms wait — the IRQ thread is blocked for "
+                      "the whole wait, which is the livelock a verifier measured")
+                failures += 1
         if "delayed_work_pending(&shid->reset_work)" not in core_code:
             print("FAIL driver/spi-hid-core.c: the reset reaction no longer coalesces, so a "
                   "storm schedules one reset per RESET_RSP")
