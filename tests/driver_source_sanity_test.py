@@ -235,6 +235,43 @@ def check_control_flow_pins():
               "spi_hid_protocol_frame_type() — the frame typing the driver runs is no "
               "longer the one the host test exercises with real buffers")
         failures += 1
+    # Every static function must be DECLARED or defined before its first call.
+    # Twice tonight a helper was called from far above its own definition and
+    # only the kernel build noticed, because this suite never compiles the
+    # translation unit. The check below is the general form of that trap: for
+    # each function the file defines, the first line mentioning it as a
+    # declaration/definition must come before the first line that calls it.
+    _ls = core_code.splitlines()
+    # TWO passes, and the first version of this check was a lesson in why: it
+    # built the definition table in the same pass as the call scan, so a name
+    # defined further down was not yet in the table when the call was seen —
+    # it could not fire for the exact case it exists to catch.
+    _first_static = {}
+    for _i, _line in enumerate(_ls, 1):
+        _m = re.match(r"\s*static\s+[A-Za-z_][\w ]*?(\w+)\s*\(", _line)
+        if _m and _m.group(1) not in _first_static:
+            _first_static[_m.group(1)] = _i
+    _first_call = {}
+    for _i, _line in enumerate(_ls, 1):
+        _m = re.match(r"\s*static\s+[A-Za-z_][\w ]*?(\w+)\s*\(", _line)
+        for _name in re.findall(r"\b(\w+)\s*\(", _line):
+            if _name in _first_call or _name not in _first_static:
+                continue
+            if _m and _name == _m.group(1):
+                continue          # the declaration/definition line itself
+            # NOT "skip lines ending in ';'": that was this check's second
+            # draft, and every CALL also ends in a semicolon — it skipped
+            # precisely the lines it existed to inspect. A prototype is already
+            # excluded above, by being the same name as the static match.
+            _first_call[_name] = _i
+    _early = {k: (_first_call[k], _first_static[k]) for k in _first_call
+              if _first_call[k] < _first_static[k]}
+    if _early:
+        print(f"FAIL driver/spi-hid-core.c: called before declared/defined "
+              f"{dict(list(_early.items())[:4])} — the kernel build is the only thing that "
+              f"catches this; add the forward declaration")
+        failures += 1
+
     # The stream enable must not run before the descriptor exchange: the
     # reference configures the stream after it (boot trace TXN#9+), and doing
     # it first is what this driver did while the device answered every DESCREQ

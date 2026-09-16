@@ -170,6 +170,8 @@ static void spi_hid_getfeat6_retain(struct spi_hid *shid, const u8 *body, u32 bo
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason);
 static void spi_hid_arm_wait_reset_watchdog(struct spi_hid *shid);
+/* Called by spi_hid_seq_set_state(), which sits above its definition. */
+static void spi_hid_raw_stream_arm(struct spi_hid *shid);
 
 static void spi_hid_seq_set_state(struct spi_hid *shid,
 		enum spi_hid_seq_state new_state, enum spi_hid_seq_reason reason)
