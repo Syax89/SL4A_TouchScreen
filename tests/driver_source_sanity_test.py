@@ -70,13 +70,18 @@ def check_control_flow_pins():
     core = (ROOT / "driver/spi-hid-core.c").read_text()
     wire = (ROOT / "driver" / "spi-hid-wire-frames.h").read_text()
 
-    # 0a. The read-frame default must be the shape the DEVICE answered. A field
-    # sweep settled it after three wrong guesses from the trace: variant 0
-    # (reference, register at offset 7) is silent, variant 2 is silent, variant 1
-    # (register in bytes 1-3) gets answers, reset_rsp=47, frames on 0x0A.
-    if "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;" not in core:
-        print("FAIL driver/spi-hid-core.c: read_frame_variant no longer defaults to "
-              "LEGACY — the only shape the panel answers (field sweep 2026-09-16)")
+    # 0a. The read-frame default must be the REFERENCE shape. The field sweep
+    # that once argued for LEGACY measured the device's state, not the frame: a
+    # stream-stuck device answers whatever it is handed. The five-byte form
+    # cannot carry a content type or id, so a descriptor read and a feature read
+    # leave the host byte-identical and the device cannot tell them apart —
+    # found independently by two blind legs, and against the header's own
+    # comment on the builder. The stop frame above removes the stream state that
+    # made the crude form look necessary; `hunt` still sweeps all three.
+    if "static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;" not in core:
+        print("FAIL driver/spi-hid-core.c: read_frame_variant no longer defaults to the "
+              "reference shape — the only frame that can name the register, the content "
+              "type and the content id (see the builder's own comment)")
         failures += 1
 
     # 0b. The stream that survives a host reboot has to be torn down before the
@@ -92,10 +97,21 @@ def check_control_flow_pins():
         if "spi_hid_wire_vendor_stop" not in body:
             print("FAIL driver/spi-hid-core.c: the probe no longer sends the stream stop")
             failures += 1
-        elif body.index("spi_hid_wire_vendor_stop") > body.index("spi_hid_wire_set_power_d2"):
-            print("FAIL driver/spi-hid-core.c: the stream stop is sent AFTER the power "
-                  "sequence instead of before the handshake")
-            failures += 1
+        else:
+            # Pin the WRITE ORDER, not the position of a declaration: the
+            # previous form matched the `struct ... stop = spi_hid_wire_vendor_stop()`
+            # line, which sits before the d2 declaration whatever the code
+            # below does with it. An adversarial leg moved the actual write
+            # after the D0 write and the pin stayed green.
+            stop_w = body.find("spi_hid_seq_write(shid, stop.bytes")
+            d2_w = body.find("spi_hid_seq_write(shid, d2.bytes")
+            if stop_w < 0 or d2_w < 0:
+                print("FAIL driver/spi-hid-core.c: cannot find the stop / d2 send sites")
+                failures += 1
+            elif stop_w > d2_w:
+                print("FAIL driver/spi-hid-core.c: the stream stop is SENT after the power "
+                      "sequence instead of before the handshake")
+                failures += 1
 
     # 1. spi_hid_ll_parse(): the mutex_unlock must not be the body of an `else`.
     # A dangling `else` had put the unlock in the success branch only, so a
@@ -289,7 +305,13 @@ def check_control_flow_pins():
     for needle, why in (
         ("TRACE peek tx_len=", "the read-path region peek is gone"),
         ("0x84=[%*ph]", "the fixed-0x84 candidate is no longer logged"),
-        ("0x89=[%*ph]", "the tx_len+1 candidate is no longer logged"),
+        # Pin the DERIVATION, not a hand-written address: the label used to
+        # say 0x89 for every request length, which was a lie for all but the
+        # eight-byte one. What matters is that the third candidate is read at
+        # tx_len+1 and that its label is computed from the same expression.
+        ("0x80u + (unsigned int)tx_len + 1u",
+         "the tx_len+1 candidate is no longer logged, or its address is no longer "
+         "computed — the RX offset question goes back to being settled by argument"),
     ):
         if needle not in amd:
             print(f"FAIL driver/spi-amd.c: {why} — the RX offset question goes "
