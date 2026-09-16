@@ -126,6 +126,22 @@ stamp_installed_head() {
 	git -C "$REPO_DIR" rev-parse HEAD >"$INSTALLED_HEAD_STAMP" 2>/dev/null || true
 }
 
+# Re-stage the checkout into the DKMS source tree and rebuild. `dkms build`
+# alone rebuilds whatever is *staged*, and staging is a copy install made at
+# install time — so a rebuild that skips the copy would rebuild the old sources
+# and stamp them as the new revision, which is worse than not rebuilding.
+# Same three steps as install (copy, build, install); no profile, no service.
+restage_and_rebuild() {
+	echo "→ Staging the checkout into $SRC_DEST and rebuilding..."
+	mkdir -p "$SRC_DEST" || fail "cannot create $SRC_DEST"
+	cp -a "$DRIVER_DIR"/. "$SRC_DEST"/ || fail "cannot stage the driver sources"
+	rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c 2>/dev/null || true
+	dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS build failed"
+	dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS install failed"
+	depmod -a 2>/dev/null || true
+	stamp_installed_head
+}
+
 installed_head() {
 	cat "$INSTALLED_HEAD_STAMP" 2>/dev/null || echo "unknown"
 }
@@ -1527,10 +1543,7 @@ cmd_hunt() {
 	head_built="$(installed_head)"
 	if [ "$head_built" != "$head_now" ]; then
 		info "Installed modules came from ${head_built:0:8}, this checkout is ${head_now:0:8} — rebuilding first (30-60 s)."
-		dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS build failed"
-		dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS install failed"
-		depmod -a 2>/dev/null || true
-		stamp_installed_head
+		restage_and_rebuild
 		pass "Rebuilt from $head_now"
 	fi
 

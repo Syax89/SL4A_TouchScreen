@@ -128,6 +128,10 @@ assert "stamp_installed_head" in tool and "installed_head()" in tool, \
     "the installed-revision stamp is gone: nothing can tell a stale module"
 assert 'if [ "$head_built" != "$head_now" ]' in tool, \
     "hunt no longer rebuilds a stale module before sweeping"
+assert "restage_and_rebuild" in tool and 'cp -a "$DRIVER_DIR"/. "$SRC_DEST"/' in tool, \
+    "the rebuild no longer re-stages the checkout: it would stamp the new " \
+    "revision onto the old sources"
+
 assert "Modules built from revision:" in tool, \
     "the sweep file no longer records the revision the modules came from"
 
