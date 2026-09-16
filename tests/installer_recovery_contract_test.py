@@ -144,6 +144,14 @@ assert "MISMATCH — the installed modules predate this checkout" in tool, \
     "a stale installed module no longer produces a warning in the bundle"
 assert "run_host_self_tests" in tool and "suite result: PASS" in tool, \
     "the bundle no longer runs the host suite, so its result is not collected"
+# Where the file lands is not cosmetic: /tmp gets cleaned, and the whole point
+# of the sweep is that the user finds it afterwards and sends it. Same folder
+# as the diagnostics bundle, and ignored by git so it does not clutter status.
+assert 'OUT="$REPO_DIR/sl4a-hunt-$(date' in tool, \
+    "the hunt artifact defaults to somewhere other than the repo root again"
+assert "sl4a-hunt-*.txt" in (root / ".gitignore").read_text(), \
+    "the hunt artifact is no longer ignored by git"
+
 # The bug the user actually hit, and the reason hunt is now tested end to end:
 # a comment whose second line lost its leading '#' became a command, so hunt
 # died with rc=127 *after* unloading the driver — invisible, because everything
