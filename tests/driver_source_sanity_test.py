@@ -240,23 +240,32 @@ def check_control_flow_pins():
               "idle frame `32 10 00 5a` will be answered as a reset again, and the field "
               "bundle 16:52 shows that loop running 47 times in one pass")
         failures += 1
-    if "spi_hid_seq_reset_like_reference(shid);" not in core_code:
+    if "spi_hid_seq_reset_like_reference(shid)" not in core_code:
         print("FAIL driver/spi-hid-core.c: the reset reaction is gone (reference: "
               "ResettingSyncEntry — ResetDevice then a 2000 ms timer)")
         failures += 1
     else:
-        if core_code.count("spi_hid_seq_reset_like_reference(shid);") < 4:
-            print("FAIL driver/spi-hid-core.c: not every RESET_RSP site resets the device "
-                  "(WAIT_RESET, WAIT_DESC, WAIT_RPT, WAIT_FEATURE)")
+        if core_code.count("if (!spi_hid_seq_reset_like_reference(shid))") < 4:
+            print("FAIL driver/spi-hid-core.c: not every RESET_RSP site honours the reset "
+                  "reaction (WAIT_RESET, WAIT_DESC, WAIT_RPT, WAIT_FEATURE)")
             failures += 1
-        rb = core_code.split("void spi_hid_seq_reset_like_reference", 1)[1].split("\n}", 1)[0]
-        if "msleep(2000)" not in rb:
-            print("FAIL driver/spi-hid-core.c: the reset reaction no longer waits the "
-                  "reference's 2000 ms")
+        rb = core_code.split("bool spi_hid_seq_reset_like_reference", 1)[1].split("\n}", 1)[0]
+        # The reference's 2000 ms must be here as a GAP, and must never be a
+        # sleep: an inline wait holds seq_lock with the IRQ masked for ~2.25 s
+        # while the field storm arrives every ~208 ms — that is a livelock, and
+        # a blind leg measured it before this pin existed.
+        if "msecs_to_jiffies(2000)" not in rb:
+            print("FAIL driver/spi-hid-core.c: the reset reaction lost the reference's "
+                  "2000 ms constant")
             failures += 1
-        if "spi_hid_vendor_init(shid)" not in rb:
-            print("FAIL driver/spi-hid-core.c: the reset reaction no longer re-runs the "
-                  "power sequence (our ResetDevice equivalent)")
+        if "msleep" in rb or "udelay" in rb:
+            print("FAIL driver/spi-hid-core.c: the reset reaction sleeps while the callers "
+                  "hold seq_lock — the IRQ stays masked for the whole wait (livelock under "
+                  "a reset storm)")
+            failures += 1
+        if "time_before(jiffies" not in rb:
+            print("FAIL driver/spi-hid-core.c: the reset reaction no longer rate-limits, "
+                  "so every RESET_RSP is answered at full speed again")
             failures += 1
 
     if "spi_hid_wire_read_approval" in wire:
