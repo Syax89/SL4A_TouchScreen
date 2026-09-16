@@ -560,6 +560,11 @@ out:
 /* Forward declarations */
 static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *rx, int rx_len);
 static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *expect_fast);
+/* The reset reaction's work item is defined ABOVE this function's own
+ * definition, and calls it: without this prototype the build fails with an
+ * implicit-declaration error (found by CI, after two host-green local runs
+ * could not see it — the host suite never compiles this translation unit). */
+static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason);
 static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen);
 static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen);
