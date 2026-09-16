@@ -119,6 +119,16 @@ assert "cannot load it (ExecStart points at" in tool, \
 assert "is NOT the build just installed" in tool
 assert 'sudo modprobe -r sl4a-spi-hid sl4a-spi-amd && sudo ./tools/sl4a-touch.sh activate' in tool
 assert '"/sys/module/$mod/srcversion"' in tool
+# hunt: the bisect is one command, and the file it writes carries a verdict
+# per variant — otherwise the diagnosis costs the user a shell session again.
+assert "cmd_hunt" in tool and "hunt_verdict" in tool and \
+    'read_frame_variant="$variant"' in tool, \
+    "the frame hunt is gone: a read-shape bisect would need hand commands"
+assert "sl4a_debug_level=3" in tool, \
+    "hunt no longer raises the debug level, so the read bytes are not captured"
+assert ">>> TOUCH THE PANEL NOW" in tool, \
+    "hunt no longer tells the user when to touch the panel"
+
 assert "Unloading the previous build and loading the new one" in tool and \
     "modprobe -r sl4a_spi_hid sl4a_spi_amd" in tool, \
     "install detected a running build that is not the installed one but only " \

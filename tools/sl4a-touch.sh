@@ -251,6 +251,13 @@ Commands:
                     state, driver sysfs stats, the last captured frame as raw
                     bytes, filtered dmesg) into a single text file for bug
                     reports. Default output path is printed at the end.
+  hunt [-o PATH]   One command for a display problem: unloads the driver and
+                    reloads it once per read-frame variant (0 reference, 1
+                    legacy, 2 both) at debug level 3, waits while you touch
+                    the panel, and writes ONE file with every variant's
+                    counters, driver log and a verdict line. Send that file.
+                    Default output /tmp/sl4a-hunt-<timestamp>.txt.
+
 
   rebuild           Developer use only: rebuild the .ko files against the
                     running kernel and drop them directly into
@@ -1462,12 +1469,102 @@ cmd_rebuild() {
 	rule
 }
 
+cmd_hunt() {
+	local OUT="" variant
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			-o|--output)
+				[ $# -ge 2 ] || fail "-o requires a path"
+				OUT="$2"
+				shift 2 ;;
+			-h|--help)
+				usage
+				exit 0 ;;
+			*) fail "unknown hunt option: $1" ;;
+		esac
+	done
+	[ "$(id -u)" = 0 ] || fail "hunt needs root (it unloads and loads the driver): run it with sudo"
+
+	[ -n "$OUT" ] || OUT="/tmp/sl4a-hunt-$(date +%Y%m%d-%H%M%S).txt"
+
+	local SYSFS_DIR
+	SYSFS_DIR="$(ls -d /sys/bus/spi/devices/*MSHW0231* 2>/dev/null | head -1)"
+
+	# The installed profile's own parameters, minus the two this command sets.
+	local opts
+	opts="$(awk '/^options[ \t]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null)"
+	[ -n "$opts" ] || opts="raw_mode=N"
+
+	info "Frame hunt: three read shapes, one file, no commands for you. Leave the panel alone until asked."
+	[ -n "$SYSFS_DIR" ] || warn "sysfs directory for the device not found — statistics will be missing"
+
+	{
+		echo "=== SL4A_TouchScreen frame hunt ==="
+		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+		echo "Profile options from $MODPROBE_CONF: $opts"
+		echo ""
+
+		for variant in 0 1 2; do
+			echo "--- variant $variant ---"
+			modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null || true
+			sleep 1
+			modprobe sl4a_spi_amd 2>/dev/null || true
+			# shellcheck disable=SC2086
+			modprobe sl4a_spi_hid $opts read_frame_variant="$variant" sl4a_debug_level=3 2>/dev/null || true
+			sleep 4
+			echo "running variant: $(cat /sys/module/sl4a_spi_hid/parameters/read_frame_variant 2>/dev/null) at debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null)"
+			echo ">>> TOUCH THE PANEL NOW, a few times <<<"
+			sleep 6
+			for f in ready seq_state protocol_stats lifecycle_status bus_error_count device_initiated_reset_count; do
+				echo "-- $f"
+				cat "$SYSFS_DIR/$f" 2>/dev/null || echo "(unavailable)"
+			done
+			echo "-- dmesg, this load only (the read bytes are here)"
+			dmesg | grep -i 'sl4a_spi_hid' | tail -n 60
+			echo ""
+			echo "VERDICT: $(hunt_verdict "$variant" "$SYSFS_DIR")"
+			echo ""
+			info "variant $variant done"
+		done
+
+		echo "--- module objects (which build ran) ---"
+		modinfo sl4a_spi_hid 2>/dev/null | head -4
+		echo ""
+	} >"$OUT" 2>&1
+	chmod 600 "$OUT" 2>/dev/null || true
+
+	# Leave the machine exactly as it was: the installed profile, no debug level.
+	modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null || true
+	cmd_activate >/dev/null 2>&1 || true
+
+	pass "Wrote $OUT (one file, all three variants)"
+	grep -h '^VERDICT' "$OUT" 2>/dev/null || true
+	echo ""
+	echo "Send that file: it already contains every variant with its verdict."
+}
+
+# Reads the counters for one variant and says what they mean, so the file
+# answers the question on its own.
+hunt_verdict() {
+	local variant="$1" dir="$2" rr dd
+	rr="$(awk -F= '/^reset_rsp=/{gsub(/ /, "", $2); print $2}' "$dir/protocol_stats" 2>/dev/null)"
+	dd="$(awk -F= '/^device_desc=/{gsub(/ /, "", $2); print $2}' "$dir/protocol_stats" 2>/dev/null)"
+	if [ "${dd:-0}" != "0" ] && [ -n "${dd:-}" ]; then
+		echo "variant $variant DELIVERED A DESCRIPTOR (device_desc=$dd) — this is the shape"
+	elif [ "${rr:-0}" != "0" ] && [ -n "${rr:-}" ]; then
+		echo "variant $variant gets answers from the device (reset_rsp=$rr)"
+	else
+		echo "variant $variant is silent (no RESET_RSP, no descriptor)"
+	fi
+}
+
 case "$CMD" in
 	install)   cmd_install "$@" ;;
 	uninstall) cmd_uninstall "$@" ;;
 	activate)  cmd_activate "$@" ;;
 	status)    cmd_status "$@" ;;
 	logs)      cmd_logs "$@" ;;
+	hunt)      cmd_hunt "$@" ;;
 	rebuild)   cmd_rebuild "$@" ;;
 	*) echo "Unknown command: $CMD"; echo ""; usage; exit 1 ;;
 esac
