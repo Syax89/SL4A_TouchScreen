@@ -1820,9 +1820,6 @@ out:
 
 /* ── Operating mode ────────────────────────────────────────────── */
 static bool raw_mode;
-/* Which shape the read approval has. The traces put the register at offset 7
- * with the address field zero; the field device answers nothing to that and
- * something to the older five-byte shape. A frame that silences a device is
 module_param(read_frame_variant, int, 0444);
 MODULE_PARM_DESC(read_frame_variant,
 	"Read approval shape: 0=reference (register at offset 7), 1=legacy (5 bytes, register in the address field), 2=both");
