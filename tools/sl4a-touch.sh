@@ -112,6 +112,24 @@ bound_driver() {
 	basename "$(readlink -f "$1/driver")"
 }
 
+# The revision the installed modules were built from. DKMS tracks a version
+# (1.7.0) that does not change during a campaign, and the srcversion only says
+# "same as the file on disk" — so both call a module installed when it was
+# built before the last pull. That is how a sweep reloaded a driver three
+# commits old and its field bundle described a revision that no longer existed.
+# This stamp is the missing fact: install/rebuild write it, hunt compares it,
+# and a mismatch rebuilds before sweeping.
+INSTALLED_HEAD_STAMP="/var/lib/sl4a-touch/installed-head"
+
+stamp_installed_head() {
+	mkdir -p "$(dirname "$INSTALLED_HEAD_STAMP")" 2>/dev/null || true
+	git -C "$REPO_DIR" rev-parse HEAD >"$INSTALLED_HEAD_STAMP" 2>/dev/null || true
+}
+
+installed_head() {
+	cat "$INSTALLED_HEAD_STAMP" 2>/dev/null || echo "unknown"
+}
+
 dkms_installed_version() {
 	# Real dkms status output looks like:
 	#   sl4a-touch/1.2.0, 7.1.3-2-cachyos, x86_64: installed
@@ -689,6 +707,7 @@ cmd_install() {
 	dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || stage_failed "DKMS build failed; existing driver state was left unchanged"
 	dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || stage_failed "DKMS install failed; existing driver state was left unchanged"
 	pass "sl4a-spi-amd.ko + sl4a-spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
+	stamp_installed_head
 
 	# Only now, with the new version built AND installed, drop any other
 	# registration of this package: an older version left registered keeps
@@ -1459,6 +1478,7 @@ cmd_rebuild() {
 	$SUDO mkdir -p "/lib/modules/$(uname -r)/updates/dkms"
 	$SUDO cp -f "$DRIVER_DIR/sl4a-spi-amd.ko" "$DRIVER_DIR/sl4a-spi-hid.ko" "/lib/modules/$(uname -r)/updates/dkms/"
 	$SUDO depmod -a
+	stamp_installed_head
 	pass "Modules installed"
 
 	echo ""
@@ -1498,10 +1518,27 @@ cmd_hunt() {
 	info "Frame hunt: three read shapes, one file, no commands for you. Leave the panel alone until asked."
 	[ -n "$SYSFS_DIR" ] || warn "sysfs directory for the device not found — statistics will be missing"
 
+	# The sweep is worthless against a stale module, and reloading does not
+	# rebuild anything: DKMS built these files at install time. Compare the
+	# stamp with the checkout and rebuild when they differ — without touching
+	# the profile, which belongs to the user.
+	local head_now head_built
+	head_now="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+	head_built="$(installed_head)"
+	if [ "$head_built" != "$head_now" ]; then
+		info "Installed modules came from ${head_built:0:8}, this checkout is ${head_now:0:8} — rebuilding first (30-60 s)."
+		dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS build failed"
+		dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS install failed"
+		depmod -a 2>/dev/null || true
+		stamp_installed_head
+		pass "Rebuilt from $head_now"
+	fi
+
 	{
 		echo "=== SL4A_TouchScreen frame hunt ==="
 		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 		echo "Profile options from $MODPROBE_CONF: $opts"
+		echo "Modules built from revision: $(installed_head)  (checkout: $head_now)"
 		echo ""
 
 		for variant in 0 1 2; do
