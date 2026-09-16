@@ -1274,7 +1274,26 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 
 static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 {
-	return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len);
+	u32 reg = shid->desc.input_register;
+
+	/* Which register a read goes to depends on whether the stream is up, and
+	 * the reference's own boot bytes say so:
+	 *
+	 *   TX 0B 00 00 00 FF 00 00 00 00   RX ... 32 10 00 5A   (register 0)
+	 *   TX 0B 00 00 00 FF 00 00 03 00   RX ... 72 80 00 5A   (register 3,
+	 *                                                          the descriptor's)
+	 *
+	 * The handshake reads register 0 and answers there; the stream register is
+	 * read only once the stream has been configured. Raw mode overrides
+	 * input_register to the stream register at probe time — before the
+	 * handshake — so every handshake read was pointed at a register the device
+	 * was not answering on yet. That is the one thing the field has never
+	 * tested, and it needs no new frame: only the destination.
+	 *
+	 * Standard mode is untouched: it never overrides the register. */
+	if (shid->raw_mode_active && !shid->raw_stream_armed)
+		reg = 0;
+	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
 
 /*

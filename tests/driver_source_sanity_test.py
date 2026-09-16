@@ -272,6 +272,17 @@ def check_control_flow_pins():
               f"catches this; add the forward declaration")
         failures += 1
 
+    # The handshake reads register 0, the stream register only after arming.
+    # The reference's boot reads register 0 (parser: TX 0B 00 00 00 FF 00 00 00
+    # 00) and its answer arrives there; this driver pointed every read at the
+    # stream register from probe setup, before the stream existed.
+    _rd = (core_code.split("static int spi_hid_seq_read(struct", 1)[1].split("\n}", 1)[0]
+           if "static int spi_hid_seq_read(struct" in core_code else "")
+    if "raw_stream_armed" not in _rd or "= 0;" not in _rd:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() no longer points the handshake "
+              "reads at register 0 — that is the reference's own register for them")
+        failures += 1
+
     # The stream enable must not run before the descriptor exchange: the
     # reference configures the stream after it (boot trace TXN#9+), and doing
     # it first is what this driver did while the device answered every DESCREQ
