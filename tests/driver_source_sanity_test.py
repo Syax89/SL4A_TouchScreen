@@ -70,6 +70,17 @@ def check_control_flow_pins():
     core = (ROOT / "driver/spi-hid-core.c").read_text()
     wire = (ROOT / "driver" / "spi-hid-wire-frames.h").read_text()
 
+    # Checks below that care whether code RUNS read these instead: a raw-text
+    # pin is satisfied by a comment, which is how three pins in this file were
+    # shown decorative by an adversarial leg that moved the real code into a
+    # comment and left the literal behind. Strip comments, keep strings.
+    def strip_c_comments(text):
+        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        text = re.sub(r"//[^\n]*", " ", text)
+        return text
+
+    core_code = strip_c_comments(core)
+
     # 0a. The read-frame default must be the REFERENCE shape. The field sweep
     # that once argued for LEGACY measured the device's state, not the frame: a
     # stream-stuck device answers whatever it is handed. The five-byte form
@@ -210,24 +221,35 @@ def check_control_flow_pins():
     # every frame reader calls — not at one call site, where the other readers
     # keep the old behaviour. A previous fix of exactly this kind was later shown
     # to guard one path while the siblings stayed broken.
-    hdrfn = (core.split("static int spi_hid_seq_hdr_type", 1)[1].split("\n}", 1)[0]
-             if "static int spi_hid_seq_hdr_type" in core else "")
+    hdrfn = (core_code.split("static int spi_hid_seq_hdr_type", 1)[1].split("\n}", 1)[0]
+             if "static int spi_hid_seq_hdr_type" in core_code else "")
+    # The narrow rule needs a satisfiable pass branch, and the only frame that
+    # can satisfy it is the sync-less one whose first byte is 3 — Windows' own
+    # test. Without this detector the type-3 arms have no reachable producer at
+    # all (the version nibble is 2, so a sync-based type 3 implies byte0 0x32):
+    # exactly the state a blind leg proved this code was in.
+    if "rx[5] == 3" not in hdrfn:
+        print("FAIL driver/spi-hid-core.c: the genuine reset detector is gone — a "
+              "sync-less frame whose first byte is 3 IS a reset (VerifyResetResponse: "
+              "msg[0] == 3), and without it every type-3 path is unreachable and a "
+              "device announcing resets is answered with descriptor requests")
+        failures += 1
     if "!= 3" not in hdrfn:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_hdr_type() no longer narrows a "
               "nibble-only type 3 to Windows' whole-first-byte rule (msg[0] == 3) — the "
               "idle frame `32 10 00 5a` will be answered as a reset again, and the field "
               "bundle 16:52 shows that loop running 47 times in one pass")
         failures += 1
-    if "spi_hid_seq_reset_like_reference(shid);" not in core:
+    if "spi_hid_seq_reset_like_reference(shid);" not in core_code:
         print("FAIL driver/spi-hid-core.c: the reset reaction is gone (reference: "
               "ResettingSyncEntry — ResetDevice then a 2000 ms timer)")
         failures += 1
     else:
-        if core.count("spi_hid_seq_reset_like_reference(shid);") < 4:
+        if core_code.count("spi_hid_seq_reset_like_reference(shid);") < 4:
             print("FAIL driver/spi-hid-core.c: not every RESET_RSP site resets the device "
                   "(WAIT_RESET, WAIT_DESC, WAIT_RPT, WAIT_FEATURE)")
             failures += 1
-        rb = core.split("void spi_hid_seq_reset_like_reference", 1)[1].split("\n}", 1)[0]
+        rb = core_code.split("void spi_hid_seq_reset_like_reference", 1)[1].split("\n}", 1)[0]
         if "msleep(2000)" not in rb:
             print("FAIL driver/spi-hid-core.c: the reset reaction no longer waits the "
                   "reference's 2000 ms")
