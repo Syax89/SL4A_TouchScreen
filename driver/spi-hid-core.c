@@ -1236,23 +1236,19 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 					       rx_len > SPI_HID_READ_APPROVAL_LEN ?
 					       shid->read_resp_content_id : 0,
 					       read_frame_variant);
-	/* The request is the frame and nothing more, and the reason changed:
-	 * a cross-family leg went through the capture row by row and refuted the
-	 * earlier explanation. The reference's `tx_len` is NOT a pre-segmentation
-	 * buffer hint: the first segment programs TX_COUNT from the request length
-	 * (spi-amd.c:358) and only CONTINUATION segments use TX_COUNT=3, while the
-	 * reference's own body reads carry the zero padding in the logged buffer
-	 * itself (945 bytes, 936 of them zeros, surface_boot_auto.csv row 211) —
-	 * and requests that DO carry content clock that content instead of zeros
-	 * (the 4309-byte read at row 211's siblings: `56 bd 0c ee 5b 44 4c` after
-	 * the frame), so the rule is "frame + whatever the request buffer holds,
-	 * to the response length", not "frame + zeros".
-	 * So the reference really does pad. This driver must not, for a reason of
-	 * its own transport: a padded buffer is chopped into TX-only bursts here
-	 * and the panel went silent (bundle: a RESET_RSP per second before, none
-	 * after), and the current transport would reject it outright at the FIFO
-	 * check (spi-amd.c:566). Byte parity with the reference is not achievable
-	 * through this path; that is a fact to carry, not a bug to chase. */
+	/* The request is the frame and nothing more: `tx_len = n`, the padded form
+	 * removed for reasons of THIS transport, not because the reference's own
+	 * behaviour was established. Two adversarial legs read the same capture and
+	 * split on that: its lengths are SpbCx transfer-descriptor BUFFER lengths
+	 * (TX == RX on every read), it records no TX_COUNT/RX_COUNT, and so it
+	 * cannot show what reaches the wire — "the reference pads" and "the
+	 * reference clocks only the frame" are both consistent with it. What is
+	 * established: a padded request here is chopped into TX-only bursts, the
+	 * FIFO guard rejects it outright (spi-amd.c:566), and the one field bundle
+	 * cited for the removal recorded no body read, so it cannot isolate the
+	 * padding either. The decision stands on the transport; do not cargo-cult
+	 * it into "the reference does not pad" — nobody has shown that.
+	 */
 	tx_len = n;
 	if (tx_len > shid->read_tx_len)
 		tx_len = shid->read_tx_len;
