@@ -1761,7 +1761,16 @@ out:
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
-	u8 hdr[9];
+	/* SIXTEEN, not nine. The field unit answers every read with a three-byte
+	 * prefix (01 <status> EE — 230-odd samples, no exception, and no occurrence
+	 * in any reference capture), and behind it either a full reference-framed
+	 * message or nothing but status bytes. A nine-byte read truncates that
+	 * message at its first header byte: every log so far ends at `… ff ff ff
+	 * ff 32`, which is a frame cut off mid-header. Widening the read is
+	 * instrumentation, not a parser change: the header still sits at offset 5
+	 * for the reference path, the offset-5 gates are untouched, and the next
+	 * field bundle shows whether the bytes after it are the message. */
+	u8 hdr[16];
 	u32 resp_reg;
 	int type, hdr_off;
 	int i, got = -1;
@@ -2311,7 +2320,16 @@ static void spi_hid_poll_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, poll_work);
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[9];
+	/* SIXTEEN, not nine. The field unit answers every read with a three-byte
+	 * prefix (01 <status> EE — 230-odd samples, no exception, and no occurrence
+	 * in any reference capture), and behind it either a full reference-framed
+	 * message or nothing but status bytes. A nine-byte read truncates that
+	 * message at its first header byte: every log so far ends at `… ff ff ff
+	 * ff 32`, which is a frame cut off mid-header. Widening the read is
+	 * instrumentation, not a parser change: the header still sits at offset 5
+	 * for the reference path, the offset-5 gates are untouched, and the next
+	 * field bundle shows whether the bytes after it are the message. */
+	u8 hdr[16];
 	int type, ret, hdr_off;
 	u16 blen;
 
@@ -2538,7 +2556,16 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	u8 hdr[9]; int type; u16 blen = 0;
+	/* SIXTEEN, not nine. The field unit answers every read with a three-byte
+	 * prefix (01 <status> EE — 230-odd samples, no exception, and no occurrence
+	 * in any reference capture), and behind it either a full reference-framed
+	 * message or nothing but status bytes. A nine-byte read truncates that
+	 * message at its first header byte: every log so far ends at `… ff ff ff
+	 * ff 32`, which is a frame cut off mid-header. Widening the read is
+	 * instrumentation, not a parser change: the header still sits at offset 5
+	 * for the reference path, the offset-5 gates are untouched, and the next
+	 * field bundle shows whether the bytes after it are the message. */
+	u8 hdr[16]; int type; u16 blen = 0;
 	int hdr_off;
 	s64 dbg_dt_us;
 	irqreturn_t result = IRQ_HANDLED;
