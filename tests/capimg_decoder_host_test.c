@@ -12,6 +12,14 @@
 #define HEADER_LENGTH 7
 #define HEATMAP_OFFSET HEADER_LENGTH
 #define HEATMAP_LENGTH (16 + SPI_HID_CAPIMG_RASTER_SAMPLES)
+/* The decoder's expected sample count must be checked against an INDEPENDENT
+ * literal, not against the macro this file also sizes its fixtures with. A leg
+ * showed that a macro change to 3440 keeps every test here green while every
+ * real frame stops decoding: the fixtures shrink with the macro. The capture's
+ * device descriptor says 72x48 = 3456 and the field bodies are 4300..4400.
+ */
+_Static_assert(SPI_HID_CAPIMG_RASTER_SAMPLES == 3456,
+               "raster sample count must match the capture's 72x48 descriptor");
 #define VENDOR_OFFSET (HEATMAP_OFFSET + HEATMAP_LENGTH)
 #define VENDOR_LENGTH (CONTAINER_LENGTH - VENDOR_OFFSET)
 
