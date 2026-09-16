@@ -30,6 +30,11 @@
 #define AMD_SPI_STATUS_REG	0x4C
 
 #define AMD_SPI_FIFO_SIZE	70
+/* The reference splits a long read into segments: the first carries the
+ * request, every continuation is a three-byte command (TX_COUNT=3 in the
+ * 0x4bac decomp, read data at 0x80 + 3 + 1 = 0x84) and 64 bytes of answer. */
+#define AMD_SPI_CHUNK_MAX	64
+#define AMD_SPI_CONT_CMD_LEN	3
 
 /* SPI_MISC_CNTRL: PSP ownership prevents host-controller accesses. */
 #define AMD_SPI_MISC_CNTRL_REG	0xFC
@@ -519,8 +524,22 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 					u32 rx_remaining = next->len;
 					u32 tx_sent = 0;
 					u32 tx_rem = tx_len;
-					/* Keep descriptor reads aligned to 64-byte chunks. */
-					u32 first_chunk = min_t(u32, rx_remaining, 64);
+					/* The FIFO holds the request, the answer and the
+					 * controller's extra byte, so the first chunk is what
+					 * is left of it after this request's bytes. A fixed 64
+					 * only fits a five-byte request; the reference's is
+					 * nine or ten, and a chunk that does not fit is
+					 * rejected outright (tx + rx + 1 > FIFO). */
+					u32 first_chunk = 0;
+
+					if (tx_len + 1 >= AMD_SPI_FIFO_SIZE) {
+						pr_err("spi-amd: request %u does not fit the FIFO %u\n",
+						       tx_len, AMD_SPI_FIFO_SIZE);
+						msg->status = -EINVAL;
+						goto out;
+					}
+					first_chunk = min_t(u32, rx_remaining,
+							    AMD_SPI_FIFO_SIZE - tx_len - 1);
 
 					/* Chunk TX if needed (FIFO size is 70 bytes) */
 					while (tx_rem > 0) {
@@ -540,15 +559,28 @@ static int amd_spi_host_transfer(struct spi_controller *host,
 					}
 
 					while (rx_remaining > 0) {
-						u32 chunk = min_t(u32, rx_remaining, 64);
-						/* Keep each 64-byte PIO continuation in the same
-						 * TX_COUNT=3/FIFO+0x84 shape as Windows 0x4bac. */
+						u32 chunk = min_t(u32, rx_remaining,
+								  AMD_SPI_CHUNK_MAX);
+						u8 cont_cmd[AMD_SPI_CONT_CMD_LEN] = { 0 };
+
+						/* TX_COUNT=3/FIFO+0x84 shape as Windows
+						 * 0x4bac: the device is already streaming the
+						 * rest of its answer, so the continuation is a
+						 * three-byte command and not another copy of the
+						 * request (which would not fit the FIFO anyway:
+						 * 9 + 64 + 1 > 70). */
 						ret = amd_spi_exec_segment(amd_spi, opcode,
-							tx_buf, tx_len, rx_ptr, chunk);
+							cont_cmd, sizeof(cont_cmd),
+							rx_ptr, chunk);
 						if (ret < 0) { msg->status = ret; goto out; }
 						rx_ptr += chunk;
 						rx_remaining -= chunk;
 					}
+					if (debug_trace >= 2)
+						pr_info("spi-amd: read %u B in %u + %u x %u chunks\n",
+							next->len, first_chunk,
+							(next->len - first_chunk) / AMD_SPI_CHUNK_MAX,
+							AMD_SPI_CHUNK_MAX);
 					xfer = next;
 					continue;
 				}

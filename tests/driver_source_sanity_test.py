@@ -188,6 +188,25 @@ def check_control_flow_pins():
               "on nine-byte reads again — the reference names it only on bodies")
         failures += 1
 
+    # 8. the segmented read in spi-amd.c. The FIFO holds the request, the
+    # answer and the controller's extra byte, so a chunk that does not fit is
+    # rejected outright (tx + rx + 1 > 70) — a fixed 64-byte first chunk only
+    # fits a five-byte request, and the reference's request is nine or ten.
+    # Every long read (the 32-byte descriptor body, the 940-byte report
+    # descriptor, the 4304-byte raw frames) goes through this path.
+    amd = (ROOT / "driver" / "spi-amd.c").read_text()
+    for needle, why in (
+        ("AMD_SPI_FIFO_SIZE - tx_len - 1",
+         "the first chunk is no longer computed from what is left of the FIFO"),
+        ("AMD_SPI_CONT_CMD_LEN", "the continuation command is gone"),
+        ("cont_cmd, sizeof(cont_cmd)", "a continuation sends the whole request again"),
+    ):
+        if needle not in amd:
+            print(f"FAIL driver/spi-amd.c: {why} — long reads cannot fit the "
+                  f"70-byte FIFO and the segment math is the only thing that "
+                  f"makes them work")
+            failures += 1
+
     return failures
 
 
