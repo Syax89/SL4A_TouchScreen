@@ -307,7 +307,8 @@ Commands:
                     legacy, 2 both) at debug level 3, waits while you touch
                     the panel, and writes ONE file with every variant's
                     counters, driver log and a verdict line. Send that file.
-                    Default output /tmp/sl4a-hunt-<timestamp>.txt.
+                    Default output: next to the driver, like the
+                    diagnostics bundle (sl4a-hunt-<timestamp>.txt).
 
 
   rebuild           Developer use only: rebuild the .ko files against the
@@ -1683,7 +1684,9 @@ cmd_hunt() {
 		fi
 	fi
 
-	[ -n "$OUT" ] || OUT="/tmp/sl4a-hunt-$(date +%Y%m%d-%H%M%S).txt"
+	# Same place as the diagnostics bundle: next to the driver, not in /tmp
+	# where it can be cleaned up before the file is even sent.
+	[ -n "$OUT" ] || OUT="$REPO_DIR/sl4a-hunt-$(date +%Y%m%d-%H%M%S).txt"
 
 	local SYSFS_DIR
 	# Any supported Surface panel, not just the SL4 one: a glob matching nothing
