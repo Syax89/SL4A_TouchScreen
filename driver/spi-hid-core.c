@@ -2882,6 +2882,16 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				return;
 			}
 			off += 3;
+			/* The layer boundary here is load-bearing and invisible when it is
+			 * crossed. `rblen` counts the FRAME (the header's word count,
+			 * padded to a 4-byte word); `report_descriptor_length` counts the
+			 * PAYLOAD. Copy with the frame number, or size the read with the
+			 * payload number, and the guard below fires — silently, because the
+			 * hardcoded copy it falls back to is byte-identical to the wire one
+			 * today. A future "unification" of the two numbers is a regression,
+			 * not a tidy-up. The gap between them is not a constant either: the
+			 * two frames this device sends differ by 4 and by 2
+			 * (3 + padding to the next 4-byte word). */
 			len = min_t(u32, shid->desc.report_descriptor_length,
 				    sizeof(shid->wire_report_descriptor));
 			if (off < rblen && len > 0 && off + len <= rblen) {
