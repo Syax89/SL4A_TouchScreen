@@ -1359,12 +1359,14 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 		if (shid->seq_state == SPI_HID_SEQ_WAIT_RESET)
 			reg = 0;                      /* the reset, and its drain */
 		else if (shid->seq_state != SPI_HID_SEQ_DONE)
-			/* Same fallback the body read has always used. Before the
-			 * DEVICE_DESC is parsed this field is still zero, and reading the
-			 * descriptor header from register 0 gets a RESET_RSP back — the
-			 * loop that keeps discovery in WAIT_DESC on a faithful device.
-			 * The comment here used to claim header and body read the same
-			 * register; they did not. */
+			/* Same fallback the body read has always used. Until the
+			 * DEVICE_DESC is parsed this field is still zero, and reading any
+			 * raw-mode header from register 0 gets a RESET_RSP back — the loop
+			 * that keeps discovery in WAIT_DESC on a faithful device. This
+			 * covers WAIT_RPT, WAIT_FEATURE and VENDOR_INIT as well as
+			 * WAIT_DESC; DONE is excluded above because there the stream
+			 * register is the point. The comment here used to claim header and
+			 * body read the same register; they did not. */
 			reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
 	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
@@ -1888,7 +1890,15 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		 * restart is refused, the watchdog owns the fallback, not this
 		 * branch. */
 		seq_dbg(shid, 1, "SEQ: poll-work: RESET_RSP, draining and retrying as the IRQ path does\n");
-		(void)spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
+		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
+			return; /* restarted: the 100 ms retry loop and the watchdog own it from here */
+		/* The restart was refused, so the budgets are spent. Fall back the way
+		 * this branch always did — and only now. Leaving this install to run
+		 * unconditionally is how this branch once retried and abandoned the
+		 * device in the same breath, with ready still false. */
+		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
+		shid->ready = true;
+		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
 		/* Parity with the raw fallback: a client waiting on `ready` must be
 		 * woken here too (review R15). */
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
@@ -2825,9 +2835,13 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 			 * behind a debug knob. */
 			dev_info(&shid->spi->dev, "SEQ: DEVICE_DESC parse offset %u (first bytes %02x %02x %02x)\n",
 				 off, body[0], rblen > 1 ? body[1] : 0, rblen > 2 ? body[2] : 0);
-			/* Reserved bytes are not consumed by spi_hid_parse_dev_desc().
-			 * Some V0 replies end immediately after wFlags. */
-			if (off + 3 + required > rblen) {
+			/* off is the STRUCT offset: the preamble and the content header
+			 * are already behind it, so the reserved bytes this line used to
+			 * add are in it too. Adding them again made the guard read
+			 * 8 + 3 + 28 > 37 against the capture's 37-byte body: every
+			 * faithful DEVICE_DESC was rejected, in a batch that claimed to
+			 * fix exactly that. */
+			if (off + required > rblen) {
 				dev_warn(&shid->spi->dev, "SEQ: DEVICE_DESC body too short (%u bytes)\n",
 					 rblen);
 				return;
