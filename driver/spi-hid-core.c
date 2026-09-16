@@ -1873,10 +1873,16 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		seq_handle_rpt(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
-		seq_dbg(shid, 1, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
-		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
-		shid->ready = true;
-		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
+		/* One reset is not a failure. The device answers a DESCREQ with a
+		 * reset whenever it has one pending — the field unit does exactly
+		 * that between every pair of exchanges — so this branch used to hand
+		 * the device up to the hardcoded fallback while it was still
+		 * answering. Do what the IRQ path has always done: drain the reset
+		 * and send the DESCREQ again. If the budgets are spent and the
+		 * restart is refused, the watchdog owns the fallback, not this
+		 * branch. */
+		seq_dbg(shid, 1, "SEQ: poll-work: RESET_RSP, draining and retrying as the IRQ path does\n");
+		(void)spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
 		/* Parity with the raw fallback: a client waiting on `ready` must be
 		 * woken here too (review R15). */
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
