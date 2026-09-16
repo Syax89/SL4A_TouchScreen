@@ -232,6 +232,23 @@ def check_control_flow_pins():
                   f"makes them work")
             failures += 1
 
+    # 9. every module parameter is declared before its first use. Twice in this
+    # campaign a parameter was added next to its neighbours and used higher up
+    # the file; only the kernel build noticed, on CI, minutes later. Cheap here.
+    pos = 0
+    while True:
+        pos = core.find("module_param(", pos)
+        if pos < 0:
+            break
+        end = core.find(",", pos)
+        name = core[pos + len("module_param("):end].strip()
+        first_use = core.find(name)
+        if name and 0 <= first_use < pos:
+            print(f"FAIL driver/spi-hid-core.c: '{name}' is used before its "
+                  f"module_param() declaration — the kernel build will reject it")
+            failures += 1
+        pos = end + 1
+
     return failures
 
 
