@@ -472,7 +472,8 @@ static void test_read_approval_frame(void)
 	      buf[7] == 0x00 && buf[8] == 0x00,
 	      "register 0 in the reference shape is the reference's own first read");
 
-	/* The frame typing itself, called with the buffers the field produced.
+	/* The frame typing itself: the reference's buffers first, then — in the
+	 * block at the end of this function — the panel's own prefixed answers.
 	 * These assertions are the reason the logic moved into the protocol
 	 * header: five pins on this repository were demonstrated decorative by
 	 * adversarial legs — satisfied by a comment, by an `#if 0` block, by a
