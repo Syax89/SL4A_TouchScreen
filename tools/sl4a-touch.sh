@@ -802,6 +802,25 @@ EOF
 					stale="${stale:+$stale, }${mod//_/-}"
 				fi
 			done
+			# The parameters count too: a module already in memory keeps the
+			# ones it was loaded with, so installing the other profile changes
+			# the file and not the driver — a test then exercises the previous
+			# profile while everything looks installed. (This is exactly what
+			# made a standard-mode test run in raw mode.)
+			profile_mismatch=""
+			while read -r k v; do
+				[ -n "$k" ] || continue
+				running="$(cat "/sys/module/sl4a_spi_hid/parameters/$k" 2>/dev/null || true)"
+				if [ -n "$running" ] && [ "$running" != "$v" ]; then
+					profile_mismatch="${profile_mismatch:+$profile_mismatch, }$k=$running running, $v configured"
+				fi
+			done < <(awk '/^options[ \t]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) { split($i, kv, "="); if (kv[1] != "") print kv[1], kv[2] } }' "$MODPROBE_CONF" 2>/dev/null)
+			if [ -n "$profile_mismatch" ]; then
+				stale="${stale:+$stale, }profile"
+				warn "The running module has a different profile than the one installed:"
+				echo "  $profile_mismatch"
+			fi
+
 			if [ -n "$stale" ]; then
 				warn "The driver running right now is NOT the build just installed ($stale)."
 				echo "  A loaded module is not replaced by modprobe: the previous build"

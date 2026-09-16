@@ -1148,9 +1148,10 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 
 	/* The reference names the content id only when it reads a body; a
 	 * nine-byte read (a header) carries none, whatever request it answers. */
-	n = spi_hid_wire_read_approval(tx, reg, shid->read_resp_type,
-				       rx_len > SPI_HID_READ_APPROVAL_LEN ?
-				       shid->read_resp_content_id : 0);
+	n = spi_hid_wire_read_approval_variant(tx, reg, shid->read_resp_type,
+					       rx_len > SPI_HID_READ_APPROVAL_LEN ?
+					       shid->read_resp_content_id : 0,
+					       read_frame_variant);
 	/* The request is the frame and nothing more. The trace's `tx_len` for a
 	 * body read is the length of the SPB *buffer*, not what the reference
 	 * clocks out — its controller segments the transfer (TX_COUNT=3 per
@@ -1848,6 +1849,16 @@ MODULE_PARM_DESC(setfeat_speed_hz,
  * puts on the bus: a single 0x02 opcode and the constant 0C EE 5B trailer.
  * 1 restores the legacy Linux form with the opcode sent twice and a zeroed
  * trailer, kept for A/B experiments. */
+/* Which shape the read approval has. The traces put the register at offset 7
+ * with the address field zero; the field device answers nothing to that and
+ * something to the older five-byte shape. A frame that silences a device is
+ * not settled by argument: one reload per variant, and the bundle says which
+ * one the hardware accepted. */
+static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;
+module_param(read_frame_variant, int, 0444);
+MODULE_PARM_DESC(read_frame_variant,
+	"Read approval shape: 0=reference (register at offset 7), 1=legacy (5 bytes, register in the address field), 2=both");
+
 module_param(wire_double_opcode, bool, 0444);
 MODULE_PARM_DESC(wire_double_opcode,
 	"Send the legacy doubled leading opcode (02 02 ..) instead of the "
