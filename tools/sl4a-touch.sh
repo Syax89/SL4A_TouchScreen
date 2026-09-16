@@ -79,6 +79,14 @@ fi
 if [[ "$PKG_VERSION" == *[\|/\\]* ]]; then
 	fail "VERSION ('$PKG_VERSION') contains a shell metacharacter (|/\\)."
 fi
+# Strict charset (review R26-9): VERSION is interpolated by sed into the staged
+# dkms.conf and passed to DKMS as the version of its build command, so anything
+# outside this set corrupts one of them silently — '1.0.&' staged
+# PACKAGE_VERSION="1.0.#VERSION#" (sed treats & as the match), and a value with
+# a space split the DKMS build line into two words.
+if [[ ! "$PKG_VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z.+~_-]*$ ]]; then
+	fail "VERSION ('$PKG_VERSION') is not a valid version string. Allowed: letters, digits and . + ~ _ -, starting with a letter or digit — never whitespace, '&', '#', '/' or another shell metacharacter. Fix the VERSION file and re-run."
+fi
 
 # ── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -107,9 +115,13 @@ bound_driver() {
 dkms_installed_version() {
 	# Real dkms status output looks like:
 	#   sl4a-touch/1.2.0, 7.1.3-2-cachyos, x86_64: installed
+	# -k pins this to the RUNNING kernel (review R26-3): without it a leftover
+	# entry for another kernel answered "matches this checkout" while the
+	# kernel that would actually load the module had nothing installed, and
+	# the kernelless "sl4a-touch/1.2.0: added" shape is not an install either.
 	# "|| true" throughout: an empty/no-match result is a normal "not
 	# installed" outcome here, not a script-ending error under set -e.
-	dkms status -m "$PKG_NAME" 2>/dev/null | grep ': installed$' | head -1 | \
+	dkms status -m "$PKG_NAME" -k "$(uname -r)" 2>/dev/null | grep ': installed$' | head -1 | \
 		sed -n 's/^sl4a-touch\/\([^,]*\),.*/\1/p' || true
 }
 
@@ -155,6 +167,32 @@ modprobe_profile() {
 		echo "standard"
 	else
 		echo "unknown"
+	fi
+}
+
+# Echo the raw_mode the LOADED module was started with ("Y"/"N"), or return 1
+# when no module is loaded. A load-time parameter cannot change on a running
+# module, so "what the config file says" and "what is loaded right now" are two
+# different answers and every caller asks this one helper for the live value
+# (review R26-8).
+loaded_raw_mode() {
+	local param="/sys/module/${HID_MODULE//-/_}/parameters/raw_mode"
+	[ -r "$param" ] || return 1
+	cat "$param"
+}
+
+# True only when the boot-activation unit is enabled AND systemd can load it.
+# `systemctl is-enabled` is file state only: a checkout moved or deleted since
+# the install leaves ExecStart pointing at nothing, and every boot then fails
+# the unit with 203/EXEC — exactly the "activates automatically" promise
+# breaking silently (review R26-4). systemd-analyze resolves ExecStart without
+# starting anything; the fallback keeps the check useful where it is absent.
+boot_unit_loadable() {
+	systemctl is-enabled sl4a-touch-activate.service >/dev/null 2>&1 || return 1
+	if command -v systemd-analyze >/dev/null 2>&1; then
+		systemd-analyze verify "$SYSTEMD_UNIT" >/dev/null 2>&1 || return 1
+	else
+		[ -x "$REPO_DIR/tools/sl4a-touch.sh" ] || return 1
 	fi
 }
 
@@ -583,9 +621,18 @@ cmd_install() {
 		rm -rf "$SRC_DEST"
 	}
 
-	# Upgrades: drop any other version of this package first, or the old
-	# registration keeps building the same module names on every kernel update.
-	dkms_remove_other_versions "$PKG_VERSION"
+	# Undo a failed attempt only when THIS run created the DKMS entry. VERSION
+	# does not move between commits, so the usual "upgrade" reuses the same
+	# version: a plain cleanup then removes the registration AND uninstalls the
+	# module that works right now (dkms remove deletes the /updates/dkms
+	# object), leaving no driver for the next boot — the one outcome an upgrade
+	# must never produce (review R26-2). When the entry was already registered
+	# and installed, its registration and installed module are what stays
+	# behind, so "existing driver state was left unchanged" is literally true.
+	stage_failed() {
+		[ "$already_added" -eq 1 ] || cleanup_staged_install
+		fail "$1"
+	}
 
 	local already_added=0
 	if [ -e "$SRC_DEST" ]; then
@@ -622,7 +669,7 @@ cmd_install() {
 	sed -i "s|#VERSION#|${PKG_VERSION}|" "$SRC_DEST/dkms.conf"
 
 	if [ "$already_added" -eq 0 ]; then
-		dkms add -m "$PKG_NAME" -v "$PKG_VERSION" || { cleanup_staged_install; fail "DKMS add failed; existing driver state was left unchanged"; }
+		dkms add -m "$PKG_NAME" -v "$PKG_VERSION" || stage_failed "DKMS add failed; existing driver state was left unchanged"
 	else
 		pass "Reusing the DKMS entry already registered for $PKG_NAME/$PKG_VERSION"
 	fi
@@ -632,9 +679,25 @@ cmd_install() {
 	# STALE object. The module on the machine then silently stops matching
 	# the checkout (field: a 1.7.0+main install whose loaded module had
 	# none of the new attributes).
-	dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || { cleanup_staged_install; fail "DKMS build failed; existing driver state was left unchanged"; }
-	dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || { cleanup_staged_install; fail "DKMS install failed; existing driver state was left unchanged"; }
+	dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || stage_failed "DKMS build failed; existing driver state was left unchanged"
+	dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || stage_failed "DKMS install failed; existing driver state was left unchanged"
 	pass "sl4a-spi-amd.ko + sl4a-spi-hid.ko built and installed via DKMS for kernel $(uname -r)"
+
+	# Only now, with the new version built AND installed, drop any other
+	# registration of this package: an older version left registered keeps
+	# building the same sl4a-spi-amd.ko/sl4a-spi-hid.ko names on every kernel
+	# update, and `dkms autoinstall` then installs whichever ran last, so an
+	# older revision can silently become the one that loads. This used to run
+	# BEFORE the build above, which meant a failed build had already removed
+	# the working version — leaving no registered driver at all, and a reboot
+	# away from a dead touchscreen (review R26-2).
+	dkms_remove_other_versions "$PKG_VERSION"
+	# Removing a version also deletes the module objects it recorded, and both
+	# versions record the same /updates/dkms destination — so the new .ko files
+	# can go with the old registration. Put them back; the command is
+	# idempotent and this keeps the on-disk driver matching the checkout.
+	dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || \
+		fail "DKMS install failed after the DKMS version cleanup; the driver running right now keeps working until you reboot, but re-run 'install' once the cause above is fixed"
 
 	info "Step 4: Updating module dependencies..."
 	depmod -a
@@ -698,7 +761,12 @@ EOF
 	install -m 0644 "$tmp_config" "$SYSTEMD_UNIT"
 	rm -f "$tmp_config"
 	systemctl daemon-reload
-	systemctl enable sl4a-touch-activate.service >/dev/null 2>&1
+	systemctl enable sl4a-touch-activate.service >/dev/null 2>&1 || \
+		fail "could not enable sl4a-touch-activate.service — the driver would not come back after a reboot (run 'sudo systemctl enable sl4a-touch-activate.service' to see why)"
+	# The pass below is a promise about every future boot, so it is only made
+	# after the unit is verified to be enabled AND loadable (review R26-4).
+	boot_unit_loadable || \
+		fail "$SYSTEMD_UNIT is enabled but systemd cannot load it (ExecStart points at $REPO_DIR/tools/sl4a-touch.sh — was the checkout moved or deleted?). Run 'systemd-analyze verify $SYSTEMD_UNIT' for the reason"
 	pass "Created $SYSTEMD_UNIT (enabled — activates automatically after every boot)"
 
 	info "Step 7: Activating..."
@@ -710,16 +778,39 @@ EOF
 		echo ""
 		echo "  To verify after the reboot:  ./tools/sl4a-touch.sh status"
 	else
-		local requested_raw_mode="N"
+		local requested_raw_mode="N" live_raw
 		[ "$PROFILE" = "raw" ] && requested_raw_mode="Y"
-		if [ -r /sys/module/sl4a_spi_hid/parameters/raw_mode ] && \
-		   [ "$(cat /sys/module/sl4a_spi_hid/parameters/raw_mode)" != "$requested_raw_mode" ]; then
+		if live_raw="$(loaded_raw_mode)" && [ "$live_raw" != "$requested_raw_mode" ]; then
 			warn "The selected profile changes a load-time-only module parameter."
 			echo "  The modules keep the previous profile until the next boot;"
 			echo "  the boot unit then activates the new one automatically."
 			echo "  Nothing else to do (to activate by hand now:  sudo ./tools/sl4a-touch.sh activate)"
 		else
 			cmd_activate
+			# cmd_activate cannot tell a no-op from a fresh load: `modprobe`
+			# does nothing when the module is already loaded, and
+			# wait_for_driver then sees the OLD object. srcversion moves with
+			# every source edit, so compare what is running against what was
+			# just installed and say it — never let "Install complete" imply
+			# the new build is the one answering (review R26-5).
+			local mod loaded_src installed_src stale=""
+			for mod in sl4a_spi_amd sl4a_spi_hid; do
+				loaded_src="$(cat "/sys/module/$mod/srcversion" 2>/dev/null || true)"
+				installed_src="$(modinfo -F srcversion "$mod" 2>/dev/null || true)"
+				if [ -n "$loaded_src" ] && [ -n "$installed_src" ] && \
+				   [ "$loaded_src" != "$installed_src" ]; then
+					stale="${stale:+$stale, }${mod//_/-}"
+				fi
+			done
+			if [ -n "$stale" ]; then
+				warn "The driver running right now is NOT the build just installed ($stale)."
+				echo "  A loaded module is not replaced by modprobe: the previous build"
+				echo "  stays in memory, bound to the touchscreen, until it is unloaded"
+				echo "  or the machine reboots."
+				echo "  To load the new build now:"
+				echo "    sudo modprobe -r sl4a-spi-hid sl4a-spi-amd && sudo ./tools/sl4a-touch.sh activate"
+				echo "  or simply reboot — the boot unit loads the new build automatically."
+			fi
 		fi
 	fi
 
@@ -953,29 +1044,46 @@ cmd_status() {
 	echo ""
 	echo "Repository checkout version: $PKG_VERSION"
 
-	local installed
+	local installed kernel
+	kernel="$(uname -r)"
+	# Kernel-aware (review R26-3): a leftover entry for another kernel is not
+	# "installed" for the kernel that would load it, and the line says which
+	# kernel it is talking about.
 	installed="$(dkms_installed_version)"
 	if [ -n "$installed" ]; then
 		if [ "$installed" = "$PKG_VERSION" ]; then
-			pass "DKMS installed version: $installed (matches this checkout)"
+			pass "DKMS installed version: $installed (matches this checkout, installed for kernel $kernel)"
 		else
-			warn "DKMS installed version: $installed (this checkout is $PKG_VERSION — run 'install' to upgrade)"
+			warn "DKMS installed version: $installed for kernel $kernel (this checkout is $PKG_VERSION — run 'install' to upgrade)"
 		fi
 	else
-		info "Not installed via DKMS (run 'install' to install)"
+		info "Not installed via DKMS for the running kernel ($kernel) — run 'install' to install"
 	fi
 
-	local profile
+	# Two different answers on purpose (review R26-8): the config file decides
+	# the next boot, while the modules keep the parameters they were loaded
+	# with until then — printing only the file's value claimed a profile the
+	# running driver does not use.
+	local profile live_raw
 	profile="$(modprobe_profile)"
 	case "$profile" in
-		raw)      warn "Active modprobe profile: raw (EXPERIMENTAL multitouch)" ;;
-		standard) pass "Active modprobe profile: standard HID" ;;
+		raw)      warn "Modprobe profile for the next boot: raw (EXPERIMENTAL multitouch)" ;;
+		standard) pass "Modprobe profile for the next boot: standard HID" ;;
 		none)     info "No modprobe profile configured (nothing installed)" ;;
-		*)        warn "Active modprobe profile: unrecognized contents in $MODPROBE_CONF" ;;
+		*)        warn "Unrecognized contents in $MODPROBE_CONF — no profile will be applied" ;;
 	esac
+	if live_raw="$(loaded_raw_mode)"; then
+		if [ "$live_raw" = "Y" ]; then
+			warn "Profile running right now: raw (EXPERIMENTAL multitouch) — it stays until the next boot"
+		else
+			pass "Profile running right now: standard HID"
+		fi
+	fi
 
-	if systemctl is-enabled sl4a-touch-activate.service >/dev/null 2>&1; then
-		pass "Auto-activates on every boot (sl4a-touch-activate.service enabled)"
+	if boot_unit_loadable; then
+		pass "Auto-activates on every boot (sl4a-touch-activate.service enabled and loadable)"
+	elif systemctl is-enabled sl4a-touch-activate.service >/dev/null 2>&1; then
+		warn "sl4a-touch-activate.service is enabled but systemd cannot load it (check ExecStart — is $REPO_DIR still there?)"
 	else
 		info "Does not auto-activate on boot — run 'install' to enable it"
 	fi
@@ -1034,6 +1142,16 @@ cmd_logs() {
 		esac
 	done
 
+	# A path starting with '-' is a file name, not an option, but $OUT is fed to
+	# head/grep/chmod as well as to the redirect below: `head -n 1 "-x"` is an
+	# invalid option and `grep -q '^--- dmesg' "-x"` reads stdin, so the bundle
+	# was written and then the completion check failed on the path (review
+	# R26-6). Normalise once here — every consumer gets the ./-prefixed form —
+	# and keep the guards below on the same value they always checked.
+	case "$OUT" in
+		-*) OUT="./$OUT" ;;
+	esac
+
 	# $OUT ends up in a root redirect plus a chmod that follows symlinks: keep it
 	# away from device nodes, symlinks, and files that are not one of our bundles
 	# (this is what keeps `logs -o /etc/shadow` from truncating the file). The
@@ -1085,8 +1203,27 @@ cmd_logs() {
 		echo "--- Repository ---"
 		echo "Checkout version: $PKG_VERSION"
 		if [ -d "$REPO_DIR/.git" ]; then
-			git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null | sed 's/^/git HEAD: /'
-			git -C "$REPO_DIR" status --short 2>/dev/null | sed 's/^/git status: /'
+			# Three states, never conflated (review R26-10): git ran and FAILED
+			# (its stderr is shown — as root against a user-owned checkout git
+			# refuses with "detected dubious ownership"), git ran on a clean
+			# tree, git ran on a modified one. Swallowing stderr made a refusal
+			# print exactly what a clean checkout prints.
+			local git_out git_rc
+			git_out="$(git -C "$REPO_DIR" rev-parse HEAD 2>&1)"; git_rc=$?
+			if [ "$git_rc" -ne 0 ]; then
+				echo "git: FAILED (exit $git_rc): $git_out"
+				echo "     (as root against a user-owned checkout this is usually 'detected dubious ownership'; allow it with: git config --global --add safe.directory $REPO_DIR)"
+			else
+				echo "git HEAD: $git_out"
+				git_out="$(git -C "$REPO_DIR" status --short 2>&1)"; git_rc=$?
+				if [ "$git_rc" -ne 0 ]; then
+					echo "git status: FAILED (exit $git_rc): $git_out"
+				elif [ -n "$git_out" ]; then
+					printf '%s\n' "$git_out" | sed 's/^/git status (modified): /'
+				else
+					echo "git status: clean (no local modifications)"
+				fi
+			fi
 		fi
 		echo ""
 
@@ -1117,9 +1254,32 @@ cmd_logs() {
 		echo "--- Loaded modules ---"
 		lsmod | grep -i sl4a || echo "(not loaded)"
 
+		# Read this first: the modinfo below describes the module ON DISK and
+		# lsmod only knows names — neither says which build is loaded. srcversion
+		# moves with every source edit, so the running module's own srcversion
+		# against the installed one is the staleness answer (review R26-7).
+		echo ""
+		echo "--- Loaded vs installed module (srcversion — read first) ---"
+		for mod in sl4a_spi_amd sl4a_spi_hid; do
+			local loaded_src disk_src
+			loaded_src="$(cat "/sys/module/$mod/srcversion" 2>/dev/null || true)"
+			disk_src="$(modinfo -F srcversion "$mod" 2>/dev/null || true)"
+			if [ -z "$loaded_src" ]; then
+				echo "$mod: not loaded (nothing running to compare)"
+			elif [ -z "$disk_src" ]; then
+				echo "$mod: loaded, srcversion $loaded_src — no installed object found to compare against"
+			elif [ "$loaded_src" = "$disk_src" ]; then
+				echo "$mod: MATCHES the installed module (srcversion $loaded_src)"
+			else
+				echo "$mod: STALE — running build $loaded_src, installed module $disk_src (the previous build is still loaded)"
+			fi
+		done
+
 		# What the kernel would load, so a module older than the checkout is
 		# visible here: DKMS reuses a cached build when VERSION has not moved,
-		# and srcversion changes with every source edit.
+		# and srcversion changes with every source edit. This is the ON-DISK
+		# identity — the section above is what is actually running.
+		echo ""
 		echo "--- Module objects ---"
 		for mod in sl4a_spi_amd sl4a_spi_hid; do
 			modinfo "$mod" 2>/dev/null | grep -E "^(filename|version|srcversion|vermagic):" \
@@ -1146,7 +1306,15 @@ cmd_logs() {
 					for f in build_info ready lifecycle_status seq_state protocol_stats baseline_status \
 						 bus_error_count device_initiated_reset_count; do
 						if [ -r "$spidev/$f" ]; then
-							echo "-- $f --"
+							# build_info is the compile-time string of the SOURCE this
+							# module was built from, not the identity of the loaded
+							# module — label it so it is not read as one (review
+							# R26-7); the srcversion section above answers that.
+							if [ "$f" = "build_info" ]; then
+								echo "-- build_info (checkout/toolchain string, not the loaded module's identity) --"
+							else
+								echo "-- $f --"
+							fi
 							cat "$spidev/$f"
 						fi
 					done

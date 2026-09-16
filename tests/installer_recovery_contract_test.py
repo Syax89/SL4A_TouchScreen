@@ -74,4 +74,80 @@ assert tool.index("already_added=1") < tool.index('dkms build -m "$PKG_NAME"'), 
 assert 'if [ "$already_added" -eq 0 ]; then' in tool, \
     "dkms add must stay conditional: it refuses an entry that already exists"
 
+# ── round 6: the upgrade order, kernel-aware status, real boot-unit check ──
+# An upgrade must not remove the working version until the new one has built
+# AND installed: with the removal first, a failed build left the machine with
+# no registered driver at all.
+assert tool.index('dkms_remove_other_versions "$PKG_VERSION"') > \
+    tool.index('dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force'), \
+    "the old DKMS registration is removed before the new version is built"
+assert tool.index('dkms_remove_other_versions "$PKG_VERSION"') > \
+    tool.index('dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force'), \
+    "the old DKMS registration is removed before the new version is installed"
+# ... and removing it also deletes the shared /updates/dkms objects, so the new
+# version is installed once more right after (DKMS do_uninstall removes the
+# destination file both versions record).
+assert tool.count('dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force') >= 2, \
+    "nothing re-installs the new version after the old registration is dropped"
+# ... and a failed build/install must not undo a version that was already
+# registered and installed: VERSION is reused between commits, so the plain
+# cleanup (`dkms remove --all`) would uninstall the working module.
+assert "stage_failed() {" in tool
+assert '[ "$already_added" -eq 1 ] || cleanup_staged_install' in tool, \
+    "the failure path runs the unconditional cleanup again: an upgrade of the " \
+    "same version then uninstalls the module that works"
+assert "cleanup_staged_install; fail" not in tool, \
+    "a failure path still calls the unconditional cleanup before failing"
+
+# `dkms status` without -k answers for some other kernel's entry.
+assert 'dkms status -m "$PKG_NAME" -k "$(uname -r)"' in tool, \
+    "dkms_installed_version is not pinned to the running kernel"
+assert "installed for kernel $kernel" in tool, \
+    "status does not say which kernel the DKMS version belongs to"
+
+# The boot-activation promise needs more than file state: is-enabled is true
+# for a checkout that has since moved or been deleted (systemd fails the unit
+# with 203/EXEC at every boot).
+assert "boot_unit_loadable" in tool and "systemd-analyze verify" in tool, \
+    "the enabled unit is never checked for loadability"
+assert "is enabled but systemd cannot load it" in tool
+assert "cannot load it (ExecStart points at" in tool, \
+    "install must fail loudly instead of promising boot activation"
+
+# A running module is not replaced by modprobe, so a completed activation can
+# still leave the previous build answering: compare srcversion and say it.
+assert "is NOT the build just installed" in tool
+assert 'sudo modprobe -r sl4a-spi-hid sl4a-spi-amd && sudo ./tools/sl4a-touch.sh activate' in tool
+assert '"/sys/module/$mod/srcversion"' in tool
+
+# `logs -o -x`: the path reaches head/grep/chmod as well as the redirect, and a
+# dash-leading one is read as an option (bundle written, completion check
+# fails). Normalised once, at the root.
+assert '\t\t-*) OUT="./$OUT" ;;' in tool, "a dash-leading -o path is not normalised"
+
+# The bundle must carry the LOADED module identity, not just the on-disk one:
+# srcversion moves with every source edit and that comparison is the staleness
+# answer the reader needs first.
+assert "Loaded vs installed module (srcversion — read first)" in tool
+assert "checkout/toolchain string, not the loaded module's identity" in tool, \
+    "build_info still reads like the loaded module's version"
+
+# git stderr is never swallowed: refused / clean / modified are three states.
+assert "git status: clean (no local modifications)" in tool
+assert "git status: FAILED (exit $git_rc)" in tool
+assert 'git -C "$REPO_DIR" rev-parse HEAD 2>&1' in tool
+
+# VERSION is interpolated by sed into dkms.conf and by DKMS into its build
+# line: '1.0.&' staged PACKAGE_VERSION="1.0.#VERSION#" and a space split the
+# build command, so the charset is enforced before either can happen.
+assert "=~ ^[0-9A-Za-z][0-9A-Za-z.+~_-]*$" in tool, \
+    "VERSION is not strictly validated before it reaches sed and dkms"
+
+# One helper reads the live profile, used by install's profile-change check
+# and by status — status must not print the config file's value as "active".
+assert tool.count("loaded_raw_mode") >= 3, \
+    "loaded_raw_mode must be defined once and used by install and status"
+assert "Profile running right now" in tool
+assert "Modprobe profile for the next boot" in tool
+
 print("installer recovery contract: PASS")
