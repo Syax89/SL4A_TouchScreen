@@ -278,7 +278,8 @@ def check_control_flow_pins():
     # stream register from probe setup, before the stream existed.
     _rd = (core_code.split("static int spi_hid_seq_read(struct", 1)[1].split("\n}", 1)[0]
            if "static int spi_hid_seq_read(struct" in core_code else "")
-    if "raw_mode_active" not in _rd or "SPI_HID_SEQ_DONE" not in _rd:
+    if not ("SPI_HID_SEQ_WAIT_RESET" in _rd and "output_register" in _rd
+            and "SPI_HID_SEQ_DONE" in _rd):
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() no longer points the handshake "
               "reads at register 0 — that is the reference's own register for them")
         failures += 1
