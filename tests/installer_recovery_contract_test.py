@@ -136,6 +136,17 @@ assert "restage_and_rebuild" in tool and 'cp -a "$DRIVER_DIR"/. "$SRC_DEST"/' in
     "the rebuild no longer re-stages the checkout: it would stamp the new " \
     "revision onto the old sources"
 
+# A bundle must say which revision its figures describe: srcversion compares
+# the loaded module with the file on disk and both can be stale together.
+assert "Installed revision vs this checkout" in tool and "installed_head" in tool, \
+    "the bundle no longer reports the installed revision"
+assert "MISMATCH — the installed modules predate this checkout" in tool, \
+    "a stale installed module no longer produces a warning in the bundle"
+assert "run_host_self_tests" in tool and "suite result: PASS" in tool, \
+    "the bundle no longer runs the host suite, so its result is not collected"
+assert "rm -f \"$INSTALLED_HEAD_STAMP\"" in tool, \
+    "uninstall leaves the revision stamp behind, so the next check lies"
+
 assert "Modules built from revision:" in tool, \
     "the sweep file no longer records the revision the modules came from"
 
