@@ -1151,8 +1151,16 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 	n = spi_hid_wire_read_approval(tx, reg, shid->read_resp_type,
 				       rx_len > SPI_HID_READ_APPROVAL_LEN ?
 				       shid->read_resp_content_id : 0);
-	tx_len = (u32)rx_len < n ? n : (u32)rx_len;
-	tx_len = min(tx_len, shid->read_tx_len);
+	/* The request is the frame and nothing more. The trace's `tx_len` for a
+	 * body read is the length of the SPB *buffer*, not what the reference
+	 * clocks out — its controller segments the transfer (TX_COUNT=3 per
+	 * continuation, see docs/AMDSPI_DECOMP.md). Padding the request to the
+	 * response length, as this did, clocks hundreds of stray bytes out
+	 * before every read: the field bundle went from a RESET_RSP per second
+	 * to none at all with the controller and the bus healthy. */
+	tx_len = n;
+	if (tx_len > shid->read_tx_len)
+		tx_len = shid->read_tx_len;
 
 	memset(rx, 0, rx_len);
 	memset(xf, 0, sizeof(xf));
