@@ -23,7 +23,11 @@ in raw mode the sequencer reads **register 0**, unconditionally, because that is
 where the reference reads its reset and its drain. Two earlier attempts (a flag,
 then a state gate) were each falsified by one field run. The decisive evidence
 had been in the log all along: a WAIT_DESC read on the stream register answered
-`01 ff ee ff ff ff ff ff 32` — a reset frame **nine bytes out of position**.
+`01 ff ee ff ff ff ff ff 32` — a frame **three bytes behind a native prefix**,
+its sync (`5A`) three bytes past the end of that nine-byte read. (This paragraph
+said "nine bytes out of position" until a cross-family leg proved it wrong with
+a harness over this very source: there is no shift, and the bytes behind the
+prefix are the reference's own frame — header at offset 8, sync at 11.)
 
 ## Descriptor handshake writes
 

@@ -2633,8 +2633,11 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		ktime_us_delta(ktime_get(), shid->seq_dbg_last_irq) : -1;
 	shid->seq_dbg_last_irq = ktime_get();
 
-	/* Windows reads response header first: 5 sync bytes + 4-byte header = 9 bytes.
-	 * AMD controller with TX_COUNT=3 sees 6 sync bytes; try 10 to capture full header. */
+	/* Sixteen bytes, measured: the reference's own frames put their header at
+	 * offset 5, but THIS panel prefixes every answer with three bytes, so the
+	 * header lands at 8 and the sync the typing code gates on at ELEVEN. Nine
+	 * bytes can never contain a frame from this device; sixteen holds the
+	 * header's fourth byte and the first body byte as well. */
 	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
 		dev_dbg(dev, "sequencer header read failed\n");
 		shid->seq_storm_count++;
@@ -3764,13 +3767,20 @@ static int spi_hid_probe(struct spi_device *spi)
 	}
 	dev_info(dev, "HID desc reg = 0x%08x\n", shid->device_descriptor_register);
 
-	/* Behavioural self-check at probe, on the two frames the field produced.
+	/* Behavioural self-check at probe, on the frames BOTH sides produce.
 	 * A cross-family leg showed that a host test cannot see a divergence
 	 * confined to THIS translation unit (a `#undef`/`#define` of the function
 	 * name, or an early return): tests/wire_frames_test.c stayed green while
 	 * the shipped driver would never detect a reset. This runs inside the
 	 * driver's own TU, and its result lands in the diagnostics bundle — the one
-	 * channel that reports what the shipped code actually does. */
+	 * channel that reports what the shipped code actually does.
+	 *
+	 * A LATER leg found the check itself decorative: it tested only the
+	 * reference traces' buffers, so it printed "frame typing ok" through days
+	 * in which every frame this driver actually received typed as -1. The
+	 * panel's own answers are in the check now — a prefix of three bytes and
+	 * the reference frame behind it, header at offset 8 — because they are
+	 * the shapes a regression here would silence. */
 	{
 		/* The reset and the drain, from the reference's own boot trace. */
 		static const u8 self_reset[9] = {
@@ -3779,6 +3789,17 @@ static int spi_hid_probe(struct spi_device *spi)
 		static const u8 self_drain[9] = {
 			0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00
 		};
+		/* And this panel's answers, verbatim from the field bundles: three-byte
+		 * prefix (01 <status> EE) then the same frame, sync at ELEVEN — beyond
+		 * every nine-byte read the driver made until now. */
+		static const u8 self_panel_reset[12] = {
+			0x01, 0xff, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10,
+			0x00, 0x5a
+		};
+		static const u8 self_panel_desc[12] = {
+			0x01, 0x07, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x72, 0x80,
+			0x00, 0x5a
+		};
 		int self_off = -1;
 		bool self_ok;
 
@@ -3786,10 +3807,18 @@ static int spi_hid_probe(struct spi_device *spi)
 			  self_off == 5;
 		self_ok = self_ok &&
 			  spi_hid_seq_hdr_type(self_drain, sizeof(self_drain), NULL) == -1;
+		self_off = -1;
+		self_ok = self_ok &&
+			  spi_hid_seq_hdr_type(self_panel_reset, sizeof(self_panel_reset), &self_off) == 3 &&
+			  self_off == 8;
+		self_off = -1;
+		self_ok = self_ok &&
+			  spi_hid_seq_hdr_type(self_panel_desc, sizeof(self_panel_desc), &self_off) == 7 &&
+			  self_off == 8;
 		if (self_ok)
-			dev_info(dev, "self-check: frame typing ok (the reference's RESET_RSP 32 10 00 5a types as 3 at offset 5; the drain 03 00 00 00 is not a frame)\n");
+			dev_info(dev, "self-check: frame typing ok (reference reset 32 10 00 5a types 3 at offset 5; the drain is not a frame; THE PANEL'S answers type too — prefixed reset 3, prefixed descriptor 7, both header at offset 8)\n");
 		else
-			dev_err(dev, "self-check: FRAME TYPING BROKEN — the reset 32 10 00 5a is not typed as 3, or the drain 03 00 00 00 is treated as a frame; resets will be misread and discovery will stall\n");
+			dev_err(dev, "self-check: FRAME TYPING BROKEN — the reference reset is not typed 3 at offset 5, or the drain is treated as a frame, or the panel's own prefixed answers (01 ?? ee + frame, header at offset 8) no longer type; discovery will stall on the field unit\n");
 	}
 	/* The DESCREQ that starts discovery is built from the compile-time
 	 * constant, so a device whose _DSM names another register can never
