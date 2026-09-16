@@ -1150,11 +1150,25 @@ static int spi_hid_set_request(struct spi_hid *shid,
  * on the builder says: a five-byte frame "is a request for register 0 —
  * answered with RESET_RSP, never with the descriptor".
  *
- * So the default is the reference's nine-byte frame, the one whose bytes are
- * in the capture. The stop frame above removes the stream state that made the
- * crude form look necessary. `hunt` still tries all three variants on the
- * hardware in one run, so the field remains the arbiter. */
-static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;
+ * The field then settled the default, twice and against my own prediction. The
+ * prediction was that the stop frame would wake the reference shape up: it did
+ * not. With the stop in place, with the detector fixed, with everything this
+ * file now does, the sweep of 2026-09-16 19:11 shows variant 0 silent on this
+ * panel and variant 1 reaching DONE with `ready` set — its reset count down
+ * from 47 to 4, so the storm is gone either way.
+ *
+ * So: the reference is the authority on the SEQUENCE — what is sent, in what
+ * order, and why — and this panel is the authority on the ENCODING of each
+ * frame, and it says five bytes with the register in the address field. That
+ * is doctrine, not preference: the same sentence already appears in the
+ * protocol notes for the transport offsets.
+ *
+ * What this default does NOT fix, stated here so it cannot be forgotten: the
+ * five-byte form cannot name the content, which is why the device answers this
+ * driver with resets and why device_desc stays 0 — the descriptor handshake is
+ * still unreachable, and the driver reaches DONE through the hardcoded
+ * fallback. That is the open problem, not a consequence of this line. */
+static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;
 
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {
