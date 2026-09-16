@@ -344,6 +344,12 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 		pr_err("spi-amd: tx_len %u exceeds FIFO size %u\n", tx_len, AMD_SPI_FIFO_SIZE);
 		return -EINVAL;
 	}
+	/* The +1 is not this driver's padding: it is the reference's own receive
+	 * count (fcn.0x4bac sets RX_COUNT = rx_len + 1, "the extra byte counted
+	 * in"), and reading past it is what a wrong answer offset looks like. Do
+	 * not "fix" the +1 out — three formulas around this budget already read
+	 * like an off-by-one to a reviewer, and this is the one the decompiled
+	 * driver actually uses. */
 	if (opcode == 0x0B && tx_len + rx_len + 1 > AMD_SPI_FIFO_SIZE) {
 		pr_err("spi-amd: tx(%u) + rx(%u) + echo > FIFO(%u)\n",
 		       tx_len, rx_len, AMD_SPI_FIFO_SIZE);
