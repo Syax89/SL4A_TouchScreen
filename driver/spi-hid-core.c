@@ -1399,6 +1399,11 @@ static void spi_hid_seq_handle_sync_response(struct spi_hid *shid, int type,
 		return;
 	}
 
+	/* ponytail: the body's +5 assumes the frame starts at offset 5 in the
+	 * body buffer. The field's frames start at 8 (three-byte native prefix),
+	 * so this arithmetic is unverified for the shape the panel actually
+	 * sends — it has never executed, because no frame has been typed yet.
+	 * It becomes the next measured step the moment one is. */
 	read_len = blen + 5;
 	if (read_len > shid->data_buf_len) {
 		dev_warn(&shid->spi->dev,
@@ -1761,17 +1766,19 @@ out:
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
-	/* NINE, as the reference reads it — and the widening to sixteen that this
-	 * was an hour ago is REVERTED, because a leg found what it would have
-	 * cost: Windows clocks nine bytes for a header read and pads its transmit
-	 * to the receive length; changing the length changes the transfer shape,
-	 * so a field comparison against the reference frame would have been
-	 * measuring two things at once. The bytes behind the prefix stay
-	 * unmeasured until the Windows frame itself has been sent: variant 0,
-	 * register 0, nine bytes (`0B 00 00 00 FF 00 00 00 00`), which the raw
-	 * capture confirms as row 64 of surface_boot_auto.csv and which the host
-	 * test pins byte for byte. */
-	u8 hdr[9];
+	/* SIXTEEN, and this time for a measured reason. This panel answers every
+	 * read with a three-byte prefix (`01 <status> EE`) and then the same frame
+	 * the reference device sends; the frame's own header begins at offset 8
+	 * and its sync byte, which is what the typing code gates on, sits at
+	 * ELEVEN. A nine-byte read therefore cannot see a frame by construction:
+	 * the field's logs end at `... ff ff ff 32`, the frame's first header
+	 * byte, with the sync three bytes past the end of the buffer. Eight
+	 * further reads would have been enough; sixteen leaves room for the
+	 * header's fourth byte and the first body byte. Measured on this source
+	 * with a harness that links this header: the prefixed reset types as 3 at
+	 * offset 8, the prefixed descriptor as 7 at offset 8 — and both pins are
+	 * in the host suite now. */
+	u8 hdr[16];
 	u32 resp_reg;
 	int type, hdr_off;
 	int i, got = -1;
@@ -1797,7 +1804,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		if (spi_hid_seq_read_reg(shid, reg, hdr, sizeof(hdr)))
 			continue;
 		type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-		if (type >= 0 && hdr_off == 5)
+		if (type >= 0 && (hdr_off == 5 || hdr_off == 8))
 			got = i;
 	}
 	if (got < 0) {
@@ -1808,7 +1815,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 	seq_dbg(shid, 2, "SEQ: poll-work: type=%d reg=0x%06x raw=[%*ph]\n", type,
 		got == 0 ? resp_reg : shid->desc.input_register, 9, hdr);
 	if (type == 7) {
-		u16 blen = (((hdr[6] >> 4) & 0xF)) | (hdr[7] << 4);
+		u16 blen = (((hdr[hdr_off + 1] >> 4) & 0xF)) | (hdr[hdr_off + 2] << 4);
 
 		blen *= 4;
 		if (blen > SZ_8K)
@@ -1826,7 +1833,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		if (shid->seq_state == SPI_HID_SEQ_WAIT_RPT)
 			schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(20));
 	} else if (type == 8) {
-		u16 blen = (((hdr[6] >> 4) & 0xF)) | (hdr[7] << 4);
+		u16 blen = (((hdr[hdr_off + 1] >> 4) & 0xF)) | (hdr[hdr_off + 2] << 4);
 
 		blen *= 4;
 		if (blen > SZ_8K)
@@ -2321,17 +2328,19 @@ static void spi_hid_poll_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, poll_work);
 	struct device *dev = &shid->spi->dev;
-	/* NINE, as the reference reads it — and the widening to sixteen that this
-	 * was an hour ago is REVERTED, because a leg found what it would have
-	 * cost: Windows clocks nine bytes for a header read and pads its transmit
-	 * to the receive length; changing the length changes the transfer shape,
-	 * so a field comparison against the reference frame would have been
-	 * measuring two things at once. The bytes behind the prefix stay
-	 * unmeasured until the Windows frame itself has been sent: variant 0,
-	 * register 0, nine bytes (`0B 00 00 00 FF 00 00 00 00`), which the raw
-	 * capture confirms as row 64 of surface_boot_auto.csv and which the host
-	 * test pins byte for byte. */
-	u8 hdr[9];
+	/* SIXTEEN, and this time for a measured reason. This panel answers every
+	 * read with a three-byte prefix (`01 <status> EE`) and then the same frame
+	 * the reference device sends; the frame's own header begins at offset 8
+	 * and its sync byte, which is what the typing code gates on, sits at
+	 * ELEVEN. A nine-byte read therefore cannot see a frame by construction:
+	 * the field's logs end at `... ff ff ff 32`, the frame's first header
+	 * byte, with the sync three bytes past the end of the buffer. Eight
+	 * further reads would have been enough; sixteen leaves room for the
+	 * header's fourth byte and the first body byte. Measured on this source
+	 * with a harness that links this header: the prefixed reset types as 3 at
+	 * offset 8, the prefixed descriptor as 7 at offset 8 — and both pins are
+	 * in the host suite now. */
+	u8 hdr[16];
 	int type, ret, hdr_off;
 	u16 blen;
 
@@ -2352,7 +2361,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 		goto resched;
 
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && hdr_off != 5) {
+	if (type >= 0 && hdr_off != 5 && hdr_off != 8) {
 		seq_dbg(shid, 1, "SEQ: poller header at unexpected offset %d\n", hdr_off);
 		shid->poll_missed++;
 		goto resched;
@@ -2362,7 +2371,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 		u32 cap = shid->raw_mode_active ? shid->data_buf_len :
 			  (shid->desc.max_input_length ? shid->desc.max_input_length : 0x1000);
 
-		blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
+		blen = (((hdr[hdr_off + 1] >> 4) & 0xF) << 0) | (hdr[hdr_off + 2] << 4);
 		blen *= 4;
 
 		{
@@ -2558,17 +2567,19 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
 	struct device *dev = &shid->spi->dev;
-	/* NINE, as the reference reads it — and the widening to sixteen that this
-	 * was an hour ago is REVERTED, because a leg found what it would have
-	 * cost: Windows clocks nine bytes for a header read and pads its transmit
-	 * to the receive length; changing the length changes the transfer shape,
-	 * so a field comparison against the reference frame would have been
-	 * measuring two things at once. The bytes behind the prefix stay
-	 * unmeasured until the Windows frame itself has been sent: variant 0,
-	 * register 0, nine bytes (`0B 00 00 00 FF 00 00 00 00`), which the raw
-	 * capture confirms as row 64 of surface_boot_auto.csv and which the host
-	 * test pins byte for byte. */
-	u8 hdr[9]; int type; u16 blen = 0;
+	/* SIXTEEN, and this time for a measured reason. This panel answers every
+	 * read with a three-byte prefix (`01 <status> EE`) and then the same frame
+	 * the reference device sends; the frame's own header begins at offset 8
+	 * and its sync byte, which is what the typing code gates on, sits at
+	 * ELEVEN. A nine-byte read therefore cannot see a frame by construction:
+	 * the field's logs end at `... ff ff ff 32`, the frame's first header
+	 * byte, with the sync three bytes past the end of the buffer. Eight
+	 * further reads would have been enough; sixteen leaves room for the
+	 * header's fourth byte and the first body byte. Measured on this source
+	 * with a harness that links this header: the prefixed reset types as 3 at
+	 * offset 8, the prefixed descriptor as 7 at offset 8 — and both pins are
+	 * in the host suite now. */
+	u8 hdr[16]; int type; u16 blen = 0;
 	int hdr_off;
 	s64 dbg_dt_us;
 	irqreturn_t result = IRQ_HANDLED;
@@ -2653,7 +2664,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		}
 		goto out;
 	}
-	if (hdr_off != 5) {
+	if (hdr_off != 5 && hdr_off != 8) {
 		dev_warn_ratelimited(dev,
 			"SEQ: malformed input header at offset %d, dropping frame\n", hdr_off);
 		shid->stat_frames_dropped++;
@@ -2664,7 +2675,7 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	shid->seq_last_valid_jiffies = jiffies;
 	shid->seq_storm_count = 0;
 
-	blen = (((hdr[6] >> 4) & 0xF) << 0) | (hdr[7] << 4);
+	blen = (((hdr[hdr_off + 1] >> 4) & 0xF) << 0) | (hdr[hdr_off + 2] << 4);
 	blen *= 4;
 	if (blen > SZ_8K)
 		blen = SZ_8K;
