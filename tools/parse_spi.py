@@ -212,8 +212,14 @@ def analyze_trace(transactions, label):
 
             print(f"  TXN#{spi_count:3d} | +{gap:8.0f}us | READ 0x0B reg=0x{addr:06X}{marker} | TX={len(tx_data)}B RX={len(rx_data)}B{resp_info}")
 
-            if len(rx_data) > 10:
-                # Show first bytes of RX (after sync)
+            # The read's OWN bytes decide the questions this project keeps
+            # asking (a register in the address field, or its absence, or a
+            # preamble length): printing only TX={n}B hid exactly that. And the
+            # response threshold was 10, so the nine-byte handshake frames —
+            # the reset and the descriptor header — printed no RX either.
+            tx_display = ' '.join(f'{b:02X}' for b in tx_data[:min(12, len(tx_data))])
+            print(f"         TX: {tx_display}{'...' if len(tx_data)>12 else ''}")
+            if len(rx_data) > 4:
                 rx_display = ' '.join(f'{b:02X}' for b in rx_data[:min(40, len(rx_data))])
                 print(f"         RX: {rx_display}{'...' if len(rx_data)>40 else ''}")
 

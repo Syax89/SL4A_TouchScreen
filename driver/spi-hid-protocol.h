@@ -184,28 +184,30 @@ static inline int spi_hid_protocol_find_header(const spi_hid_proto_u8 *raw,
 static inline int spi_hid_protocol_frame_type(const spi_hid_proto_u8 *rx, int len,
 					      int *hdr_off)
 {
-	int type;
-
-	/* The preamble this driver produces is exactly five bytes — the legacy read
-	 * approval — so a response's first frame byte is at index 5 and nowhere
-	 * else. An earlier version scanned 4..7, which for a nine-byte read could
-	 * only ever reach 4 and 5: the upper half was dead, and the index-4 slot
-	 * added false-positive surface for a preamble no caller produces. A
-	 * cross-family leg found both.
-	 * ponytail: fixed at 5; if a caller ever reads with another preamble, this
-	 * is the line to generalise. */
-	if (len > 8 && rx[5] == 3 && rx[6] == 0 && rx[7] == 0 && rx[8] == 0) {
-		if (hdr_off)
-			*hdr_off = 5;
-		return 3;
-	}
-
-	type = spi_hid_protocol_find_header(rx, len, hdr_off);
-	if (type == 3 && hdr_off && *hdr_off >= 0 && rx[*hdr_off] != 3) {
-		*hdr_off = -1;
-		return -1;
-	}
-	return type;
+	/* The reference's own exchange, read from the boot trace with
+	 * tools/parse_spi.py (which now prints the hex of every frame, not just
+	 * the length):
+	 *
+	 *   TX 0B 00 00 00 FF 00 00 00 00   RX FF FF FF FF FF 32 10 00 5A  → RESET_RSP
+	 *   TX 0B 00 00 00 FF 00 00 00 00   RX FF FF FF FF FF 03 00 00 00  → its drain
+	 *   TX 02 00 00 01 42 00 00 03 00 00                                → DESCREQ
+	 *   TX 0B 00 00 00 FF 00 00 03 00   RX FF FF FF FF FF 72 80 00 5A  → DEVICE_DESC
+	 *
+	 * So `32 10 00 5A` IS the reset response — high nibble 3, sync present, which
+	 * is exactly the rule this function has always applied — and `03 00 00 00`
+	 * is the DRAIN that answers the read after it, not a reset of its own.
+	 *
+	 * Two later "improvements" inverted that, both mine: a narrowing taken from
+	 * a Cx-layer function (VerifyResetResponse tests msg[0]==3) rejected the
+	 * real reset, and a detector built on top of it promoted the drain. A blind
+	 * leg had even proved the narrowing's pass branch unsatisfiable — the signal
+	 * that the rule was wrong, which I answered by adding a detector instead of
+	 * deleting the narrowing. The field then showed the device behaving exactly
+	 * like the reference while this driver answered upside down.
+	 *
+	 * The lesson is in the shape of the mistake: the capture is the authority on
+	 * what the device SAYS, a class-driver function from another layer is not. */
+	return spi_hid_protocol_find_header(rx, len, hdr_off);
 }
 
 #endif /* SPI_HID_PROTOCOL_H */

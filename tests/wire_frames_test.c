@@ -468,12 +468,19 @@ static void test_read_approval_frame(void)
 	 * satisfied by text: if the detector disappears or weakens, this fails to
 	 * compile or fails here. */
 	{
-		/* The device's idle frame: type 3 by the sync nibble, NOT a reset. */
-		static const uint8_t idle[9] = {
+		/* THE RESET. From the reference's own boot trace (tools/parse_spi.py,
+		 * which now prints every frame's hex): a nine-byte read of register 0
+		 * answers with exactly these bytes, and the parser labels them
+		 * RESET_RSP. High nibble 3, sync present. Two of my own changes once
+		 * rejected this frame as an "idle" one and promoted the drain below to
+		 * a reset — the device behaved correctly the whole time. */
+		static const uint8_t reset[9] = {
 			0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10, 0x00, 0x5a
 		};
-		/* The reset, from the field bundle: no sync byte, pattern 03 00 00 00 */
-		static const uint8_t reset[9] = {
+		/* THE DRAIN. The second read in the reference answers with this; it is
+		 * the reset's gutted body, not a second reset, and it carries no sync
+		 * so it is not a frame at all. */
+		static const uint8_t drain[9] = {
 			0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00
 		};
 		/* A 3 with anything else behind it is data, not a reset. */
@@ -486,12 +493,11 @@ static void test_read_approval_frame(void)
 		};
 		int off = -1;
 
-		CHECK(spi_hid_protocol_frame_type(idle, sizeof(idle), &off) == -1,
-		      "the idle frame 32 10 00 5a is not a reset");
-		off = -1;
 		CHECK(spi_hid_protocol_frame_type(reset, sizeof(reset), &off) == 3,
-		      "the sync-less 03 00 00 00 is a reset");
+		      "the reference's RESET_RSP 32 10 00 5a types as 3");
 		CHECK(off == 5, "and its frame starts where the preamble ends");
+		CHECK(spi_hid_protocol_frame_type(drain, sizeof(drain), NULL) == -1,
+		      "the drain 03 00 00 00 is not a reset of its own — no sync, no frame");
 		CHECK(spi_hid_protocol_frame_type(data3, sizeof(data3), NULL) == -1,
 		      "a bare 3 with data behind it is not a reset");
 		off = -1;

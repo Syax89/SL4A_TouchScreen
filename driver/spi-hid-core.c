@@ -541,7 +541,6 @@ out:
 		spi_hid_disable_irq(shid);
 		if (shid->works_initialized) {
 			cancel_delayed_work_sync(&shid->descreq_work);
-			cancel_delayed_work_sync(&shid->reset_work);
 			cancel_delayed_work_sync(&shid->poll_work);
 			cancel_delayed_work_sync(&shid->raw_handshake_watchdog);
 			cancel_delayed_work_sync(&shid->raw_probe_retry_work);
@@ -1411,73 +1410,6 @@ static int spi_hid_seq_write(struct spi_hid *shid, const u8 *buf, int len, u8 *r
 static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 {
 	return spi_hid_protocol_frame_type(rx, len, hdr_off);
-}
-
-/* The reference's reaction to a reset, taken from the V0 state machine's own
- * symbol names (hidspi_8080_ResettingSyncEntry): increment the counter, call
- * Fdo::ResetDevice(), and on success start a 2000 ms timer before the next
- * state. Our equivalent of ResetDevice is the power sequence the probe already
- * uses (stop + D2 + D0) — it is what puts the device back into a known session.
- * The 2000 ms is the reference's own constant, seen twice in this file's notes,
- * so it is measured rather than chosen.
- * ponytail: no FDO-level reset exists on this stack; if the device still resets
- * through this, the next step is a full re-probe, not a longer wait. */
-/* The reference's reaction to a reset, in the shape this stack can take.
- * ResettingSyncEntry calls Fdo::ResetDevice() and then arms a 2000 ms timer
- * before the next state. A verifier measured what an INLINE version costs here:
- * ~2.25 s under seq_lock with the IRQ masked, against a device that resets
- * every ~208 ms — a livelock, not a stall. So the wait lives in a work item of
- * its own, and the lock covers only the SPI writes, which is all it was ever
- * for. The reset half runs in raw mode, where this driver owns the session,
- * mirroring the checks the other callers of spi_hid_vendor_init() make. */
-static void spi_hid_seq_reset_work(struct work_struct *work)
-{
-	struct spi_hid *shid = container_of(work, struct spi_hid, reset_work.work);
-
-	mutex_lock(&shid->seq_lock);
-	if (shid->removing || shid->suspended || !shid->seq_enabled) {
-		mutex_unlock(&shid->seq_lock);
-		return;
-	}
-	if (shid->raw_mode_active)
-		spi_hid_vendor_init(shid);
-	mutex_unlock(&shid->seq_lock);
-
-	/* Outside the lock on purpose: the IRQ thread keeps draining frames. */
-	msleep(2000);
-
-	mutex_lock(&shid->seq_lock);
-	if (!shid->removing && !shid->suspended && shid->seq_enabled)
-		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE);
-	mutex_unlock(&shid->seq_lock);
-}
-
-static bool spi_hid_seq_reset_like_reference(struct spi_hid *shid)
-{
-
-	/* The reference's reaction to a reset is ResetDevice followed by a 2000 ms
-	 * timer (ResettingSyncEntry). An adversarial leg measured what an inline
-	 * wait costs HERE: ~2.25 s under seq_lock with the IRQ masked, with 2000 ms
-	 * also the value of both watchdog constants — and the field storm arrives
-	 * every ~208 ms, so sleeping per reset would livelock the driver.
-	 *
-	 * Same constant, a shape that cannot lock anything: the 2000 ms is a
-	 * MINIMUM GAP between reactions. That is what breaks the loop — one DESCREQ
-	 * per 2 s instead of five per second, so the driver stops feeding the storm
-	 * that produced the resets in the first place.
-	 *
-	 * ponytail: gap only, no device reset yet. The full reference shape — the
-	 * reset itself and the wait, off the IRQ thread in a state of its own — is
-	 * queued; an inline wait must not ship. */
-	/* Coalescing, not throttling: the reference answers a reset with a RESET,
-	 * and a second reset arriving while one is already in flight is the same
-	 * event. Nothing is waited for here — this runs on the IRQ thread. */
-	if (delayed_work_pending(&shid->reset_work)) {
-		seq_dbg(shid, 2, "SEQ: reset already in flight, coalescing\n");
-		return false;
-	}
-	schedule_delayed_work(&shid->reset_work, 0);
-	return true;
 }
 
 static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
@@ -2668,9 +2600,9 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 		 * version at ~2.25 s under seq_lock with the IRQ masked, against a
 		 * device that resets every ~208 ms. The work sends the DESCREQ when
 		 * the wait is over. */
-		spi_hid_seq_reset_like_reference(shid);
-		return;
-		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: DESCREQ sent, waiting for DEVICE_DESC IRQ\n");
+		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
+			return;
+		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: RESET_RSP drained, DESCREQ sent (the reference: ~156 us later, no wait)\n");
 		*expect_fast = true;
 	} else if (type == 7) {
 		seq_dbg(shid, 1, "SEQ[WAIT_RESET]: DEVICE_DESC without RESET_RSP, handing to desc handler\n");
@@ -2767,9 +2699,9 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		 * version at ~2.25 s under seq_lock with the IRQ masked, against a
 		 * device that resets every ~208 ms. The work sends the DESCREQ when
 		 * the wait is over. */
-		spi_hid_seq_reset_like_reference(shid);
-		return;
-		seq_dbg(shid, 1, "SEQ: DESCREQ sent synchronously, waiting for next IRQ\n");
+		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
+			return;
+		seq_dbg(shid, 1, "SEQ: RESET_RSP drained, DESCREQ sent synchronously\n");
 	}
 }
 
@@ -2915,8 +2847,8 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 		 * version at ~2.25 s under seq_lock with the IRQ masked, against a
 		 * device that resets every ~208 ms. The work sends the DESCREQ when
 		 * the wait is over. */
-		spi_hid_seq_reset_like_reference(shid);
-		return;
+		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
+			return;
 	}
 }
 
@@ -2962,8 +2894,8 @@ static void seq_handle_feat(struct spi_hid *shid, int type, u16 blen)
 		 * version at ~2.25 s under seq_lock with the IRQ masked, against a
 		 * device that resets every ~208 ms. The work sends the DESCREQ when
 		 * the wait is over. */
-		spi_hid_seq_reset_like_reference(shid);
-		return;
+		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
+			return;
 	}
 }
 
@@ -3012,8 +2944,8 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		/* Through the same gate as the other reset sites: a leg found this
 		 * arm answering at full speed while the IRQ path was rate-limited,
 		 * i.e. exactly where a storm hits hardest. */
-		seq_dbg(shid, 1, "SEQ: Device reset detected in DONE. Scheduling the reference reaction...\n");
-		spi_hid_seq_reset_like_reference(shid);
+		seq_dbg(shid, 1, "SEQ: Device reset detected in DONE. Re-initializing sequencer...\n");
+		spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_DEVICE_RESET);
 		return;
 	}
 	if (type != 1)
@@ -3719,20 +3651,20 @@ static int spi_hid_probe(struct spi_device *spi)
 	 * driver's own TU, and its result lands in the diagnostics bundle — the one
 	 * channel that reports what the shipped code actually does. */
 	{
-		static const u8 self_idle[9] = {
+		/* The reset and the drain, from the reference's own boot trace. */
+		static const u8 self_reset[9] = {
 			0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10, 0x00, 0x5a
 		};
-		static const u8 self_reset[9] = {
+		static const u8 self_drain[9] = {
 			0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00
 		};
 		int self_off = -1;
 		bool self_ok;
 
-		self_ok = spi_hid_seq_hdr_type(self_idle, sizeof(self_idle), &self_off) == -1;
-		self_off = -1;
-		self_ok = self_ok &&
-			  spi_hid_seq_hdr_type(self_reset, sizeof(self_reset), &self_off) == 3 &&
+		self_ok = spi_hid_seq_hdr_type(self_reset, sizeof(self_reset), &self_off) == 3 &&
 			  self_off == 5;
+		self_ok = self_ok &&
+			  spi_hid_seq_hdr_type(self_drain, sizeof(self_drain), NULL) == -1;
 		if (self_ok)
 			dev_info(dev, "self-check: frame typing ok (idle frame rejected, sync-less reset recognised at offset 5)\n");
 		else
@@ -3820,7 +3752,6 @@ static int spi_hid_probe(struct spi_device *spi)
 	INIT_WORK(&shid->create_device_work, spi_hid_create_device_work);
 	INIT_WORK(&shid->error_work, spi_hid_error_work);
 	INIT_DELAYED_WORK(&shid->descreq_work, spi_hid_seq_descreq_work);
-	INIT_DELAYED_WORK(&shid->reset_work, spi_hid_seq_reset_work);
 	INIT_DELAYED_WORK(&shid->raw_handshake_watchdog, spi_hid_raw_handshake_watchdog);
 	INIT_DELAYED_WORK(&shid->raw_probe_retry_work, spi_hid_raw_probe_retry_work);
 	INIT_DELAYED_WORK(&shid->feat_delay_work, spi_hid_feat_delay_work);
