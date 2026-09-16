@@ -511,6 +511,9 @@ def main():
     # shapes are removed (the first version of this check was dead code: it sat
     # outside main() and used a root variable that does not exist here).
     core_src = (ROOT / "driver" / "spi-hid-core.c").read_text()
+    # The body offset helper returns the struct offset; an `off += 3` after it
+    # reads three bytes late and rejects every real descriptor (8+3+28 > 37 on
+    # the capture's 37-byte body). This exact mistake shipped once.
     for _name in ("self_panel_reset", "self_panel_desc"):
         if f"static const u8 {_name}[12]" not in core_src:
             print(f"FAIL self-check: {_name} missing from the probe's frame-typing self-check")
