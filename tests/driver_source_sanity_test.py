@@ -14,6 +14,7 @@ the kernel headers would have said.
 """
 
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -232,22 +233,26 @@ def check_control_flow_pins():
                   f"makes them work")
             failures += 1
 
-    # 9. every module parameter is declared before its first use. Twice in this
-    # campaign a parameter was added next to its neighbours and used higher up
-    # the file; only the kernel build noticed, on CI, minutes later. Cheap here.
-    pos = 0
-    while True:
-        pos = core.find("module_param(", pos)
-        if pos < 0:
-            break
-        end = core.find(",", pos)
-        name = core[pos + len("module_param("):end].strip()
-        first_use = core.find(name)
-        if name and 0 <= first_use < pos:
-            print(f"FAIL driver/spi-hid-core.c: '{name}' is used before its "
-                  f"module_param() declaration — the kernel build will reject it")
+    # 9. a module parameter must be declared above the code that reads it. Twice
+    # in this campaign one was added next to its neighbours and used higher up
+    # the file; only the kernel build noticed, minutes later on CI. Comments and
+    # strings are stripped and the match is a whole identifier, so `raw_mode` is
+    # not confused with `raw_mode_active` — and the first mention has to be a
+    # declaration line, not a use inside a function.
+    code, _ = strip_comments_and_strings(core)
+    for m in re.finditer(r"module_param\((\w+)", code):
+        name = m.group(1)
+        first = re.search(r"\b" + re.escape(name) + r"\b", code)
+        if first is None:
+            continue
+        line = code[:first.start()].rsplit("\n", 1)[-1].strip()
+        if not line.startswith(("static", "int", "bool", "unsigned", "char",
+                                "u8", "u16", "u32", "u64", "const", "struct")):
+            print(f"FAIL driver/spi-hid-core.c: '{name}' is first mentioned as "
+                  f"'{line[:60]}', not as a declaration — the kernel build will "
+                  f"reject the use above the declaration")
             failures += 1
-        pos = end + 1
+
 
     return failures
 

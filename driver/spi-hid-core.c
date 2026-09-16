@@ -1115,6 +1115,13 @@ static int spi_hid_set_request(struct spi_hid *shid,
 			shid->desc.output_register, &report);
 }
 
+/* Which shape the read approval has. The traces put the register at offset 7
+ * with the address field zero; the field device answers nothing to that and
+ * something to the older five-byte shape. A frame that silences a device is
+ * not settled by argument: one reload per variant, and the bundle says which
+ * one the hardware accepted. */
+static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;
+
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {
 	u8 *tx = shid->read_tx_buf;
@@ -1813,6 +1820,13 @@ out:
 
 /* ── Operating mode ────────────────────────────────────────────── */
 static bool raw_mode;
+/* Which shape the read approval has. The traces put the register at offset 7
+ * with the address field zero; the field device answers nothing to that and
+ * something to the older five-byte shape. A frame that silences a device is
+module_param(read_frame_variant, int, 0444);
+MODULE_PARM_DESC(read_frame_variant,
+	"Read approval shape: 0=reference (register at offset 7), 1=legacy (5 bytes, register in the address field), 2=both");
+
 module_param(raw_mode, bool, 0444);
 MODULE_PARM_DESC(raw_mode,
 	"0 = standard HID mode (single-touch, Report ID 0x40); "
@@ -1829,16 +1843,6 @@ MODULE_PARM_DESC(acpi_probe_power_cycle,
 	"Experimental ACPI _PS3->_PS0 power cycle at probe (default disabled)");
 
 module_param(sync_timeout_ms, int, 0444);
-
-/* Which shape the read approval has. The traces put the register at offset 7
- * with the address field zero; the field device answers nothing to that and
- * something to the older five-byte shape. A frame that silences a device is
- * not settled by argument: one reload per variant, and the bundle says which
- * one the hardware accepted. */
-static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;
-module_param(read_frame_variant, int, 0444);
-MODULE_PARM_DESC(read_frame_variant,
-	"Read approval shape: 0=reference (register at offset 7), 1=legacy (5 bytes, register in the address field), 2=both");
 
 MODULE_PARM_DESC(sync_timeout_ms,
 	"Timeout in ms for synchronous requests (default 6000: covers the ~3.6 s measured device "
