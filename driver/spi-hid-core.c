@@ -1236,13 +1236,23 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 					       rx_len > SPI_HID_READ_APPROVAL_LEN ?
 					       shid->read_resp_content_id : 0,
 					       read_frame_variant);
-	/* The request is the frame and nothing more. The trace's `tx_len` for a
-	 * body read is the length of the SPB *buffer*, not what the reference
-	 * clocks out — its controller segments the transfer (TX_COUNT=3 per
-	 * continuation, see docs/AMDSPI_DECOMP.md). Padding the request to the
-	 * response length, as this did, clocks hundreds of stray bytes out
-	 * before every read: the field bundle went from a RESET_RSP per second
-	 * to none at all with the controller and the bus healthy. */
+	/* The request is the frame and nothing more, and the reason changed:
+	 * a cross-family leg went through the capture row by row and refuted the
+	 * earlier explanation. The reference's `tx_len` is NOT a pre-segmentation
+	 * buffer hint: the first segment programs TX_COUNT from the request length
+	 * (spi-amd.c:358) and only CONTINUATION segments use TX_COUNT=3, while the
+	 * reference's own body reads carry the zero padding in the logged buffer
+	 * itself (945 bytes, 936 of them zeros, surface_boot_auto.csv row 211) —
+	 * and requests that DO carry content clock that content instead of zeros
+	 * (the 4309-byte read at row 211's siblings: `56 bd 0c ee 5b 44 4c` after
+	 * the frame), so the rule is "frame + whatever the request buffer holds,
+	 * to the response length", not "frame + zeros".
+	 * So the reference really does pad. This driver must not, for a reason of
+	 * its own transport: a padded buffer is chopped into TX-only bursts here
+	 * and the panel went silent (bundle: a RESET_RSP per second before, none
+	 * after), and the current transport would reject it outright at the FIFO
+	 * check (spi-amd.c:566). Byte parity with the reference is not achievable
+	 * through this path; that is a fact to carry, not a bug to chase. */
 	tx_len = n;
 	if (tx_len > shid->read_tx_len)
 		tx_len = shid->read_tx_len;
@@ -4050,9 +4060,13 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err1;
 	}
 
-	/* Request buffer for spi_hid_seq_read_reg(): the read approval is clocked
-	 * out padded to the length of the response (the reference does the same),
-	 * so it is zeroed once and only its first nine bytes are rewritten. */
+	/* Request buffer for spi_hid_seq_read_reg(). It is sized for the longest
+	 * padded reference frame and zeroed once, but the driver clocks ONLY the
+	 * frame (`tx_len = n`): the reference pads its request out to the response
+	 * length with zeros, and when this driver did the same the transport
+	 * chopped the padded buffer into TX-only bursts and the panel went silent
+	 * — so padding here is NOT the behaviour, and a comment claiming it is has
+	 * already cost one field round trip. */
 	shid->read_tx_buf = devm_kmalloc(dev, 8200, GFP_KERNEL);
 	shid->read_tx_len = 8200;
 	if (!shid->read_tx_buf) {
