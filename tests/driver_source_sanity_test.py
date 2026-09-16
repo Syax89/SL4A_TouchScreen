@@ -175,14 +175,32 @@ def check_control_flow_pins():
     # id only when it reads a body. Without the enable the device never streams;
     # with the id on a header read the frame differs from the reference.
     for needle, why in (
-        ("SPI_HID_CONTENT_TYPE_SET_FEATURE", "the stream enable no longer sends SET_FEATURE"),
+        ("spi_hid_wire_vendor_init(0)", "the stream enable no longer sends the reference's frame"),
         ("SPI_HID_RAW_STREAM_CONTENT_ID", "the stream enable no longer names content id 0x56"),
-        ("0xBD, 0x0C, 0xEE, 0x5B", "the stream enable payload is no longer the reference's"),
         ("SPI_HID_RAW_STREAM_REGISTER 0x0A", "the stream register is no longer 0x0A"),
     ):
         if needle not in core:
             print(f"FAIL driver/spi-hid-core.c: {why} (trace #0531 / #0004-#0873)")
             failures += 1
+    # The writes that ask for a response must record which request they are,
+    # or the read that follows names nothing (trace: 00 04 03 00 06,
+    # 00 03 0A 00 56). The descriptor requests are the 0/0 case.
+    for fn, want in (("vendor_init", "SPI_HID_CONTENT_TYPE_SET_FEATURE"),
+                     ("get_feature6", "SPI_HID_CONTENT_TYPE_GET_FEATURE"),
+                     ("setfeat", "shid->read_resp_content_id = 5")):
+        marker = f"static int spi_hid_seq_write_{fn}"
+        # rfind: the forward declarations at the top of the file would
+        # otherwise be the match, and a prototype has no body to check.
+        seg = core.rsplit(marker, 1)[1][:900] if marker in core else ""
+        if want not in seg:
+            print(f"FAIL driver/spi-hid-core.c: spi_hid_seq_write_{fn}() does not "
+                  f"record the request its response belongs to — its reads go out "
+                  f"naming nothing")
+            failures += 1
+    if "shid->desc.max_input_length = 0x2000;" not in core:
+        print("FAIL driver/spi-hid-core.c: the fallback's max_input_length is not "
+              "0x2000 — a 4096 cap truncates the 4309-byte raw frames")
+        failures += 1
     if "rx_len > SPI_HID_READ_APPROVAL_LEN ?" not in read_reg:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_reg() names a content id "
               "on nine-byte reads again — the reference names it only on bodies")

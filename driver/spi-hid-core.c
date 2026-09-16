@@ -603,10 +603,21 @@ static int spi_hid_seq_write_descreq(struct spi_hid *shid)
 	return spi_hid_seq_write(shid, frame, (int)len, NULL, 0);
 }
 
+/* The raw stream: the reference reads it from register 0x0A with content id
+ * 0x56 (boot trace #0004-#0873 — 4309 bytes = 5 + 4304 after a nine-byte
+ * header read that says 'type 0x1 body 4304'). Both are used by the reads and
+ * by the enable below, so they sit here, before either. */
+#define SPI_HID_RAW_STREAM_REGISTER 0x0A
+#define SPI_HID_RAW_STREAM_CONTENT_ID 0x56
+
 /* SET_FEATURE Report ID 0x56 (vendor init / device key). */
 static int spi_hid_seq_write_vendor_init(struct spi_hid *shid)
 {
 	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(spi_hid_wire_doubled());
+
+	/* The reads that follow name this request, like the reference's do. */
+	shid->read_resp_type = SPI_HID_CONTENT_TYPE_SET_FEATURE;
+	shid->read_resp_content_id = SPI_HID_RAW_STREAM_CONTENT_ID;
 
 	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
 }
@@ -615,6 +626,9 @@ static int spi_hid_seq_write_vendor_init(struct spi_hid *shid)
 static int spi_hid_seq_write_get_feature6(struct spi_hid *shid)
 {
 	struct spi_hid_wire_frame frame = spi_hid_wire_get_feature6(spi_hid_wire_doubled());
+
+	shid->read_resp_type = SPI_HID_CONTENT_TYPE_GET_FEATURE;
+	shid->read_resp_content_id = SPI_HID_GETFEAT6_REPORT_ID;
 
 	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
 }
@@ -991,7 +1005,11 @@ static void spi_hid_use_hardcoded_desc(struct spi_hid *shid)
 	shid->desc.report_descriptor_length = 936;
 	shid->desc.report_descriptor_register = 0x0002;
 	shid->desc.input_register = 0x0000;
-	shid->desc.max_input_length = 0x1000;
+	/* 0x2000, not 0x1000: the raw frames are 4309 bytes (5 + 4304) and a
+	 * 4096 cap truncates them. The real descriptor reports it this way; the
+	 * value is the cap the standard-mode reads use (raw mode uses the
+	 * buffer's own size). */
+	shid->desc.max_input_length = 0x2000;
 	shid->desc.output_register = 0x0003;
 	shid->desc.max_output_length = 0x0100;
 	shid->desc.command_register = 0x0004;
@@ -1046,21 +1064,13 @@ static void spi_hid_create_device_work(struct work_struct *work)
  * Without it the device does not stream and every read of that register has
  * nothing to answer with, however well formed the read is.
  */
-static const u8 spi_hid_raw_enable_payload[] = {
-	0xBD, 0x0C, 0xEE, 0x5B, 0x44, 0x4C, 0x00,
-};
-
-#define SPI_HID_RAW_STREAM_REGISTER 0x0A
-#define SPI_HID_RAW_STREAM_CONTENT_ID 0x56
-
 static int spi_hid_raw_enable_stream(struct spi_hid *shid)
 {
-	struct spi_hid_output_report report = {
-		.content_type = SPI_HID_CONTENT_TYPE_SET_FEATURE,
-		.content_length = sizeof(spi_hid_raw_enable_payload),
-		.content_id = SPI_HID_RAW_STREAM_CONTENT_ID,
-		.content = (u8 *)spi_hid_raw_enable_payload,
-	};
+	/* The plain vendor-init frame is exactly the reference's enable
+	 * (02 00 00 03 C2 00 03 0A 00 56 BD 0C EE 5B 44 4C 00 00), built and
+	 * sent by the same code the handshake uses — one frame, one path, so a
+	 * fix to either is a fix to both. */
+	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(0);
 
 	if (!shid->raw_mode_active)
 		return 0;
@@ -1069,7 +1079,7 @@ static int spi_hid_raw_enable_stream(struct spi_hid *shid)
 		 "SEQ: enabling the raw stream (SET_FEATURE 0x%02x on register 0x%02x)\n",
 		 SPI_HID_RAW_STREAM_CONTENT_ID, SPI_HID_RAW_STREAM_REGISTER);
 
-	return spi_hid_send_output_report(shid, shid->desc.output_register, &report);
+	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
 }
 
 static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
@@ -1844,6 +1854,9 @@ static int spi_hid_seq_write_setfeat(struct spi_hid *shid)
 {
 	struct spi_hid_wire_frame frame =
 		spi_hid_wire_set_feature5(spi_hid_wire_doubled_setfeat());
+
+	shid->read_resp_type = SPI_HID_CONTENT_TYPE_SET_FEATURE;
+	shid->read_resp_content_id = 5;	/* the heatmap report this enables */
 
 	return spi_hid_seq_write_speed(shid, frame.bytes, (int)frame.len, NULL, 0,
 				       setfeat_speed_hz);
