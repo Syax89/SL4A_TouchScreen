@@ -2097,19 +2097,39 @@ static ssize_t heatmap_debug_show(struct device *dev,
 static DEVICE_ATTR_RO(heatmap_debug);
 
 /*
- * The complete last captured frame, as raw bytes.
+ * struct bin_attribute::read() took a non-const attribute until 6.13, when the
+ * const read_new() variant appeared and __BIN_ATTR()'s _Generic picked between
+ * the two; 6.16 dropped the non-const callback and the kernel builds with
+ * -Werror=incompatible-pointer-types, so the old signature is a build failure
+ * there rather than a warning. Ubuntu 24.04 LTS (6.8) is still a supported
+ * target, so both signatures have to exist. Same reasoning as the .remove
+ * guard in spi-amd.c.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
+#define SPI_HID_BIN_ATTR_PTR struct bin_attribute *attr
+#else
+#define SPI_HID_BIN_ATTR_PTR const struct bin_attribute *attr
+#endif
+
+/*
+ * The complete last captured frame: the CapImg cell field, one byte per cell
+ * (3456 bytes on MSHW0231, 4056 on MSHW0162), which is what a frame analysis
+ * needs — not the 4304-byte wire body, which heatmap_buf never held.
  *
- * heatmap_debug carries the same frame as hex, but a sysfs show() attribute is
- * limited to one page, and the V0 body (4304 bytes) does not fit: its tail —
- * the part a frame analysis needs — is cut. This binary attribute streams the
- * whole buffer instead, in as many reads as the reader asks for, so the
- * diagnostic bundle can carry a frame that is complete.
+ * heatmap_debug carries the same bytes as hex, but a sysfs show() attribute is
+ * limited to one page and the 78x52 panel's cell field does not fit, so its
+ * tail is cut. This binary attribute streams the whole buffer instead, in as
+ * many reads as the reader asks for.
  *
  * No new state and no new locking: same buffer, same length, same seq_lock as
- * heatmap_debug. Reading it on a driver without a captured frame yields EOF.
+ * heatmap_debug. Reading it on a driver with no captured frame yields EOF.
+ *
+ * Size 0: the length is per-device (3456/4056), so there is nothing honest to
+ * advertise, and sysfs_kf_bin_read() then leaves the read length alone — the
+ * handler's EOF ends the stream.
  */
 static ssize_t heatmap_raw_read(struct file *filp, struct kobject *kobj,
-				struct bin_attribute *attr, char *buf,
+				SPI_HID_BIN_ATTR_PTR, char *buf,
 				loff_t off, size_t count)
 {
 	struct spi_hid *shid = dev_get_drvdata(kobj_to_dev(kobj));
@@ -2127,7 +2147,7 @@ static ssize_t heatmap_raw_read(struct file *filp, struct kobject *kobj,
 
 	return n;
 }
-static BIN_ATTR_RO(heatmap_raw, SPI_HID_RAW_CAPTURE_BODY_LENGTH);
+static BIN_ATTR_RO(heatmap_raw, 0);
 
 static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {

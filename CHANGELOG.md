@@ -5,19 +5,35 @@
 ### Diagnostic bundle carries the last captured frame
 
 `sudo ./tools/sl4a-touch.sh logs` now writes the last captured frame into the
-bundle as raw bytes, so a problem report can be analysed from the bundle alone.
-The frame could not come from `heatmap_debug`: a sysfs `show()` attribute is
-limited to one page and the 4304-byte V0 body does not fit, so the frame's tail
-— where the per-frame lists sit — was cut. The driver now exposes the same
-buffer as the `heatmap_raw` binary attribute, which streams the whole body in as
-many reads as the reader asks for; the bundle falls back to the truncated
-`heatmap_debug` hex view, labelled as such, on modules that predate it, and says
-so explicitly when no frame has been captured yet. The bundle also picks up
-`build_info`, `ready` and the two error counters, and `sl4a_debug_level=2`
-continues to add the per-blob lines through dmesg.
+bundle, so a problem report can be analysed from the bundle alone. What the
+driver keeps is the frame's **cell field** — one byte per cell, 3456 bytes on
+MSHW0231, 4056 on the 78x52 MSHW0162 panel — not the 4304-byte wire body, and
+the bundle carries it as hex.
 
-`tests/diagnostic_bundle_contract_test.py` pins both halves: the tool's section
-and fallback, and the driver's attribute with its create/remove pair.
+The frame could not come from `heatmap_debug`: a sysfs `show()` attribute is
+limited to one page and the cell field of the 78x52 panel does not fit, so the
+frame's tail — where the per-frame lists sit — was cut. The driver now exposes
+the same buffer as the `heatmap_raw` binary attribute, which streams it whole,
+in as many reads as the reader asks for, holding the same `seq_lock` as
+`heatmap_debug` and advertising no size (the length is per-device). The
+callback is version-guarded for kernels ≥ 6.16, where the bin_attribute
+callback lost its non-const argument: the unguarded signature would turn into a
+hard `-Werror=incompatible-pointer-types` build failure on current
+Arch/CachyOS/Fedora kernels, which the CI job (Ubuntu 24.04, 6.8 headers) cannot
+see.
+
+The bundle reads the attribute once and labels it with the bytes it just read,
+so the count always describes the hex below it; an empty attribute says there is
+no frame data instead of claiming "0 bytes, complete"; and on modules that
+predate the attribute it falls back to the truncated `heatmap_debug` view,
+labelled as such. It also picks up `build_info`, `ready` and the two error
+counters. `sl4a_debug_level=2` continues to add the per-blob lines through
+dmesg.
+
+Three host tests pin it: `diagnostic_bundle_contract_test.py` (structure),
+`diagnostic_bundle_frame_test.py` (the section run for real against a fake sysfs
+tree, hex round-tripped) and `binattr_signature_test.py` (the guard compiles on
+6.8/6.13/6.16, and the revert fails on 6.16).
 
 ### Windows alignment analysis, replay harness, and a refuted transplant
 

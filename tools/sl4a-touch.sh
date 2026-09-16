@@ -1129,15 +1129,29 @@ cmd_logs() {
 
 					# Frame data, so a report can be analysed without asking for
 					# anything else. heatmap_raw is the binary attribute and
-					# carries the whole body; heatmap_debug is the one-page hex
-					# view kept for older modules, and cuts the frame tail.
+					# carries the whole cell field (one byte per cell);
+					# heatmap_debug is the one-page hex view kept for older
+					# modules, and cuts the tail.
 					echo ""
 					echo "--- Last captured frame ---"
 					if [ -r "$spidev/heatmap_raw" ]; then
-						local frame_bytes
-						frame_bytes=$(wc -c < "$spidev/heatmap_raw")
-						echo "-- heatmap_raw ($frame_bytes bytes, complete) --"
-						od -An -v -tx1 -w32 "$spidev/heatmap_raw" 2>/dev/null
+						local frame_tmp frame_bytes
+						frame_tmp=$(mktemp 2>/dev/null)
+						if [ -n "$frame_tmp" ]; then
+							# One read only: the attribute is rewritten at frame
+							# rate, so the count has to describe the bytes below it.
+							cat "$spidev/heatmap_raw" > "$frame_tmp" 2>/dev/null
+							frame_bytes=$(wc -c < "$frame_tmp")
+							if [ "${frame_bytes:-0}" -gt 0 ]; then
+								echo "-- heatmap_raw ($frame_bytes bytes, cell field complete) --"
+								od -An -v -tx1 -w32 "$frame_tmp"
+							else
+								echo "(no frame data: nothing captured yet, or the driver is being unbound)"
+							fi
+							rm -f "$frame_tmp"
+						else
+							echo "(could not create a temporary file to read the frame into)"
+						fi
 					elif [ -r "$spidev/heatmap_debug" ]; then
 						echo "-- heatmap_debug (hex, truncated to one page: this module has no heatmap_raw) --"
 						cat "$spidev/heatmap_debug"
