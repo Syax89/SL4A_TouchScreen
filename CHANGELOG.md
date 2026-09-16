@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### The read approval now names the request it reads the response of
+
+With the register at the right offset, the rest of the frame became visible in
+the traces: it mirrors the request whose response is being read.
+
+```
+write GET_FEATURE(6) to reg 3   02 00 00 03 42 00 04 03 00 06
+read  reg 3    9 B              0B 00 00 00 FF 00 04 03 00        (header)
+read  reg 3  129 B              0B 00 00 00 FF 00 04 03 00 06     (body)
+write SET_FEATURE(5) to reg 4   02 00 00 03 82 00 03 04 00 05 …
+read  reg 4  221 B              0B 00 00 00 FF 00 03 04 00 05     (feature body)
+read  reg 0A 4309 B = 5 + 4304  0B 00 00 00 FF 00 03 0A 00 56     (raw frame)
+```
+
+Offset 6 is the content type of that request (0 for the descriptors, 4 =
+GET_FEATURE, 3 = SET_FEATURE), offset 9 its content id (6 = the feature report,
+0x56 = the raw stream), and the trailing zero is trimmed: nine bytes when the
+content id is zero, ten otherwise. The whole request is then clocked out padded
+to the length of the response: nine bytes for a four-byte header, `5 + body`
+for a body — which is also the first sighting of the raw stream, 4304 bytes of
+it, read from register 0x0A.
+
+The driver wrote zeros in both fields, so a feature response or a stream frame
+was asked for without saying which request it belonged to.
+`spi_hid_send_output_report()` now records the content type and id of every
+request it writes, the read approval repeats them, and the descriptor requests
+reset the pair to zero. `tests/wire_frames_test.c` checks all three shapes
+against the trace above.
+
 ### The read approval asked the wrong question
 
 The descriptor never arrived because of the frame that asks for it, not because

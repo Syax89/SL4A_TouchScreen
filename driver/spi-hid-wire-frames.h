@@ -208,8 +208,14 @@ static inline struct spi_hid_wire_frame spi_hid_wire_get_feature6(int double_opc
 #define SPI_HID_WIRE_OPCODE_READ 0x0B
 #define SPI_HID_READ_APPROVAL_LEN 9
 
+/* `content_type` and `content_id` are those of the request being read back —
+ * 0/0 for the descriptor requests, GET_FEATURE/6 for a feature query
+ * (0B 00 00 00 FF 00 04 03 00 06), SET_FEATURE/0x56 for the stream
+ * (0B 00 00 00 FF 00 03 0A 00 56). The reference puts them there; the device
+ * answers the read the request's response belongs to. */
 static inline unsigned int spi_hid_wire_read_approval(SPI_HID_WIRE_U8 *out,
-		unsigned int reg)
+		unsigned int reg, SPI_HID_WIRE_U8 content_type,
+		SPI_HID_WIRE_U8 content_id)
 {
 	out[0] = SPI_HID_WIRE_OPCODE_READ;
 	out[1] = 0x00;
@@ -217,10 +223,14 @@ static inline unsigned int spi_hid_wire_read_approval(SPI_HID_WIRE_U8 *out,
 	out[3] = 0x00;
 	out[4] = 0xFF;
 	out[5] = 0x00;
-	out[6] = 0x00;
+	out[6] = content_type;
 	out[7] = reg & 0xff;
 	out[8] = 0x00;
-	return SPI_HID_READ_APPROVAL_LEN;
+	out[9] = content_id;
+	/* The reference trims the trailing zero: a descriptor read (content id
+	 * zero) is nine bytes, one that names a request is ten. The buffer is
+	 * then clocked out padded to the length of the response anyway. */
+	return content_id ? SPI_HID_READ_APPROVAL_LEN + 1 : SPI_HID_READ_APPROVAL_LEN;
 }
 
 /* DESCREQ for `reg`: the device-descriptor register 0x000001
