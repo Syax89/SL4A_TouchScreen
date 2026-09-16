@@ -515,6 +515,26 @@ static void test_read_approval_frame(void)
 		off = -1;
 		CHECK(spi_hid_protocol_frame_type(data, sizeof(data), &off) == 1,
 		      "an ordinary sync frame still types as DATA");
+		/* The panel's own answer family, verbatim from the field bundles: a
+		 * three-byte native prefix (01 <status> EE) followed by the same frame
+		 * the reference device sends. The header sits at offset 8 and the sync
+		 * at 11 — invisible to a nine-byte read, which is why no field payload
+		 * was ever typed. Measured with a harness over this header. */
+		static const unsigned char prefixed_reset[12] = {
+			0x01, 0xff, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10,
+			0x00, 0x5a };
+		static const unsigned char prefixed_desc[12] = {
+			0x01, 0x07, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x72, 0x80,
+			0x00, 0x5a };
+
+		off = -1;
+		CHECK(spi_hid_protocol_frame_type(prefixed_reset, sizeof(prefixed_reset), &off) == 3,
+		      "the panel's prefixed reset types as 3");
+		CHECK(off == 8, "and its frame starts three bytes past the reference offset");
+		off = -1;
+		CHECK(spi_hid_protocol_frame_type(prefixed_desc, sizeof(prefixed_desc), &off) == 7,
+		      "the panel's prefixed descriptor types as 7");
+		CHECK(off == 8, "at the same offset");
 	}
 }
 
