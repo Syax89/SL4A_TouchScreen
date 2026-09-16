@@ -77,6 +77,9 @@ def check_control_flow_pins():
     def strip_c_comments(text):
         text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
         text = re.sub(r"//[^\n]*", " ", text)
+        # Preprocessor-disabled code is not code either: a leg neutralised a
+        # guard inside `#if 0` and the comment-stripping pins stayed green.
+        text = re.sub(r"#if\s+0\b.*?#endif", " ", text, flags=re.S)
         return text
 
     core_code = strip_c_comments(core)
@@ -228,11 +231,13 @@ def check_control_flow_pins():
     # test. Without this detector the type-3 arms have no reachable producer at
     # all (the version nibble is 2, so a sync-based type 3 implies byte0 0x32):
     # exactly the state a blind leg proved this code was in.
-    if "rx[5] == 3" not in hdrfn:
-        print("FAIL driver/spi-hid-core.c: the genuine reset detector is gone — a "
-              "sync-less frame whose first byte is 3 IS a reset (VerifyResetResponse: "
-              "msg[0] == 3), and without it every type-3 path is unreachable and a "
-              "device announcing resets is answered with descriptor requests")
+    if "rx[i] == 3" not in hdrfn or "rx[i + 1] == 0" not in hdrfn:
+        print("FAIL driver/spi-hid-core.c: the genuine reset detector is gone or weakened — "
+              "a sync-less `03 00 00 00` IS the reset (VerifyResetResponse: msg[0] == 3, "
+              "and tools/parse_spi.py parses the same pattern in userspace). One bare "
+              "byte == 3 is not enough: a body byte would read as a reset. Without the "
+              "detector every type-3 path is unreachable and a device announcing resets "
+              "is answered with descriptor requests")
         failures += 1
     if "!= 3" not in hdrfn:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_hdr_type() no longer narrows a "
