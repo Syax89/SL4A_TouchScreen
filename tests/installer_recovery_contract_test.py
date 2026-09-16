@@ -144,6 +144,25 @@ assert "MISMATCH — the installed modules predate this checkout" in tool, \
     "a stale installed module no longer produces a warning in the bundle"
 assert "run_host_self_tests" in tool and "suite result: PASS" in tool, \
     "the bundle no longer runs the host suite, so its result is not collected"
+# The bug the user actually hit, and the reason hunt is now tested end to end:
+# a comment whose second line lost its leading '#' became a command, so hunt
+# died with rc=127 *after* unloading the driver — invisible, because everything
+# past that point is redirected into the artifact. The sandbox test in
+# hunt_sandbox_test.sh runs the real sweep against stubs; these pins keep the
+# two mechanisms that make such a death impossible to miss.
+assert "exec 3>&2" in tool, \
+    "hunt lost its terminal fd: progress and errors would vanish into the file again"
+assert ">\u00263" in tool or ">&3" in tool, \
+    "nothing writes to the terminal fd during the sweep"
+assert "trap 'rc=$?;" in tool and "hunt stopped at line $LINENO" in tool, \
+    "the ERR trap is gone: a failing command inside the sweep is silent again"
+assert "( cmd_activate >/dev/null 2>&1 ) || true" in tool, \
+    "the final restore is not isolated in a subshell: cmd_activate's fail() \
+     would exit the whole sweep after the artifact was already complete"
+assert "|| true" in tool.split("modinfo sl4a_spi_hid")[1][:60], \
+    "modinfo is unguarded again: on a machine where the module is not installed, \
+     the sweep dies at the very end"
+
 # ── the double-blind leg's findings ────────────────────────────────────────
 # The worst regression of the whole campaign, and the last one standing: a fix
 # of mine rewrote stamp_installed_head and swallowed restage_and_rebuild with

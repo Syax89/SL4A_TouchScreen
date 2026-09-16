@@ -153,6 +153,7 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 	$(PYTHON) diagnostic_bundle_contract_test.py
 	$(PYTHON) diagnostic_bundle_frame_test.py
 	$(PYTHON) installer_recovery_contract_test.py
+	$(SHELL) hunt_sandbox_test.sh
 
 # Checks that need something this repository does not ship: the Windows touch
 # corpus, the offline analyzers, the capture harnesses. They skip (and therefore
