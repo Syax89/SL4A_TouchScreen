@@ -92,10 +92,12 @@ def check_control_flow_pins():
     # found independently by two blind legs, and against the header's own
     # comment on the builder. The stop frame above removes the stream state that
     # made the crude form look necessary; `hunt` still sweeps all three.
-    if "static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;" not in core:
+    if "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;" not in core:
         print("FAIL driver/spi-hid-core.c: read_frame_variant no longer defaults to the "
-              "reference shape — the only frame that can name the register, the content "
-              "type and the content id (see the builder's own comment)")
+              "shape this PANEL answers. The reference shape is the authority on the "
+              "sequence, but the field sweep of 2026-09-16 19:11 says the encoding this "
+              "device accepts is the five-byte one — variant 0 silent, variant 1 reaching "
+              "DONE with ready set and the reset count down from 47 to 4")
         failures += 1
 
     # 0b. The stream that survives a host reboot has to be torn down before the
