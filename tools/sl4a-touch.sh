@@ -1712,6 +1712,15 @@ cmd_hunt() {
 		pass "Rebuilt from $head_now"
 	fi
 
+	trap 'rc=$?; printf "\n\033[0;31m\xe2\x9c\x97 hunt stopped at line $LINENO (rc=$rc)\033[0m\n" >&3; printf "  artifact so far: %s\n" "$OUT" >&3; printf "  send that file: it ends where the error is\n" >&3; exit $rc' ERR
+	# fd 3 is the terminal itself, duplicated before the sweep redirects
+	# both streams into the artifact. Progress and the error trap write
+	# there: the file must stay complete, but a person watching the screen
+	# has to see movement — and see where it stopped if it stops.
+	exec 3>&2
+	info "Full sweep goes to: $OUT"
+	info "Three variants, ~11 s each; the verdicts are printed here at the end."
+
 	{
 		echo "=== SL4A_TouchScreen frame hunt ==="
 		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -1721,6 +1730,7 @@ cmd_hunt() {
 
 		for variant in 0 1 2; do
 			echo "--- variant $variant ---"
+			printf '\n[%d/3] variant %s: reloading the driver, debug level 3 (~11 s)\n' "$((variant + 1))" "$variant" >&3
 			local dmesg_mark
 			dmesg_mark="$(dmesg 2>/dev/null | wc -l)"
 			modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null || true
@@ -1730,8 +1740,11 @@ cmd_hunt() {
 			modprobe sl4a_spi_hid $opts read_frame_variant="$variant" sl4a_debug_level=3 2>/dev/null || true
 			sleep 4
 			echo "running variant: $(cat /sys/module/sl4a_spi_hid/parameters/read_frame_variant 2>/dev/null) at debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null)"
-			echo ">>> TOUCH THE PANEL NOW, a few times <<<"
-			sleep 6
+			for _s in 6 5 4 3 2 1; do
+				printf '\r     >>> TOUCH THE PANEL NOW (tocca il pannello) — %d <<<   ' "$_s" >&3
+				sleep 1
+			done
+			printf '\r%80s\r' '' >&3
 			for f in ready seq_state protocol_stats lifecycle_status bus_error_count device_initiated_reset_count; do
 				echo "-- $f"
 				cat "$SYSFS_DIR/$f" 2>/dev/null || echo "(unavailable)"
@@ -1746,7 +1759,7 @@ cmd_hunt() {
 				echo "$win"
 			else
 				# Ring buffer wrapped between the mark and now: the arithmetic
-				yields nothing while the lines still exist. Say so, then show them.
+				# yields nothing while the lines still exist. Say so, then show them.
 				echo "(no lines after the mark — the ring may have wrapped; last 60 driver lines)"
 				dmesg 2>/dev/null | grep -i sl4a_spi_hid | tail -n 60 || true
 			fi
@@ -1759,14 +1772,20 @@ cmd_hunt() {
 		run_host_self_tests
 		echo ""
 		echo "--- module objects (which build ran) ---"
-		modinfo sl4a_spi_hid 2>/dev/null | head -4
+		modinfo sl4a_spi_hid 2>/dev/null | head -4 || true
 		echo ""
 	} >"$OUT" 2>&1
 	chmod 644 "$OUT" 2>/dev/null || true
 
 	# Leave the machine exactly as it was: the installed profile, no debug level.
 	modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null || true
-	cmd_activate >/dev/null 2>&1 || true
+	# In a subshell on purpose: cmd_activate's own fail() would 'exit 1' the
+	# whole sweep after the artifact was complete (the restore must never be
+	# able to kill the run it is restoring from).
+	# In a subshell, with '|| true' OUTSIDE it: cmd_activate's own fail() calls
+	# exit 1, which leaves the subshell immediately and can only be caught from
+	# the outside. Inside, the || true never ran at all.
+	( cmd_activate >/dev/null 2>&1 ) || true
 
 	pass "Wrote $OUT (one file, all three variants)"
 	grep -h '^VERDICT' "$OUT" 2>/dev/null || true
