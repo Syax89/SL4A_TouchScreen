@@ -111,6 +111,34 @@ def check_control_flow_pins():
               "watchdog (raw mode has no timer for a silent post-resume controller)")
         failures += 1
 
+    # 4. spi_hid_raw_handshake_watchdog(): its "fall back to standard HID" branch
+    # must install the hardcoded descriptors first. Without them
+    # spi_hid_create_device_work() sees version 0, refuses to publish the device
+    # and schedules the ACPI power cycle — the field case where the raw handshake
+    # failed and the fallback left the panel deader than before.
+    body = core.split("static void spi_hid_raw_handshake_watchdog", 1)[1].split("\n}", 1)[0]
+    if "spi_hid_use_hardcoded_desc" not in body:
+        print("FAIL driver/spi-hid-core.c: the raw watchdog's standard-HID fallback "
+              "no longer installs the hardcoded descriptors (create_device_work() "
+              "will reject version 0 and power the panel down instead)")
+        failures += 1
+
+    # 5. the descriptor response path. Windows answers a request on the output
+    # register (the boot trace reads the DEVICE_DESC and the RPT_DESC from
+    # register 3 right after the request, with no interrupt in between), while
+    # the device pushes its events on the input register. Reading only the input
+    # register is what kept the field unit in WAIT_DESC forever.
+    if "spi_hid_seq_read_resp" not in core:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_resp() is gone; the "
+              "descriptor bodies would only ever be read from the input register")
+        failures += 1
+    body = core.split("static void spi_hid_seq_descreq_work", 1)[1].split("\n}", 1)[0]
+    if "desc.output_register" not in body or "desc.input_register" not in body:
+        print("FAIL driver/spi-hid-core.c: the descriptor poller no longer tries "
+              "both registers (responses live on the output register, events on "
+              "the input one)")
+        failures += 1
+
     return failures
 
 

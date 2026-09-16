@@ -964,6 +964,35 @@ static int spi_hid_create_device(struct spi_hid *shid)
 	return 0;
 }
 
+/*
+ * Install the descriptor set a fallback uses when the device never told us its
+ * own. These are the Windows stack's values for MSHW0231 (vendor 045E, product
+ * 0C19, report-descriptor register 0x0002, length 936 = the hardcoded report
+ * descriptor in hardcoded_rd.h).
+ *
+ * The version field matters as much as the registers: without it a fallback
+ * hands spi_hid_create_device_work() a zeroed descriptor, that function rejects
+ * version 0, schedules the ACPI error path, and the panel stays dead — which is
+ * exactly what happened in the field when the raw handshake failed and the
+ * "fall back to standard HID" path had nothing to create the device with.
+ *
+ * Called with seq_lock held.
+ */
+static void spi_hid_use_hardcoded_desc(struct spi_hid *shid)
+{
+	shid->desc.hid_version = 0x0100;
+	shid->desc.report_descriptor_length = 936;
+	shid->desc.report_descriptor_register = 0x0002;
+	shid->desc.input_register = 0x0000;
+	shid->desc.max_input_length = 0x1000;
+	shid->desc.output_register = 0x0003;
+	shid->desc.max_output_length = 0x0100;
+	shid->desc.command_register = 0x0004;
+	shid->desc.vendor_id = 0x045E;
+	shid->desc.product_id = 0x0C19;
+	shid->desc.version_id = 0x0100;
+}
+
 static void spi_hid_create_device_work(struct work_struct *work)
 {
 	struct spi_hid *shid =
@@ -1069,6 +1098,39 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 
 static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 {
+	return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len);
+}
+
+/*
+ * Read a request's response.
+ *
+ * Windows reads it from the output register: in the boot trace it writes the
+ * DESCREQ to the descriptor register and then reads the DEVICE_DESC (type 7)
+ * and its body from register 3 — a plain read, no interrupt in between — and
+ * the report descriptor (type 8) the same way. The device pushes its own
+ * events (RESET_RSP) on the input register, which is where this driver read
+ * everything. On the field unit that register only ever yields RESET_RSP, so
+ * the response was never seen and discovery stayed in WAIT_DESC forever.
+ *
+ * Both registers are tried, response register first: a device (or a build
+ * older than this one) may still answer on the input register, and the caller
+ * only sees the first read that succeeded.
+ */
+static int spi_hid_seq_read_resp(struct spi_hid *shid, u8 *rx, int rx_len)
+{
+	u32 resp_reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+	int ret;
+
+	if (resp_reg != shid->desc.input_register) {
+		ret = spi_hid_seq_read_reg(shid, resp_reg, rx, rx_len);
+		if (!ret) {
+			seq_dbg(shid, 2, "SEQ: response read from register 0x%06x\n",
+				resp_reg);
+			return 0;
+		}
+		seq_dbg(shid, 2, "SEQ: register 0x%06x read failed (%d), trying the input register\n",
+			resp_reg, ret);
+	}
 	return spi_hid_seq_read_reg(shid, shid->desc.input_register, rx, rx_len);
 }
 
@@ -1317,8 +1379,15 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		}
 		dev_err(dev, "SEQ: raw_mode handshake failed after %d attempts, falling back to standard HID\n",
 			shid->raw_probe_attempts + 1);
-		/* The descriptor was already acquired. Stop the experimental input
-		 * path and instantiate standard HID without requiring module reload. */
+		/* The descriptor is NOT "already acquired" here, whatever the old
+		 * comment said: this branch runs because discovery never finished,
+		 * so desc is zero and create_device_work() would reject version 0,
+		 * schedule the ACPI power cycle and leave the panel dead. Install
+		 * the hardcoded set first — then this fallback actually publishes
+		 * a standard HID touchscreen. Stop the experimental input path and
+		 * instantiate standard HID without requiring a module reload. */
+		if (!shid->desc.hid_version)
+			spi_hid_use_hardcoded_desc(shid);
 		shid->raw_mode_active = false;
 		shid->poll_active = false;
 		shid->stream_watchdog_active = false;
@@ -1443,27 +1512,41 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
 	u8 hdr[9];
+	u32 resp_reg;
 	int type, hdr_off;
+	int i, got = -1;
 
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
 	    !READ_ONCE(shid->seq_enabled) ||
-	    shid->seq_state != SPI_HID_SEQ_WAIT_DESC)
+	    (shid->seq_state != SPI_HID_SEQ_WAIT_DESC &&
+	     shid->seq_state != SPI_HID_SEQ_WAIT_RPT))
 		goto out;
 
-	seq_dbg(shid, 1, "SEQ: poll-work: reading for DEVICE_DESC...\n");
-	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
-		seq_dbg(shid, 1, "SEQ: poll-work: read failed, retrying...\n");
+	/* Both registers can carry a frame (see spi_hid_seq_read_resp): the one
+	 * a device answers requests on, and the one it pushes its own events on.
+	 * This poller used to read the input register only, so a device that
+	 * answers on the other stayed in discovery forever. Take the first
+	 * register whose read yields a frame header. */
+	resp_reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+	for (i = 0; i < 2 && got < 0; i++) {
+		u32 reg = i == 0 ? resp_reg : shid->desc.input_register;
+
+		if (i == 1 && reg == resp_reg)
+			break;
+		if (spi_hid_seq_read_reg(shid, reg, hdr, sizeof(hdr)))
+			continue;
+		type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
+		if (type >= 0 && hdr_off == 5)
+			got = i;
+	}
+	if (got < 0) {
+		seq_dbg(shid, 2, "SEQ: poll-work: no frame header on either register, retrying...\n");
 		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
 		goto out;
 	}
-	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	if (type >= 0 && hdr_off != 5) {
-		seq_dbg(shid, 1, "SEQ: poll-work: header at unexpected offset %d\n", hdr_off);
-		schedule_delayed_work(&shid->descreq_work, msecs_to_jiffies(100));
-		goto out;
-	}
-	seq_dbg(shid, 2, "SEQ: poll-work: type=%d raw=[%*ph]\n", type, 9, hdr);
+	seq_dbg(shid, 2, "SEQ: poll-work: type=%d reg=0x%06x raw=[%*ph]\n", type,
+		got == 0 ? resp_reg : shid->desc.input_register, 9, hdr);
 	if (type == 7) {
 		u16 blen = (((hdr[6] >> 4) & 0xF)) | (hdr[7] << 4);
 
@@ -1476,6 +1559,16 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		 * see it: run the same handler it would have run, otherwise the
 		 * poller drops the very descriptor it exists to recover. */
 		seq_handle_desc(shid, type, blen);
+	} else if (type == 8) {
+		u16 blen = (((hdr[6] >> 4) & 0xF)) | (hdr[7] << 4);
+
+		blen *= 4;
+		if (blen > SZ_8K)
+			blen = SZ_8K;
+		seq_dbg(shid, 1, "SEQ: poll-work: GOT RPT_DESC (blen=%u), handling it here\n",
+			blen);
+		/* Same handler the IRQ thread would have run for this state. */
+		seq_handle_rpt(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
 		seq_dbg(shid, 1, "SEQ: poll-work: still RESET_RSP, DESCREQ failed\n");
@@ -1486,17 +1579,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		 * woken here too (review R15). */
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		/* Hardcode and create device */
-		shid->desc.hid_version = 0x0100;
-		shid->desc.report_descriptor_length = 936;
-		shid->desc.report_descriptor_register = 0x0002;
-		shid->desc.input_register = 0x0000;
-		shid->desc.max_input_length = 0x1000;
-		shid->desc.output_register = 0x0003;
-		shid->desc.max_output_length = 0x0100;
-		shid->desc.command_register = 0x0004;
-		shid->desc.vendor_id = 0x045E;
-		shid->desc.product_id = 0x0C19;
-		shid->desc.version_id = 0x0100;
+		spi_hid_use_hardcoded_desc(shid);
 		/* Raw mode suppresses the standard HID device everywhere else (see the
 		 * wire-descriptor path); the fallback must not hand userspace a second
 		 * publisher while the raw pipeline owns the panel. */
@@ -2364,7 +2447,7 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 
 		shid->stat_device_desc++;
 		seq_dbg(shid, 1, "SEQ: DEVICE_DESC! reading body (%u bytes)...\n", blen);
-		if (rblen < 3 || spi_hid_seq_read(shid, body, rblen)) {
+		if (rblen < 3 || spi_hid_seq_read_resp(shid, body, rblen)) {
 			dev_warn(&shid->spi->dev, "SEQ: DEVICE_DESC read failed or was truncated\n");
 			return;
 		}
@@ -2439,7 +2522,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 
 		shid->stat_rpt_desc++;
 		seq_dbg(shid, 1, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
-		if (rblen < 3 || spi_hid_seq_read(shid, body, rblen)) {
+		if (rblen < 3 || spi_hid_seq_read_resp(shid, body, rblen)) {
 			dev_warn(&shid->spi->dev, "SEQ: RPT_DESC read failed or was truncated\n");
 			return;
 		}
@@ -2626,17 +2709,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
 		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: got RESET_RSP, vendor init ignored. Hardcoding descriptors...\n");
-		shid->desc.hid_version = 0x0100;
-		shid->desc.report_descriptor_length = 936;
-		shid->desc.report_descriptor_register = 0x0002;
-		shid->desc.input_register = 0x0000;
-		shid->desc.max_input_length = 0x1000;
-		shid->desc.output_register = 0x0003;
-		shid->desc.max_output_length = 0x0100;
-		shid->desc.command_register = 0x0004;
-		shid->desc.vendor_id = 0x045E;
-		shid->desc.product_id = 0x0C19;
-		shid->desc.version_id = 0x0100;
+		spi_hid_use_hardcoded_desc(shid);
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
