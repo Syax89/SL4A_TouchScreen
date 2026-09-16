@@ -1400,10 +1400,27 @@ static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 	 * leg proved this arithmetic against a python port of find_header; the
 	 * narrowing below is unsatisfiable-proof only because this detector exists.
 	 * ponytail: fixed offset 5, tied to the 5-byte approval the panel answers. */
-	if (len > 5 && rx[5] == 3) {
-		if (hdr_off)
-			*hdr_off = 5;
-		return 3;
+	{
+		int i;
+
+		/* The whole pattern, not one byte: `03 00 00 00` is the ACK/reset
+		 * shape this repo already parses in userspace (tools/parse_spi.py:
+		 * "Check for ACK pattern (03 00 00 00) without 0x5A"). A single
+		 * byte == 3 is not enough — an adversarial leg showed a body byte
+		 * at that position would be read as a reset. Scanning a small
+		 * window instead of a fixed index also removes the fragility of
+		 * depending on one preamble length: the frame's first byte is
+		 * where the pattern starts, whatever the preamble was.
+		 * ponytail: window 4..7 covers the preamble lengths this driver
+		 * produces; widen only if a caller ever reads with another one. */
+		for (i = 4; i <= 7 && i + 3 < len; i++) {
+			if (rx[i] == 3 && rx[i + 1] == 0 &&
+			    rx[i + 2] == 0 && rx[i + 3] == 0) {
+				if (hdr_off)
+					*hdr_off = i;
+				return 3;
+			}
+		}
 	}
 
 	type = spi_hid_protocol_find_header(rx, len, hdr_off);
