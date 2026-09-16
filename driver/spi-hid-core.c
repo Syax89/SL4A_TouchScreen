@@ -644,9 +644,24 @@ static int spi_hid_seq_write_get_feature6(struct spi_hid *shid)
  * different internal opcode 0x08 encoding). */
 static int spi_hid_vendor_init(struct spi_hid *shid)
 {
+	struct spi_hid_wire_frame stop = spi_hid_wire_vendor_stop(spi_hid_wire_doubled());
 	struct spi_hid_wire_frame d2 = spi_hid_wire_set_power_d2(spi_hid_wire_doubled());
 	struct spi_hid_wire_frame d0 = spi_hid_wire_set_power_d0(spi_hid_wire_doubled());
 	int ret;
+
+	/* First, tear down a stream that is still running. The device keeps
+	 * streaming across a host reboot: the state comes from an earlier
+	 * session's enable, it is there on the very first probe, and the
+	 * descriptor handshake cannot complete while it lasts (the field sweep
+	 * shows register 0 answering with stream frames and device_desc=0).
+	 * The reference sends exactly this frame before its DESCREQ
+	 * (surface_init.csv #0257, then RESET_RSP on register 0 at #0258/#0259
+	 * and a fresh DESCREQ at #0260). Six bytes separate it from the enable
+	 * key the sequencer sends later. Review S41-F1. */
+	ret = spi_hid_seq_write(shid, stop.bytes, (int)stop.len, NULL, 0);
+	if (ret)
+		return ret;
+	msleep(50);
 
 	ret = spi_hid_seq_write(shid, d2.bytes, (int)d2.len, NULL, 0);
 	if (ret)
@@ -1120,7 +1135,12 @@ static int spi_hid_set_request(struct spi_hid *shid,
  * something to the older five-byte shape. A frame that silences a device is
  * not settled by argument: one reload per variant, and the bundle says which
  * one the hardware accepted. */
-static int read_frame_variant = SPI_HID_READ_FRAME_REFERENCE;
+/* Default LEGACY: the only shape the device answers. Measured on the panel
+ * (frame sweep 2026-09-16): variant 0 (reference, register at offset 7) is
+ * silent, variant 2 is silent, variant 1 (register in bytes 1-3) gets
+ * answers — reset_rsp=47, stream frames on register 0x0A. The trace-derived
+ * shape was wrong about the read request, and only the device could say so. */
+static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;
 
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {

@@ -153,6 +153,32 @@ static inline struct spi_hid_wire_frame spi_hid_wire_vendor_init(int double_opco
 	return SPI_HID_WIRE_PICK(plain, doubled, double_opcode);
 }
 
+/* SET_FEATURE Report ID 0x56 with an all-FF payload: the reference's stream
+ * STOP / re-enumeration teardown, byte-for-byte trace
+ * captures/wintrace/surface_init.csv txn #0257:
+ *   02 00 00 03 C2 00 03 0A 00 56 FF FF FF FF FF FF 00 00   (18 B)
+ * It is the same frame as spi_hid_wire_vendor_init(), six bytes different where
+ * that one carries the enable key BD 0C EE 5B 44 4C. The reference sends it
+ * when the device is mid-raw-stream — a state that SURVIVES a host reboot, so
+ * the driver meets it on every probe and must tear it down before the
+ * descriptor handshake. Immediately after it the device reports type=0x3
+ * (RESET_RSP) on register 0 and a fresh DESCREQ is answered with the descriptor
+ * (txn #0258/#0259/#0260). Sending the enable instead leaves the device
+ * streaming and the handshake never completes. Review S41-F1. */
+static inline struct spi_hid_wire_frame spi_hid_wire_vendor_stop(int double_opcode)
+{
+	static const SPI_HID_WIRE_U8 plain[] = {
+		0x02, 0x00, 0x00, 0x03, 0xC2, 0x00, 0x03, 0x0A, 0x00,
+		0x56, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00
+	};
+	static const SPI_HID_WIRE_U8 doubled[] = {
+		0x02, 0x02, 0x00, 0x00, 0x03, 0xC2, 0x00, 0x03, 0x0A, 0x00,
+		0x56, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00
+	};
+
+	return SPI_HID_WIRE_PICK(plain, doubled, double_opcode);
+}
+
 /* SET_FEATURE Report ID 5 (enables the heatmap), command register 0x000003,
  * 14 bytes: one payload byte (01 = enable) and a three-byte trailer. */
 static inline struct spi_hid_wire_frame spi_hid_wire_set_feature5(int double_opcode)

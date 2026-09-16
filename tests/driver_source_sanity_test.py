@@ -70,6 +70,33 @@ def check_control_flow_pins():
     core = (ROOT / "driver/spi-hid-core.c").read_text()
     wire = (ROOT / "driver" / "spi-hid-wire-frames.h").read_text()
 
+    # 0a. The read-frame default must be the shape the DEVICE answered. A field
+    # sweep settled it after three wrong guesses from the trace: variant 0
+    # (reference, register at offset 7) is silent, variant 2 is silent, variant 1
+    # (register in bytes 1-3) gets answers, reset_rsp=47, frames on 0x0A.
+    if "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;" not in core:
+        print("FAIL driver/spi-hid-core.c: read_frame_variant no longer defaults to "
+              "LEGACY — the only shape the panel answers (field sweep 2026-09-16)")
+        failures += 1
+
+    # 0b. The stream that survives a host reboot has to be torn down before the
+    # descriptor handshake, and the teardown is the reference's all-FF
+    # SET_FEATURE(0x56) (surface_init.csv #0257). Without it the device keeps
+    # streaming and device_desc stays 0 — the field stall.
+    if "spi_hid_wire_vendor_stop" not in wire:
+        print("FAIL driver/spi-hid-wire-frames.h: the all-FF stream-stop frame is gone "
+              "(the device keeps streaming and the handshake never completes)")
+        failures += 1
+    else:
+        body = core.split("static int spi_hid_vendor_init(struct spi_hid *shid)", 1)[1].split("\n}", 1)[0]
+        if "spi_hid_wire_vendor_stop" not in body:
+            print("FAIL driver/spi-hid-core.c: the probe no longer sends the stream stop")
+            failures += 1
+        elif body.index("spi_hid_wire_vendor_stop") > body.index("spi_hid_wire_set_power_d2"):
+            print("FAIL driver/spi-hid-core.c: the stream stop is sent AFTER the power "
+                  "sequence instead of before the handshake")
+            failures += 1
+
     # 1. spi_hid_ll_parse(): the mutex_unlock must not be the body of an `else`.
     # A dangling `else` had put the unlock in the success branch only, so a
     # failed hardcoded-descriptor parse returned with shid->lock held — and
