@@ -14,6 +14,9 @@ no source is a guess wearing a constant's clothes.
 |---|---|---|
 | read, reference shape | `0B 00 00 00 FF 00 00 <reg> 00` (9B) | the reference's own boot reads: register 0 for its reset and drain, register 3 for the descriptor's responses |
 | read, legacy shape | `0B <reg3> FF` (5B) | the field only — kept because this panel answers it; the sweep keeps testing it |
+| read, **stream** | `0B 00 00 00 FF 00 03 0A 00 56` (9B) | the reference's DATA reads: offset 7 = **0x0A**, dozens of them once the stream is up (TXN#869+). A first version of this table listed only registers 0 and 3 — a leg caught the omission, the same one that drove the wrong register change, because the stream is read through the same helper. |
+
+The three registers, per phase, are the whole story: **0** while the driver is in WAIT_RESET (the reset and its drain), the descriptor register (**3** on this device) through the descriptor phases, and the stream register (**0x0A**) once the sequencer is DONE.
 
 The register these go to was wrong for the whole campaign and was fixed last:
 in raw mode the sequencer reads **register 0**, unconditionally, because that is
@@ -36,17 +39,17 @@ never in doubt after the parser learned to print bytes.
 
 | frame | bytes | source |
 |---|---|---|
-| GET_FEATURE 6 | `02 00 00 03 42 00 04 03 00 06` (10B) | trace: `02 00 00 03 42 00 04 03 00 06`, byte for byte |
-| SET_FEATURE 5 | `02 00 00 03 82 00 03 04 00 05 01 0C EE 5B` (14B) | ETW capture (TXN cited in the test) |
-| SET_FEATURE 0x56 enable | `02 00 00 03 C2 00 03 0A 00 56 BD 0C EE 5B 44 4C 00 00` (18B) | ETW capture (TXN 634494034), device key |
+| GET_FEATURE 6 | `02 00 00 03 42 00 04 03 00 06` (10B) | both: the boot trace's own bytes, and Clock-Time `134276314683821940` (len 10, prefix `02 00 00 03 42`) |
+| SET_FEATURE 5 | `02 00 00 03 82 00 03 04 00 05 01 0C EE 5B` (14B) | capture: Clock-Time `134276314683843667` (len 14, prefix `02 00 00 03 82`) |
+* SET_FEATURE 0x56 enable | `02 00 00 03 C2 00 03 0A 00 56 BD 0C EE 5B 44 4C 00 00` (18B) | capture: Clock-Time `134276314683446347`, `captures/wintrace/surface_init.csv` (row shows len 18 and the `02 00 00 03 C2` prefix) |
 | SET_FEATURE 0x56 stop | same with payload all-`FF` | ETW capture; this is what stops the device before the power sequence |
 
 ## Power frames
 
 | frame | bytes | source |
 |---|---|---|
-| SET_POWER D2 | `02 00 00 04 82 00 00 04 00 01 02 0C EE 5B` (14B) | ETW capture, the D0 twin at TXN 634377432 (the two differ only in the payload byte) |
-| SET_POWER D0 | same with `01` | ETW capture, TXN 634377432 |
+| SET_POWER D2 | `02 00 00 04 82 00 00 04 00 01 02 0C EE 5B` (14B) | capture: Clock-Time `134276314634377432` (len 14, prefix `02 00 00 04 82`); the D0 twin differs in the payload byte |
+| SET_POWER D0 | same with `01` | same transaction |
 
 **An apparent conflict, resolved.** V0's `ConfigurePowerTransfer` builds a frame
 in a zeroed buffer — `02 <reg> 82 00 00 04 00 01 <D0\|D2>` at length 14, tail

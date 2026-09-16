@@ -1309,25 +1309,31 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 *
 	 * Standard mode is untouched: it never overrides the register.
 	 *
-	 * Register 0 is where the device answers its resets and the whole
-	 * handshake — the reference reads it there at boot (`0B 00 00 00 FF 00 00
-	 * 00 00` answers the RESET_RSP). The stream register is the OTHER half:
-	 * input_register is 0x0A in raw mode, and spi_hid_poll_work reads the
-	 * heatmap frames from it once the sequencer is DONE — which is the very
-	 * gate that poller carries (`seq_state != SPI_HID_SEQ_DONE` reschedules
-	 * without reading). So DONE is the crossover, and it is the only
-	 * discriminator that is neither sticky (raw_stream_armed, falsified by one
-	 * field run) nor unreachable (WAIT_RESET, which this driver only ever
-	 * sits in at boot).
+	 * Which register a read goes to is a property of the PHASE, and the
+	 * reference's boot trace names all three of them:
 	 *
-	 * Both directions of this mistake are silent: pointing the handshake at
-	 * 0x0A produced a reset frame nine bytes out of position in every field
+	 *   WAIT_RESET         register 0              TXN#1/#2   (the reset, drain)
+	 *   WAIT_DESC/WAIT_RPT register 3              TXN#4/#5   (descriptor hdr+body)
+	 *   DONE               the stream, 0x0A in raw  TXN#869+   (DATA frames)
+	 *
+	 * Two earlier versions of this were wrong and one field run each was
+	 * enough to show it: a sticky flag (raw_stream_armed — one run reaching
+	 * DONE fixed it for the session: 141 reads on 0x0a, none on 0) and then
+	 * "not DONE → 0", which an adversarial leg showed would send the
+	 * descriptor's own header to register 0 while the reference reads it at 3.
+	 * The three phases above are exactly the three registers the trace uses.
+	 *
+	 * Both directions of getting this wrong are silent: pointing the handshake
+	 * at 0x0A produced a reset frame nine bytes out of position in every field
 	 * log, and pointing the stream at 0 is a poller that reads zeros forever.
-	 * A double-check leg found the second half of that sentence by auditing
-	 * this function's own claim that the stream used explicit calls — it did
-	 * not, and the claim was mine. */
-	if (shid->raw_mode_active && shid->seq_state != SPI_HID_SEQ_DONE)
-		reg = 0;
+	 * The leg that checked this function's claim that "the stream uses its own
+	 * explicit calls" found no such call anywhere — the claim was mine. */
+	if (shid->raw_mode_active) {
+		if (shid->seq_state == SPI_HID_SEQ_WAIT_RESET)
+			reg = 0;                      /* the reset, and its drain */
+		else if (shid->seq_state != SPI_HID_SEQ_DONE)
+			reg = shid->desc.output_register;  /* the descriptor: header and body */
+	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
 
