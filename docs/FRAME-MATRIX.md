@@ -58,6 +58,30 @@ not: the register comes from a different source in V0 and it never emits this
 trailer, so the two functions build **different commands**. The wire capture wins
 for the frame it captures; V0 wins for the frame it builds.
 
+## The honest limit of every register claim here
+
+The reference's registers live at **offset 7 of a nine-byte read** — the shape
+Windows sends. The dialect this panel accepts is the **five-byte read, register
+in the address field** — measured, repeatedly, and the reason the legacy variant
+exists. **Mapping one onto the other is an interpretation, not a measurement**:
+under the panel's own decoding, the reference's "register 3" reads carry zero in
+the address field and would look like register-0 reads. So the register table
+above is what the trace says Windows asked for, translated into the dialect this
+panel answers — and the field is what decides whether the translation is right.
+
+Two independent legs checked this boundary and one of them went further, calling
+offset 6 the register. It is not: the parser's own labels are `a7` for offset 6
+and `a8` for offset 7, and the feature response reads (`0B 00 00 00 FF 00 04 03
+00`, TXN#221) carry **content type 4** at offset 6 and **register 3** at offset
+7 — the same register as the descriptor. The distinction matters because the
+wrong reading would have sent the feature path to a register that does not
+exist in this protocol.
+
+One difference remains and is **not expressible in the winning dialect**: the
+reference marks feature-response reads with content type 4, while the five-byte
+form this panel answers has no content-type field at all. Recorded here rather
+than patched, because the form that could carry it is the form the panel ignores.
+
 ## What is not in this driver, and should not be
 
 The traces carry whole families this driver never sends: `0x24` (calibration),
