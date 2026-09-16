@@ -1037,6 +1037,10 @@ static int spi_hid_create_device(struct spi_hid *shid)
 static void spi_hid_use_hardcoded_desc(struct spi_hid *shid)
 {
 	shid->desc.hid_version = 0x0100;
+	/* 936 is the device's own wReportDescLength from the decoded descriptor;
+	 * the report-descriptor frame's header declares 940 and its content prefix
+	 * 939. Three layers, three numbers — a leg flagged the +1/+4 and said
+	 * investigate, do not silently "fix". */
 	shid->desc.report_descriptor_length = 936;
 	shid->desc.report_descriptor_register = 0x0002;
 	shid->desc.input_register = 0x0000;
@@ -1307,15 +1311,16 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * In standard mode the descriptor's own register stands: the force at probe
 	 * is raw-only, for exactly this reason.
 	 *
-	 * Neither a flag nor a state gate: in raw mode this function ALWAYS reads
-	 * register 0. The field settled it, twice. First a sticky flag (one run
-	 * reaching DONE fixed it for the session: 141 reads on 0x0a, none on 0),
-	 * then a state gate (the driver sits in WAIT_DESC, never in WAIT_RESET:
-	 * still zero reads on 0). And the reason was in the bytes all along — the
-	 * WAIT_DESC read answers `01 ff ee ff ff ff ff ff 32`, a reset frame nine
-	 * bytes out of position, because it was read from the stream register. On
-	 * register 0 the same frame arrives aligned, exactly as the reference reads
-	 * it (`02 10 00 5A` behind its five-byte preamble).
+	 * The register is a property of the PHASE: the three-way selector below
+	 * is the rule (0 for the reset, the output register for the descriptor,
+	 * the stream register at DONE), and both cruder attempts that preceded it
+	 * are recorded in the field bundles — a sticky flag (141 reads on 0x0a,
+	 * none on 0), then a state gate the driver never entered (310 reads in
+	 * WAIT_DESC, one in WAIT_RESET). What the field's answers actually contain
+	 * is a three-byte prefix and the reference frame behind it with its sync at
+	 * eleven, which is why the read had to grow — not a frame "nine bytes out
+	 * of position", a reading a leg disproved with a harness over this header.
+	 * See docs/FRAME-MATRIX.md.
 	 *
 	 * Nothing else needs this function's register: the stream register is read
 	 * by the raw path's own explicit calls, and the descriptor's responses by
