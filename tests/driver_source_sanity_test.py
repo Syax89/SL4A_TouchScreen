@@ -200,6 +200,43 @@ def check_control_flow_pins():
               "request it reads the response of (read_resp_type/_content_id, offsets "
               "6 and 8 of the read approval)")
         failures += 1
+    # 6b. The reset marker and the reset reaction. Windows' VerifyResetResponse
+    # tests the WHOLE first byte (msg[0] == 3, hidspicx_dd64); this parser derives
+    # the type from a nibble, and the two disagree on the device's idle frame
+    # `32 10 00 5a` — which, unguarded, is answered as a reset with a DESCREQ, 47
+    # times in one field pass. And the reference's reaction to a real reset is
+    # named in the PDB: ResettingSyncEntry — ResetDevice, then a 2000 ms timer.
+    # The narrowing must live in the SHARED helper (spi_hid_seq_hdr_type), which
+    # every frame reader calls — not at one call site, where the other readers
+    # keep the old behaviour. A previous fix of exactly this kind was later shown
+    # to guard one path while the siblings stayed broken.
+    hdrfn = (core.split("static int spi_hid_seq_hdr_type", 1)[1].split("\n}", 1)[0]
+             if "static int spi_hid_seq_hdr_type" in core else "")
+    if "!= 3" not in hdrfn:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_hdr_type() no longer narrows a "
+              "nibble-only type 3 to Windows' whole-first-byte rule (msg[0] == 3) — the "
+              "idle frame `32 10 00 5a` will be answered as a reset again, and the field "
+              "bundle 16:52 shows that loop running 47 times in one pass")
+        failures += 1
+    if "spi_hid_seq_reset_like_reference(shid);" not in core:
+        print("FAIL driver/spi-hid-core.c: the reset reaction is gone (reference: "
+              "ResettingSyncEntry — ResetDevice then a 2000 ms timer)")
+        failures += 1
+    else:
+        if core.count("spi_hid_seq_reset_like_reference(shid);") < 4:
+            print("FAIL driver/spi-hid-core.c: not every RESET_RSP site resets the device "
+                  "(WAIT_RESET, WAIT_DESC, WAIT_RPT, WAIT_FEATURE)")
+            failures += 1
+        rb = core.split("void spi_hid_seq_reset_like_reference", 1)[1].split("\n}", 1)[0]
+        if "msleep(2000)" not in rb:
+            print("FAIL driver/spi-hid-core.c: the reset reaction no longer waits the "
+                  "reference's 2000 ms")
+            failures += 1
+        if "spi_hid_vendor_init(shid)" not in rb:
+            print("FAIL driver/spi-hid-core.c: the reset reaction no longer re-runs the "
+                  "power sequence (our ResetDevice equivalent)")
+            failures += 1
+
     if "spi_hid_wire_read_approval" in wire:
         approval = wire.split("spi_hid_wire_read_approval_variant", 1)[1].split("\n}", 1)[0]
         for needle, why in (
