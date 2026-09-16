@@ -141,6 +141,17 @@ installed_head() {
 	echo "$head"
 }
 
+restage_and_rebuild() {
+	echo "→ Staging the checkout into $SRC_DEST and rebuilding..."
+	mkdir -p "$SRC_DEST" || fail "cannot create $SRC_DEST"
+	cp -a "$DRIVER_DIR"/. "$SRC_DEST"/ || fail "cannot stage the driver sources"
+	rm -f "$SRC_DEST"/*.o "$SRC_DEST"/*.ko "$SRC_DEST"/*.mod "$SRC_DEST"/*.mod.c 2>/dev/null || true
+	dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS build failed"
+	dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force || fail "DKMS install failed"
+	depmod -a 2>/dev/null || true
+	stamp_installed_head
+}
+
 dkms_installed_version() {
 	# Real dkms status output looks like:
 	#   sl4a-touch/1.2.0, 7.1.3-2-cachyos, x86_64: installed
@@ -314,8 +325,8 @@ EOF
 # chosen command name on stdout; caller captures it. Falls back to plain
 # usage text when stdin isn't a tty (piped/scripted invocation).
 menu_pick_command() {
-	local labels=("Install" "Uninstall" "Activate" "Status" "Collect diagnostics (logs)" "Quit")
-	local cmds=("install" "uninstall" "activate" "status" "logs" "")
+	local labels=("Install" "Uninstall" "Activate" "Status" "Collect diagnostics (logs)" "Frame hunt (touch the panel)" "Quit")
+	local cmds=("install" "uninstall" "activate" "status" "logs" "hunt" "")
 	local selected=0 n=${#labels[@]} key rest
 	# draw() below prints exactly this many lines every time: title +
 	# subtitle + one blank line + one line per option. Cursor-up must
@@ -699,7 +710,7 @@ cmd_install() {
 		if [ "$legacy_removed" -eq 1 ]; then
 			# The legacy artifact is already uninstalled at this point, so
 			# "existing driver state was left unchanged" would be false.
-			fail "$1 — note: the previous driver artifact was already removed from DKMS, so nothing is installed right now; re-run 'install' once the cause above is fixed"
+			fail "${1%%;*} — the previous driver artifact was already uninstalled, so there is no driver installed right now; re-run 'install' once the cause above is fixed"
 		fi
 		fail "$1"
 	}
@@ -1197,7 +1208,7 @@ cmd_status() {
 	installed="$(dkms_installed_version)"
 	if [ -n "$installed" ]; then
 		if [ "$installed" = "$PKG_VERSION" ]; then
-			pass "DKMS installed version: $installed (matches this checkout, installed for kernel $kernel)"
+			pass "DKMS installed version: $installed (installed for kernel $kernel)"
 		else
 			warn "DKMS installed version: $installed for kernel $kernel (this checkout is $PKG_VERSION — run 'install' to upgrade)"
 		fi
@@ -1207,7 +1218,7 @@ cmd_status() {
 	local head_now head_built
 	head_now="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 	head_built="$(installed_head)"
-	if [ "$head_built" = "$head_now" ]; then
+	if [ "$head_built" = "$head_now" ] && [ "$head_built" != "unknown" ]; then
 		pass "Installed modules were built from $head_built (this checkout)"
 	elif [ "$head_built" = "unknown" ]; then
 		warn "No installed-revision stamp — run 'install' so a bundle can say which build it describes"
@@ -1307,7 +1318,7 @@ run_host_self_tests() {
 	out="$(make -C "$REPO_DIR/tests" test 2>&1)"
 	rc=$?
 	[ "$had_errexit" -eq 1 ] && set -e -o pipefail || true
-	echo "$out" | grep -E 'PASS|FAIL|assertions' | tail -n 12
+	echo "$out" | grep -E 'PASS|FAIL|assertions' | tail -n 12 || true
 	if [ "$rc" = 0 ]; then
 		echo "suite result: PASS"
 	else
@@ -1461,7 +1472,7 @@ cmd_logs() {
 		head_built="$(installed_head)"
 		echo "checkout:                $head_now"
 		echo "installed modules built: $head_built"
-		if [ "$head_built" = "$head_now" ]; then
+		if [ "$head_built" = "$head_now" ] && [ "$head_built" != "unknown" ]; then
 			echo "the installed modules were built from this exact checkout"
 		else
 			echo "MISMATCH — the installed modules predate this checkout, so every figure"
@@ -1653,6 +1664,16 @@ cmd_hunt() {
 	# user's word for it, so `sudo hunt -o /etc/shadow` would truncate it.
 	if [ -n "$OUT" ]; then
 		case "$OUT" in -*) OUT="./$OUT" ;; esac
+		# Never over one of the driver's own files: the modprobe conf and the
+		# boot unit both START with our marker line, so the 'looks like ours'
+		# test below would happily truncate them (double-blind leg, C4).
+		local _real
+		_real="$(readlink -f -- "$OUT" 2>/dev/null || echo "$OUT")"
+		case "$_real" in
+			"$MODPROBE_CONF"|"$SYSTEMD_UNIT"|"$INSTALLED_HEAD_STAMP")
+				fail "refusing to write the hunt file over $OUT — that is one of the driver's own files, not a diagnostic" ;;
+		esac
+		[ -L "$OUT" ] && fail "refusing to write the hunt file through the symlink $OUT"
 		if [ -e "$OUT" ]; then
 			[ -f "$OUT" ] && [ ! -L "$OUT" ] || fail "$OUT is not a regular file; refusing to write it"
 			if [ -s "$OUT" ]; then
@@ -1671,7 +1692,8 @@ cmd_hunt() {
 
 	# The installed profile's own parameters, minus the two this command sets.
 	local opts
-	opts="$(awk '/^options[ \t]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null)"
+	opts="$(awk '/^options[ \t]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
+
 	[ -n "$opts" ] || opts="raw_mode=N"
 
 	info "Frame hunt: three read shapes, one file, no commands for you. Leave the panel alone until asked."
@@ -1718,7 +1740,16 @@ cmd_hunt() {
 			# `|| true` is load-bearing: under `set -e -o pipefail` a grep that
 			# matches nothing (every modprobe in this variant failed, say) aborted
 			# hunt after it had unloaded the driver and before putting it back.
-			dmesg 2>/dev/null | tail -n +"$((dmesg_mark + 1))" | grep -i sl4a_spi_hid | tail -n 60 || true
+			local win
+			win="$(dmesg 2>/dev/null | tail -n +"$((dmesg_mark + 1))" | grep -i sl4a_spi_hid | tail -n 60)" || true
+			if [ -n "$win" ]; then
+				echo "$win"
+			else
+				# Ring buffer wrapped between the mark and now: the arithmetic
+				yields nothing while the lines still exist. Say so, then show them.
+				echo "(no lines after the mark — the ring may have wrapped; last 60 driver lines)"
+				dmesg 2>/dev/null | grep -i sl4a_spi_hid | tail -n 60 || true
+			fi
 			echo ""
 			echo "VERDICT: $(hunt_verdict "$variant" "$SYSFS_DIR")"
 			echo ""
@@ -1731,7 +1762,7 @@ cmd_hunt() {
 		modinfo sl4a_spi_hid 2>/dev/null | head -4
 		echo ""
 	} >"$OUT" 2>&1
-	chmod 600 "$OUT" 2>/dev/null || true
+	chmod 644 "$OUT" 2>/dev/null || true
 
 	# Leave the machine exactly as it was: the installed profile, no debug level.
 	modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null || true

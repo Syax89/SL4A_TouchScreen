@@ -72,7 +72,7 @@ assert "already registered; rebuilding from this checkout" in tool, \
 # Scoped to the install path: hunt's rebuild helper also stages and builds, and
 # a global index() then compared the helper's copy against install's branch.
 # The claim is about install's sequence, so measure it inside install.
-_install = tool[tool.index("Step 3: Staging"):]
+_install = tool[tool.index("cmd_install() {"):tool.index("cmd_uninstall() {")]
 assert _install.index("already_added=1") < _install.index('dkms build -m "$PKG_NAME"'), \
     "the rebuild must follow the already-registered branch"
 assert 'if [ "$already_added" -eq 0 ]; then' in tool, \
@@ -144,6 +144,24 @@ assert "MISMATCH — the installed modules predate this checkout" in tool, \
     "a stale installed module no longer produces a warning in the bundle"
 assert "run_host_self_tests" in tool and "suite result: PASS" in tool, \
     "the bundle no longer runs the host suite, so its result is not collected"
+# ── the double-blind leg's findings ────────────────────────────────────────
+# The worst regression of the whole campaign, and the last one standing: a fix
+# of mine rewrote stamp_installed_head and swallowed restage_and_rebuild with
+# it, so 'hunt' — the one command the user has to run — died with rc=127,
+# "command not found", in exactly the case the fix chain exists for. bash -n
+# cannot see it, the suite could not see it, and the pin that was supposed to
+# protect hunt passed on the shipped tree while hunt was broken. A helper that
+# is called but never defined is now a test failure.
+for _fn in ("restage_and_rebuild", "quarantine_unowned", "run_host_self_tests",
+            "stamp_installed_head", "installed_head", "hunt_verdict",
+            "modprobe_profile", "cleanup_staged_install"):
+    assert f"{_fn}() {{" in tool, \
+        f"{_fn} is called but never defined — every caller dies with rc=127"
+# Every call site must come after the definition, so a reordering cannot
+# silently pick up a same-named command from the system.
+assert tool.index("restage_and_rebuild() {") < tool.index("\t\trestage_and_rebuild\n"), \
+    "restage_and_rebuild is used before it is defined"
+
 # ── the installer review's findings (leg 2026-09-16) ───────────────────────
 # F1: under `set -e -o pipefail` a dmesg|grep that matches nothing aborted hunt
 # after it unloaded the driver and before it put the module back.
@@ -169,7 +187,7 @@ assert 'stamp_installed_head "$SUDO"' in tool, \
     "rebuild stamps unprivileged, so a non-root rebuild records nothing"
 # F7: the legacy migration removes the old artifact before the build and lied
 # about it in the failure message.
-assert "legacy_removed" in tool and "nothing is installed right now" in tool, \
+assert "legacy_removed" in tool and "there is no driver installed right now" in tool, \
     "the legacy migration path can leave the machine without a driver and \
      report that state as unchanged"
 # F8: status claimed "matches this checkout" from a version string that never
