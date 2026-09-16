@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### The raw fallback could never have worked, and now it does
+
+The bundle from the field test showed the recovery chain doing exactly what it
+was built to do — the level-0 warnings, the three retry budgets, the two 5 s
+restarts, and then `falling back to standard HID` — followed one line later by
+`Unsupported device descriptor version 0` and an ACPI power cycle: the panel
+ended up deader than before and nothing was armed anywhere.
+
+`spi_hid_create_device_work()` refuses to publish a device whose
+`desc.hid_version` is not `0x0100`, and the raw fallback runs precisely because
+discovery never completed — so the descriptor was still zero, the version check
+rejected it, and the error path powered the controller down. The two other
+fallbacks in the file (the poll-work one and the vendor-init one) had always
+carried the eleven hardcoded descriptor fields for exactly this reason; the raw
+one did not.
+
+Those fields now live in one helper, `spi_hid_use_hardcoded_desc()`, called by
+all three. A failed raw handshake installs the Windows stack's own values
+(vendor `045E`, product `0C19`, report-descriptor register `0x0002`, length 936
+— the hardcoded report descriptor) before creating the device, so the fallback
+now hands back a working single-touch HID touchscreen instead of a dead panel.
+
 ### The management tool: an upgrade that cannot take the driver away, and a bundle that answers the question
 
 Ten findings from the same campaign about `tools/sl4a-touch.sh`.

@@ -964,6 +964,35 @@ static int spi_hid_create_device(struct spi_hid *shid)
 	return 0;
 }
 
+/*
+ * Install the descriptor set a fallback uses when the device never told us its
+ * own. These are the Windows stack's values for MSHW0231 (vendor 045E, product
+ * 0C19, report-descriptor register 0x0002, length 936 = the hardcoded report
+ * descriptor in hardcoded_rd.h).
+ *
+ * The version field matters as much as the registers: without it a fallback
+ * hands spi_hid_create_device_work() a zeroed descriptor, that function rejects
+ * version 0, schedules the ACPI error path, and the panel stays dead — which is
+ * exactly what happened in the field when the raw handshake failed and the
+ * "fall back to standard HID" path had nothing to create the device with.
+ *
+ * Called with seq_lock held.
+ */
+static void spi_hid_use_hardcoded_desc(struct spi_hid *shid)
+{
+	shid->desc.hid_version = 0x0100;
+	shid->desc.report_descriptor_length = 936;
+	shid->desc.report_descriptor_register = 0x0002;
+	shid->desc.input_register = 0x0000;
+	shid->desc.max_input_length = 0x1000;
+	shid->desc.output_register = 0x0003;
+	shid->desc.max_output_length = 0x0100;
+	shid->desc.command_register = 0x0004;
+	shid->desc.vendor_id = 0x045E;
+	shid->desc.product_id = 0x0C19;
+	shid->desc.version_id = 0x0100;
+}
+
 static void spi_hid_create_device_work(struct work_struct *work)
 {
 	struct spi_hid *shid =
@@ -1317,8 +1346,15 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 		}
 		dev_err(dev, "SEQ: raw_mode handshake failed after %d attempts, falling back to standard HID\n",
 			shid->raw_probe_attempts + 1);
-		/* The descriptor was already acquired. Stop the experimental input
-		 * path and instantiate standard HID without requiring module reload. */
+		/* The descriptor is NOT "already acquired" here, whatever the old
+		 * comment said: this branch runs because discovery never finished,
+		 * so desc is zero and create_device_work() would reject version 0,
+		 * schedule the ACPI power cycle and leave the panel dead. Install
+		 * the hardcoded set first — then this fallback actually publishes
+		 * a standard HID touchscreen. Stop the experimental input path and
+		 * instantiate standard HID without requiring a module reload. */
+		if (!shid->desc.hid_version)
+			spi_hid_use_hardcoded_desc(shid);
 		shid->raw_mode_active = false;
 		shid->poll_active = false;
 		shid->stream_watchdog_active = false;
@@ -1486,17 +1522,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		 * woken here too (review R15). */
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 		/* Hardcode and create device */
-		shid->desc.hid_version = 0x0100;
-		shid->desc.report_descriptor_length = 936;
-		shid->desc.report_descriptor_register = 0x0002;
-		shid->desc.input_register = 0x0000;
-		shid->desc.max_input_length = 0x1000;
-		shid->desc.output_register = 0x0003;
-		shid->desc.max_output_length = 0x0100;
-		shid->desc.command_register = 0x0004;
-		shid->desc.vendor_id = 0x045E;
-		shid->desc.product_id = 0x0C19;
-		shid->desc.version_id = 0x0100;
+		spi_hid_use_hardcoded_desc(shid);
 		/* Raw mode suppresses the standard HID device everywhere else (see the
 		 * wire-descriptor path); the fallback must not hand userspace a second
 		 * publisher while the raw pipeline owns the panel. */
@@ -2626,17 +2652,7 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
 		seq_dbg(shid, 1, "SEQ: VENDOR_INIT: got RESET_RSP, vendor init ignored. Hardcoding descriptors...\n");
-		shid->desc.hid_version = 0x0100;
-		shid->desc.report_descriptor_length = 936;
-		shid->desc.report_descriptor_register = 0x0002;
-		shid->desc.input_register = 0x0000;
-		shid->desc.max_input_length = 0x1000;
-		shid->desc.output_register = 0x0003;
-		shid->desc.max_output_length = 0x0100;
-		shid->desc.command_register = 0x0004;
-		shid->desc.vendor_id = 0x045E;
-		shid->desc.product_id = 0x0C19;
-		shid->desc.version_id = 0x0100;
+		spi_hid_use_hardcoded_desc(shid);
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");

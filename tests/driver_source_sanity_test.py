@@ -111,6 +111,18 @@ def check_control_flow_pins():
               "watchdog (raw mode has no timer for a silent post-resume controller)")
         failures += 1
 
+    # 4. spi_hid_raw_handshake_watchdog(): its "fall back to standard HID" branch
+    # must install the hardcoded descriptors first. Without them
+    # spi_hid_create_device_work() sees version 0, refuses to publish the device
+    # and schedules the ACPI power cycle — the field case where the raw handshake
+    # failed and the fallback left the panel deader than before.
+    body = core.split("static void spi_hid_raw_handshake_watchdog", 1)[1].split("\n}", 1)[0]
+    if "spi_hid_use_hardcoded_desc" not in body:
+        print("FAIL driver/spi-hid-core.c: the raw watchdog's standard-HID fallback "
+              "no longer installs the hardcoded descriptors (create_device_work() "
+              "will reject version 0 and power the panel down instead)")
+        failures += 1
+
     return failures
 
 
