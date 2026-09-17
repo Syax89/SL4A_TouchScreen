@@ -30,7 +30,10 @@ static void compute_c590_lut(void)
 {
 	int i;
 	for (i = 0; i < 256; i++) {
-		s32 v = C590_BASE - ((s32)i * C590_STEP_NUM / C590_STEP_DEN + C590_OFFSET);
+		/* Driver form: rounds half up — (i*STEP_NUM + STEP_DEN/2) / STEP_DEN.
+		 * See driver/mshw0231-raw.c mshw0231_raw_init(). A truncating copy
+		 * here asserted 1181 at i=127 while the driver produces 1180. */
+		s32 v = C590_BASE - (((s32)i * C590_STEP_NUM + C590_STEP_DEN / 2) / C590_STEP_DEN + C590_OFFSET);
 		c590_lut[i] = (s16)(v > 0 ? v : 0);
 	}
 }
@@ -68,8 +71,11 @@ static void test_c590_lut_values(void)
 	CHECK(c590_lut[64] > 1000, "c590[64]=%d too low (noise ceiling)", (int)c590_lut[64]);
 	CHECK(c590_lut[128] > 0, "c590[128]=%d should be positive", (int)c590_lut[128]);
 
-	CHECK(c590_lut[127] == (s16)(C590_BASE - (127 * C590_STEP_NUM / C590_STEP_DEN + C590_OFFSET)),
+	CHECK(c590_lut[127] == (s16)(C590_BASE - ((127 * C590_STEP_NUM + C590_STEP_DEN / 2) / C590_STEP_DEN + C590_OFFSET)),
 	      "c590[127] computed incorrectly");
+	/* Independent literal: the reference polynomial in
+	 * driver/mshw0231-raw.c gives 1180.15 at i=127 (rounded -> 1180). */
+	CHECK(c590_lut[127] == 1180, "c590[127] must be 1180 (rounded driver form)");
 	CHECK(c590_lut[0] == (s16)(C590_BASE - C590_OFFSET),
 	      "c590[0] should be C590_BASE - C590_OFFSET = %d", C590_BASE - C590_OFFSET);
 

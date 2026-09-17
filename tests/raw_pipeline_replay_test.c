@@ -144,6 +144,19 @@ static void setup_device(struct spi_hid *shid, struct spi_device *spidev)
 	shid->cfg = &sl4_cfg;
 
 	mshw0231_raw_init(shid);
+	/* The c590 table is the REAL driver's (this file links
+	 * driver/mshw0231-raw.c, see tests/Makefile): round-half integer form,
+	 * (i*22204 + 500) / 1000. Expected values from the reference
+	 * polynomial recorded at driver/mshw0231-raw.c:187-191
+	 * (1.0 - (i*0.00222035428 + 0.600000024), x10000):
+	 * i=23 -> 3489.32, i=127 -> 1180.15, i=180 -> 3.36; the truncating
+	 * form would give 3490 / 1181 / 4, so these three bite. */
+	CHECK(shid->c590_lut[0] == 4000, "c590[0] = %d, expected 4000", (int)shid->c590_lut[0]);
+	CHECK(shid->c590_lut[23] == 3489, "c590[23] = %d, expected 3489 (rounded form)", (int)shid->c590_lut[23]);
+	CHECK(shid->c590_lut[127] == 1180, "c590[127] = %d, expected 1180 (rounded form)", (int)shid->c590_lut[127]);
+	CHECK(shid->c590_lut[180] == 3, "c590[180] = %d, expected 3 (rounded form)", (int)shid->c590_lut[180]);
+	CHECK(shid->c590_lut[200] == 0, "c590[200] = %d, expected 0 (clamped)", (int)shid->c590_lut[200]);
+	CHECK(shid->c590_lut[255] == 0, "c590[255] = %d, expected 0 (clamped)", (int)shid->c590_lut[255]);
 	if (mshw0231_raw_input_register(shid) != 0 || !shid->touch_input) {
 		fprintf(stderr, "FATAL: mshw0231_raw_input_register() failed\n");
 		exit(1);

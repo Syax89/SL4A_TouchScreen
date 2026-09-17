@@ -386,6 +386,10 @@ static void test_signal_thresholds(void)
 	CHECK(HEATMAP_BASELINE_FRAMES == 30, "baseline frames = 30");
 	CHECK(HEATMAP_MAX_PEAKS == 16, "max peaks = 16");
 	CHECK(HEATMAP_MIN_BLOB_PIXELS == 2, "min blob pixels = 2");
+	/* The peak gate is a full (2R+1)^2 neighbourhood scan; R is a budget
+	 * constant, not a free knob (a 2->5 change used to pass every replay
+	 * fixture because the blobs are further apart than the window). */
+	CHECK(HEATMAP_PEAK_RADIUS == 2, "peak radius = 2");
 	CHECK(HEATMAP_VELOCITY_REJECT_RADIUS == 6, "velocity reject radius = 6");
 	CHECK(HEATMAP_SPLIT_MIN_DIST == 4, "split min distance = 4");
 	CHECK(HEATMAP_MISSED_FRAME_TIMEOUT_MS == 60, "missed frame timeout = 60ms");

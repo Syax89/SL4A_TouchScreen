@@ -35,10 +35,11 @@ OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Relative dip fractions for a small, roughly circular blob footprint,
 # tapering from the contact center out to grid distance 2. This keeps
-# each touch a compact ~13-cell blob (>= HEATMAP_MIN_BLOB_PIXELS=2,
-# well inside the HEATMAP_PEAK_RADIUS=5 cross-check radius) rather
-# than a single hot pixel, matching what a real fingertip footprint
-# looks like on this sensor.
+# each touch a compact ~13-cell blob (>= HEATMAP_MIN_BLOB_PIXELS=2, the
+# CCL floor that rejects a 1-cell component; the peak gate itself —
+# full-neighbourhood scan, HEATMAP_PEAK_RADIUS=2 — passes a lone cell)
+# rather than a single hot pixel, matching what a real fingertip
+# footprint looks like on this sensor.
 BLOB_SHAPE = {
     (0, 0): 1.00,
     (1, 0): 0.75, (-1, 0): 0.75, (0, 1): 0.75, (0, -1): 0.75,

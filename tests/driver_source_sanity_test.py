@@ -84,6 +84,7 @@ def check_control_flow_pins():
         return text
 
     core_code = strip_c_comments(core)
+    wire_code = strip_c_comments(wire)
 
     # 0a. The read-frame default must be the REFERENCE shape. The field sweep
     # that once argued for LEGACY measured the device's state, not the frame: a
@@ -93,7 +94,7 @@ def check_control_flow_pins():
     # found independently by two blind legs, and against the header's own
     # comment on the builder. The stop frame above removes the stream state that
     # made the crude form look necessary; `hunt` still sweeps all three.
-    if "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;" not in core:
+    if "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;" not in core_code:
         print("FAIL driver/spi-hid-core.c: read_frame_variant no longer defaults to the "
               "shape this PANEL answers. The reference shape is the authority on the "
               "sequence, but the field sweep of 2026-09-16 19:11 says the encoding this "
@@ -105,12 +106,12 @@ def check_control_flow_pins():
     # descriptor handshake, and the teardown is the reference's all-FF
     # SET_FEATURE(0x56) (surface_init.csv #0257). Without it the device keeps
     # streaming and device_desc stays 0 — the field stall.
-    if "spi_hid_wire_vendor_stop" not in wire:
+    if "spi_hid_wire_vendor_stop" not in wire_code:
         print("FAIL driver/spi-hid-wire-frames.h: the all-FF stream-stop frame is gone "
               "(the device keeps streaming and the handshake never completes)")
         failures += 1
     else:
-        body = core.split("static int spi_hid_vendor_init(struct spi_hid *shid)", 1)[1].split("\n}", 1)[0]
+        body = core_code.split("static int spi_hid_vendor_init(struct spi_hid *shid)", 1)[1].split("\n}", 1)[0]
         if "spi_hid_wire_vendor_stop" not in body:
             print("FAIL driver/spi-hid-core.c: the probe no longer sends the stream stop")
             failures += 1
@@ -134,7 +135,7 @@ def check_control_flow_pins():
     # A dangling `else` had put the unlock in the success branch only, so a
     # failed hardcoded-descriptor parse returned with shid->lock held — and
     # every later lock taker (IRQ thread, sysfs readers, remove) waits forever.
-    body = core.split("static int spi_hid_ll_parse", 1)[1].split("\n}", 1)[0]
+    body = core_code.split("static int spi_hid_ll_parse", 1)[1].split("\n}", 1)[0]
     tail = body.rsplit("HARDCODED_RD_SIZE);", 1)[-1].split("mutex_unlock", 1)[0]
     tail, _ = strip_comments_and_strings(tail)
     if "else" in tail:
@@ -147,7 +148,7 @@ def check_control_flow_pins():
     # WAIT_DESC/WAIT_RPT *before* the unchanged-state early return — the
     # RESET_RSP loop re-enters WAIT_DESC with the state unchanged, which is the
     # field stall: silent at level 0, and permanent.
-    body = core.split("spi_hid_seq_set_state(struct spi_hid *shid", 1)[1].split("\n}", 1)[0]
+    body = core_code.split("spi_hid_seq_set_state(struct spi_hid *shid", 1)[1].split("\n}", 1)[0]
     if "SPI_HID_SEQ_WAIT_DESC || new_state == SPI_HID_SEQ_WAIT_RPT" not in body:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_set_state() no longer arms "
               "the raw watchdog for WAIT_DESC/WAIT_RPT (pre-DONE stall is silent "
@@ -167,7 +168,7 @@ def check_control_flow_pins():
     # through spi_hid_seq_set_state(), and the standard-mode arm it does call is
     # a no-op in raw mode — so without its own arm a controller that comes back
     # from resume without a RESET_RSP has no timer at all and stays dead.
-    body = core.split("static int spi_hid_resume", 1)[1].split("\n}", 1)[0]
+    body = core_code.split("static int spi_hid_resume", 1)[1].split("\n}", 1)[0]
     if "raw_handshake_watchdog" not in body:
         print("FAIL driver/spi-hid-core.c: spi_hid_resume() no longer arms the raw "
               "watchdog (raw mode has no timer for a silent post-resume controller)")
@@ -178,7 +179,7 @@ def check_control_flow_pins():
     # spi_hid_create_device_work() sees version 0, refuses to publish the device
     # and schedules the ACPI power cycle — the field case where the raw handshake
     # failed and the fallback left the panel deader than before.
-    body = core.split("static void spi_hid_raw_handshake_watchdog", 1)[1].split("\n}", 1)[0]
+    body = core_code.split("static void spi_hid_raw_handshake_watchdog", 1)[1].split("\n}", 1)[0]
     if "spi_hid_use_hardcoded_desc" not in body:
         print("FAIL driver/spi-hid-core.c: the raw watchdog's standard-HID fallback "
               "no longer installs the hardcoded descriptors (create_device_work() "
@@ -190,11 +191,11 @@ def check_control_flow_pins():
     # register 3 right after the request, with no interrupt in between), while
     # the device pushes its events on the input register. Reading only the input
     # register is what kept the field unit in WAIT_DESC forever.
-    if "spi_hid_seq_read_resp" not in core:
+    if "spi_hid_seq_read_resp" not in core_code:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_resp() is gone; the "
               "descriptor bodies would only ever be read from the input register")
         failures += 1
-    body = core.split("static void spi_hid_seq_descreq_work", 1)[1].split("\n}", 1)[0]
+    body = core_code.split("static void spi_hid_seq_descreq_work", 1)[1].split("\n}", 1)[0]
     if "desc.output_register" not in body or "desc.input_register" not in body:
         print("FAIL driver/spi-hid-core.c: the descriptor poller no longer tries "
               "both registers (responses live on the output register, events on "
@@ -206,7 +207,7 @@ def check_control_flow_pins():
     # five-byte frame carrying it in the address field asks for register 0 and
     # is answered with the device's RESET_RSP — which is how discovery stalled
     # while the host thought it was asking for the descriptor.
-    read_reg = core.split("static int spi_hid_seq_read_reg", 1)[1].split("\n}", 1)[0]
+    read_reg = core_code.split("static int spi_hid_seq_read_reg", 1)[1].split("\n}", 1)[0]
     if "rx_len < n ? n :" in read_reg or "tx_len = (u32)rx_len" in read_reg:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_reg() pads the request "
               "to the response length again — that clocks stray bytes out and the "
@@ -391,7 +392,7 @@ def check_control_flow_pins():
         ("SPI_HID_RAW_STREAM_CONTENT_ID", "the stream enable no longer names content id 0x56"),
         ("SPI_HID_RAW_STREAM_REGISTER 0x0A", "the stream register is no longer 0x0A"),
     ):
-        if needle not in core:
+        if needle not in core_code:
             print(f"FAIL driver/spi-hid-core.c: {why} (trace #0531 / #0004-#0873)")
             failures += 1
     # The writes that ask for a response must record which request they are,
@@ -403,13 +404,13 @@ def check_control_flow_pins():
         marker = f"static int spi_hid_seq_write_{fn}"
         # rfind: the forward declarations at the top of the file would
         # otherwise be the match, and a prototype has no body to check.
-        seg = core.rsplit(marker, 1)[1][:900] if marker in core else ""
+        seg = core_code.rsplit(marker, 1)[1][:900] if marker in core_code else ""
         if want not in seg:
             print(f"FAIL driver/spi-hid-core.c: spi_hid_seq_write_{fn}() does not "
                   f"record the request its response belongs to — its reads go out "
                   f"naming nothing")
             failures += 1
-    if "shid->desc.max_input_length = 0x2000;" not in core:
+    if "shid->desc.max_input_length = 0x2000;" not in core_code:
         print("FAIL driver/spi-hid-core.c: the fallback's max_input_length is not "
               "0x2000 — a 4096 cap truncates the 4309-byte raw frames")
         failures += 1
@@ -424,7 +425,7 @@ def check_control_flow_pins():
     # fits a five-byte request, and the reference's request is nine or ten.
     # Every long read (the 32-byte descriptor body, the 940-byte report
     # descriptor, the 4304-byte raw frames) goes through this path.
-    amd = (ROOT / "driver" / "spi-amd.c").read_text()
+    amd = strip_c_comments((ROOT / "driver" / "spi-amd.c").read_text())
     for needle, why in (
         ("AMD_SPI_FIFO_SIZE - tx_len - 1",
          "the first chunk is no longer computed from what is left of the FIFO"),
@@ -462,7 +463,7 @@ def check_control_flow_pins():
     # read command is an open question (fixed 0x84 in the decomp's three-byte
     # example, tx_len + 1 in ours) and only the field can answer it; if this
     # line disappears the next bundle cannot either.
-    amd = (ROOT / "driver" / "spi-amd.c").read_text()
+    amd = strip_c_comments((ROOT / "driver" / "spi-amd.c").read_text())
     for needle, why in (
         ("TRACE peek tx_len=", "the read-path region peek is gone"),
         # The full label set, in order: window 1 named 0x80 (it reads
@@ -584,7 +585,7 @@ def main():
     # made this one count was the mutation run that proved it fails when the
     # shapes are removed (the first version of this check was dead code: it sat
     # outside main() and used a root variable that does not exist here).
-    core_src = (ROOT / "driver" / "spi-hid-core.c").read_text()
+    core_src, _ = strip_comments_and_strings((ROOT / "driver" / "spi-hid-core.c").read_text())
     # The body offset helper returns the struct offset; an `off += 3` after it
     # reads three bytes late and rejects every real descriptor (8+3+28 > 37 on
     # the capture's 37-byte body). This exact mistake shipped once.

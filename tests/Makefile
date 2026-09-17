@@ -147,6 +147,7 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 	$(PYTHON) spi_amd_ownership_safety_test.py
 	$(PYTHON) raw_capture_export_test.py
 	$(PYTHON) replay_fixture_test.py
+	$(PYTHON) surface_tracker_oracle_test.py
 	$(PYTHON) raw_consumer_boundary_test.py
 	$(PYTHON) driver_source_sanity_test.py
 	$(PYTHON) binattr_signature_test.py
@@ -167,7 +168,6 @@ local-checks: raw_pipeline_replay_test real_frame_replay_test
 	./real_frame_replay_test $(REAL_FRAMES)
 	$(PYTHON) raw_transition_safety_test.py
 	$(PYTHON) isolated_set_safety_test.py
-	$(PYTHON) surface_tracker_oracle_test.py
 	$(PYTHON) post_set_timeline_test.py
 	$(PYTHON) raw_corpus_test.py
 	$(PYTHON) v0_capimg_decoder_test.py

@@ -100,9 +100,10 @@ Bit 0     : reserved
   full-duplex read phase. Matches Windows `amdspi.sys` decomp (0x4bac).
   Without this, the first 3 RX bytes are corrupted.
 
-- **FIFO headroom**: TX_COUNT + reserved_status_bytes ≤ FIFO_DEPTH.
-  On Cezanne the FIFO is 71 bytes with a 4-byte status word, so
-  TX_COUNT ≤ 67.
+- **FIFO headroom**: the data FIFO window is `0x80`–`0xC6` (71 bytes). The
+  segment budget the driver enforces is 70 bytes per transfer —
+  `tx_len + rx_len + 1 > AMD_SPI_FIFO_SIZE` is rejected (`driver/spi-amd.c`)
+  — and long reads are drained in `AMD_SPI_CHUNK_MAX` (64-byte) chunks.
 
 - **Chunking**: Large reads (>64 bytes) must be split into 64-byte chunks
   with separate transfers.

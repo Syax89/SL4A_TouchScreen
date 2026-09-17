@@ -3,7 +3,6 @@
 
 from pathlib import Path
 import sys
-from optional_contract import skip_optional_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +18,10 @@ try:
         coalesce_contacts,
     )
 except ModuleNotFoundError:
-    skip_optional_contract("surface tracker oracle module is not present")
+    # The oracle module ships in tools/ of this repository: its absence is a
+    # defect, not an optional input. (This check runs in the CI gate `test`.)
+    print("FAIL: tools/surface_tracker_oracle.py is missing — restore it")
+    raise SystemExit(1)
 
 
 assert MSHW0231_ASSOCIATION_RADIUS == 0.5450090169906616

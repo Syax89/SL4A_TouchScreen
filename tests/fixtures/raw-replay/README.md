@@ -36,9 +36,11 @@ fixture, add a call to `stamp_blob(frame, col, row)` (see the script)
 for each finger you want and `write_frame("name.bin", frame)`.
 
 `stamp_blob()` stamps a small (~13-cell) tapering dip, not a single
-pixel: `HEATMAP_MIN_BLOB_PIXELS=2` and the cross-shaped peak-detection
-radius `HEATMAP_PEAK_RADIUS=5` mean a true single-pixel dip is
-invisible to the pipeline. The center dip (baseline `0xB4` -> `0x7F`,
+pixel: a lone touched cell PASSES the peak gate (full-neighbourhood
+local-maximum scan, `HEATMAP_PEAK_RADIUS=2`) and is then rejected by
+CCL's `HEATMAP_MIN_BLOB_PIXELS=2` — a 1-cell component is below it —
+so a true single-pixel dip never reaches the tracker. The center dip
+(baseline `0xB4` -> `0x7F`,
 a drop of 0x35=53) matches a real confirmed-working single-touch
 capture from live hardware testing.
 

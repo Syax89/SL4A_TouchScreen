@@ -10,7 +10,14 @@ kbuild = (root / "driver" / "Kbuild").read_text()
 assert "mshw0231-raw.o" in kbuild
 assert "spi_hid_capimg_decode_v0" not in core
 assert "mshw0231_raw_consume_v0(shid, &body[5], rblen - 5)" in core
-assert core.index("!shid->raw_handshake_confirmed") < core.index(
+# Anchor the ordering INSIDE the DONE handler that consumes. The first
+# `!shid->raw_handshake_confirmed` occurrence sits ~3000 lines earlier in an
+# unrelated function, so the whole-file index comparison was satisfied before
+# the handler's guard was even written — a leg deleted the guard at :3224 and
+# this pin stayed green. rsplit: the first occurrence is the forward
+# declaration, which has no body.
+handler = core.rsplit("static void seq_handle_data(", 1)[1].split("\n}", 1)[0]
+assert handler.index("!shid->raw_handshake_confirmed") < handler.index(
     "mshw0231_raw_consume_v0(shid, &body[5], rblen - 5)")
 assert "mshw0231_raw_consume_v0(shid, &shid->data_buf[5]" in core
 assert "spi_hid_capimg_decode_v0" in raw
