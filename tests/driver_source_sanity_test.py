@@ -49,7 +49,15 @@ def strip_comments_and_strings(text):
             i += 1
             while i < n and text[i] != quote:
                 if text[i] == "\\":
-                    i += 1
+                    # A backslash escapes the NEXT character: a `\"` inside
+                    # the literal must not end it. The P15 rewrite advanced
+                    # by one and handed everything after a `\"` to the code
+                    # view — a decoy string then carried a pin's needle while
+                    # the real code was reverted (P16 wave, in-tree proven).
+                    if i + 1 < n and text[i + 1] == "\n":
+                        line += 1
+                        out.append("\n")
+                    i += 2
                 elif text[i] == "\n":
                     # Unterminated literal (gcc rejects it): the next line must
                     # NOT reach the code view. The old break-and-skip handed it
@@ -69,6 +77,109 @@ def strip_comments_and_strings(text):
     return "".join(out), None
 
 
+# ── The conditional-compilation ladder ─────────────────────────────────
+# `#if 0` carried needles until the P15 wave banned the literal-zero
+# family; the P16 wave widened the lens — `#ifdef NEVER_DEFINED_X`,
+# `#if defined(X) && 0` and `#if <macro #define'd 0>` let a needle sit in
+# a block the compiler drops. A directive is refused (and its block
+# dropped from the code view) only when its condition is PROVABLY false
+# for this tree: every symbol it tests has no `#define` in any driver
+# file and is not kernel-provided. The `#ifndef X` + `#define X` idiom
+# (include guards, default-if-undefined) is kept. Unknown shapes are
+# kept too — the ladder refuses only what it can prove, and the
+# code-view strip is what makes a hidden needle fail its pin.
+_KERNEL_PROVIDED = {"__KERNEL__", "LINUX_VERSION_CODE", "KERNEL_VERSION",
+                    "TRACE_HEADER_MULTI_READ", "__has_include"}
+
+
+def _driver_macro_sets():
+    defined, zero = set(), set()
+    for _p in FILES:
+        _src = _p.read_text()
+        defined |= set(re.findall(r"^[ \t]*#[ \t]*define[ \t]+(\w+)", _src, re.M))
+        zero |= set(re.findall(
+            r"^[ \t]*#[ \t]*define[ \t]+(\w+)[ \t]+(?:0[xX]0*|[0]+[uUlL]*)"
+            r"[ \t]*(?://[^\n]*)?$", _src, re.M))
+    return defined, zero
+
+
+_DEFINED_MACROS, _ZERO_MACROS = _driver_macro_sets()
+
+
+def _sym_never_defined(sym):
+    return (sym not in _DEFINED_MACROS
+            and not sym.startswith("CONFIG_")
+            and sym not in _KERNEL_PROVIDED)
+
+
+def _guards_itself(directive, following_text):
+    """`#ifndef X` whose block opens with `#define X`: the guard idiom."""
+    m = re.match(r"[ \t]*#[ \t]*ifndef[ \t]+(\w+)", directive)
+    if not m:
+        return False
+    n = re.match(r"[ \t]*#[ \t]*define[ \t]+(\w+)", following_text or "")
+    return bool(n and n.group(1) == m.group(1))
+
+
+def _directive_is_provably_false(directive):
+    d = directive.strip()
+    m = re.match(r"#\s*ifdef\s+(\w+)", d)
+    if m:
+        return _sym_never_defined(m.group(1))
+    m = re.match(r"#\s*ifndef\s+(\w+)", d)
+    if m:
+        return (m.group(1) in _DEFINED_MACROS
+                and m.group(1) not in _KERNEL_PROVIDED)
+    m = re.match(r"#\s*if\s+(.+)$", d)
+    if m:
+        cond = m.group(1).strip()
+        if re.search(r"&&[ \t]*\(*[ \t]*(?:0[xX]0*|[0]+[uUlL]*)[ \t]*\)*"
+                     r"[ \t]*(?://.*)?$", cond):
+            return True                     # `<anything> && 0`
+        if re.match(r"^\w+$", cond):
+            return cond in _ZERO_MACROS or _sym_never_defined(cond)
+        syms = re.findall(r"\bdefined\s*\(\s*(\w+)\s*\)", cond)
+        if syms and not re.search(r"[&|]", cond):
+            return all(_sym_never_defined(s) for s in syms)
+    return False
+
+
+def _strip_preproc_disabled(text):
+    # Literal-zero family (P15 wave): kept as its own pass, mutation-proven.
+    text = re.sub(
+        r"#if[ \t]*\(*[ \t]*(?:0[xX]0*|[0]+[uUlL]*)[ \t]*\)*[ \t]*"
+        r"(?://[^\n]*)?\n.*?#endif", " ", text, flags=re.S)
+
+    def _repl(m):
+        body = m.group("body")
+        first = next((ln for ln in body.split("\n") if ln.strip()), "")
+        if _guards_itself(m.group("dir"), first):
+            return m.group(0)
+        return " " if _directive_is_provably_false(m.group("dir")) else m.group(0)
+
+    return re.sub(
+        r"^[ \t]*(?P<dir>#\s*(?:ifdef|ifndef|if)[^\n]*)\n"
+        r"(?P<body>.*?)^[ \t]*#\s*endif[^\n]*",
+        _repl, text, flags=re.S | re.M)
+
+
+def code_view(text, keep_strings=False):
+    """The code view every structural pin reads.
+
+    Ladder, each rung shown necessary by a leg that kept a pin green while
+    the real code was neutralised: comments and strings (P2 wave), the
+    `#if 0` family (P15 wave), provably-false macro conditionals (P16 wave).
+    `keep_strings=True` is for the few pins whose subject IS a log line's
+    text.
+    """
+    if keep_strings:
+        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        text = re.sub(r"//[^\n]*", " ", text)
+    else:
+        text, _ = strip_comments_and_strings(text)
+    return _strip_preproc_disabled(text)
+
+
 def check_control_flow_pins():
     """Two control-flow shapes this campaign already paid for, pinned cheaply.
 
@@ -80,37 +191,25 @@ def check_control_flow_pins():
     wire = (ROOT / "driver" / "spi-hid-wire-frames.h").read_text()
 
     # Checks below that care whether code RUNS read these. The stripping ladder
-    # has climbed three rungs, each shown necessary by a leg that kept a pin
+    # has climbed four rungs, each shown necessary by a leg that kept a pin
     # green while the real code was neutralised: comments (code moved into a
-    # comment), `#if 0` blocks, and — P2 double-blind wave — STRING LITERALS
+    # comment), `#if 0` blocks, — P2 double-blind wave — STRING LITERALS
     # (a decoy string carrying the pin's needle while the real call was
-    # reverted). `if (0)` decoys are refused outright by
-    # check_no_dead_code_decoys(). Text pins still have a ceiling: any deeper
-    # unreachable-code shape defeats them, which is why the checks that CAN
-    # run as code live in headers the host tests call.
+    # reverted), and — P16 wave — the macro extension of the literal-zero
+    # family (`#ifdef NEVER_DEFINED_X`, `#if defined(X) && 0`, `#if <macro
+    # #define'd 0>`), all in code_view(). `if (0)` decoys are refused
+    # outright by check_no_dead_code_decoys(). Text pins still have a
+    # ceiling: any deeper unreachable-code shape defeats them, which is why
+    # the checks that CAN run as code live in headers the host tests call.
     #
     # keep_strings=True is for the few pins whose subject IS a log line's text
     # (the spi-amd peek labels, the CapImg ratelimit messages). A decoy string
     # can still satisfy those text-only pins — accepted and written down,
     # because the message text cannot live anywhere but in a string; where a
     # code-view sibling pin exists, removing the real call fails the suite.
-    def strip_c_comments(text, keep_strings=False):
-        if keep_strings:
-            text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
-            text = re.sub(r"//[^\n]*", " ", text)
-        else:
-            text, _ = strip_comments_and_strings(text)
-        # Preprocessor-disabled code is not code either: a leg neutralised a
-        # guard inside `#if 0` and the comment-stripping pins stayed green.
-        # The P15 wave: the zero here is a family — `#if 00`, `#if 0L`,
-        # `#if (0)`, `#if 0x0` all carried a needle into the code view.
-        text = re.sub(r"#if[ \t]*\(*[ \t]*(?:0[xX]0*|[0]+[uUlL]*)[ \t]*\)*[ \t]*(?://[^\n]*)?\n.*?#endif",
-                      " ", text, flags=re.S)
-        return text
-
-    core_code = strip_c_comments(core)
-    core_text = strip_c_comments(core, keep_strings=True)
-    wire_code = strip_c_comments(wire)
+    core_code = code_view(core)
+    core_text = code_view(core, keep_strings=True)
+    wire_code = code_view(wire)
 
     # 0a. The read-frame default must be the REFERENCE shape. The field sweep
     # that once argued for LEGACY measured the device's state, not the frame: a
@@ -498,8 +597,19 @@ def check_control_flow_pins():
     # fallback runs only when the restart is refused). Pin both: no plain
     # return in the body, and the restart decided by `!` with the exit through
     # out:.
-    _dw = (core_code.rsplit("static void spi_hid_seq_descreq_work", 1)[1].split("\n}", 1)[0]
-           if "static void spi_hid_seq_descreq_work" in core_code else "")
+    # Selected by CONTENT like 7c (P16 wave): rsplit took the LAST
+    # occurrence, so a definition-shaped shadow appended below the real
+    # function carried the pinned text while the real body leaked the lock
+    # (in-tree proven). Exactly one marker segment may contain the lock.
+    _dw_segs = [seg.split("\n}", 1)[0] for seg in
+                core_code.split("static void spi_hid_seq_descreq_work")[1:]]
+    _dw_regions = [seg for seg in _dw_segs if "mutex_lock(&shid->seq_lock)" in seg]
+    _dw = _dw_regions[0] if len(_dw_regions) == 1 else ""
+    if len(_dw_regions) != 1:
+        print("FAIL driver/spi-hid-core.c: descreq_work()'s seq_lock region is not "
+              f"identifiable ({len(_dw_regions)} candidate regions) — a second "
+              "definition-shaped occurrence deflects this check (P16 wave)")
+        failures += 1
     if re.search(r"\breturn\b", _dw):
         print("FAIL driver/spi-hid-core.c: descreq_work() exits with a plain return "
               "while holding seq_lock — out: is the only unlock, so the mutex "
@@ -520,6 +630,16 @@ def check_control_flow_pins():
     if "spi_hid_wire_vendor_init" in strip_comments_and_strings(_decoy)[0]:
         print("FAIL tests/driver_source_sanity_test.py: strip_comments_and_strings() "
               "hands a newline-terminated literal's content to the code view (P15 wave)")
+        failures += 1
+    # P16 wave: a backslash-escaped quote must not END the literal. The P15
+    # rewrite advanced by one, so everything after a `\"` reached the code
+    # view — an in-tree decoy string then satisfied the 0a default pin while
+    # the real default was reverted.
+    _decoy2 = 'const char *d = "x\\"; spi_hid_wire_vendor_init(spi_hid_wire_doubled()); \\"";\n'
+    if "spi_hid_wire_vendor_init" in strip_comments_and_strings(_decoy2)[0]:
+        print("FAIL tests/driver_source_sanity_test.py: strip_comments_and_strings() "
+              "ends a literal at a backslash-escaped quote — the smuggled text "
+              "reaches the code view (P16 wave)")
         failures += 1
     # The writes that ask for a response must record which request they are,
     # or the read that follows names nothing (trace: 00 04 03 00 06,
@@ -551,7 +671,7 @@ def check_control_flow_pins():
     # fits a five-byte request, and the reference's request is nine or ten.
     # Every long read (the 32-byte descriptor body, the 940-byte report
     # descriptor, the 4304-byte raw frames) goes through this path.
-    amd = strip_c_comments((ROOT / "driver" / "spi-amd.c").read_text())
+    amd = code_view((ROOT / "driver" / "spi-amd.c").read_text())
     for needle, why in (
         ("AMD_SPI_FIFO_SIZE - tx_len - 1",
          "the first chunk is no longer computed from what is left of the FIFO"),
@@ -589,9 +709,9 @@ def check_control_flow_pins():
     # read command is an open question (fixed 0x84 in the decomp's three-byte
     # example, tx_len + 1 in ours) and only the field can answer it; if this
     # line disappears the next bundle cannot either.
-    amd = strip_c_comments((ROOT / "driver" / "spi-amd.c").read_text())
-    amd_text = strip_c_comments((ROOT / "driver" / "spi-amd.c").read_text(),
-                                keep_strings=True)
+    amd = code_view((ROOT / "driver" / "spi-amd.c").read_text())
+    amd_text = code_view((ROOT / "driver" / "spi-amd.c").read_text(),
+                         keep_strings=True)
     # The message-text needles read the strings-kept view; the code-view loop
     # below pins the pr_info call's own argument expressions, which a decoy
     # string cannot supply.
@@ -690,6 +810,26 @@ def check_no_dead_code_decoys():
                   f"needle while the real code is reverted keeps every text pin green "
                   f"(P2/P15 waves); remove it")
             failures += 1
+        # The P16 wave lifted this rung past literals: a macro-conditional
+        # block that cannot be live for this tree (its symbol has no
+        # `#define` anywhere in the driver tree and is not kernel-provided)
+        # is refused like the literal-zero family it extends. The guard idiom
+        # and anything the checker cannot prove are left alone.
+        _lines = text.split("\n")
+        for _idx, _ln in enumerate(_lines):
+            if not re.match(r"[ \t]*#[ \t]*(?:ifdef|ifndef|if)\b", _ln):
+                continue
+            if re.match(r"[ \t]*#[ \t]*if[ \t]*\(*[ \t]*(?:0[xX]0*|[0]+[uUlL]*)", _ln):
+                continue        # literal-zero family: refused by the regex above
+            _nxt = next((l for l in _lines[_idx + 1:] if l.strip()), "")
+            if _guards_itself(_ln, _nxt):
+                continue
+            if _directive_is_provably_false(_ln):
+                print(f"FAIL {path.name}: a conditional-compilation block on a symbol "
+                      f"no driver file defines ({_ln.strip()!r}) — dead code that "
+                      f"carries a pin's needle while the real code is reverted keeps "
+                      f"every text pin green (P16 wave); remove it")
+                failures += 1
     return failures
 
 
@@ -707,10 +847,7 @@ def check_trace_event_liveness():
     failures = 0
 
     def live_code(text):
-        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
-        text = re.sub(r"//[^\n]*", " ", text)
-        text = re.sub(r"#if\s+0\b.*?#endif", " ", text, flags=re.S)
-        return text
+        return code_view(text, keep_strings=True)
 
     trace = live_code((ROOT / "driver" / "spi-hid_trace.h").read_text())
     producers = "\n".join(
@@ -767,7 +904,7 @@ def main():
     # made this one count was the mutation run that proved it fails when the
     # shapes are removed (the first version of this check was dead code: it sat
     # outside main() and used a root variable that does not exist here).
-    core_src, _ = strip_comments_and_strings((ROOT / "driver" / "spi-hid-core.c").read_text())
+    core_src = code_view((ROOT / "driver" / "spi-hid-core.c").read_text())
     # The body offset helper returns the struct offset; an `off += 3` after it
     # reads three bytes late and rejects every real descriptor (8+3+28 > 37 on
     # the capture's 37-byte body). This exact mistake shipped once.

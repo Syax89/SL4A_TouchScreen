@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Keep raw payload handling isolated from transport ownership."""
+"""Keep raw payload handling isolated from transport ownership.
+
+Producer-side checks read the CODE view (comments, strings and disabled
+preprocessor blocks stripped — P16 wave: a trailing comment carrying the
+handler marker plus both needles kept the ordering pin green while the real
+guard was deleted)."""
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from driver_source_sanity_test import code_view
+
 root = Path(__file__).parents[1]
-core = (root / "driver" / "spi-hid-core.c").read_text()
-raw = (root / "driver" / "mshw0231-raw.c").read_text()
+core = code_view((root / "driver" / "spi-hid-core.c").read_text())
+raw = code_view((root / "driver" / "mshw0231-raw.c").read_text())
 kbuild = (root / "driver" / "Kbuild").read_text()
 
 assert "mshw0231-raw.o" in kbuild

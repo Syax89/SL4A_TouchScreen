@@ -197,7 +197,7 @@ void mshw0231_raw_reset(struct spi_hid *shid)
  * The polynomial itself spans 0.4 (byte 0) down to ~-0.166 (byte 255), but
  * the LUT is clamped at 0: byte 0 -> 4000, byte 180 (the resting level on
  * this panel) -> 3, byte >180 -> 0.
- * Fixed-point: c590[i] = (10000 - (i * 22204 / 1000 + 6000)), clamped >= 0.
+ * Fixed-point: c590[i] = (10000 - ((i * 22204 + 500) / 1000 + 6000)), clamped >= 0.
  * Scaled to [0, 4000] with 4 decimal digits of precision. */
 #define C590_BASE   10000
 #define C590_STEP_NUM 22204   /* 0.00222035428 * 10000000 / 1000 */
