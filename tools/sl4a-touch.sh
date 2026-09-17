@@ -36,6 +36,18 @@ MODPROBE_CONF="/etc/modprobe.d/sl4a-spi-hid.conf"
 SYSTEMD_UNIT="/etc/systemd/system/sl4a-touch-activate.service"
 SYSFS_ROOT="${SL4A_SYSFS_ROOT:-/sys}"
 DMI_ROOT="${SL4A_DMI_ROOT:-/sys/class/dmi/id}"
+# Where the input layer exposes its event nodes (discovery) and where the
+# corresponding evdev char devices live (the bounded read during the touch
+# window). Split in two on purpose: the diagnostic can find the panel's node
+# by name under the first even when the second is not readable (no root, or
+# the node belongs to another device).
+INPUT_SYSFS="${SL4A_INPUT_SYSFS:-$SYSFS_ROOT/class/input}"
+INPUT_DEV_ROOT="${SL4A_INPUT_DEV_ROOT:-/dev/input}"
+# Seconds the touch window stays open (countdown and the bounded evdev read),
+# and the most bytes one evdev read will take before giving up. 24 B is one
+# struct input_event on 64-bit, so bytes/24 is the event count reported.
+HUNT_TOUCH_SECS="${SL4A_HUNT_TOUCH_SECS:-6}"
+HUNT_EVDEV_MAX="${SL4A_HUNT_EVDEV_MAX:-4096}"
 
 CONTROLLER_MODULE="sl4a-spi-amd"
 CONTROLLER_DRIVER="sl4a_spi_amd_v2_multi"
@@ -306,13 +318,16 @@ Commands:
                     state, driver sysfs stats, the last captured frame as raw
                     bytes, filtered dmesg) into a single text file for bug
                     reports. Default output path is printed at the end.
-  hunt [-o PATH]   One command for a display problem: unloads the driver and
-                    reloads it once per probe variant (0 control; 1 a real
-                    _PS3->_PS0 power cycle at probe; 2 skip the pre-DESCREQ
-                    teardown + power preamble; 3 both) at debug level 3,
-                    waits while you touch the panel, and writes ONE file with
-                    every variant's profile, counters, driver log and a
-                    verdict line. Send that file.
+  hunt [-o PATH]   One command for a display problem: runs the full battery —
+                    every field variant the campaign designed (7 raw + 4
+                    standard), one per driver reload, on the command line so
+                    /etc/modprobe.d is never edited. For each it unloads and
+                    reloads the driver at debug level 3, waits while you touch
+                    the panel (reading the touch device's evdev node, or a
+                    y/n fallback), snapshots the counters before and after,
+                    and records the driver log. Writes ONE file with every
+                    variant's profile, counters, deltas, log, a verdict line
+                    and a final summary table. Send that file.
                     Default output: next to the driver, like the
                     diagnostics bundle (sl4a-hunt-<timestamp>.txt).
 
@@ -332,7 +347,7 @@ EOF
 # chosen command name on stdout; caller captures it. Falls back to plain
 # usage text when stdin isn't a tty (piped/scripted invocation).
 menu_pick_command() {
-	local labels=("Install" "Uninstall" "Activate" "Status" "Collect diagnostics (logs)" "Frame hunt (touch the panel)" "Quit")
+	local labels=("Install" "Uninstall" "Activate" "Status" "Collect diagnostics (logs)" "Frame hunt battery (touch the panel)" "Quit")
 	local cmds=("install" "uninstall" "activate" "status" "logs" "hunt" "")
 	local selected=0 n=${#labels[@]} key rest
 	# draw() below prints exactly this many lines every time: title +
@@ -1688,6 +1703,134 @@ cmd_rebuild() {
 	rule
 }
 
+# ── frame-hunt battery plan ─────────────────────────────────────────────
+#
+# One line per variant: `<profile>|<label>|<params>`. The profile selects the
+# base parameter set (hunt_profile_params); the params are the extra module
+# parameters appended to that variant's load line. The whole flow — unload,
+# load, settle, snapshot, touch (evdev read + verdict), counter deltas, dmesg
+# slice, artifact block, summary row — is driven from this array, so a new
+# variant is a one-line addition and nothing else changes.
+#
+# RAW is today's raw profile (raw_mode=Y raw_input_beta=Y skip_getfeat=Y);
+# STANDARD is the single-touch path (raw_mode=N). The retired pc/svs arms
+# (acpi_probe_power_cycle × skip_vendor_stop, the P13-P16 waves) are NOT
+# re-run: that question is answered (all four arms negative), and running it
+# twice wastes a field trip. Revive it by adding a line here.
+HUNT_VARIANTS=(
+	"raw|raw control|"
+	"raw|raw raw_pre_desc_reg0=1|raw_pre_desc_reg0=1"
+	"raw|raw raw_fallback_on_reset=1|raw_fallback_on_reset=1"
+	"raw|raw raw_pre_desc_reg0=1+raw_fallback_on_reset=1|raw_pre_desc_reg0=1 raw_fallback_on_reset=1"
+	"raw|raw read_frame_variant=2|read_frame_variant=2"
+	"raw|raw wire_double_opcode=1|wire_double_opcode=1"
+	"raw|raw wire_double_opcode=1+skip_vendor_stop=1|wire_double_opcode=1 skip_vendor_stop=1"
+	"standard|std control|"
+	"standard|std wire_double_opcode=1|wire_double_opcode=1"
+	"standard|std skip_std_getfeat=1|skip_std_getfeat=1"
+	"standard|std wire_double_opcode=1+skip_std_getfeat=1|wire_double_opcode=1 skip_std_getfeat=1"
+)
+
+hunt_variant_count() { printf '%s\n' "${#HUNT_VARIANTS[@]}"; }
+
+# Base module parameters for a plan profile.
+hunt_profile_params() {
+	case "$1" in
+		raw)      printf 'raw_mode=Y raw_input_beta=Y skip_getfeat=Y' ;;
+		standard) printf 'raw_mode=N' ;;
+		*)        return 1 ;;
+	esac
+}
+
+# Every input event node visible here, by basename.
+hunt_input_events() {
+	local e
+	for e in "$INPUT_SYSFS"/event*; do
+		[ -e "$e" ] || continue
+		basename "$e"
+	done
+}
+
+# The input-event node whose device name looks like our panel, or nothing.
+# Matched by name, not by "new since boot": the battery reloads the driver
+# between variants, so the node is present before and after each load and a
+# set-difference would call the panel "old".
+hunt_touch_event() {
+	local e name
+	for e in "$INPUT_SYSFS"/event*; do
+		[ -e "$e" ] || continue
+		name="$(cat "$e/device/name" 2>/dev/null || true)"
+		case "$name" in
+			*MSHW*|*sl4a*|*SL4A*|*[Tt]ouchscreen*)
+				basename "$e"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# Human-readable name of one input event node (for the artifact).
+hunt_input_name() {
+	cat "$INPUT_SYSFS/$1/device/name" 2>/dev/null || echo "?"
+}
+
+# Bounded read of one raw evdev node DURING the touch window. Writes
+# "<bytes> <events>" to $2 — a file, so the read can run in the background
+# underneath the countdown (an evdev client must be open while the finger is
+# on the panel: events delivered with no reader are dropped). Reads at most
+# $HUNT_EVDEV_MAX bytes or for $HUNT_TOUCH_SECS seconds, whichever comes
+# first; the char device blocks until events arrive.
+hunt_evdev_read() {
+	local node="$1" out="$2" dev="$INPUT_DEV_ROOT/$1" tmp bytes
+	printf '0 0\n' > "$out" 2>/dev/null || return 0
+	[ -r "$dev" ] || return 0
+	tmp="$(mktemp 2>/dev/null)" || return 0
+	timeout "$HUNT_TOUCH_SECS" head -c "$HUNT_EVDEV_MAX" "$dev" > "$tmp" 2>/dev/null || true
+	bytes="$(wc -c < "$tmp" 2>/dev/null || echo 0)"
+	rm -f "$tmp" 2>/dev/null || true
+	case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+	printf '%s %s\n' "$bytes" "$((bytes / 24))" > "$out"
+}
+
+# The interesting module parameters, read back from the LIVE module so the
+# artifact states what is loaded rather than what was requested. Every read
+# goes through /sys/module (scoped to the sandbox's stub sysfs under test).
+hunt_param_readback() {
+	local p out=""
+	for p in raw_mode raw_input_beta skip_getfeat read_frame_variant wire_double_opcode \
+	         raw_pre_desc_reg0 raw_fallback_on_reset skip_vendor_stop; do
+		out="$out$p=$(cat "/sys/module/sl4a_spi_hid/parameters/$p" 2>/dev/null || echo '?') "
+	done
+	printf '%s' "$out"
+}
+
+# One field out of a protocol_stats blob ("key=value" lines).
+hunt_stat_field() {
+	printf '%s\n' "$1" | awk -F= -v k="$2" '$1==k {gsub(/ /,"",$2); print $2; exit}'
+}
+
+# after - before for one protocol_stats field. A non-numeric or unreadable
+# field is read as 0, so a missing snapshot never prints a bogus delta; a
+# counter that went backwards (impossible inside one load, but cheap to allow)
+# would print a negative number rather than a fabricated 0.
+hunt_delta() {
+	local fa fb a b
+	fa="$(hunt_stat_field "$1" "$3")"
+	fb="$(hunt_stat_field "$2" "$3")"
+	a="${fa:-0}"; b="${fb:-0}"
+	case "$a" in ''|*[!0-9]*) a=0 ;; esac
+	case "$b" in ''|*[!0-9]*) b=0 ;; esac
+	printf '%d' "$((b - a))"
+}
+
+# Short verdict cell for the summary table.
+hunt_note() {
+	local have="$1" dd="$2" rr="$3"
+	if [ "$have" != 1 ]; then echo "no counters"; return; fi
+	if [ "${dd:-0}" -gt 0 ]; then echo "descriptor +$dd"; return; fi
+	if [ "${rr:-0}" -gt 0 ]; then echo "resets +$rr"; return; fi
+	echo "silent"
+}
+
 cmd_hunt() {
 	local OUT="" variant
 	while [ $# -gt 0 ]; do
@@ -1741,33 +1884,7 @@ cmd_hunt() {
 		if [ -d "$d" ]; then SYSFS_DIR="$d"; break; fi
 	done
 
-	# The installed profile's own parameters, minus the six this sweep
-	# controls (three it sets below, three it pins at the module default).
-	local opts opts_note
-	opts_note=""
-	opts="$(awk '/^[ 	]*options[ 	]+sl4a_spi_hid/ { sub(/#.*/, ""); for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level|wire_double_opcode|setfeat_no_double|acpi_probe_power_cycle|skip_vendor_stop)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
-
-	if [ -z "$opts" ]; then
-		# Two shapes reach an empty $opts, and only one of them is a missing
-		# profile (P15 wave, B:C1): a line whose every parameter is one the
-		# sweep itself controls leaves nothing to carry and is NOT a missing
-		# file — it used to print the missing-line warning about a file whose
-		# line was right there. A missing profile must not masquerade as a raw
-		# sweep either: raw_mode=N is STANDARD mode, where
-		# spi_hid_vendor_init() never runs (both call sites are raw-gated), so
-		# probe arms 2/3 would repeat arms 0/1 exactly while the artifact
-		# still listed four variants. The run is kept — a refusal would strand
-		# a field trip — but labelled wherever it is printed (P14 wave, A:C6/F5).
-		if grep -qE '^[[:space:]]*options[[:space:]]+sl4a_spi_hid' "$MODPROBE_CONF" 2>/dev/null; then
-			opts_note=" (profile line present, all of its parameters are sweep-controlled — no other options carried)"
-		else
-			opts="raw_mode=N"
-			opts_note=" (FALLBACK — no 'options sl4a_spi_hid' line in $MODPROBE_CONF: STANDARD mode, probe arms 2/3 are inert here)"
-			warn "no 'options sl4a_spi_hid' line in $MODPROBE_CONF — sweeping in fallback standard mode (raw_mode=N)"
-		fi
-	fi
-
-	info "Frame hunt: four probe variants, one file, no commands for you. Leave the panel alone until asked."
+	info "Frame hunt battery: raw AND standard variants, one file, no commands for you. Leave the panel alone until asked."
 	[ -n "$SYSFS_DIR" ] || warn "sysfs directory for the device not found — statistics will be missing"
 
 	# The sweep is worthless against a stale module, and reloading does not
@@ -1790,12 +1907,12 @@ cmd_hunt() {
 	# has to see movement — and see where it stopped if it stops.
 	exec 3>&2
 	info "Full sweep goes to: $OUT"
-	info "Four variants, ~11 s each; the verdicts are printed here at the end."
+	info "$(hunt_variant_count) variants, ~20 s each (reload + settle + touch window); the verdicts and the summary are printed here at the end."
 
 	{
 		echo "=== SL4A_TouchScreen frame hunt ==="
 		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-		echo "Profile options from $MODPROBE_CONF: $opts$opts_note"
+		echo "Battery plan: $(hunt_variant_count) variants (raw + standard), one touch verdict each"
 		echo "Modules built from revision: $(installed_head)  (checkout: $head_now)"
 		# What the OS itself sees right now, before anything is unloaded: a
 		# panel that never binds, or an input device that never registers, is
@@ -1822,54 +1939,145 @@ cmd_hunt() {
 		echo "input device (MSHW in /proc/bus/input/devices): $input_state"
 		echo ""
 
-		# The axes under test after the wire axis closed (2026-09-17 13:11 field
-		# run: single, doubled and doubled-except-setfeat all reset-loop): the
-		# probe sequence v1.6.3 did not have. 1 = a real _PS3->_PS0 power cycle
-		# at probe; 2 = skip the pre-DESCREQ teardown + power preamble
-		# (vendor_stop + D2/D0); 3 = both. 0 is the control. Reads stay at the
-		# module default (legacy, as in v1.6.3).
-		for variant in 0 1 2 3; do
-			local pc svs
-			case "$variant" in
-				0) pc=0; svs=0 ;;
-				1) pc=1; svs=0 ;;
-				2) pc=0; svs=1 ;;
-				3) pc=1; svs=1 ;;
-			esac
-			echo "--- variant $variant (acpi_probe_power_cycle=$pc skip_vendor_stop=$svs) ---"
-			printf '\n[%d/4] variant %s: reloading the driver, debug level 3 (~11 s)\n' "$((variant + 1))" "$variant" >&3
+		# The full battery, driven from HUNT_VARIANTS: every field test the
+		# campaign designed, raw and standard, one touch verdict each. The
+		# retired pc/svs arms are not re-run (see the plan above).
+		local vi=0 total rows=() row
+		total="$(hunt_variant_count)"
+		for variant in "${HUNT_VARIANTS[@]}"; do
+			vi=$((vi + 1))
+			local profile label vparams rest base
+			profile="${variant%%|*}"
+			rest="${variant#*|}"
+			label="${rest%%|*}"
+			vparams="${rest#*|}"
+			base="$(hunt_profile_params "$profile")" || base=""
+
+			echo "--- variant $vi/$total: $label (profile=$profile params='${vparams:-(none)}') ---"
+			printf '\n[%d/%d] %s: reloading the driver, debug level 3\n' "$vi" "$total" "$label" >&3
+
 			local dmesg_mark
 			dmesg_mark="$(dmesg 2>/dev/null | wc -l)"
 			modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null || true
 			sleep 1
+			# The input nodes with the driver UNLOADED: whatever this load
+			# registers afterwards is "new since before this load".
+			local ev_before
+			ev_before="$(hunt_input_events)"
 			# The RX-region peek logs at the CONTROLLER's debug_trace=3
 			# (spi-amd.c) — its own module param, distinct from the core's
 			# sl4a_debug_level. Loading the controller bare kept the one
 			# line this sweep exists to capture out of every artifact.
 			modprobe sl4a_spi_amd debug_trace=3 2>/dev/null || true
+			# The variant's own parameter set on the command line: the profile
+			# base plus the plan's extra params. /etc/modprobe.d is never
+			# edited — the sweep leaves the installed profile as it found it.
 			# shellcheck disable=SC2086
-			modprobe sl4a_spi_hid $opts acpi_probe_power_cycle="$pc" skip_vendor_stop="$svs" sl4a_debug_level=3 2>/dev/null || true
-			sleep 4
-			echo "running variant: acpi_probe_power_cycle=$pc skip_vendor_stop=$svs at debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null) controller trace $(cat /sys/module/sl4a_spi_amd/parameters/debug_trace 2>/dev/null || echo '?')"
+			modprobe sl4a_spi_hid $base $vparams sl4a_debug_level=3 2>/dev/null || true
+			sleep 10
+			echo "running variant: profile=$profile params='${vparams:-(none)}' base='$base' debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null) controller trace $(cat /sys/module/sl4a_spi_amd/parameters/debug_trace 2>/dev/null || echo '?')"
 			# The line above echoes what was REQUESTED — a load that failed
 			# leaves it looking the same. Read the live parameters back so
 			# the artifact states what is actually loaded; the module being
 			# absent is the explicit failure marker (P3 wave: the intent
 			# echo alone let a failed load masquerade as a productive one).
 			if [ -d /sys/module/sl4a_spi_hid ]; then
-				echo "loaded params (read back): acpi_probe_power_cycle=$(cat /sys/module/sl4a_spi_hid/parameters/acpi_probe_power_cycle 2>/dev/null || echo '?') skip_vendor_stop=$(cat /sys/module/sl4a_spi_hid/parameters/skip_vendor_stop 2>/dev/null || echo '?')  (sysfs spells booleans Y/N)"
+				echo "loaded params (read back): $(hunt_param_readback)(sysfs spells booleans Y/N)"
 			else
 				echo "loaded params (read back): MODULE NOT LOADED — nothing was measured for this variant"
 			fi
-			for _s in 6 5 4 3 2 1; do
-				printf '\r     >>> TOUCH THE PANEL NOW (tocca il pannello) — %d <<<   ' "$_s" >&3
-				sleep 1
+
+			# Snapshot at settle: counters, sequence state, and the input
+			# devices this load registered (which touch node is new).
+			local ev_after touch_node touch_new
+			ev_after="$(hunt_input_events)"
+			touch_node="$(hunt_touch_event)" || touch_node=""
+			touch_new="?"
+			if [ -n "$touch_node" ]; then
+				case " $ev_before " in
+					*" $touch_node "*) touch_new="no (present before this load)" ;;
+					*)                 touch_new="yes" ;;
+				esac
+			fi
+			echo "-- settle snapshot --"
+			echo "ready: $(cat "$SYSFS_DIR/ready" 2>/dev/null || echo '(unavailable)')"
+			echo "seq_state: $(cat "$SYSFS_DIR/seq_state" 2>/dev/null || echo '(unavailable)')"
+			echo "-- input devices (eventN + name) --"
+			local e
+			for e in $ev_after; do
+				if [ "$e" = "$touch_node" ]; then
+					echo "$e $(hunt_input_name "$e")   <-- touch device (new since before this load: $touch_new)"
+				else
+					echo "$e $(hunt_input_name "$e")"
+				fi
 			done
-			printf '\r%80s\r' '' >&3
-			for f in ready seq_state protocol_stats lifecycle_status bus_error_count device_initiated_reset_count; do
-				echo "-- $f"
-				cat "$SYSFS_DIR/$f" 2>/dev/null || echo "(unavailable)"
-			done
+			[ -n "$ev_after" ] || echo "(no input event nodes)"
+			local stats_before
+			stats_before="$(cat "$SYSFS_DIR/protocol_stats" 2>/dev/null || true)"
+			echo "-- protocol_stats (after load, before touch) --"
+			if [ -n "$stats_before" ]; then printf '%s\n' "$stats_before"; else echo "(unavailable)"; fi
+
+			# Touch window. An evdev client must be open WHILE the finger is
+			# down (events delivered with no reader are dropped), so the
+			# bounded read runs in the background under the countdown. When
+			# the node is absent, the human y/n answer is the fallback.
+			local ev_tmp ev_bytes=0 ev_events=0 touch_cell
+			ev_tmp="$(mktemp 2>/dev/null)" || ev_tmp="/tmp/sl4a-hunt-ev.$$"
+			if [ -n "$touch_node" ] && [ -r "$INPUT_DEV_ROOT/$touch_node" ]; then
+				hunt_evdev_read "$touch_node" "$ev_tmp" &
+				local ev_pid=$!
+				for _s in 6 5 4 3 2 1; do
+					printf '\r     >>> TOUCH THE PANEL NOW (tocca il pannello) — %d <<<   ' "$_s" >&3
+					sleep 1
+				done
+				wait "$ev_pid" 2>/dev/null || true
+				printf '\r%80s\r' '' >&3
+				read -r ev_bytes ev_events < "$ev_tmp" 2>/dev/null || true
+				case "$ev_bytes" in ''|*[!0-9]*) ev_bytes=0 ;; esac
+				case "$ev_events" in ''|*[!0-9]*) ev_events=0 ;; esac
+				touch_cell="$ev_events events"
+				echo "-- touch (evdev read on $touch_node) --"
+				echo "evdev $touch_node: $ev_bytes bytes, $ev_events events (${HUNT_TOUCH_SECS}s window)"
+			else
+				for _s in 6 5 4 3 2 1; do
+					printf '\r     >>> TOUCH THE PANEL NOW (tocca il pannello) — %d <<<   ' "$_s" >&3
+					sleep 1
+				done
+				printf '\r%80s\r' '' >&3
+				printf '     evdev node unavailable — did you touch the panel? [y/N] ' >&3
+				local ans=""
+				read -rt "$HUNT_TOUCH_SECS" -n 1 ans 2>/dev/null || ans=""
+				echo "" >&3
+				case "$ans" in
+					y|Y) touch_cell="human:yes" ;;
+					*)   touch_cell="human:no" ;;
+				esac
+				echo "-- touch (no evdev node for this panel) --"
+				echo "human fallback (evdev node '${touch_node:-not found}'): $touch_cell"
+			fi
+			rm -f "$ev_tmp" 2>/dev/null || true
+
+			# Snapshot again and compute the deltas the summary reports.
+			local stats_after have d_rr d_dd d_data d_irq note
+			stats_after="$(cat "$SYSFS_DIR/protocol_stats" 2>/dev/null || true)"
+			echo "-- protocol_stats (after touch) --"
+			if [ -n "$stats_after" ]; then printf '%s\n' "$stats_after"; else echo "(unavailable)"; fi
+			have=0
+			if [ -n "$stats_after" ]; then have=1; fi
+			d_rr=0; d_dd=0; d_data=0; d_irq=0
+			if [ "$have" = 1 ]; then
+				d_rr="$(hunt_delta "$stats_before" "$stats_after" reset_rsp)"
+				d_dd="$(hunt_delta "$stats_before" "$stats_after" device_desc)"
+				d_data="$(hunt_delta "$stats_before" "$stats_after" data)"
+				d_irq="$(hunt_delta "$stats_before" "$stats_after" irq_count)"
+			fi
+			echo "-- deltas (after - before) --"
+			if [ "$have" = 1 ]; then
+				echo "reset_rsp=$d_rr device_desc=$d_dd data=$d_data irq_count=$d_irq"
+			else
+				echo "(no counters — deltas not measured)"
+			fi
+
 			echo "-- dmesg, this load only (the read bytes are here)"
 			# `|| true` is load-bearing: under `set -e -o pipefail` a grep that
 			# matches nothing (every modprobe in this variant failed, say) aborted
@@ -1917,10 +2125,26 @@ cmd_hunt() {
 			else
 				echo "first write on the wire: (none in this load's log)"
 			fi
-			echo "VERDICT (acpi_probe_power_cycle=$pc skip_vendor_stop=$svs): $(hunt_verdict "$variant" "$SYSFS_DIR")"
+			echo "VERDICT ($label): $(hunt_verdict "$label" "$have" "$d_dd" "$d_rr")"
 			echo ""
-			info "variant $variant done"
+			note="$(hunt_note "$have" "$d_dd" "$d_rr")"
+			rows+=("$label|+$d_dd|+$d_data|+$d_rr|$touch_cell|$note")
+			printf '     [%d/%d] %s done\n' "$vi" "$total" "$label" >&3
 		done
+
+		# The "where are we" the whole battery exists for: one row per variant,
+		# before the self-tests, so a reader sees the shape at a glance.
+		echo ""
+		echo "=== SUMMARY ($total variants) ==="
+		printf '%-48s | %-11s | %-4s | %-9s | %-15s | %s\n' \
+			"variant" "device_desc" "data" "reset_rsp" "touch(evdev events)" "note"
+		local r_label r_dd r_data r_rr r_touch r_note
+		for row in "${rows[@]}"; do
+			IFS='|' read -r r_label r_dd r_data r_rr r_touch r_note <<< "$row"
+			printf '%-48s | %-11s | %-4s | %-9s | %-15s | %s\n' \
+				"$r_label" "$r_dd" "$r_data" "$r_rr" "$r_touch" "$r_note"
+		done
+		echo ""
 
 		run_host_self_tests
 		echo ""
@@ -1940,36 +2164,28 @@ cmd_hunt() {
 	# the outside. Inside, the || true never ran at all.
 	( cmd_activate >/dev/null 2>&1 ) || true
 
-	pass "Wrote $OUT (one file, all four variants)"
+	pass "Wrote $OUT (one file, all $total variants — raw + standard)"
 	grep -h '^VERDICT' "$OUT" 2>/dev/null || true
 	echo ""
-	echo "Send that file: it already contains every variant with its verdict."
+	echo "Send that file: it already contains every variant with its verdict and the summary table."
 }
 
-# Reads the counters for one variant and says what they mean, so the file
-# answers the question on its own.
+# Turns one variant's counter deltas into the verdict line the file carries.
+# "No counters" is not "counters at zero": when the panel's sysfs is missing
+# every counter is unreadable, and a diagnostic that wrote "silent" anyway
+# would claim a measurement that was never taken.
 hunt_verdict() {
-	local variant="$1" dir="$2" rr dd
-	# No counters at all is not the same as counters at zero: the device
-	# name is matched by glob, so on another panel (SL3 is MSHW0162) every
-	# counter is unreadable — and this function used to write "silent" into
-	# the artifact anyway, a diagnostic claiming a measurement never taken.
-	if [ -z "$dir" ] || [ ! -r "$dir/protocol_stats" ]; then
-		echo "variant $variant: NO COUNTERS READ (sysfs not found for this panel) — nothing was measured"
+	local label="$1" have="$2" dd="$3" rr="$4"
+	if [ "$have" != 1 ]; then
+		echo "variant $label: NO COUNTERS READ (sysfs not found for this panel) — nothing was measured"
 		return 0
 	fi
-	if [ -z "$(cat "$dir/protocol_stats" 2>/dev/null)" ]; then
-		echo "variant $variant: NO COUNTERS READ (protocol_stats unreadable) — nothing was measured"
-		return 0
-	fi
-	rr="$(awk -F= '/^reset_rsp=/{gsub(/ /, "", $2); print $2}' "$dir/protocol_stats" 2>/dev/null)"
-	dd="$(awk -F= '/^device_desc=/{gsub(/ /, "", $2); print $2}' "$dir/protocol_stats" 2>/dev/null)"
-	if [ "${dd:-0}" != "0" ] && [ -n "${dd:-}" ]; then
-		echo "variant $variant DELIVERED A DESCRIPTOR (device_desc=$dd) — this is the shape"
-	elif [ "${rr:-0}" != "0" ] && [ -n "${rr:-}" ]; then
-		echo "variant $variant gets answers from the device (reset_rsp=$rr)"
+	if [ "${dd:-0}" -gt 0 ]; then
+		echo "variant $label DELIVERED A DESCRIPTOR (device_desc +$dd) — this is the shape"
+	elif [ "${rr:-0}" -gt 0 ]; then
+		echo "variant $label gets answers from the device (reset_rsp +$rr)"
 	else
-		echo "variant $variant is silent (no RESET_RSP, no descriptor)"
+		echo "variant $label is silent (no new RESET_RSP, no descriptor)"
 	fi
 }
 

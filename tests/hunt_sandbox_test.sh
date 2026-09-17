@@ -9,10 +9,10 @@
 # from inside the sweep is redirected into the file.
 #
 # So: build a fake machine (stub modprobe/dkms/dmesg/sleep, a fake panel in a
-# fake sysfs, a profile file), point the tool at it, run `hunt`, and demand the
-# things a working sweep must produce. Only the root check and the absolute
-# paths are patched out of the copy under test; everything else is the shipped
-# script, verbatim.
+# fake sysfs, a fake input event node + evdev char device, a profile file),
+# point the tool at it, run `hunt`, and demand the things a working battery
+# must produce. Only the root check and the absolute paths are patched out of
+# the copy under test; everything else is the shipped script, verbatim.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SB="$(mktemp -d "${TMPDIR:-/tmp}/sl4a-hunt-sandbox.XXXXXX")"
@@ -21,13 +21,20 @@ trap 'rm -rf "$SB"' EXIT
 fail() { echo "hunt sandbox contract: FAIL — $*"; exit 1; }
 
 mkdir -p "$SB/bin" "$SB/etc" "$SB/var" "$SB/src" \
-         "$SB/sys/bus/spi/devices/spi-MSHW0231:00"
+         "$SB/sys/bus/spi/devices/spi-MSHW0231:00" \
+         "$SB/sys/class/input/event10/device" "$SB/dev/input"
 D="$SB/sys/bus/spi/devices/spi-MSHW0231:00"
-printf 'reset_rsp=0\ndevice_desc=0\nbus_error_count=0\n' > "$D/protocol_stats"
+printf 'reset_rsp=0\ndevice_desc=0\ndata=0\nirq_count=0\n' > "$D/protocol_stats"
 for f in ready seq_state lifecycle_status bus_error_count device_initiated_reset_count; do
 	printf 'stub\n' > "$D/$f"
 done
-printf '# SL4A_TouchScreen\noptions sl4a_spi_hid raw_mode=Y raw_input_beta=Y acpi_probe_power_cycle=1 skip_vendor_stop=1\n' \
+# The panel's input event node (found by name) and its evdev char device. The
+# raw device is a regular file inside the sandbox: the bounded read that a real
+# run performs against /dev/input/eventN finishes instantly here (EOF), so the
+# flow stays covered without a touch surface and without the fallback prompt.
+printf 'MSHW0231 Touchscreen\n' > "$SB/sys/class/input/event10/device/name"
+head -c 48 /dev/zero > "$SB/dev/input/event10"
+printf '# SL4A_TouchScreen\noptions sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y\n' \
 	> "$SB/etc/sl4a-spi-hid.conf"
 printf '# SL4A_TouchScreen\n' > "$SB/etc/sl4a-touch-activate.service"
 : > "$SB/dmesg.txt"
@@ -35,12 +42,31 @@ for i in $(seq 1 200); do
 	printf '[%d.0] fake line %d\n[%d.1] sl4a_spi_hid: stub %d\n' "$i" "$i" "$i" "$i" >> "$SB/dmesg.txt"
 done
 
-# `sleep` is stubbed so the sweep takes a second instead of 33; `make` so
-# run_host_self_tests cannot re-enter this very suite.
-for c in systemctl depmod mokutil make modinfo sleep; do
+# `make` so run_host_self_tests cannot re-enter this very suite. `sleep` is not
+# a no-op: it advances the panel's counters, so the before/after deltas the
+# summary reports are non-zero and exercise the verdict arithmetic (a real run
+# spends its whole touch window in `sleep`). systemctl/depmod/mokutil/modinfo
+# are inert.
+for c in systemctl depmod mokutil make modinfo; do
 	printf '#!/bin/bash\nexit 0\n' > "$SB/bin/$c"
 	chmod +x "$SB/bin/$c"
 done
+cat > "$SB/bin/sleep" <<EOS
+#!/bin/bash
+f="$D/protocol_stats"
+if [ -f "\$f" ]; then
+	{
+		while IFS= read -r line; do
+			case "\$line" in
+				reset_rsp=*) n="\${line#reset_rsp=}"; echo "reset_rsp=\$((n + 1))" ;;
+				*) echo "\$line" ;;
+			esac
+		done < "\$f"
+	} > "\$f.tmp" && mv "\$f.tmp" "\$f"
+fi
+exit 0
+EOS
+chmod +x "$SB/bin/sleep"
 # dkms records what it was asked to do: the rebuild path (restage_and_rebuild)
 # must actually invoke it — a stale stamp that prints "rebuilding first" and
 # then rebuilds nothing swept the old modules silently with the sandbox green
@@ -51,7 +77,7 @@ echo "dkms \$*" >> "$SB/dkms.log"
 exit 0
 EOS
 chmod +x "$SB/bin/dkms"
-# modprobe records its arguments: the sweep must hand the controller's
+# modprobe records its arguments: the battery must hand the controller's
 # debug_trace to sl4a_spi_amd, or the peek line — the one that answers the
 # RX-region question — can never appear in the artifact. A load of the driver
 # also emits a realistic level-3 burst: the FIRST control write the sweep's
@@ -83,6 +109,8 @@ sed -e "s#^REPO_DIR=.*#REPO_DIR=\"$ROOT\"#" \
     -e "s#^MODPROBE_CONF=.*#MODPROBE_CONF=\"$SB/etc/sl4a-spi-hid.conf\"#" \
     -e "s#^SYSTEMD_UNIT=.*#SYSTEMD_UNIT=\"$SB/etc/sl4a-touch-activate.service\"#" \
     -e "s#^INSTALLED_HEAD_STAMP=.*#INSTALLED_HEAD_STAMP=\"$SB/var/installed-head\"#" \
+    -e "s#^INPUT_SYSFS=.*#INPUT_SYSFS=\"$SB/sys/class/input\"#" \
+    -e "s#^INPUT_DEV_ROOT=.*#INPUT_DEV_ROOT=\"$SB/dev/input\"#" \
     -e "s#/sys/bus/spi/devices/\*MSHW\*#$SB/sys/bus/spi/devices/*MSHW*#" \
     -e "s#/sys/module/#$SB/sys/module/#g" \
     -e 's#^\([[:space:]]*\)\[ "\$(id -u)" = 0 \] || fail "hunt needs root.*#\1: #' \
@@ -90,66 +118,99 @@ sed -e "s#^REPO_DIR=.*#REPO_DIR=\"$ROOT\"#" \
 chmod +x "$SB/tool.sh"
 git -C "$ROOT" rev-parse HEAD > "$SB/var/installed-head"
 
+# ── the variant plan, as the battery loads it (one line per variant) ───────
+# The battery is data-driven (HUNT_VARIANTS): every variant is one driver load,
+# in this order, with exactly these parameters. Order matters — a swapped label
+# or a dropped arm would otherwise stay green.
+cat > "$SB/expected-loads.txt" <<'EOS'
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y raw_pre_desc_reg0=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y raw_fallback_on_reset=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y raw_pre_desc_reg0=1 raw_fallback_on_reset=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y read_frame_variant=2 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 skip_vendor_stop=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=N sl4a_debug_level=3
+sl4a_spi_hid raw_mode=N wire_double_opcode=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=N skip_std_getfeat=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=N wire_double_opcode=1 skip_std_getfeat=1 sl4a_debug_level=3
+EOS
+NVARIANTS=11
+# Sweeps this script runs (main, stale-stamp rebuild, no-panel, quiet, wrapped
+# ring, evdev fallback, stubbed module).
+NSWEEPS=7
+
 PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out.txt" > "$SB/run.txt" 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run.txt"; fail "hunt exited $rc (a silent death is exactly the bug this test exists for)"; }
 
 [ -s "$SB/out.txt" ] || fail "no artifact was written"
 n="$(grep -c '^VERDICT' "$SB/out.txt" || true)"
-[ "$n" -eq 4 ] || fail "expected 4 verdicts in the artifact, found ${n:-0}"
+[ "$n" -eq "$NVARIANTS" ] || fail "expected $NVARIANTS verdicts in the artifact, found ${n:-0}"
 
 # The peek line that settles the RX-region question only prints at the
-# controller's debug_trace=3; the sweep must pass it to sl4a_spi_amd. Without
+# controller's debug_trace=3; the battery must pass it to sl4a_spi_amd. Without
 # this check the sweep loads the controller bare and the one artifact the
 # user sends can never carry the peek.
 grep -q '^sl4a_spi_amd debug_trace=3$' "$SB/modprobe.log" \
 	|| fail "hunt loaded sl4a_spi_amd without debug_trace=3 — the RX-region peek cannot reach the artifact"
 
-# The probe arms are the axis the artifact has to explain: if the sweep does
-# not actually load all four, the bundle cannot say which one answered. Order
-# matters too — a swapped case arm loads every pair while mislabelling which
-# one ran (the P3 wave's stays-green mutation), so the pairs must appear as
-# 0/0, 1/0, 0/1, 1/1 repeating, once per sweep.
-grep -q 'acpi_probe_power_cycle=0 skip_vendor_stop=0' "$SB/modprobe.log" \
-	|| fail "the sweep never loaded the control arm"
-grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=0' "$SB/modprobe.log" \
-	|| fail "the sweep never loaded the power-cycle arm"
-grep -q 'acpi_probe_power_cycle=0 skip_vendor_stop=1' "$SB/modprobe.log" \
-	|| fail "the sweep never loaded the skip-preamble arm"
-grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=1' "$SB/modprobe.log" \
-	|| fail "the sweep never loaded the combined arm"
-grep -q '^VERDICT (acpi_probe_power_cycle=1 skip_vendor_stop=1)' "$SB/out.txt" \
-	|| fail "the VERDICT line itself must carry the probe pair (the echo/header lines are not the verdict)"
+# Every variant is one driver load, in order, with exactly its parameters —
+# the battery is the campaign's whole plan, so a dropped arm or a swapped pair
+# has to bite. (`-r` unloads and the controller load do not match this prefix.)
+grep '^sl4a_spi_hid ' "$SB/modprobe.log" | head -n "$NVARIANTS" > "$SB/got-loads.txt"
+if ! diff -u "$SB/expected-loads.txt" "$SB/got-loads.txt" > "$SB/loads.diff"; then
+	sed -n '1,40p' "$SB/loads.diff"
+	fail "the battery did not load the planned variants in order (see diff above)"
+fi
 
-grep -o 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" > "$SB/pairs.txt"
-k=0
-while IFS= read -r p; do
-	case "$k" in
-		0) want="acpi_probe_power_cycle=0 skip_vendor_stop=0" ;;
-		1) want="acpi_probe_power_cycle=1 skip_vendor_stop=0" ;;
-		2) want="acpi_probe_power_cycle=0 skip_vendor_stop=1" ;;
-		3) want="acpi_probe_power_cycle=1 skip_vendor_stop=1" ;;
-		*) break ;;
-	esac
-	[ "$p" = "$want" ] \
-		|| fail "load $((k + 1)) carried '$p', expected '$want' — variant order or pair swap"
-	k=$((k + 1))
-done < "$SB/pairs.txt"
-[ "$k" -eq 4 ] || fail "expected one full sweep of 4 driver loads so far, saw $k"
+# The summary table is the "where are we" the user asked for: one row per
+# variant, right before the self-tests, with the evdev touch verdict.
+grep -q '=== SUMMARY (11 variants) ===' "$SB/out.txt" \
+	|| fail "the artifact has no summary table"
+grep -q 'variant .*| device_desc .*| data .*| reset_rsp .*| touch(evdev events) .*| note' "$SB/out.txt" \
+	|| fail "the summary table header is missing a column"
+n_rows="$(grep -cE '^raw |^std ' "$SB/out.txt" || true)"
+[ "$n_rows" -eq "$NVARIANTS" ] \
+	|| fail "the summary table has $n_rows rows, expected $NVARIANTS"
+awk '/^=== SUMMARY/{found=1; next} found && /^raw |^std /{n++} END{exit (n == 11) ? 0 : 1}' "$SB/out.txt" \
+	|| fail "the summary rows are not all after the SUMMARY header"
+# The summary must precede the self-tests section.
+grep -n '=== SUMMARY' "$SB/out.txt" | head -1 | cut -d: -f1 > "$SB/summary.line"
+grep -n -- '--- Self-tests' "$SB/out.txt" | head -1 | cut -d: -f1 > "$SB/selftest.line"
+[ -s "$SB/summary.line" ] && [ -s "$SB/selftest.line" ] \
+	|| fail "the summary table is not before the self-tests section"
+[ "$(cat "$SB/summary.line")" -lt "$(cat "$SB/selftest.line")" ] \
+	|| fail "the summary table is not before the self-tests section"
+
+# The touch verdict is measured, not asked: the panel's evdev node is read
+# during the window and the byte/event count reaches the artifact and the table.
+grep -q 'evdev read on event10' "$SB/out.txt" \
+	|| fail "the artifact does not record the evdev read"
+grep -q 'evdev event10: 48 bytes, 2 events' "$SB/out.txt" \
+	|| fail "the evdev read did not report bytes/events from the node"
+grep -qE '^raw control +\| \+0 +\| \+0 +\| \+6 +\| 2 events +\| resets \+6' "$SB/out.txt" \
+	|| fail "the summary row does not carry the deltas and the evdev verdict"
+
+# The deltas are measured from the counters around the touch window. The sleep
+# stub advances reset_rsp once per countdown second (6), so a run that dropped
+# the before/after snapshots would report +0.
+grep -q 'reset_rsp=6 device_desc=0 data=0 irq_count=0' "$SB/out.txt" \
+	|| fail "the counter deltas were not computed around the touch window"
 
 # The artifact must carry the first control write of each load's OWN slice:
 # with the realistic burst above, the write sits far above the 60-line tail,
 # and a tail-only window dropped it exactly when the load was productive (P3).
-grep -q 'first write on the wire: \[999.0\] sl4a_spi_hid: SEQ: write op=0x02' "$SB/out.txt" \
-	|| fail "the artifact lost the first control write (the 60-line window again?)"
+n_wr="$(grep -c 'first write on the wire: \[999.0\] sl4a_spi_hid: SEQ: write op=0x02' "$SB/out.txt" || true)"
+[ "$n_wr" -eq "$NVARIANTS" ] \
+	|| fail "the artifact lost the first control write for some variant (the 60-line window again? saw $n_wr)"
 
-# The "running variant" line echoes what was REQUESTED; the live readback
-# must accompany it so a failed load cannot masquerade as a productive one.
-# All module reads go through the scoped stub sysfs (the staging sed rewrites
+# The "running variant" line echoes what was REQUESTED; the live readback must
+# accompany it so a failed load cannot masquerade as a productive one. All
+# module reads go through the scoped stub sysfs (the staging sed rewrites
 # /sys/module/), so with no stub module present the artifact must say exactly
 # that (P3 wave) — and must say it identically on a host that happens to have
-# the real driver loaded (that host-dependence failed this suite on the panel
-# machine while staying green on module-less CI hosts).
+# the real driver loaded.
 grep -q 'loaded params (read back): MODULE NOT LOADED' "$SB/out.txt" \
 	|| fail "no live module readback line: a failed load would still read as loaded"
 grep -q -- '-- OS binding (before the sweep) --' "$SB/out.txt" \
@@ -157,13 +218,13 @@ grep -q -- '-- OS binding (before the sweep) --' "$SB/out.txt" \
 
 # The progress the user asked for has to be on the terminal too, not only in
 # the file — that is the whole point of it.
-grep -q '\[1/4\] variant 0' "$SB/run.txt" || fail "no per-variant progress on the terminal"
+grep -q '\[1/11\] raw control' "$SB/run.txt" || fail "no per-variant progress on the terminal"
 grep -q 'TOUCH THE PANEL NOW' "$SB/run.txt" || fail "no touch prompt on the terminal"
-grep -q 'four probe variants' "$SB/run.txt" \
-	|| fail "the terminal intro still describes the retired wire axis (it must name the probe sweep)"
+grep -q 'raw AND standard variants' "$SB/run.txt" \
+	|| fail "the terminal intro still describes the retired probe sweep (it must name the raw+standard battery)"
 
 # A stale stamp must take the rebuild path (it is the path that once died with
-# 'command not found'), and the sweep must survive it.
+# 'command not found'), and the battery must survive it.
 echo "0000000000000000000000000000000000000000" > "$SB/var/installed-head"
 PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out2.txt" > "$SB/run2.txt" 2>&1
 rc=$?
@@ -177,9 +238,9 @@ grep -q 'dkms build -m sl4a-touch -v ' "$SB/dkms.log" \
 # so by now exactly one build has a reason to exist.
 [ "$(grep -c 'dkms build -m sl4a-touch -v ' "$SB/dkms.log" || true)" -eq 1 ] \
 	|| fail "expected exactly one dkms build (the stale-stamp rebuild), saw $(grep -c 'dkms build -m sl4a-touch -v ' "$SB/dkms.log" || true) — a build from another path satisfies the old check (P16 wave, B:C6)"
-[ "$(grep -c '^VERDICT' "$SB/out2.txt" || true)" -eq 4 ] || fail "the artifact after a rebuild is incomplete"
+[ "$(grep -c '^VERDICT' "$SB/out2.txt" || true)" -eq "$NVARIANTS" ] || fail "the artifact after a rebuild is incomplete"
 
-# No panel at all: the sysfs glob matches nothing and the sweep must say so.
+# No panel at all: the sysfs glob matches nothing and the battery must say so.
 # `ls -d` on a vanished (nullglob) pattern lists the CURRENT DIRECTORY, so the
 # old one-liner set SYSFS_DIR="." — never empty — and the intended warning was
 # dead code. Move the fake panel away and demand the warning plus the honest
@@ -192,10 +253,10 @@ grep -q 'sysfs directory for the device not found' "$SB/run3.txt" \
 	|| fail "no-panel run: the missing-sysfs warning never fired (the glob still resolves to '.')"
 grep -q 'bound driver: (sysfs dir not found' "$SB/out3.txt" \
 	|| fail "no-panel run: the OS-binding block printed a bare 'none' as if it had probed (a reader would blame the OS)"
-[ "$(grep -c 'NO COUNTERS READ' "$SB/out3.txt" || true)" -eq 4 ] \
+[ "$(grep -c 'NO COUNTERS READ' "$SB/out3.txt" || true)" -eq "$NVARIANTS" ] \
 	|| fail "the no-panel artifact does not degrade honestly to NO COUNTERS READ"
 
-# A load that logs nothing must not abort the sweep, and its absence must be
+# A load that logs nothing must not abort the battery, and its absence must be
 # STATED: under `set -e -o pipefail` an unguarded `dmesg | grep` that matched
 # nothing killed hunt after it had unloaded the driver, and a silenced
 # fallback read as "searched and found nothing" without evidence (P14 wave:
@@ -208,127 +269,76 @@ rc=$?
 grep -q 'no lines after the mark' "$SB/out4.txt" \
 	|| fail "quiet run: the ring-wrap fallback message never appeared"
 n_none="$(grep -cF "first write on the wire: (none in this load's log)" "$SB/out4.txt" || true)"
-[ "$n_none" -eq 4 ] \
+[ "$n_none" -eq "$NVARIANTS" ] \
 	|| fail "quiet run: the artifact does not state the write's absence for every variant (saw $n_none)"
 
 # Ring wrapped between the mark and the slice: the write still exists in the
 # buffer, outside the slice, and the search must find it in the fallback too —
-# labelled, because those lines can span loads (P14 wave, F7).
+# labelled, because those lines can span loads (P14 wave, F7). `quiet` is
+# deliberately left in place: the run emits no burst of its own, so the only
+# write in the buffer is the pre-wrap marker appended here, exactly the shape
+# the fallback search exists for.
 printf '[1000.0] sl4a_spi_hid: SEQ: write op=0x02 reg=1 raw=[02 00 00 01 42 00 00 03 00 00] (pre-wrap marker)\n' >> "$SB/dmesg.txt"
 PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out5.txt" > "$SB/run5.txt" 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run5.txt"; fail "hunt exited $rc on the wrapped-ring run"; }
 n_wr="$(grep -c 'first write on the wire (from the wrapped ring — may belong to an earlier load)' "$SB/out5.txt" || true)"
-[ "$n_wr" -eq 4 ] \
+[ "$n_wr" -eq "$NVARIANTS" ] \
 	|| fail "wrapped-ring run: the first-write line did not search the fallback window (saw $n_wr) — or its caveat was dropped (P15 wave: the pin must cover the full label, not its prefix)"
-
-# No profile at all: the sweep still runs, but raw_mode=N is STANDARD mode
-# where the probe arms are inert (spi_hid_vendor_init is raw-gated) — the
-# fallback must be labelled in the artifact AND warned on the terminal, not
-# printed as if the file had said so (P14 wave, A:C6/F5).
-mv "$SB/etc/sl4a-spi-hid.conf" "$SB/etc/sl4a-spi-hid.conf.bak"
-git -C "$ROOT" rev-parse HEAD > "$SB/var/installed-head"
 rm -f "$SB/quiet"
-PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out6.txt" > "$SB/run6.txt" 2>&1
+
+# No evdev node (an unusual panel, or the node not registered): the tool must
+# fall back to the human y/n and still produce the full artifact. Run it with
+# stdin at /dev/null so the fallback read returns immediately (a real run waits
+# the countdown). The touch column then says "human:no", not an event count.
+mv "$SB/sys/class/input" "$SB/class-input-away"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out6.txt" > "$SB/run6.txt" 2>&1 </dev/null
 rc=$?
-[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run6.txt"; fail "hunt exited $rc with a missing profile"; }
-grep -q 'STANDARD mode, probe arms 2/3 are inert here' "$SB/out6.txt" \
-	|| fail "the missing-profile artifact does not label its raw_mode=N fallback (full note, P15 wave: a shortened ' (FALLBACK)' satisfied the old prefix-only pin)"
-grep -q 'fallback standard mode' "$SB/run6.txt" \
-	|| fail "the missing-profile run printed no warning about the fallback"
-[ "$(grep -c 'first write on the wire: \[999.0\]' "$SB/out6.txt" || true)" -eq 4 ] \
-	|| fail "the missing-profile sweep did not carry the first write (dmesg emission should have resumed)"
-mv "$SB/etc/sl4a-spi-hid.conf.bak" "$SB/etc/sl4a-spi-hid.conf"
-
-# A profile whose EVERY parameter is one the sweep controls empties the
-# carried-options set without the file being missing: the artifact must not
-# claim a missing 'options' line about a line that is right there (P15 wave,
-# B:C1), and the sweep must still run and label honestly.
-printf '# SL4A_TouchScreen\noptions sl4a_spi_hid acpi_probe_power_cycle=1 skip_vendor_stop=1\n' \
-	> "$SB/etc/sl4a-spi-hid.conf"
-PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out7.txt" > "$SB/run7.txt" 2>&1
-rc=$?
-[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run7.txt"; fail "hunt exited $rc with an all-filtered profile"; }
-[ "$(grep -c '^VERDICT' "$SB/out7.txt" || true)" -eq 4 ] \
-	|| fail "the all-filtered-profile artifact is incomplete"
-grep -q 'all of its parameters are sweep-controlled' "$SB/out7.txt" \
-	|| fail "an all-filtered profile is not labelled as such (P15 wave, B:C1)"
-grep -q "no 'options sl4a_spi_hid' line" "$SB/run7.txt" \
-	&& fail "the all-filtered profile took the missing-line warning about a line that exists (P15 wave, B:C1)"
-grep -q 'FALLBACK' "$SB/out7.txt" \
-	&& fail "the all-filtered profile is labelled FALLBACK though nothing is missing (P15 wave, B:C1)"
-
-# The same all-filtered shape, INDENTED and with a trailing comment: both
-# used to fall through — modprobe.d honours an indented `options` keyword, but
-# the column-0 anchors read it as a missing profile, and the comment tokens
-# were carried into the load line (P16 wave, B:C5). The label must stay honest
-# and the comment must not reach modprobe.
-printf '# SL4A_TouchScreen\n  options sl4a_spi_hid acpi_probe_power_cycle=1 skip_vendor_stop=1 # sweep note\n' \
-	> "$SB/etc/sl4a-spi-hid.conf"
-PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out8.txt" > "$SB/run8.txt" 2>&1
-rc=$?
-[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run8.txt"; fail "hunt exited $rc with an indented all-filtered profile"; }
-[ "$(grep -c '^VERDICT' "$SB/out8.txt" || true)" -eq 4 ] \
-	|| fail "the indented-profile artifact is incomplete"
-grep -q 'all of its parameters are sweep-controlled' "$SB/out8.txt" \
-	|| fail "an indented all-filtered profile is not labelled as such (P16 wave, B:C5)"
-grep -q "no 'options sl4a_spi_hid' line" "$SB/run8.txt" \
-	&& fail "an indented all-filtered profile took the missing-line warning about a line that exists (P16 wave, B:C5)"
-grep -q 'FALLBACK' "$SB/out8.txt" \
-	&& fail "an indented all-filtered profile is labelled FALLBACK though nothing is missing (P16 wave, B:C5)"
-grep -q '# sweep note' "$SB/modprobe.log" \
-	&& fail "the profile's trailing comment was carried into the load line (P16 wave, B:C5)"
-
-# Every sweep so far (control, rebuild, no-panel, quiet, wrapped ring,
-# missing profile, all-filtered, indented all-filtered) loaded the same four
-# arms in the same order: 32 loads, the pattern repeating. The profile now
-# also carries the two knobs, and the $opts filter must keep them OFF the
-# load lines — a leaked pair ahead of the arm's own could read as the arm's
-# value (P14 wave: that mutation stayed green too).
-n_loaded="$(grep -c 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" || true)"
-[ "$n_loaded" -eq 32 ] \
-	|| fail "expected 32 driver loads after eight sweeps, saw $n_loaded"
-awk '
-	/sl4a_spi_hid/ && /acpi_probe_power_cycle=/ {
-		if (gsub(/acpi_probe_power_cycle=/, "&") != 1 ||
-		    gsub(/skip_vendor_stop=/, "&") != 1) {
-			printf "leaky load line: %s\n", $0
-			bad = 1
-		}
-	}
-	END { exit bad }
-' "$SB/modprobe.log" || fail "the profile's knobs leaked onto a load line (the \$opts filter regressed)"
-
-# The profile's raw_mode must REACH the load lines: it is the mode the whole
-# probe sweep is about, and the $opts filter carries it (raw_mode is not one
-# of the six the sweep controls). Adding it to the filter dropped the field's
-# raw mode on every arm with the sandbox still green — every verdict read
-# productive while the sweep measured standard mode (P15 wave, M6).
-n_rawy="$(grep -c 'raw_mode=Y' "$SB/modprobe.log" || true)"
-[ "$n_rawy" -eq 20 ] \
-	|| fail "the profile's raw_mode=Y reached $n_rawy driver loads, expected 20 (five profile sweeps) — the \$opts filter dropped it (P15 wave, M6)"
-n_rawn="$(grep -c 'raw_mode=N' "$SB/modprobe.log" || true)"
-[ "$n_rawn" -eq 4 ] \
-	|| fail "the missing-profile fallback loads should carry raw_mode=N on the 4 loads, saw $n_rawn (P15 wave, M6)"
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run6.txt"; fail "hunt exited $rc with no evdev node (the fallback path)"; }
+[ "$(grep -c '^VERDICT' "$SB/out6.txt" || true)" -eq "$NVARIANTS" ] \
+	|| fail "the no-evdev artifact is incomplete"
+grep -q 'no evdev node for this panel' "$SB/out6.txt" \
+	|| fail "no-evdev run: the artifact does not record the fallback"
+grep -q 'human fallback (evdev node' "$SB/out6.txt" \
+	|| fail "no-evdev run: the human y/n fallback did not run"
+grep -qE '^raw control +\| \+0 +\| \+0 +\| \+6 +\| human:no +\| resets \+6' "$SB/out6.txt" \
+	|| fail "no-evdev run: the summary does not carry the human fallback verdict"
+mv "$SB/class-input-away" "$SB/sys/class/input"
 
 # A stubbed module must be seen through the scoped sysfs too: every module
-# read (the readback line, loaded_raw_mode, the arm echo) goes through
-# /sys/module under $SB. If the staging sed ever drops the rewrite, this run
-# reads the HOST's /sys/module instead — on a module-less CI host it would
-# print MODULE NOT LOADED and still pass, so only the stub values pin it.
-printf '# SL4A_TouchScreen\noptions sl4a_spi_hid raw_mode=Y raw_input_beta=Y acpi_probe_power_cycle=1 skip_vendor_stop=1\n' \
-	> "$SB/etc/sl4a-spi-hid.conf"
-git -C "$ROOT" rev-parse HEAD > "$SB/var/installed-head"
+# read (the readback line, the arm echo) goes through /sys/module under $SB.
+# If the staging sed ever drops the rewrite, this run reads the HOST's
+# /sys/module instead — on a module-less CI host it would print MODULE NOT
+# LOADED and still pass, so only the stub values pin it.
 mkdir -p "$SB/sys/module/sl4a_spi_hid/parameters" "$SB/sys/module/sl4a_spi_amd/parameters"
-for p in raw_mode raw_input_beta skip_getfeat acpi_probe_power_cycle skip_vendor_stop sl4a_debug_level; do
+for p in raw_mode raw_input_beta skip_getfeat read_frame_variant wire_double_opcode; do
 	printf 'Y\n' > "$SB/sys/module/sl4a_spi_hid/parameters/$p"
 done
-printf 'N\n' > "$SB/sys/module/sl4a_spi_hid/parameters/skip_vendor_stop"
+for p in raw_pre_desc_reg0 raw_fallback_on_reset skip_vendor_stop; do
+	printf 'N\n' > "$SB/sys/module/sl4a_spi_hid/parameters/$p"
+done
+printf '3\n' > "$SB/sys/module/sl4a_spi_hid/parameters/sl4a_debug_level"
 printf '0\n' > "$SB/sys/module/sl4a_spi_amd/parameters/debug_trace"
-PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out9.txt" > "$SB/run9.txt" 2>&1
+git -C "$ROOT" rev-parse HEAD > "$SB/var/installed-head"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out7.txt" > "$SB/run7.txt" 2>&1
 rc=$?
-[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run9.txt"; fail "hunt exited $rc with a stubbed module present"; }
-grep -q 'loaded params (read back): acpi_probe_power_cycle=Y skip_vendor_stop=N' "$SB/out9.txt" \
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run7.txt"; fail "hunt exited $rc with a stubbed module present"; }
+grep -q 'loaded params (read back): raw_mode=Y raw_input_beta=Y skip_getfeat=Y read_frame_variant=Y wire_double_opcode=Y raw_pre_desc_reg0=N raw_fallback_on_reset=N skip_vendor_stop=N' "$SB/out7.txt" \
 	|| fail "the readback did not quote the scoped sysfs — the staging sed lost the /sys/module/ rewrite and the host is being read"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives and really rebuilds, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, raw_mode carried, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, missing profile labels the fallback mode, all-filtered profile labels itself, indented all-filtered profile labels itself, module reads scoped to the stub sysfs)"
+# ── the whole battery, every sweep, in aggregate ───────────────────────────
+# Seven sweeps x the plan: the counts land exactly, so a sweep that silently
+# skipped a variant (or an extra load from another path) bites here. A
+# `dkms`/controller line cannot satisfy the `sl4a_spi_hid ` prefix, and the
+# `-r` unloads do not start with it either.
+n_hid="$(grep -c '^sl4a_spi_hid ' "$SB/modprobe.log" || true)"
+[ "$n_hid" -eq "$((NSWEEPS * NVARIANTS))" ] \
+	|| fail "expected $((NSWEEPS * NVARIANTS)) driver loads after $NSWEEPS sweeps, saw $n_hid"
+n_rawy="$(grep -c 'raw_mode=Y' "$SB/modprobe.log" || true)"
+n_rawn="$(grep -c 'raw_mode=N' "$SB/modprobe.log" || true)"
+[ "$n_rawy" -eq "$((NSWEEPS * 7))" ] \
+	|| fail "raw_mode=Y reached $n_rawy driver loads, expected $((NSWEEPS * 7)) (7 raw variants per sweep)"
+[ "$n_rawn" -eq "$((NSWEEPS * 4))" ] \
+	|| fail "raw_mode=N reached $n_rawn driver loads, expected $((NSWEEPS * 4)) (4 standard variants per sweep)"
+
+echo "hunt sandbox contract: PASS (battery completes, $NVARIANTS variants loaded in plan order with the right raw/standard mode, rebuild path survives and really rebuilds, summary table with $NVARIANTS rows before the self-tests, evdev touch verdict measured, counter deltas computed, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, no-evdev run falls back to y/n, module reads scoped to the stub sysfs)"

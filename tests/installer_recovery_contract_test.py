@@ -254,16 +254,27 @@ assert "Modules built from revision:" in tool, \
     "the sweep file no longer records the revision the modules came from"
 
 # The sweep's existence, as one contiguous load line: an intent-only token
+# The sweep's existence, as one contiguous load line: an intent-only token
 # ('acpi_probe_power_cycle="$pc"') was satisfiable by a decoy comment while the
 # real load was gone (P3 wave). The biting check for what is actually loaded
-# is the sandbox's modprobe.log assertions; this one only guards the text.
+# is the sandbox's modprobe.log assertions; this one only guards the text. The
+# load line is data-driven now: the profile base (hunt_profile_params) plus the
+# variant's own params, all on the command line.
 assert "cmd_hunt" in tool and "hunt_verdict" in tool and \
-    'modprobe sl4a_spi_hid $opts acpi_probe_power_cycle="$pc" skip_vendor_stop="$svs" sl4a_debug_level=3' in tool, \
-    "the frame hunt is gone: a probe-axis bisect would need hand commands"
+    'modprobe sl4a_spi_hid $base $vparams sl4a_debug_level=3' in tool, \
+    "the frame hunt is gone: the battery would need hand commands"
+assert "HUNT_VARIANTS=(" in tool and "hunt_profile_params()" in tool, \
+    "the variant plan is gone: the battery would no longer be data-driven"
+assert "raw_mode=Y raw_input_beta=Y skip_getfeat=Y" in tool, \
+    "the raw profile's base parameters are gone from the battery"
 assert "sl4a_debug_level=3" in tool, \
     "hunt no longer raises the debug level, so the read bytes are not captured"
 assert ">>> TOUCH THE PANEL NOW" in tool, \
     "hunt no longer tells the user when to touch the panel"
+assert "hunt_evdev_read" in tool and "INPUT_DEV_ROOT" in tool, \
+    "hunt no longer reads the touch device's evdev node — the touch verdict is a guess again"
+assert "=== SUMMARY (" in tool, \
+    "the battery no longer emits the summary table the operator reads at a glance"
 
 assert "Unloading the previous build and loading the new one" in tool and \
     "modprobe -r sl4a_spi_hid sl4a_spi_amd" in tool, \
