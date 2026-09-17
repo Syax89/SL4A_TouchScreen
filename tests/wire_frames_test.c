@@ -350,9 +350,62 @@ static char *slurp(const char *path)
 	return buf;
 }
 
+/* Blank comments and string/char literals in place, keeping every newline so
+ * the text keeps its shape. The strstr checks below look for builder
+ * IDENTIFIERS, so a trailing comment (or a decoy string) carrying a name used
+ * to satisfy a needle while the real call was reverted — in-tree proven: a
+ * comment reading "was spi_hid_wire_set_feature5" kept this test green at
+ * 99/0 with the builder call gone (P16 wave, A:C5). Blanking is the cheap
+ * C-side equivalent of driver_source_sanity_test.py's code_view(). */
+static void blank_noncode(char *s, int keep_strings)
+{
+	size_t i = 0;
+
+	while (s[i]) {
+		if (s[i] == '/' && s[i + 1] == '/') {
+			while (s[i] && s[i] != '\n')
+				s[i++] = ' ';
+		} else if (s[i] == '/' && s[i + 1] == '*') {
+			s[i++] = ' ';
+			s[i++] = ' ';
+			while (s[i] && !(s[i] == '*' && s[i + 1] == '/')) {
+				if (s[i] != '\n')
+					s[i] = ' ';
+				i++;
+			}
+			if (s[i]) {
+				s[i++] = ' ';
+				s[i++] = ' ';
+			}
+		} else if (!keep_strings && (s[i] == '"' || s[i] == '\'')) {
+			char q = s[i];
+
+			s[i++] = ' ';
+			while (s[i] && s[i] != q) {
+				if (s[i] == '\\' && s[i + 1]) {
+					/* Escaped char: skip both, keep '\n' as
+					 * the newline it is (line continuation). */
+					s[i++] = ' ';
+					if (s[i] != '\n')
+						s[i] = ' ';
+					i++;
+				} else {
+					if (s[i] != '\n')
+						s[i] = ' ';
+					i++;
+				}
+			}
+			if (s[i])
+				s[i++] = ' ';
+		} else {
+			i++;
+		}
+	}
+}
+
 /* `make -C tests` runs this with tests/ as the working directory, but the
  * binary is also usable by hand from the repository root. */
-static char *slurp_driver_source(void)
+static char *slurp_driver_source(int keep_strings)
 {
 	static const char *paths[] = {
 		"../driver/spi-hid-core.c",
@@ -363,47 +416,53 @@ static char *slurp_driver_source(void)
 	for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
 		char *text = slurp(paths[i]);
 
-		if (text)
+		if (text) {
+			blank_noncode(text, keep_strings);
 			return text;
+		}
 	}
 	return NULL;
 }
 
 static void test_driver_uses_header(void)
 {
-	char *core = slurp_driver_source();
+	char *core = slurp_driver_source(1);	/* strings kept: the include line */
+	char *code = slurp_driver_source(0);	/* code only: decoys cannot satisfy */
 
-	if (!core) {
+	if (!core || !code) {
 		g_failed++;
 		g_passed++;
 		fprintf(stderr, "FAIL: cannot locate driver/spi-hid-core.c\n");
+		free(core);
+		free(code);
 		return;
 	}
 	CHECK(strstr(core, "#include \"spi-hid-wire-frames.h\"") != NULL,
 	      "spi-hid-core.c includes the frame header");
-	CHECK(strstr(core, "SPI_HID_WIRE_DOUBLE_DEFAULT") != NULL,
+	CHECK(strstr(code, "SPI_HID_WIRE_DOUBLE_DEFAULT") != NULL,
 	      "spi-hid-core.c initialises the parameter from the header default");
-	CHECK(strstr(core, "spi_hid_wire_set_feature5") != NULL,
+	CHECK(strstr(code, "spi_hid_wire_set_feature5") != NULL,
 	      "spi-hid-core.c builds SET_FEATURE through the header");
-	CHECK(strstr(core, "spi_hid_wire_get_feature6") != NULL,
+	CHECK(strstr(code, "spi_hid_wire_get_feature6") != NULL,
 	      "spi-hid-core.c builds GET_FEATURE 6 through the header");
-	CHECK(strstr(core, "spi_hid_wire_descreq") != NULL,
+	CHECK(strstr(code, "spi_hid_wire_descreq") != NULL,
 	      "spi-hid-core.c builds DESCREQ through the header");
-	CHECK(strstr(core, "spi_hid_wire_set_power_d0") != NULL &&
-	      strstr(core, "spi_hid_wire_set_power_d2") != NULL,
+	CHECK(strstr(code, "spi_hid_wire_set_power_d0") != NULL &&
+	      strstr(code, "spi_hid_wire_set_power_d2") != NULL,
 	      "spi-hid-core.c builds SET_POWER through the header");
 	/* Every doubled-opcode table lives in the header now: a literal doubled
 	 * frame reappearing in the driver means a local table came back. */
-	CHECK(strstr(core, "0x02, 0x02") == NULL,
+	CHECK(strstr(code, "0x02, 0x02") == NULL,
 	      "no doubled-opcode frame literal in spi-hid-core.c");
 	/* The read-frame default is a deliberate, field-settled choice (see the
 	 * block above `read_frame_variant` in spi-hid-core.c): this panel
 	 * answers the LEGACY shape, so the default must stay that variant until
 	 * the field says otherwise. Read here because the host build cannot
 	 * link a kernel TU. */
-	CHECK(strstr(core, "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;") != NULL,
+	CHECK(strstr(code, "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;") != NULL,
 	      "the read-frame default is still the field-settled LEGACY variant");
 	free(core);
+	free(code);
 }
 
 static void test_body_offset(void)

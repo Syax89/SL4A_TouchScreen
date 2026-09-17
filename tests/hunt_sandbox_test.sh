@@ -167,6 +167,12 @@ rc=$?
 grep -q 'rebuilding first' "$SB/run2.txt" || fail "a stale stamp did not trigger a rebuild"
 grep -q 'dkms build -m sl4a-touch -v ' "$SB/dkms.log" \
 	|| fail "a stale stamp printed the rebuild message but dkms was never asked to build (P15 wave, M9)"
+# ...and only THERE: a `dkms build` from any other path (say, unconditionally
+# at the top of cmd_hunt) satisfied the existence-only check above while the
+# stale-stamp path rebuilt nothing (P16 wave, B:C6). Run 1 used a fresh stamp,
+# so by now exactly one build has a reason to exist.
+[ "$(grep -c 'dkms build -m sl4a-touch -v ' "$SB/dkms.log" || true)" -eq 1 ] \
+	|| fail "expected exactly one dkms build (the stale-stamp rebuild), saw $(grep -c 'dkms build -m sl4a-touch -v ' "$SB/dkms.log" || true) — a build from another path satisfies the old check (P16 wave, B:C6)"
 [ "$(grep -c '^VERDICT' "$SB/out2.txt" || true)" -eq 4 ] || fail "the artifact after a rebuild is incomplete"
 
 # No panel at all: the sysfs glob matches nothing and the sweep must say so.
@@ -248,15 +254,36 @@ grep -q "no 'options sl4a_spi_hid' line" "$SB/run7.txt" \
 grep -q 'FALLBACK' "$SB/out7.txt" \
 	&& fail "the all-filtered profile is labelled FALLBACK though nothing is missing (P15 wave, B:C1)"
 
+# The same all-filtered shape, INDENTED and with a trailing comment: both
+# used to fall through — modprobe.d honours an indented `options` keyword, but
+# the column-0 anchors read it as a missing profile, and the comment tokens
+# were carried into the load line (P16 wave, B:C5). The label must stay honest
+# and the comment must not reach modprobe.
+printf '# SL4A_TouchScreen\n  options sl4a_spi_hid acpi_probe_power_cycle=1 skip_vendor_stop=1 # sweep note\n' \
+	> "$SB/etc/sl4a-spi-hid.conf"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out8.txt" > "$SB/run8.txt" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run8.txt"; fail "hunt exited $rc with an indented all-filtered profile"; }
+[ "$(grep -c '^VERDICT' "$SB/out8.txt" || true)" -eq 4 ] \
+	|| fail "the indented-profile artifact is incomplete"
+grep -q 'all of its parameters are sweep-controlled' "$SB/out8.txt" \
+	|| fail "an indented all-filtered profile is not labelled as such (P16 wave, B:C5)"
+grep -q "no 'options sl4a_spi_hid' line" "$SB/run8.txt" \
+	&& fail "an indented all-filtered profile took the missing-line warning about a line that exists (P16 wave, B:C5)"
+grep -q 'FALLBACK' "$SB/out8.txt" \
+	&& fail "an indented all-filtered profile is labelled FALLBACK though nothing is missing (P16 wave, B:C5)"
+grep -q '# sweep note' "$SB/modprobe.log" \
+	&& fail "the profile's trailing comment was carried into the load line (P16 wave, B:C5)"
+
 # Every sweep so far (control, rebuild, no-panel, quiet, wrapped ring,
-# missing profile, all-filtered) loaded the same four arms in the same order:
-# 28 loads, the pattern repeating. The profile now also carries the two knobs,
-# and the $opts filter must keep them OFF the load lines — a leaked pair ahead
-# of the arm's own could read as the arm's value (P14 wave: that mutation
-# stayed green too).
+# missing profile, all-filtered, indented all-filtered) loaded the same four
+# arms in the same order: 32 loads, the pattern repeating. The profile now
+# also carries the two knobs, and the $opts filter must keep them OFF the
+# load lines — a leaked pair ahead of the arm's own could read as the arm's
+# value (P14 wave: that mutation stayed green too).
 n_loaded="$(grep -c 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" || true)"
-[ "$n_loaded" -eq 28 ] \
-	|| fail "expected 28 driver loads after seven sweeps, saw $n_loaded"
+[ "$n_loaded" -eq 32 ] \
+	|| fail "expected 32 driver loads after eight sweeps, saw $n_loaded"
 awk '
 	/sl4a_spi_hid/ && /acpi_probe_power_cycle=/ {
 		if (gsub(/acpi_probe_power_cycle=/, "&") != 1 ||
@@ -280,4 +307,4 @@ n_rawn="$(grep -c 'raw_mode=N' "$SB/modprobe.log" || true)"
 [ "$n_rawn" -eq 4 ] \
 	|| fail "the missing-profile fallback loads should carry raw_mode=N on the 4 loads, saw $n_rawn (P15 wave, M6)"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives and really rebuilds, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, raw_mode carried, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, missing profile labels the fallback mode, all-filtered profile labels itself)"
+echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives and really rebuilds, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, raw_mode carried, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, missing profile labels the fallback mode, all-filtered profile labels itself, indented all-filtered profile labels itself)"

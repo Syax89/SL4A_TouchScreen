@@ -29,6 +29,17 @@ handler = core.rsplit("static void seq_handle_data(", 1)[1].split("\n}", 1)[0]
 assert handler.index("!shid->raw_handshake_confirmed") < handler.index(
     "mshw0231_raw_consume_v0(shid, &body[5], rblen - 5)")
 assert "mshw0231_raw_consume_v0(shid, &shid->data_buf[5]" in core
+# The poller's handshake guard is the SAME gate on the other consume path,
+# and it was wholly unpinned (P16 wave, A:C4): replacing it with
+# `if (shid->raw_mode_active)` retired the handshake on ANY frame — the exact
+# defect the handler's own comment warns about — with this test and the
+# sanity test both green (in-tree proven). Mirror the handler's ordering pin
+# inside the poller slice: the confirming-frame guard comes first.
+poll = core.rsplit("static void spi_hid_poll_work", 1)[1].split("\n}", 1)[0]
+assert "!shid->raw_handshake_confirmed" in poll
+assert "spi_hid_protocol_raw_confirms_handshake(shid->data_buf[7], rl)" in poll
+assert poll.index("!shid->raw_handshake_confirmed") < poll.index(
+    "mshw0231_raw_consume_v0(shid, &shid->data_buf[5]")
 assert "spi_hid_capimg_decode_v0" in raw
 assert "mshw0231_raw_process_samples" not in core
 assert "static void mshw0231_raw_process_samples" in raw

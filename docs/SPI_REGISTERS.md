@@ -37,7 +37,7 @@ driver's physical ALT_CS mapping is an unresolved board-specific quirk.
 
 | Offset | Name | Capacity | Access |
 |--------|------|----------|--------|
-| 0x80-0xC6 | Data FIFO | 71 bytes | R/W |
+| 0x80-0xC5 | Data FIFO | 70 bytes | R/W |
 | 0x04 (within FIFO range) | Opcode FIFO | 8 slots × 8-bit | W |
 
 ## CTRL0 Register Bit Map (0x00)
@@ -87,7 +87,7 @@ Bit 0     : reserved
 
 ```
 1. Select chip, program opcode FIFO
-2. Set TX_COUNT = n_bytes (leave ≥4 bytes headroom for FIFO status)
+2. Set TX_COUNT = n_bytes (the single echo byte counts toward the FIFO budget)
 3. Write opcode + payload to TX FIFO
 4. Trigger EXEC_OPCODE
 5. Poll: wait for bus idle + TX FIFO empty

@@ -205,9 +205,9 @@ modprobe_profile() {
 	# driver's own parm desc) use 0/1, and modprobe/kstrtobool accept both —
 	# accepting only Y/N made status call a working profile "unrecognized"
 	# and install warn about a change that never happened (P12 wave, F3).
-	if grep -qE '^options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=([Yy]|1)' "$MODPROBE_CONF" 2>/dev/null; then
+	if grep -qE '^[[:space:]]*options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=([Yy]|1)' "$MODPROBE_CONF" 2>/dev/null; then
 		echo "raw"
-	elif grep -qE '^options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=([Nn]|0)' "$MODPROBE_CONF" 2>/dev/null; then
+	elif grep -qE '^[[:space:]]*options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=([Nn]|0)' "$MODPROBE_CONF" 2>/dev/null; then
 		echo "standard"
 	else
 		echo "unknown"
@@ -930,7 +930,7 @@ EOF
 				if [ -n "$running" ] && [ "$running" != "$v" ]; then
 					profile_mismatch="${profile_mismatch:+$profile_mismatch, }$k=$running running, $v configured"
 				fi
-			done < <(awk '/^options[ \t]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) { split($i, kv, "="); if (kv[1] != "") print kv[1], kv[2] } }' "$MODPROBE_CONF" 2>/dev/null)
+			done < <(awk '/^[ \t]*options[ \t]+sl4a_spi_hid/ { sub(/#.*/, ""); for (i = 3; i <= NF; i++) { split($i, kv, "="); if (kv[1] != "") print kv[1], kv[2] } }' "$MODPROBE_CONF" 2>/dev/null)
 			if [ -n "$profile_mismatch" ]; then
 				stale="${stale:+$stale, }profile"
 				warn "The running module has a different profile than the one installed:"
@@ -1745,7 +1745,7 @@ cmd_hunt() {
 	# controls (three it sets below, three it pins at the module default).
 	local opts opts_note
 	opts_note=""
-	opts="$(awk '/^options[ 	]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level|wire_double_opcode|setfeat_no_double|acpi_probe_power_cycle|skip_vendor_stop)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
+	opts="$(awk '/^[ 	]*options[ 	]+sl4a_spi_hid/ { sub(/#.*/, ""); for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level|wire_double_opcode|setfeat_no_double|acpi_probe_power_cycle|skip_vendor_stop)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
 
 	if [ -z "$opts" ]; then
 		# Two shapes reach an empty $opts, and only one of them is a missing
@@ -1758,7 +1758,7 @@ cmd_hunt() {
 		# probe arms 2/3 would repeat arms 0/1 exactly while the artifact
 		# still listed four variants. The run is kept — a refusal would strand
 		# a field trip — but labelled wherever it is printed (P14 wave, A:C6/F5).
-		if grep -qE '^options[[:space:]]+sl4a_spi_hid' "$MODPROBE_CONF" 2>/dev/null; then
+		if grep -qE '^[[:space:]]*options[[:space:]]+sl4a_spi_hid' "$MODPROBE_CONF" 2>/dev/null; then
 			opts_note=" (profile line present, all of its parameters are sweep-controlled — no other options carried)"
 		else
 			opts="raw_mode=N"

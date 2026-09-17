@@ -622,6 +622,20 @@ def check_control_flow_pins():
               "gates on the restart's REFUSAL (negated) with an exit through out: — "
               "the w7/w8 shape the P15 wave re-derived")
         failures += 1
+    # P16 wave, B:C1: banning `return` was not enough — nothing required every
+    # exit to reach `out`. A `goto out2;` whose `out2:` label sat after the
+    # unlock jumped past it and leaked seq_lock with this check green
+    # (in-tree proven). Every goto must target `out`, and `out:` must be the
+    # label that unlocks.
+    if any(_t != "out" for _t in re.findall(r"\bgoto\s+(\w+)\s*;", _dw)):
+        print("FAIL driver/spi-hid-core.c: descreq_work() jumps to a label other "
+              "than `out` while holding seq_lock — only out: drops the mutex, so "
+              "any other target can leave it held (P16 wave, B:C1)")
+        failures += 1
+    if not re.search(r"\bout:\s*\n\s*mutex_unlock\(&shid->seq_lock\);", _dw):
+        print("FAIL driver/spi-hid-core.c: descreq_work()'s `out:` no longer "
+              "unlocks seq_lock directly (P16 wave, B:C1)")
+        failures += 1
 
     # 7e. The stripper's own contract, executable: a quote at end-of-line must
     # not hand the next line to the code view (P15 wave: that bypass satisfied
@@ -641,6 +655,25 @@ def check_control_flow_pins():
               "ends a literal at a backslash-escaped quote — the smuggled text "
               "reaches the code view (P16 wave)")
         failures += 1
+    # 7f. raw_detect_peaks()'s gate is a FULL (2R+1)^2 neighbourhood scan (P16
+    # wave, A:C3): the radius-literal pin missed every shape that changes the
+    # EFFECTIVE radius — a `+ 1` on either walk bound and a 4-point cross probe
+    # at the pinned R stayed green on every fixture (in-tree proven). The scan
+    # is static kernel-only code, so pin its shape: both walks span
+    # -HEATMAP_PEAK_RADIUS..+HEATMAP_PEAK_RADIUS over the full square.
+    _raw = code_view((ROOT / "driver" / "mshw0231-raw.c").read_text())
+    for _needle, _why in (
+            ("for (dr = -(s32)HEATMAP_PEAK_RADIUS; ok && dr <= (s32)HEATMAP_PEAK_RADIUS; dr++)",
+             "the peak gate's row walk no longer spans -R..+R over the full "
+             "square (a widened or narrowed bound is a different effective "
+             "radius — the 4-point cross probe this replaced lived there)"),
+            ("for (dc = -(s32)HEATMAP_PEAK_RADIUS; dc <= (s32)HEATMAP_PEAK_RADIUS; dc++)",
+             "the peak gate's column walk no longer spans -R..+R over the full "
+             "square"),
+    ):
+        if _needle not in _raw:
+            print(f"FAIL driver/mshw0231-raw.c: {_why} (P16 wave, A:C3)")
+            failures += 1
     # The writes that ask for a response must record which request they are,
     # or the read that follows names nothing (trace: 00 04 03 00 06,
     # 00 03 0A 00 56). The descriptor requests are the 0/0 case.
