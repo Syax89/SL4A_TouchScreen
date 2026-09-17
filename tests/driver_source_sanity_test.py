@@ -611,6 +611,83 @@ def check_control_flow_pins():
                           f"lost '{_needle}' — {_why}")
                     failures += 1
 
+    # raw_pre_desc_reg0 (H4 double-blind falsifier, the cross-family wave's
+    # delta-of-deltas #1): declared, loadable, and consulted at BOTH spots the
+    # knob must reach — the probe-time stream-register force AND the raw
+    # pre-DONE branch of spi_hid_seq_read(). The H4 legs gave this the
+    # falsifier "one raw sweep with the probe force removed (reads reg 0
+    # through WAIT_DESC) showing a first-try DEVICE_DESC and
+    # stat_device_desc > 0". Removing either consultation leaves the knob
+    # declared and loadable but inert: the force still points the handshake at
+    # 0x0A (or the read still selects {3, 0x0A}), so the sweep is the parent
+    # byte-for-byte and proves nothing. Each site is window-scoped, not a fixed
+    # byte reach (the raw_fallback_on_reset lesson): the probe window is the
+    # probe body up to the guard on the assignment, the read window is the raw
+    # branch up to its own closing brace.
+    if "static bool raw_pre_desc_reg0;" not in core_code:
+        print("FAIL driver/spi-hid-core.c: raw_pre_desc_reg0 is no longer declared")
+        failures += 1
+    if "module_param(raw_pre_desc_reg0, bool, 0444);" not in core_code:
+        print("FAIL driver/spi-hid-core.c: raw_pre_desc_reg0 is no longer loadable")
+        failures += 1
+    _pr0_probe = (core_code.rsplit("static int spi_hid_probe(struct spi_device *spi)", 1)[1]
+                  .split("\n}", 1)[0]
+                  if "static int spi_hid_probe(struct spi_device *spi)" in core_code else "")
+    _pr0_force = _pr0_probe.split(
+        "shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;", 1)
+    if len(_pr0_force) != 2:
+        print("FAIL driver/spi-hid-core.c: the probe's raw stream-register force is gone — "
+              "raw_pre_desc_reg0 has nothing to skip")
+        failures += 1
+    else:
+        # The guard is the `if (` immediately before the assignment: a knob
+        # consultation anywhere else in the (huge) probe body would not gate
+        # the force. Whitespace-normalised so the exact spelling of the
+        # condition does not matter, only that the knob is in it — and negated
+        # (skip the force WHEN SET, spec item 1), so a polarity flip that keeps
+        # the knob name but forces 0x0A whenever the knob is set is also red.
+        _pr0_guard = _pr0_force[0].rsplit("if (", 1)
+        _pr0_g = "".join(_pr0_guard[1].split()) if len(_pr0_guard) == 2 else ""
+        if "raw_pre_desc_reg0" not in _pr0_g:
+            print("FAIL driver/spi-hid-core.c: the probe stream-register force no longer "
+                  "consults raw_pre_desc_reg0 — with the knob set input_register is still "
+                  "forced to 0x0A and the H4 sweep can never read register 0")
+            failures += 1
+        elif "!raw_pre_desc_reg0" not in _pr0_g:
+            print("FAIL driver/spi-hid-core.c: the probe stream-register force consults "
+                  "raw_pre_desc_reg0 without negating it — the force now fires exactly when "
+                  "the H4 sweep sets the knob, the opposite of spec item 1")
+            failures += 1
+    _pr0_rd = (core_code.split("static int spi_hid_seq_read(struct", 1)[1].split("\n}", 1)[0]
+               if "static int spi_hid_seq_read(struct" in core_code else "")
+    _pr0_raw = _pr0_rd.split("if (shid->raw_mode_active) {", 1)
+    if len(_pr0_raw) != 2:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read()'s raw branch is gone — "
+              "raw_pre_desc_reg0 has no read destination to reroute")
+        failures += 1
+    else:
+        _pr0_body = _pr0_raw[1].split("\n\t}", 1)
+        if len(_pr0_body) != 2:
+            print("FAIL driver/spi-hid-core.c: the raw read branch is not closed at its own "
+                  "indent — raw_pre_desc_reg0 cannot be scoped to the branch (H4)")
+            failures += 1
+        elif "raw_pre_desc_reg0" not in _pr0_body[0]:
+            print("FAIL driver/spi-hid-core.c: the raw read branch no longer consults "
+                  "raw_pre_desc_reg0 — pre-DONE reads stay on {3, 0x0A} and the H4 sweep "
+                  "still points the handshake at the stream register")
+            failures += 1
+        elif "shid->desc.input_register" not in \
+                _pr0_body[0].split("raw_pre_desc_reg0", 1)[1]:
+            print("FAIL driver/spi-hid-core.c: the raw read branch consults raw_pre_desc_reg0 "
+                  "but no longer routes the pre-DONE read to input_register — the register "
+                  "destination is the H4 falsifier's whole subject")
+            failures += 1
+        elif "!raw_pre_desc_reg0" in "".join(_pr0_body[0].split()):
+            print("FAIL driver/spi-hid-core.c: the raw read branch negates raw_pre_desc_reg0 — "
+                  "pre-DONE would then route to input_register when the knob is OFF, inverting "
+                  "spec item 1 (the default build must keep {3, 0x0A})")
+            failures += 1
+
     # 7b. sync_timeout_ms is clamped at probe into the protocol's bounds — the
     # same class as the getfeat_delay_ms clamp above it: negative wraps
     # msecs_to_jiffies() into the far future (a synchronous request waits

@@ -77,6 +77,20 @@ static bool skip_vendor_stop;
  * retry is right for a device still answering, and the watchdog owns the
  * never-answering shape in raw mode. */
 static bool raw_fallback_on_reset;
+/* H4 double-blind falsifier (2026-09-17 regression), ranked the delta-of-deltas
+ * #1: the raw handshake never reads register 0 during discovery, and the
+ * panel's dialect IS the reg-0 5-byte read — standard mode keeps the
+ * descriptor's register and tries {3, 0}, finds the panel's reg-0 answers and
+ * completes on the same build, the raw-vs-standard asymmetry. Set to 1 to
+ * restore v1.5.0's pre-DONE read destination: skip the probe-time
+ * stream-register force (leave input_register exactly as v1.5.0 did — 0 until a
+ * descriptor parses) and, in spi_hid_seq_read()'s raw branch, route every
+ * pre-DONE state to input_register instead of the output_register ?: 0x0003
+ * fallback. DONE keeps the current stream-register behavior either way. One raw
+ * sweep tells whether the register destination is the wedge — first-try
+ * DEVICE_DESC and stat_device_desc > 0 — or not. Default 0: byte-for-byte the
+ * parent. */
+static bool raw_pre_desc_reg0;
 /* Deprecated alias: 1 asked for the frame without the doubled opcode, which is
  * the default now, so it only matters as an override of wire_double_opcode=1.
  * Kept declared so existing modprobe.d drop-ins keep loading. */
@@ -1395,18 +1409,32 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * The leg that checked this function's claim that "the stream uses its own
 	 * explicit calls" found no such call anywhere — the claim was mine. */
 	if (shid->raw_mode_active) {
-		if (shid->seq_state == SPI_HID_SEQ_WAIT_RESET)
-			reg = 0;                      /* the reset, and its drain */
-		else if (shid->seq_state != SPI_HID_SEQ_DONE)
-			/* Same fallback the body read has always used. Until the
-			 * DEVICE_DESC is parsed this field is still zero, and reading any
-			 * raw-mode header from register 0 gets a RESET_RSP back — the loop
-			 * that keeps discovery in WAIT_DESC on a faithful device. This
-			 * covers WAIT_RPT, WAIT_FEATURE and VENDOR_INIT as well as
-			 * WAIT_DESC; DONE is excluded above because there the stream
-			 * register is the point. The comment here used to claim header and
-			 * body read the same register; they did not. */
-			reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+		if (shid->seq_state != SPI_HID_SEQ_DONE) {
+			/* H4 falsifier: with raw_pre_desc_reg0 set (and the probe
+			 * force above skipped), every pre-DONE read goes to the
+			 * input_register — still 0 until a descriptor parses, the
+			 * register the panel actually answers on — instead of
+			 * {3, 0x0A}. One raw sweep tells whether the register
+			 * destination is the wedge: first-try DEVICE_DESC and
+			 * stat_device_desc > 0, or not. */
+			if (raw_pre_desc_reg0)
+				reg = shid->desc.input_register;
+			else if (shid->seq_state == SPI_HID_SEQ_WAIT_RESET)
+				reg = 0;              /* the reset, and its drain */
+			else
+				/* Same fallback the body read has always used. Until the
+				 * DEVICE_DESC is parsed this field is still zero, and reading any
+				 * raw-mode header from register 0 gets a RESET_RSP back — the loop
+				 * that keeps discovery in WAIT_DESC on a faithful device. This
+				 * covers WAIT_RPT, WAIT_FEATURE and VENDOR_INIT as well as
+				 * WAIT_DESC; DONE is excluded above because there the stream
+				 * register is the point. The comment here used to claim header and
+				 * body read the same register; they did not. */
+				reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+		}
+		/* DONE keeps the current stream-register behavior: reg stays the
+		 * descriptor's input_register, which the raw path forced to 0x0A
+		 * at probe (unless raw_pre_desc_reg0 skipped that force). */
 	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
@@ -2123,6 +2151,10 @@ MODULE_PARM_DESC(skip_vendor_stop,
 module_param(raw_fallback_on_reset, bool, 0444);
 MODULE_PARM_DESC(raw_fallback_on_reset,
 	"poller RESET_RSP gives up to the hardcoded fallback as b1f8109 did (default 0)");
+module_param(raw_pre_desc_reg0, bool, 0444);
+MODULE_PARM_DESC(raw_pre_desc_reg0,
+	"H4 falsifier: skip the raw probe stream-register force and read every pre-DONE "
+	"register 0 / input_register instead of {3, 0x0A} (default 0)");
 module_param(wire_double_opcode, bool, 0444);
 MODULE_PARM_DESC(wire_double_opcode,
 	"Send the legacy doubled leading opcode (02 02 ..) instead of the "
@@ -4196,8 +4228,11 @@ static int spi_hid_probe(struct spi_device *spi)
 	 * the capture names (0 for the reset, 3 for the descriptor) and this force
 	 * would send every one of them to the stream register instead. A leg found
 	 * the window: probe to first DEVICE_DESC, self-healing on a successful
-	 * parse, with every handshake read misdirected until then. */
-	if (shid->raw_mode_active)
+	 * parse, with every handshake read misdirected until then. raw_pre_desc_reg0
+	 * skips this force so the H4 falsifier can read register 0 through
+	 * WAIT_DESC: with it set input_register stays 0 until a descriptor parses,
+	 * exactly as v1.5.0 had it. */
+	if (shid->raw_mode_active && !raw_pre_desc_reg0)
 		shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;
 	/* The enable is NOT sent here any more: it is sent when the sequencer
 	 * reaches DONE, after the descriptor exchange, as the reference does. See
