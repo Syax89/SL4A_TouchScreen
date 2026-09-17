@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### The hunt sweeps the wire forms, and the file says what the OS sees
+
+The 2026-09-17 field regression (raw touch answered on v1.6.3 and reset-looped
+after the campaign's wire changes) moved the hunt's variant axis from the read
+frame to the wire itself: `wire_double_opcode` 0 (single - the failing shape),
+1 (doubled - what v1.6.3 shipped on every control frame) and 2 (doubled except
+SET_FEATURE5), with reads at the module default. Every variant now names its
+wire profile in the artifact, the file carries the first control write's bytes
+(the doubled-vs-single discriminator is its second byte), and an "OS binding"
+block reports what the system sees before anything is unloaded (ACPI device,
+bound driver, registered input device). The sandbox test fails if any of the
+three shapes is not actually loaded, or if the artifact does not name the one
+it ran. The rest of the collection upgrade: `docs/TOOL-COLLECTION-PLAN.md`.
+
 ### The wire contract against the capture: a tool that printed no TX, and four shapes no pin held
 
 The P4 double-blind wave read the wire contract — `spi-hid-protocol.h`,

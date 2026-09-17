@@ -248,8 +248,8 @@ assert "Modules built from revision:" in tool, \
     "the sweep file no longer records the revision the modules came from"
 
 assert "cmd_hunt" in tool and "hunt_verdict" in tool and \
-    'read_frame_variant="$variant"' in tool, \
-    "the frame hunt is gone: a read-shape bisect would need hand commands"
+    'wire_double_opcode="$wd"' in tool, \
+    "the frame hunt is gone: a wire-shape bisect would need hand commands"
 assert "sl4a_debug_level=3" in tool, \
     "hunt no longer raises the debug level, so the read bytes are not captured"
 assert ">>> TOUCH THE PANEL NOW" in tool, \

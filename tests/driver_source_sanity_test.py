@@ -108,7 +108,8 @@ def check_control_flow_pins():
     # leave the host byte-identical and the device cannot tell them apart —
     # found independently by two blind legs, and against the header's own
     # comment on the builder. The stop frame above removes the stream state that
-    # made the crude form look necessary; `hunt` still sweeps all three.
+    # made the crude form look necessary; the read shape stays at this default
+    # and `hunt` sweeps the wire forms (doubled opcode) instead.
     if "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;" not in core_code:
         print("FAIL driver/spi-hid-core.c: read_frame_variant no longer defaults to the "
               "shape this PANEL answers. The reference shape is the authority on the "

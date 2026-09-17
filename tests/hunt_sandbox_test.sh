@@ -75,6 +75,17 @@ n="$(grep -c '^VERDICT' "$SB/out.txt" || true)"
 grep -q '^sl4a_spi_amd debug_trace=3$' "$SB/modprobe.log" \
 	|| fail "hunt loaded sl4a_spi_amd without debug_trace=3 — the RX-region peek cannot reach the artifact"
 
+# The wire-form axis is the one the artifact has to explain: if the sweep does
+# not actually load all three shapes, the bundle cannot say which one answered.
+grep -q 'wire_double_opcode=0 setfeat_no_double=0' "$SB/modprobe.log" \
+	|| fail "the sweep never loaded the control (single-opcode) wire shape"
+grep -q 'wire_double_opcode=1 setfeat_no_double=0' "$SB/modprobe.log" \
+	|| fail "the sweep never loaded the doubled (v1.6.3) wire shape"
+grep -q 'wire_double_opcode=1 setfeat_no_double=1' "$SB/modprobe.log" \
+	|| fail "the sweep never loaded the doubled-except-SET_FEATURE5 wire shape"
+grep -q 'wire_double_opcode=1 setfeat_no_double=1' "$SB/out.txt" \
+	|| fail "the artifact never names the wire variant it ran"
+
 # The progress the user asked for has to be on the terminal too, not only in
 # the file — that is the whole point of it.
 grep -q '\[1/3\] variant 0' "$SB/run.txt" || fail "no per-variant progress on the terminal"

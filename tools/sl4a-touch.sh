@@ -307,10 +307,12 @@ Commands:
                     bytes, filtered dmesg) into a single text file for bug
                     reports. Default output path is printed at the end.
   hunt [-o PATH]   One command for a display problem: unloads the driver and
-                    reloads it once per read-frame variant (0 reference, 1
-                    legacy, 2 both) at debug level 3, waits while you touch
-                    the panel, and writes ONE file with every variant's
-                    counters, driver log and a verdict line. Send that file.
+                    reloads it once per wire variant (0 single opcode - the
+                    shape that fails; 1 doubled opcode - the v1.6.3 shape
+                    that worked; 2 doubled except SET_FEATURE5) at debug
+                    level 3, waits while you touch the panel, and writes ONE
+                    file with every variant's wire profile, counters, driver
+                    log and a verdict line. Send that file.
                     Default output: next to the driver, like the
                     diagnostics bundle (sl4a-hunt-<timestamp>.txt).
 
@@ -1741,11 +1743,11 @@ cmd_hunt() {
 
 	# The installed profile's own parameters, minus the two this command sets.
 	local opts
-	opts="$(awk '/^options[ \t]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
+	opts="$(awk '/^options[ \t]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level|wire_double_opcode|setfeat_no_double)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
 
 	[ -n "$opts" ] || opts="raw_mode=N"
 
-	info "Frame hunt: three read shapes, one file, no commands for you. Leave the panel alone until asked."
+	info "Frame hunt: three wire shapes, one file, no commands for you. Leave the panel alone until asked."
 	[ -n "$SYSFS_DIR" ] || warn "sysfs directory for the device not found — statistics will be missing"
 
 	# The sweep is worthless against a stale module, and reloading does not
@@ -1775,10 +1777,34 @@ cmd_hunt() {
 		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 		echo "Profile options from $MODPROBE_CONF: $opts"
 		echo "Modules built from revision: $(installed_head)  (checkout: $head_now)"
+		# What the OS itself sees right now, before anything is unloaded: a
+		# panel that never binds, or an input device that never registers, is
+		# a different problem from one that binds and stays quiet.
+		local acpi_id drv input_state
+		acpi_id="$(touchscreen_acpi_id 2>/dev/null)" || acpi_id="none"
+		drv="$(bound_driver "$SYSFS_DIR" 2>/dev/null)" || drv="none"
+		if grep -qi MSHW /proc/bus/input/devices 2>/dev/null; then
+			input_state="registered"
+		else
+			input_state="not registered"
+		fi
+		echo "-- OS binding --"
+		echo "ACPI device: $acpi_id"
+		echo "bound driver: $drv"
+		echo "input device (MSHW in /proc/bus/input/devices): $input_state"
 		echo ""
 
+		# The axis under test since the 2026-09-17 field regression: the doubled
+		# leading opcode v1.6.3 sent on the control frames, which the current
+		# build sends single. Reads stay at the module default (legacy).
 		for variant in 0 1 2; do
-			echo "--- variant $variant ---"
+			local wd snd
+			case "$variant" in
+				0) wd=0; snd=0 ;;
+				1) wd=1; snd=0 ;;
+				2) wd=1; snd=1 ;;
+			esac
+			echo "--- variant $variant (wire_double_opcode=$wd setfeat_no_double=$snd) ---"
 			printf '\n[%d/3] variant %s: reloading the driver, debug level 3 (~11 s)\n' "$((variant + 1))" "$variant" >&3
 			local dmesg_mark
 			dmesg_mark="$(dmesg 2>/dev/null | wc -l)"
@@ -1790,9 +1816,9 @@ cmd_hunt() {
 			# line this sweep exists to capture out of every artifact.
 			modprobe sl4a_spi_amd debug_trace=3 2>/dev/null || true
 			# shellcheck disable=SC2086
-			modprobe sl4a_spi_hid $opts read_frame_variant="$variant" sl4a_debug_level=3 2>/dev/null || true
+			modprobe sl4a_spi_hid $opts wire_double_opcode="$wd" setfeat_no_double="$snd" sl4a_debug_level=3 2>/dev/null || true
 			sleep 4
-			echo "running variant: $(cat /sys/module/sl4a_spi_hid/parameters/read_frame_variant 2>/dev/null) at debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null) controller trace $(cat /sys/module/sl4a_spi_amd/parameters/debug_trace 2>/dev/null || echo '?')"
+			echo "running variant: wire_double_opcode=$wd setfeat_no_double=$snd at debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null) controller trace $(cat /sys/module/sl4a_spi_amd/parameters/debug_trace 2>/dev/null || echo '?')"
 			for _s in 6 5 4 3 2 1; do
 				printf '\r     >>> TOUCH THE PANEL NOW (tocca il pannello) — %d <<<   ' "$_s" >&3
 				sleep 1
@@ -1820,7 +1846,12 @@ cmd_hunt() {
 				dmesg 2>/dev/null | grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60 || true
 			fi
 			echo ""
-			echo "VERDICT: $(hunt_verdict "$variant" "$SYSFS_DIR")"
+			# The proof of what actually went on the wire for this load: the first
+			# control write, hex and all - doubled vs single is its second byte.
+			local wr
+			wr="$(printf '%s\n' "$win" | grep -m1 'write op=0x02')" || wr=""
+			[ -n "$wr" ] && echo "first write on the wire: $wr"
+			echo "VERDICT (wire_double_opcode=$wd setfeat_no_double=$snd): $(hunt_verdict "$variant" "$SYSFS_DIR")"
 			echo ""
 			info "variant $variant done"
 		done
