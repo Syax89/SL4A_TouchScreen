@@ -201,9 +201,13 @@ dkms_remove_other_versions() {
 
 modprobe_profile() {
 	[ -f "$MODPROBE_CONF" ] || { echo "none"; return; }
-	if grep -qE '^options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=Y' "$MODPROBE_CONF" 2>/dev/null; then
+	# Spellings: the tool writes Y/N, but the README/QUICKSTART (and the
+	# driver's own parm desc) use 0/1, and modprobe/kstrtobool accept both —
+	# accepting only Y/N made status call a working profile "unrecognized"
+	# and install warn about a change that never happened (P12 wave, F3).
+	if grep -qE '^options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=([Yy]|1)' "$MODPROBE_CONF" 2>/dev/null; then
 		echo "raw"
-	elif grep -qE '^options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=N' "$MODPROBE_CONF" 2>/dev/null; then
+	elif grep -qE '^options[[:space:]]+sl4a_spi_hid[[:space:]].*raw_mode=([Nn]|0)' "$MODPROBE_CONF" 2>/dev/null; then
 		echo "standard"
 	else
 		echo "unknown"
@@ -548,6 +552,14 @@ cmd_install() {
 		[ "$REPAIR" -eq 1 ] || fail "refusing to replace unowned $MODPROBE_CONF — it is not ours. Move it aside yourself, or re-run with '--repair' to have it moved aside for you (nothing is deleted)"
 		quarantine_unowned "$MODPROBE_CONF"
 	fi
+	# Same guard, same reason, deliberately in the same place: it used to run
+	# at Step 6, AFTER the DKMS build/install, the version sweep and the
+	# profile write — a refusal there left a half install with no boot unit
+	# and no rollback (P12 wave, F1). Nothing below depends on the old spot.
+	if [ -e "$SYSTEMD_UNIT" ] && ! grep -q '^# SL4A_TouchScreen' "$SYSTEMD_UNIT"; then
+		[ "$REPAIR" -eq 1 ] || fail "refusing to replace unowned $SYSTEMD_UNIT — it is not ours. Move it aside yourself, or re-run with '--repair' to have it moved aside for you (nothing is deleted)"
+		quarantine_unowned "$SYSTEMD_UNIT"
+	fi
 
 	local skip_activate=0
 
@@ -687,14 +699,9 @@ cmd_install() {
 
 	cleanup_staged_install() {
 		dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all >/dev/null 2>&1 || true
-		# Same ownership rule as the two removal paths: never delete a tree
-		# that carries someone else's dkms.conf. A partial copy of our own
-		# staging has no dkms.conf yet and stays safe to drop.
-		if [ -f "$SRC_DEST/dkms.conf" ] && \
-		   ! grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$SRC_DEST/dkms.conf"; then
-			info "Leaving unowned $SRC_DEST untouched"
-			return 0
-		fi
+		# An unowned tree is refused before staging (see the guard above), so
+		# by the time this runs $SRC_DEST is ours or a partial copy of our
+		# own staging — both safe to drop.
 		rm -rf "$SRC_DEST"
 	}
 
@@ -713,11 +720,28 @@ cmd_install() {
 			# "existing driver state was left unchanged" would be false.
 			fail "${1%%;*} — the previous driver artifact was already uninstalled, so there is no driver installed right now; re-run 'install' once the cause above is fixed"
 		fi
+		if [ "$already_added" -eq 1 ]; then
+			# The DKMS entry and the installed module are untouched, but the
+			# staged sources were updated from this checkout before the build
+			# ran — and DKMS rebuilds from them on every kernel update, so a
+			# broken tree keeps failing there too (P12 wave, P12-5).
+			fail "${1%%;*} — the DKMS entry and the installed driver are unchanged, but the staged sources under $SRC_DEST were updated from this checkout; fix the build so the next kernel update can rebuild from them"
+		fi
 		fail "$1"
 	}
 
 	local already_added=0
 	local legacy_removed=0
+	# The staged tree gets the same pre-write ownership guard as the modprobe
+	# config and the boot unit: staging below (cp -a) replaces every file in
+	# it, so an unowned tree would be clobbered file by file while the old
+	# code printed "Leaving unowned ... untouched" (P12 wave, P12-4). Refuse
+	# first; --repair moves it aside.
+	if [ -e "$SRC_DEST" ] && [ -f "$SRC_DEST/dkms.conf" ] && \
+	   ! grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$SRC_DEST/dkms.conf"; then
+		[ "$REPAIR" -eq 1 ] || fail "refusing to replace unowned $SRC_DEST — it is not ours. Move it aside yourself, or re-run with '--repair' to have it moved aside for you (nothing is deleted)"
+		quarantine_unowned "$SRC_DEST"
+	fi
 	if [ -e "$SRC_DEST" ]; then
 		if dkms status -m "$PKG_NAME" -v "$PKG_VERSION" 2>/dev/null | grep -q "installed"; then
 			if grep -q '^obj-m += sl4a-spi-amd.o$' "$SRC_DEST/Kbuild" && \
@@ -735,14 +759,9 @@ cmd_install() {
 				info "Replacing the package's legacy spi-amd artifact with the opt-in controller module..."
 				dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all || fail "could not remove the package's legacy DKMS artifact"
 				legacy_removed=1
-				# Same ownership rule as the other two removal paths: never delete
-				# a tree that carries someone else's dkms.conf.
-				if [ -f "$SRC_DEST/dkms.conf" ] && \
-				   ! grep -qE '^PACKAGE_NAME="sl4a-touch"[[:space:]]*$' "$SRC_DEST/dkms.conf"; then
-					info "Leaving unowned $SRC_DEST untouched"
-				else
-					rm -rf "$SRC_DEST"
-				fi
+				# The tree is ours (the ownership guard ran before the case
+				# analysis), so it goes with the legacy artifact it holds.
+				rm -rf "$SRC_DEST"
 			fi
 		else
 			# Left behind by an interrupted run: recoverable, not a dead end.
@@ -845,12 +864,9 @@ SuccessExitStatus=0 1
 [Install]
 WantedBy=multi-user.target
 EOF
-	# Same ownership guard the modprobe config gets: never clobber a file at
-	# this path that this tool did not write.
-	if [ -e "$SYSTEMD_UNIT" ] && ! grep -q '^# SL4A_TouchScreen' "$SYSTEMD_UNIT"; then
-		[ "$REPAIR" -eq 1 ] || fail "refusing to replace unowned $SYSTEMD_UNIT — it is not ours. Move it aside yourself, or re-run with '--repair' to have it moved aside for you (nothing is deleted)"
-		quarantine_unowned "$SYSTEMD_UNIT"
-	fi
+	# The ownership check for this path already ran next to the modprobe
+	# config's (before any write this run makes), so reaching this point
+	# means the unit file is ours or absent.
 	install -m 0644 "$tmp_config" "$SYSTEMD_UNIT"
 	rm -f "$tmp_config"
 	systemctl daemon-reload
@@ -903,7 +919,12 @@ EOF
 			profile_mismatch=""
 			while read -r k v; do
 				[ -n "$k" ] || continue
+				# sysfs prints booleans as Y/N; a hand-edited profile may
+				# spell them 0/1 or y/n (all equivalent to the kernel). Say
+				# nothing about a spelling difference (P12 wave, F3).
+				case "$v" in 1|[Yy]) v=Y ;; 0|[Nn]) v=N ;; esac
 				running="$(cat "/sys/module/sl4a_spi_hid/parameters/$k" 2>/dev/null || true)"
+				case "$running" in 1|[Yy]) running=Y ;; 0|[Nn]) running=N ;; esac
 				if [ -n "$running" ] && [ "$running" != "$v" ]; then
 					profile_mismatch="${profile_mismatch:+$profile_mismatch, }$k=$running running, $v configured"
 				fi
@@ -983,6 +1004,11 @@ cmd_uninstall() {
 			*) fail "unknown uninstall option: $arg (see --help)" ;;
 		esac
 	done
+	# Anything this run could not remove (unowned files it refuses to touch,
+	# a DKMS registration that survived) changes the closing verdict: they
+	# block the next install or keep DKMS rebuilding on kernel updates
+	# (P12 wave, P12-8/F6).
+	local leftovers=0
 
 	if [ -f "$SYSTEMD_UNIT" ]; then
 		if grep -q '^# SL4A_TouchScreen' "$SYSTEMD_UNIT"; then
@@ -996,6 +1022,7 @@ cmd_uninstall() {
 				quarantine_unowned "$SYSTEMD_UNIT"
 			else
 				info "Leaving unowned $SYSTEMD_UNIT untouched (re-run with '--repair' to move it aside so install can proceed)"
+			leftovers=1
 			fi
 		fi
 	fi
@@ -1010,6 +1037,7 @@ cmd_uninstall() {
 				quarantine_unowned "$MODPROBE_CONF"
 			else
 				info "Leaving unowned $MODPROBE_CONF untouched (re-run with '--repair' to move it aside so install can proceed)"
+			leftovers=1
 			fi
 		fi
 	fi
@@ -1024,9 +1052,11 @@ cmd_uninstall() {
 			pass "Removed package-owned DKMS version $PKG_VERSION"
 		else
 			info "DKMS removal failed; leaving $SRC_DEST for recovery"
+			leftovers=1
 		fi
 	elif [ -e "$SRC_DEST" ]; then
 		info "Leaving unowned $SRC_DEST untouched"
+		leftovers=1
 	fi
 
 	# Any other version of this package (a leftover from an earlier upgrade)
@@ -1034,12 +1064,23 @@ cmd_uninstall() {
 	# so a version mismatch no longer turns "Uninstall complete" into a lie.
 	dkms_remove_other_versions ""
 
+	# Whatever is still registered (the version above if its removal failed,
+	# or another one) keeps DKMS rebuilding it on kernel updates.
+	if [ -n "$(dkms status -m "$PKG_NAME" 2>/dev/null || true)" ]; then
+		leftovers=1
+	fi
+
 	depmod -a
 	pass "DKMS removal completed"
 
 	echo ""
 	rule
-	echo -e "${GREEN}${BOLD}Uninstall complete.${NC} Reboot to unload the active driver."
+	if [ "$leftovers" -eq 1 ]; then
+		echo -e "${YELLOW}${BOLD}Uninstall finished with items left behind.${NC} See the notes above."
+		echo "To clear them: re-run with '--repair' (unowned files), or remove the DKMS registration by hand."
+	else
+		echo -e "${GREEN}${BOLD}Uninstall complete.${NC} Reboot to unload the active driver."
+	fi
 	echo "To reinstall later: sudo ./tools/sl4a-touch.sh install"
 	rule
 }

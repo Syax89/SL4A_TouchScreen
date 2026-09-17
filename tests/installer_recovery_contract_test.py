@@ -290,4 +290,37 @@ assert tool.count("loaded_raw_mode") >= 3, \
 assert "Profile running right now" in tool
 assert "Modprobe profile for the next boot" in tool
 
+# ── the P12 wave's findings (install lifecycle + user-facing docs) ─────────
+# F1/P12-3: the unit-file ownership guard must run BEFORE Step 3's staging and
+# build. At Step 6 it refused only after the DKMS modules were installed, the
+# version sweep had run and the profile was written — a half install with no
+# boot unit and nothing that undoes it.
+_inst = tool[tool.index("cmd_install() {"):tool.index("cmd_uninstall() {")]
+assert _inst.index("refusing to replace unowned $SYSTEMD_UNIT") < \
+    _inst.index('dkms build -m "$PKG_NAME"'), \
+    "the unit guard runs after the build again: a refusal leaves a half install"
+# P12-4: staging (cp -a) replaces every file in $SRC_DEST, so the tree gets the
+# same pre-write ownership guard as the modprobe config and the boot unit.
+assert "refusing to replace unowned $SRC_DEST" in tool and \
+    'quarantine_unowned "$SRC_DEST"' in tool, \
+    "an unowned /usr/src tree is staged over without a refusal again"
+assert "Leaving unowned $SRC_DEST untouched" not in _inst, \
+    "the install path prints 'untouched' and then stages over the tree again"
+# F3: raw_mode=0/1 is what the README, QUICKSTART and the driver's parm desc
+# spell; accepting only Y/N made status call a good profile "unrecognized" and
+# install warn about a profile change that never happened.
+assert 'raw_mode=([Yy]|1)' in tool and 'raw_mode=([Nn]|0)' in tool, \
+    "modprobe_profile only understands Y/N again"
+assert 'case "$v" in 1|[Yy]) v=Y ;; 0|[Nn]) v=N ;; esac' in tool, \
+    "the Step-7 profile comparison compares spellings, not values, again"
+# P12-8/F6: the closing banner must not claim "complete" while a leftover
+# blocks the next install or a registration survives.
+assert "Uninstall finished with items left behind" in tool and \
+    "leftovers=1" in tool, \
+    "the uninstall banner claims success with leftovers again"
+# P12-5: a failed rebuild over a registered version leaves the staged tree
+# updated, and the message must say so — DKMS rebuilds from that tree.
+assert "fix the build so the next kernel update can rebuild" in tool, \
+    "stage_failed claims the staged tree was left unchanged again"
+
 print("installer recovery contract: PASS")

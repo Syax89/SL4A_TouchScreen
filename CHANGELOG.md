@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Guards before writes, one spelling for `raw_mode`, and an honest uninstall banner
+
+The P12 double-blind wave (the user-facing path: installer lifecycle, packaging,
+README and the docs README sends users to; two model families over `13c4063`)
+produced one convergent high finding and a set of doc claims that no longer
+matched the code.
+
+`install` now runs BOTH ownership guards — the modprobe config and the systemd
+unit — before Step 3 touches the disk. The unit guard used to sit at Step 6,
+after the modules were built and installed and the profile was written, so its
+refusal left a half install with no boot unit and nothing that undoes it; the
+staged `/usr/src` tree gets the same pre-write guard, because staging replaces
+every file in it (the old code printed "Leaving unowned ... untouched" and then
+copied over it anyway). `modprobe_profile` and the Step-7 profile comparison now
+accept the `0`/`1` spelling the README, QUICKSTART and the driver's own parm desc
+use — previously a correctly configured `raw_mode=1` made `status` report an
+unrecognized profile and `install` warn about a change that never happened.
+`stage_failed` says what actually changed when a rebuild over a registered
+version fails (the staged sources were updated — DKMS rebuilds from them on
+every kernel update), and `uninstall` ends with "items left behind" instead of
+"Uninstall complete." when an unowned file or a DKMS registration survived.
+
+Docs, each claim re-checked against the constants and the driver: the README
+pipeline row and troubleshooting now carry the shipped EMA values (alpha=2,
+0.2-cell deadband, 2-frame lock; the 7 is the weight EMA and the baseline
+recovery alpha), "Build from Source" ends with `activate` instead of rebooting
+into modules that never load, QUICKSTART's verify step checks the HID input node
+(`spi 045E:0C19`) instead of grepping the SPI modalias for it (a correct install
+read as broken), ROLLBACK's upgrade order and MOK paragraph match the code, and
+`dkms.conf` points at `tools/sl4a-touch.sh`. Every fix has a mutation-proved
+pin in `tests/installer_recovery_contract_test.py`.
+
 ### Two dead trace classes, three pins for the glue, and log hygiene
 
 The P8 double-blind wave (capimg decoder, trace header, raw constants, the

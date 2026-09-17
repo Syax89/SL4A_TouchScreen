@@ -47,7 +47,7 @@ Frame (heatmap grid — 72×48/3456 cells on SL4 MSHW0231, 78×52/4056 on SL3 MS
   │   hold_frames=0 (disabled)
   │
   ├─ EMA + Deadband + Stationary Lock
-  │   EMA alpha=7, deadband ±80, lock after 6 still frames
+  │   EMA alpha=2 (module param `ema_alpha`), deadband ±20 (±0.2 cells), lock after 2 still frames
   │
   ├─ Lift Lookback (2 frames history)
   │
@@ -65,7 +65,7 @@ Frame (heatmap grid — 72×48/3456 cells on SL4 MSHW0231, 78×52/4056 on SL3 MS
 | Edge penalty | config+0x8D0/0x8D4 | 90% (0.967/0.228 from DLL) |
 | Hungarian | FUN_1805fd090 | ~90% (cost matrix matches) |
 | Association radii | config+0x8DC-0x8EC | 100% (DLL values verified) |
-| EMA smoothing | FUN_180608000 | ~80% (alpha=7) |
+| EMA smoothing | FUN_180608000 | ~80% (alpha=2) |
 | Hold/lift | FUN_180606370 | ~40% (simplified, hold_frames=0) |
 | Classifier | FUN_180601690 | 0% (Mahalanobis runtime-matrix) |
 | Per-cycle gain | FUN_180600820 | 0% (runtime from firmware) |
@@ -96,7 +96,7 @@ Extracted from DLL `DAT_1808e0460` (file offset `0x8DF060`):
 | `raw_mode` | 0 | Raw heatmap + multi-touch; `sl4a-touch.sh install --raw` enables it experimentally |
 | `skip_getfeat` | 1 | Skip the standard-mode feature-read handshake (no `WAIT_FEATURE`); the raw-mode Report ID 6 configuration read still runs |
 | `wire_double_opcode` | 0 | 0 = Windows-identical frames, 1 = legacy doubled opcode (see `docs/PARAMETERS.md`) |
-| `ema_alpha` | 7 | EMA smoothing weight |
+| `ema_alpha` | 2 | Position-smoothing EMA weight (baseline recovery uses its own fixed alpha 7) |
 | `blob_max_distance` | 3 | Hungarian base radius (cells) |
 | `blob_min_weight` | 1000 | Minimum blob weight |
 | `blob_debounce` | 3 | Debounce frames for new touch |

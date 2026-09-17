@@ -57,11 +57,12 @@ Shows the installed version, active profile, and whether the driver is
 currently loaded and bound — no root required. Or check manually:
 
 ```bash
-ls /sys/bus/spi/devices/spi*
-cat /sys/bus/spi/devices/spi*/modalias | grep 0C19
+ls /sys/bus/spi/devices/          # the controller enumerates as spi-MSHW0231:00 (or spi-MSHW0162:00)
+cat /sys/class/input/input*/name | sort -u    # the touch input node is named "spi 045E:0C19"
 ```
 
-Look for a device node containing `spi 045E:0C19`. If something looks wrong,
+Look for the input node named `spi 045E:0C19` (raw mode names it
+`MSHW0231 Touchscreen`). If something looks wrong,
 `sudo ./tools/sl4a-touch.sh logs` collects a diagnostic bundle to attach to a
 bug report.
 
@@ -81,8 +82,8 @@ Force-reboot if the unload fails.
 
 - **Single-touch only** in standard HID mode (the default). Multi-touch
   requires the experimental raw mode (`raw_mode=1`).
-- Device node appears as a **SPI device with ID `045E:0C19`** under
-  `/sys/bus/spi/devices/`.
+- The touch input node is named **`spi 045E:0C19`** (raw mode: `MSHW0231 Touchscreen`);
+  the controller itself is the SPI device `spi-MSHW0231:00` (SL3: `spi-MSHW0162:00`).
 - A **stylus/pen input node is published** but remains untested — pen
   input behavior has not been qualified.
 - **No multi-touch, no palm rejection, no pen qualification** in the

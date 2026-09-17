@@ -90,7 +90,7 @@ unresolved frame-layout assumptions are recorded in `docs/EVIDENCE.md`.
 | **Eigenvalues** | Second moments → touch major/minor/orientation |
 | **Pre-merge** | Merge blobs within ghost_dist=6 (distance² < 36) |
 | **Hungarian** | Assignment with multi-finger radii (1×2.2, 2×1.0, 3×2.8, 4×3.4, 5+×4.0) |
-| **EMA + deadband** | Alpha=7 smoothing, ±0.8 cell deadband, 6-frame stationary lock |
+| **EMA + deadband** | Alpha=2 smoothing, ±0.2 cell deadband, 2-frame stationary lock |
 | **Lift lookback** | Emit lift at position from 2 frames ago |
 
 ## Install
@@ -181,17 +181,24 @@ is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
 | No touch after cold boot and no `RESET_RSP` in dmesg at all | Enable the backstop: `echo 'options sl4a_spi_hid wait_reset_kick_ms=4000' \| sudo tee /etc/modprobe.d/sl4a-kick.conf`, then cold boot. dmesg then shows `no RESET_RSP and no IRQ at all after 4000 ms, forcing DESCREQ`, and the descriptor poller keeps reading until the device answers. A `DESCREQ write to a silent controller failed 3 times` line instead means the SPI write itself is failing (bus level), not that the device stayed quiet. If the touchscreen never comes back, power off, unplug AC, wait 30 s, reboot and report the log in issue #4 |
 | No multi-touch (only single-touch) | Check `raw_mode=Y` in modprobe config |
 | Fingers lost during fast movement | Increase `blob_lift_frames` |
-| Jitter during pinch-to-zoom | Verify `ema_alpha=7`, stationary lock active |
+| Jitter during pinch-to-zoom | Verify `ema_alpha=2`, stationary lock active |
 | Module rejected (Secure Boot) | Enroll DKMS signing key via distribution MOK |
 
 ## Build from Source
+
+For development without DKMS (modules built this way are unsigned — turn Secure
+Boot off, or sign them yourself):
 
 ```bash
 make -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
 sudo cp driver/sl4a-spi-amd.ko driver/sl4a-spi-hid.ko /lib/modules/$(uname -r)/updates/dkms/
 sudo depmod -a
-sudo reboot
+sudo ./tools/sl4a-touch.sh activate
 ```
+
+The modules export no aliases, so the kernel never loads them on its own: after
+a reboot run `activate` again, or use `install`, which also sets up the boot
+unit that repeats the binding automatically.
 
 ## Documentation
 
