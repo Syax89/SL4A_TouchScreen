@@ -566,6 +566,24 @@ def check_control_flow_pins():
                   "from the poller")
             failures += 1
         else:
+            # The five shape needles below must be scoped to the BRANCH ITSELF,
+            # not to a fixed byte reach past its opening. The stripped code view
+            # packs the RETRY path right below the branch, and that path's own
+            # text already carries every one of these needles (`goto out;`,
+            # `shid->ready = true;`, `sysfs_notify`, `SPI_HID_SEQ_DONE`,
+            # `spi_hid_use_hardcoded_desc(shid);`). The old `_fb[1][:900]` reach
+            # therefore satisfied them from code the branch never runs, so
+            # dropping any one from the branch stayed green (H2 leg B, M2-M4,
+            # measured). End the window at the branch's own closing line: the
+            # branch opens at 2-tab indent and every interior line indents 3+
+            # tabs, so the first `\n\t\t}` after the opening is that close (and
+            # it is the only 2-tab `}` in the function).
+            _br = _fb[1].split("\n\t\t}", 1)
+            if len(_br) != 2:
+                print("FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch is "
+                      "not closed at its own indent — the give-up shape cannot be "
+                      "scoped to the branch (H2 leg B)")
+                failures += 1
             if "spi_hid_seq_restart_discovery" not in _body:
                 print("FAIL driver/spi-hid-core.c: the poller's restart path is gone — "
                       "the give-up knob rides a branch that no longer has its retry")
@@ -588,7 +606,7 @@ def check_control_flow_pins():
                 ("spi_hid_use_hardcoded_desc(shid);",
                  "the give-up no longer installs the fallback descriptor"),
             ):
-                if _needle not in _fb[1][:900]:
+                if len(_br) == 2 and _needle not in _br[0]:
                     print(f"FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch "
                           f"lost '{_needle}' — {_why}")
                     failures += 1
