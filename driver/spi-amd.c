@@ -451,10 +451,21 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 			/* The third label is computed, not hardcoded: it is
 			 * 0x80 + tx_len + 1, which equals 0x89 only for an
 			 * eight-byte request. A hardcoded label lied about the
-			 * address for every other length. */
-			pr_info("spi-amd: TRACE peek tx_len=%u 0x%02x=[%*ph] 0x84=[%*ph] 0x%02x=[%*ph]\n",
+			 * address for every other length.
+			 *
+			 * Window 1 carried the SAME bug one line up: f27c651
+			 * rewrote its label to 0x80 + tx_len while its pointer
+			 * still read 0x80, and no window read 0x80 + tx_len at
+			 * all — the doc's 0x80 + TX_COUNT form (0x83 for a
+			 * three-byte request, 0x88 for eight) went unobserved,
+			 * so a bundle could have settled the offset question
+			 * WRONG. Every label now mirrors the address it prints,
+			 * and every candidate region has a window. */
+			pr_info("spi-amd: TRACE peek tx_len=%u 0x80=[%*ph] 0x%02x=[%*ph] 0x84=[%*ph] 0x%02x=[%*ph]\n",
 				tx_len,
-				0x80u + (unsigned int)tx_len, 16, base + fifo_pos,
+				16, base + fifo_pos,
+				0x80u + (unsigned int)tx_len,
+				16, base + fifo_pos + tx_len,
 				16, base + fifo_pos + 4,
 				0x80u + (unsigned int)tx_len + 1u,
 				16, base + fifo_pos + tx_len + 1);

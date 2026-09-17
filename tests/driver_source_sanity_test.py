@@ -465,6 +465,14 @@ def check_control_flow_pins():
     amd = (ROOT / "driver" / "spi-amd.c").read_text()
     for needle, why in (
         ("TRACE peek tx_len=", "the read-path region peek is gone"),
+        # The full label set, in order: window 1 named 0x80 (it reads
+        # base+fifo_pos), window 2 the computed 0x80+tx_len (the doc's
+        # 0x80+TX_COUNT form — shipped unobserved until f27c651's mislabelled
+        # window 1 was caught), window 3 the literal 0x84, window 4 the
+        # computed tx_len+1.
+        ("0x80=[%*ph] 0x%02x=[%*ph] 0x84=[%*ph] 0x%02x=[%*ph]",
+         "the peek's window/label set changed — a label that no longer mirrors "
+         "the address it prints can settle the RX offset question WRONG"),
         ("0x84=[%*ph]", "the fixed-0x84 candidate is no longer logged"),
         # Pin the DERIVATION, not a hand-written address: the label used to
         # say 0x89 for every request length, which was a lie for all but the
@@ -473,6 +481,14 @@ def check_control_flow_pins():
         ("0x80u + (unsigned int)tx_len + 1u",
          "the tx_len+1 candidate is no longer logged, or its address is no longer "
          "computed — the RX offset question goes back to being settled by argument"),
+        # And the label/pointer ADJACENCY for the two computed windows: a label
+        # and its address are one pair, and f27c651 proved one can be edited
+        # without the other (window 1 printed 0x80+tx_len over base+fifo_pos
+        # and the suite stayed green).
+        ("0x80u + (unsigned int)tx_len,\n\t\t\t\t16, base + fifo_pos + tx_len,",
+         "window 2's label and the address it prints have drifted apart"),
+        ("0x80u + (unsigned int)tx_len + 1u,\n\t\t\t\t16, base + fifo_pos + tx_len + 1);",
+         "window 4's label and the address it prints have drifted apart"),
     ):
         if needle not in amd:
             print(f"FAIL driver/spi-amd.c: {why} — the RX offset question goes "
