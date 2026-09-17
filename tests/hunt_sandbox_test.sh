@@ -27,7 +27,7 @@ printf 'reset_rsp=0\ndevice_desc=0\nbus_error_count=0\n' > "$D/protocol_stats"
 for f in ready seq_state lifecycle_status bus_error_count device_initiated_reset_count; do
 	printf 'stub\n' > "$D/$f"
 done
-printf '# SL4A_TouchScreen\noptions sl4a_spi_hid raw_mode=Y raw_input_beta=Y\n' \
+printf '# SL4A_TouchScreen\noptions sl4a_spi_hid raw_mode=Y raw_input_beta=Y acpi_probe_power_cycle=1 skip_vendor_stop=1\n' \
 	> "$SB/etc/sl4a-spi-hid.conf"
 printf '# SL4A_TouchScreen\n' > "$SB/etc/sl4a-touch-activate.service"
 : > "$SB/dmesg.txt"
@@ -51,7 +51,7 @@ done
 cat > "$SB/bin/modprobe" <<'EOS'
 #!/bin/bash
 echo "$*" >> "__SB__/modprobe.log"
-if [ "${1:-}" != "-r" ] && [[ " $* " == *" sl4a_spi_hid "* ]]; then
+if [ "${1:-}" != "-r" ] && [[ " $* " == *" sl4a_spi_hid "* ]] && [ ! -f "__SB__/quiet" ]; then
 	{
 		printf '[999.0] sl4a_spi_hid: SEQ: write op=0x02 reg=1 raw=[02 00 00 01 42 00 00 03 00 00]\n'
 		i=0
@@ -107,8 +107,8 @@ grep -q 'acpi_probe_power_cycle=0 skip_vendor_stop=1' "$SB/modprobe.log" \
 	|| fail "the sweep never loaded the skip-preamble arm"
 grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=1' "$SB/modprobe.log" \
 	|| fail "the sweep never loaded the combined arm"
-grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=1' "$SB/out.txt" \
-	|| fail "the artifact never names the probe variant it ran"
+grep -q '^VERDICT (acpi_probe_power_cycle=1 skip_vendor_stop=1)' "$SB/out.txt" \
+	|| fail "the VERDICT line itself must carry the probe pair (the echo/header lines are not the verdict)"
 
 grep -o 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" > "$SB/pairs.txt"
 k=0
@@ -145,6 +145,8 @@ grep -q -- '-- OS binding (before the sweep) --' "$SB/out.txt" \
 # the file — that is the whole point of it.
 grep -q '\[1/4\] variant 0' "$SB/run.txt" || fail "no per-variant progress on the terminal"
 grep -q 'TOUCH THE PANEL NOW' "$SB/run.txt" || fail "no touch prompt on the terminal"
+grep -q 'four probe variants' "$SB/run.txt" \
+	|| fail "the terminal intro still describes the retired wire axis (it must name the probe sweep)"
 
 # A stale stamp must take the rebuild path (it is the path that once died with
 # 'command not found'), and the sweep must survive it.
@@ -171,10 +173,68 @@ grep -q 'bound driver: (sysfs dir not found' "$SB/out3.txt" \
 [ "$(grep -c 'NO COUNTERS READ' "$SB/out3.txt" || true)" -eq 4 ] \
 	|| fail "the no-panel artifact does not degrade honestly to NO COUNTERS READ"
 
-# All three sweeps (control run, rebuild run, no-panel run) loaded the same
-# four arms in the same order: 12 loads, the pattern repeating.
-n_loaded="$(grep -c 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" || true)"
-[ "$n_loaded" -eq 12 ] \
-	|| fail "expected 12 driver loads after three sweeps, saw $n_loaded"
+# A load that logs nothing must not abort the sweep, and its absence must be
+# STATED: under `set -e -o pipefail` an unguarded `dmesg | grep` that matched
+# nothing killed hunt after it had unloaded the driver, and a silenced
+# fallback read as "searched and found nothing" without evidence (P14 wave:
+# both mutations stayed green before these two sweeps).
+mv "$SB/panel-away" "$D"
+touch "$SB/quiet"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out4.txt" > "$SB/run4.txt" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run4.txt"; fail "hunt exited $rc with a silent driver (an unguarded dmesg|grep again?)"; }
+grep -q 'no lines after the mark' "$SB/out4.txt" \
+	|| fail "quiet run: the ring-wrap fallback message never appeared"
+n_none="$(grep -cF "first write on the wire: (none in this load's log)" "$SB/out4.txt" || true)"
+[ "$n_none" -eq 4 ] \
+	|| fail "quiet run: the artifact does not state the write's absence for every variant (saw $n_none)"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, first write survives the window, live readback present, no-panel run warns and degrades honestly)"
+# Ring wrapped between the mark and the slice: the write still exists in the
+# buffer, outside the slice, and the search must find it in the fallback too —
+# labelled, because those lines can span loads (P14 wave, F7).
+printf '[1000.0] sl4a_spi_hid: SEQ: write op=0x02 reg=1 raw=[02 00 00 01 42 00 00 03 00 00] (pre-wrap marker)\n' >> "$SB/dmesg.txt"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out5.txt" > "$SB/run5.txt" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run5.txt"; fail "hunt exited $rc on the wrapped-ring run"; }
+n_wr="$(grep -c 'first write on the wire (from the wrapped ring' "$SB/out5.txt" || true)"
+[ "$n_wr" -eq 4 ] \
+	|| fail "wrapped-ring run: the first-write line did not search the fallback window (saw $n_wr)"
+
+# No profile at all: the sweep still runs, but raw_mode=N is STANDARD mode
+# where the probe arms are inert (spi_hid_vendor_init is raw-gated) — the
+# fallback must be labelled in the artifact AND warned on the terminal, not
+# printed as if the file had said so (P14 wave, A:C6/F5).
+mv "$SB/etc/sl4a-spi-hid.conf" "$SB/etc/sl4a-spi-hid.conf.bak"
+git -C "$ROOT" rev-parse HEAD > "$SB/var/installed-head"
+rm -f "$SB/quiet"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out6.txt" > "$SB/run6.txt" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run6.txt"; fail "hunt exited $rc with a missing profile"; }
+grep -q 'FALLBACK' "$SB/out6.txt" \
+	|| fail "the missing-profile artifact does not label its raw_mode=N fallback"
+grep -q 'fallback standard mode' "$SB/run6.txt" \
+	|| fail "the missing-profile run printed no warning about the fallback"
+[ "$(grep -c 'first write on the wire: \[999.0\]' "$SB/out6.txt" || true)" -eq 4 ] \
+	|| fail "the missing-profile sweep did not carry the first write (dmesg emission should have resumed)"
+mv "$SB/etc/sl4a-spi-hid.conf.bak" "$SB/etc/sl4a-spi-hid.conf"
+
+# Every sweep (control, rebuild, no-panel, quiet, wrapped ring, missing
+# profile) loaded the same four arms in the same order: 24 loads, the pattern
+# repeating. The profile now also carries the two knobs, and the $opts filter
+# must keep them OFF the load lines — a leaked pair ahead of the arm's own
+# could read as the arm's value (P14 wave: that mutation stayed green too).
+n_loaded="$(grep -c 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" || true)"
+[ "$n_loaded" -eq 24 ] \
+	|| fail "expected 24 driver loads after six sweeps, saw $n_loaded"
+awk '
+	/sl4a_spi_hid/ && /acpi_probe_power_cycle=/ {
+		if (gsub(/acpi_probe_power_cycle=/, "&") != 1 ||
+		    gsub(/skip_vendor_stop=/, "&") != 1) {
+			printf "leaky load line: %s\n", $0
+			bad = 1
+		}
+	}
+	END { exit bad }
+' "$SB/modprobe.log" || fail "the profile's knobs leaked onto a load line (the \$opts filter regressed)"
+
+echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, missing profile labels the fallback mode)"

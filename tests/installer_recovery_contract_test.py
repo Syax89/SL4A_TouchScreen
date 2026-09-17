@@ -191,10 +191,16 @@ assert tool.index("restage_and_rebuild() {") < tool.index("\t\trestage_and_rebui
 
 # ── the installer review's findings (leg 2026-09-16) ───────────────────────
 # F1: under `set -e -o pipefail` a dmesg|grep that matches nothing aborted hunt
-# after it unloaded the driver and before it put the module back.
-assert '| grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60 || true' in tool, \
-    "the hunt dmesg pipeline is unguarded again: a variant with no log lines \
+# after it unloaded the driver and before it put the module back. Both
+# pipelines are pinned separately: a pin that matched only the ring-wrap
+# fallback stayed green while the per-load slice's guard was dropped (P14
+# wave, M16), and the slice is the one that does the searching.
+assert '| grep -iE "sl4a_spi_hid|spi-amd")" || true' in tool, \
+    "the per-load dmesg slice is unguarded again: a variant with no log lines \
      aborts the sweep with the driver unloaded"
+assert '| grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60)" || true' in tool, \
+    "the ring-wrap fallback is unguarded again: an empty buffer aborts the \
+     sweep with the driver unloaded"
 # F2: a glob that matches no panel made every counter unreadable, and the
 # verdict then recorded "silent" — a measurement that was never taken.
 assert "NO COUNTERS READ" in tool and "MSHW*" in tool, \

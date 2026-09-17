@@ -1741,13 +1741,25 @@ cmd_hunt() {
 		if [ -d "$d" ]; then SYSFS_DIR="$d"; break; fi
 	done
 
-	# The installed profile's own parameters, minus the two this command sets.
-	local opts
-	opts="$(awk '/^options[ \t]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level|wire_double_opcode|setfeat_no_double|acpi_probe_power_cycle|skip_vendor_stop)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
+	# The installed profile's own parameters, minus the six this sweep
+	# controls (three it sets below, three it pins at the module default).
+	local opts opts_note
+	opts_note=""
+	opts="$(awk '/^options[ 	]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level|wire_double_opcode|setfeat_no_double|acpi_probe_power_cycle|skip_vendor_stop)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
 
-	[ -n "$opts" ] || opts="raw_mode=N"
+	if [ -z "$opts" ]; then
+		# A missing profile must not masquerade as a raw sweep: raw_mode=N is
+		# STANDARD mode, where spi_hid_vendor_init() never runs (both call
+		# sites are raw-gated), so probe arms 2/3 would repeat arms 0/1
+		# exactly while the artifact still listed four variants. The run is
+		# kept — a refusal would strand a field trip — but labelled wherever
+		# it is printed (P14 wave, A:C6/F5).
+		opts="raw_mode=N"
+		opts_note=" (FALLBACK — no 'options sl4a_spi_hid' line in $MODPROBE_CONF: STANDARD mode, probe arms 2/3 are inert here)"
+		warn "no 'options sl4a_spi_hid' line in $MODPROBE_CONF — sweeping in fallback standard mode (raw_mode=N)"
+	fi
 
-	info "Frame hunt: three wire shapes, one file, no commands for you. Leave the panel alone until asked."
+	info "Frame hunt: four probe variants, one file, no commands for you. Leave the panel alone until asked."
 	[ -n "$SYSFS_DIR" ] || warn "sysfs directory for the device not found — statistics will be missing"
 
 	# The sweep is worthless against a stale module, and reloading does not
@@ -1775,7 +1787,7 @@ cmd_hunt() {
 	{
 		echo "=== SL4A_TouchScreen frame hunt ==="
 		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-		echo "Profile options from $MODPROBE_CONF: $opts"
+		echo "Profile options from $MODPROBE_CONF: $opts$opts_note"
 		echo "Modules built from revision: $(installed_head)  (checkout: $head_now)"
 		# What the OS itself sees right now, before anything is unloaded: a
 		# panel that never binds, or an input device that never registers, is
@@ -1837,7 +1849,7 @@ cmd_hunt() {
 			# absent is the explicit failure marker (P3 wave: the intent
 			# echo alone let a failed load masquerade as a productive one).
 			if [ -d /sys/module/sl4a_spi_hid ]; then
-				echo "loaded params (read back): acpi_probe_power_cycle=$(cat /sys/module/sl4a_spi_hid/parameters/acpi_probe_power_cycle 2>/dev/null || echo '?') skip_vendor_stop=$(cat /sys/module/sl4a_spi_hid/parameters/skip_vendor_stop 2>/dev/null || echo '?')"
+				echo "loaded params (read back): acpi_probe_power_cycle=$(cat /sys/module/sl4a_spi_hid/parameters/acpi_probe_power_cycle 2>/dev/null || echo '?') skip_vendor_stop=$(cat /sys/module/sl4a_spi_hid/parameters/skip_vendor_stop 2>/dev/null || echo '?')  (sysfs spells booleans Y/N)"
 			else
 				echo "loaded params (read back): MODULE NOT LOADED — nothing was measured for this variant"
 			fi
@@ -1854,7 +1866,9 @@ cmd_hunt() {
 			# `|| true` is load-bearing: under `set -e -o pipefail` a grep that
 			# matches nothing (every modprobe in this variant failed, say) aborted
 			# hunt after it had unloaded the driver and before putting it back.
-			local all win
+			local all win fb wr_fb
+			fb=""
+			wr_fb=""
 			# The spi-amd prefix matters: the controller layer logs the read
 			# regions (peek) under its own name, and filtering it out threw
 			# away exactly the line the RX-region question needs answered.
@@ -1864,9 +1878,13 @@ cmd_hunt() {
 				echo "$win"
 			else
 				# Ring buffer wrapped between the mark and now: the arithmetic
-				# yields nothing while the lines still exist. Say so, then show them.
-				echo "(no lines after the mark — the ring may have wrapped; last 60 driver lines)"
-				dmesg 2>/dev/null | grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60 || true
+				# yields nothing while the lines still exist (shifted out of
+				# the slice, not out of the buffer). Say so, then show the
+				# newest driver lines — which can span loads, so the write
+				# search below labels where it read.
+				echo "(no lines after the mark — the ring may have wrapped; last 60 driver lines, possibly from an earlier load)"
+				fb="$(dmesg 2>/dev/null | grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60)" || true
+				if [ -n "$fb" ]; then printf '%s\n' "$fb"; fi
 			fi
 			echo ""
 			# The proof of what actually went on the wire for this load: the first
@@ -1878,8 +1896,16 @@ cmd_hunt() {
 			# and the tail-only grep lost this line exactly when the load
 			# worked (P3 wave). Absence is stated, not silent.
 			wr="$(printf '%s\n' "$all" | grep -m1 'write op=0x02')" || wr=""
+			if [ -z "$wr" ] && [ -n "$fb" ]; then
+				# The slice was empty (ring wrapped): the write may sit in the
+				# fallback lines shown above. Report it from there — labelled,
+				# because those lines can span loads (P14 wave, F7).
+				wr_fb="$(printf '%s\n' "$fb" | grep -m1 'write op=0x02')" || wr_fb=""
+			fi
 			if [ -n "$wr" ]; then
 				echo "first write on the wire: $wr"
+			elif [ -n "$wr_fb" ]; then
+				echo "first write on the wire (from the wrapped ring — may belong to an earlier load): $wr_fb"
 			else
 				echo "first write on the wire: (none in this load's log)"
 			fi

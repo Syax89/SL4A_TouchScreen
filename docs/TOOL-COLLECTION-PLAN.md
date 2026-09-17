@@ -21,7 +21,7 @@ per run, which shape was on the wire and what the OS thinks it sees.
   three reset-loop; close an axis in ONE run and move on. Current axes
   (since `4525811`): 0 control / 1 `acpi_probe_power_cycle=1` / 2
   `skip_vendor_stop=1` / 3 both. Reads keep the module default (legacy).
-- every variant names its wire profile in the artifact and on the terminal;
+- every variant names its probe profile in the artifact and on the terminal;
 - the artifact carries the first control write's bytes (doubled vs single is
   the second byte) and an "OS binding" block: ACPI device, bound driver,
   registered input device - the "does the hardware present itself to the OS"
@@ -40,10 +40,11 @@ a test asserts the header keys.
 
 ## Phase 3 - variant axes become first-class
 
-`hunt --variants wire|read|all` (default wire). The read/transport axis
+`hunt --variants probe|read|all` (default probe; the wire axis closed negative
+on 2026-09-17 13:11 and stays as history only). The read/transport axis
 (request-resend continuations, the `0x84` window - the V-A/V-B/V-C shapes a
 P13 leg proposed) returns as `read`, because the next open question after the
-wire test is the segmented read chain. Acceptance: axis selector documented,
+probe test is the segmented read chain. Acceptance: axis selector documented,
 sandbox test per axis.
 
 ## Phase 4 - the sweep recommends the shape
