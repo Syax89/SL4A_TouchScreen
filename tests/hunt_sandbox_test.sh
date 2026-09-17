@@ -84,6 +84,7 @@ sed -e "s#^REPO_DIR=.*#REPO_DIR=\"$ROOT\"#" \
     -e "s#^SYSTEMD_UNIT=.*#SYSTEMD_UNIT=\"$SB/etc/sl4a-touch-activate.service\"#" \
     -e "s#^INSTALLED_HEAD_STAMP=.*#INSTALLED_HEAD_STAMP=\"$SB/var/installed-head\"#" \
     -e "s#/sys/bus/spi/devices/\*MSHW\*#$SB/sys/bus/spi/devices/*MSHW*#" \
+    -e "s#/sys/module/#$SB/sys/module/#g" \
     -e 's#^\([[:space:]]*\)\[ "\$(id -u)" = 0 \] || fail "hunt needs root.*#\1: #' \
     "$ROOT/tools/sl4a-touch.sh" > "$SB/tool.sh" || fail "could not stage the tool"
 chmod +x "$SB/tool.sh"
@@ -144,8 +145,11 @@ grep -q 'first write on the wire: \[999.0\] sl4a_spi_hid: SEQ: write op=0x02' "$
 
 # The "running variant" line echoes what was REQUESTED; the live readback
 # must accompany it so a failed load cannot masquerade as a productive one.
-# On this sandbox host the module is never loaded, and the artifact must say
-# exactly that (P3 wave).
+# All module reads go through the scoped stub sysfs (the staging sed rewrites
+# /sys/module/), so with no stub module present the artifact must say exactly
+# that (P3 wave) — and must say it identically on a host that happens to have
+# the real driver loaded (that host-dependence failed this suite on the panel
+# machine while staying green on module-less CI hosts).
 grep -q 'loaded params (read back): MODULE NOT LOADED' "$SB/out.txt" \
 	|| fail "no live module readback line: a failed load would still read as loaded"
 grep -q -- '-- OS binding (before the sweep) --' "$SB/out.txt" \
@@ -307,4 +311,24 @@ n_rawn="$(grep -c 'raw_mode=N' "$SB/modprobe.log" || true)"
 [ "$n_rawn" -eq 4 ] \
 	|| fail "the missing-profile fallback loads should carry raw_mode=N on the 4 loads, saw $n_rawn (P15 wave, M6)"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives and really rebuilds, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, raw_mode carried, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, missing profile labels the fallback mode, all-filtered profile labels itself, indented all-filtered profile labels itself)"
+# A stubbed module must be seen through the scoped sysfs too: every module
+# read (the readback line, loaded_raw_mode, the arm echo) goes through
+# /sys/module under $SB. If the staging sed ever drops the rewrite, this run
+# reads the HOST's /sys/module instead — on a module-less CI host it would
+# print MODULE NOT LOADED and still pass, so only the stub values pin it.
+printf '# SL4A_TouchScreen\noptions sl4a_spi_hid raw_mode=Y raw_input_beta=Y acpi_probe_power_cycle=1 skip_vendor_stop=1\n' \
+	> "$SB/etc/sl4a-spi-hid.conf"
+git -C "$ROOT" rev-parse HEAD > "$SB/var/installed-head"
+mkdir -p "$SB/sys/module/sl4a_spi_hid/parameters" "$SB/sys/module/sl4a_spi_amd/parameters"
+for p in raw_mode raw_input_beta skip_getfeat acpi_probe_power_cycle skip_vendor_stop sl4a_debug_level; do
+	printf 'Y\n' > "$SB/sys/module/sl4a_spi_hid/parameters/$p"
+done
+printf 'N\n' > "$SB/sys/module/sl4a_spi_hid/parameters/skip_vendor_stop"
+printf '0\n' > "$SB/sys/module/sl4a_spi_amd/parameters/debug_trace"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out9.txt" > "$SB/run9.txt" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run9.txt"; fail "hunt exited $rc with a stubbed module present"; }
+grep -q 'loaded params (read back): acpi_probe_power_cycle=Y skip_vendor_stop=N' "$SB/out9.txt" \
+	|| fail "the readback did not quote the scoped sysfs — the staging sed lost the /sys/module/ rewrite and the host is being read"
+
+echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives and really rebuilds, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, raw_mode carried, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, missing profile labels the fallback mode, all-filtered profile labels itself, indented all-filtered profile labels itself, module reads scoped to the stub sysfs)"
