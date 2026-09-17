@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### The wire axis is closed, and the hunt moves to the probe axes
+
+The 13:11 field run on the wire sweep settled it: single, doubled and
+doubled-except-SET_FEATURE5 reset-loop identically (reset_rsp=82..83,
+device_desc=0) — the opcode doubling is not the regression. The same run
+showed the panel self-resetting ~8x/s (irq_count tracks the reset count: the
+device initiates), against 26 resets in v1.6.3's whole session, and that the
+`01 ff ee` prefix tracks the REQUEST shape: legacy reads answer clean
+(`ff ff ff ff ff 32 10 00 5a`, frame at offset 5, no prefix). The hunt now
+sweeps what v1.6.3 did not do at probe: a real _PS3->_PS0 power cycle
+(`acpi_probe_power_cycle=1`) and `skip_vendor_stop=1` — the new knob that
+skips spi_hid_vendor_init's vendor_stop + D2/D0 preamble, added 2026-09-16,
+after the last build this panel answered on.
+
 ### The hunt sweeps the wire forms, and the file says what the OS sees
 
 The 2026-09-17 field regression (raw touch answered on v1.6.3 and reset-looped

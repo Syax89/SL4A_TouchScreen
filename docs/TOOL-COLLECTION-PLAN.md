@@ -15,10 +15,11 @@ per run, which shape was on the wire and what the OS thinks it sees.
 
 ## Phase 1 - DONE (2026-09-17, with the regression hunt)
 
-- hunt sweeps `wire_double_opcode` / `setfeat_no_double`:
-  0 = single opcode (the failing shape), 1 = doubled (every control frame,
-  v1.6.3's shape), 2 = doubled except SET_FEATURE5. Reads keep the module
-  default (legacy, as in v1.6.3).
+- **axis history**: wire forms (0 single / 1 doubled / 2 doubled-except-
+  SET_FEATURE5) were swept on 2026-09-17 13:11 and came back negative — all
+  three reset-loop; close an axis in ONE run and move on. Current axes
+  (since `4525811`): 0 control / 1 `acpi_probe_power_cycle=1` / 2
+  `skip_vendor_stop=1` / 3 both. Reads keep the module default (legacy).
 - every variant names its wire profile in the artifact and on the terminal;
 - the artifact carries the first control write's bytes (doubled vs single is
   the second byte) and an "OS binding" block: ACPI device, bound driver,
