@@ -359,7 +359,6 @@ struct spi_hid {
 	u32 poll_missed;                          /* Consecutive empty polls */
 
 	u32 stat_reset_rsp;
-	unsigned long last_reset_reaction;        /* jiffies of the last reset answer */
 	u32 stat_device_desc;
 	u32 stat_rpt_desc;
 	u32 stat_data;

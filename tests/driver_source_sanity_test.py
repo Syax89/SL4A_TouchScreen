@@ -71,19 +71,34 @@ def check_control_flow_pins():
     core = (ROOT / "driver/spi-hid-core.c").read_text()
     wire = (ROOT / "driver" / "spi-hid-wire-frames.h").read_text()
 
-    # Checks below that care whether code RUNS read these instead: a raw-text
-    # pin is satisfied by a comment, which is how three pins in this file were
-    # shown decorative by an adversarial leg that moved the real code into a
-    # comment and left the literal behind. Strip comments, keep strings.
-    def strip_c_comments(text):
-        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
-        text = re.sub(r"//[^\n]*", " ", text)
+    # Checks below that care whether code RUNS read these. The stripping ladder
+    # has climbed three rungs, each shown necessary by a leg that kept a pin
+    # green while the real code was neutralised: comments (code moved into a
+    # comment), `#if 0` blocks, and — P2 double-blind wave — STRING LITERALS
+    # (a decoy string carrying the pin's needle while the real call was
+    # reverted). `if (0)` decoys are refused outright by
+    # check_no_dead_code_decoys(). Text pins still have a ceiling: any deeper
+    # unreachable-code shape defeats them, which is why the checks that CAN
+    # run as code live in headers the host tests call.
+    #
+    # keep_strings=True is for the few pins whose subject IS a log line's text
+    # (the spi-amd peek labels, the CapImg ratelimit messages). A decoy string
+    # can still satisfy those text-only pins — accepted and written down,
+    # because the message text cannot live anywhere but in a string; where a
+    # code-view sibling pin exists, removing the real call fails the suite.
+    def strip_c_comments(text, keep_strings=False):
+        if keep_strings:
+            text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+            text = re.sub(r"//[^\n]*", " ", text)
+        else:
+            text, _ = strip_comments_and_strings(text)
         # Preprocessor-disabled code is not code either: a leg neutralised a
         # guard inside `#if 0` and the comment-stripping pins stayed green.
         text = re.sub(r"#if\s+0\b.*?#endif", " ", text, flags=re.S)
         return text
 
     core_code = strip_c_comments(core)
+    core_text = strip_c_comments(core, keep_strings=True)
     wire_code = strip_c_comments(wire)
 
     # 0a. The read-frame default must be the REFERENCE shape. The field sweep
@@ -440,6 +455,15 @@ def check_control_flow_pins():
               "read-approval pair inside seq_lock — the write races the "
               "sequencer's reads across threads again")
         failures += 1
+    # A leg kept that order pin green while leaking the mutex: an `if (!ready)
+    # goto out;` planted between lock and unlock leaves the write inside the
+    # region, but the `out:` path (which drops only response_mutex) then runs
+    # with seq_lock held. No exit other than the unlock may live in there.
+    if _l >= 0 and _u > _l and "goto" in _sr[_l:_u]:
+        print("FAIL driver/spi-hid-core.c: sync_request() can leave the seq_lock "
+              "region through a goto — out: does not drop seq_lock, so the "
+              "mutex leaks (P2 wave bypass)")
+        failures += 1
     # The writes that ask for a response must record which request they are,
     # or the read that follows names nothing (trace: 00 04 03 00 06,
     # 00 03 0A 00 56). The descriptor requests are the 0/0 case.
@@ -509,6 +533,11 @@ def check_control_flow_pins():
     # example, tx_len + 1 in ours) and only the field can answer it; if this
     # line disappears the next bundle cannot either.
     amd = strip_c_comments((ROOT / "driver" / "spi-amd.c").read_text())
+    amd_text = strip_c_comments((ROOT / "driver" / "spi-amd.c").read_text(),
+                                keep_strings=True)
+    # The message-text needles read the strings-kept view; the code-view loop
+    # below pins the pr_info call's own argument expressions, which a decoy
+    # string cannot supply.
     for needle, why in (
         ("TRACE peek tx_len=", "the read-path region peek is gone"),
         # The full label set, in order: window 1 named 0x80 (it reads
@@ -520,6 +549,12 @@ def check_control_flow_pins():
          "the peek's window/label set changed — a label that no longer mirrors "
          "the address it prints can settle the RX offset question WRONG"),
         ("0x84=[%*ph]", "the fixed-0x84 candidate is no longer logged"),
+    ):
+        if needle not in amd_text:
+            print(f"FAIL driver/spi-amd.c: {why} — the RX offset question goes "
+                  f"back to being settled by argument")
+            failures += 1
+    for needle, why in (
         # Pin the DERIVATION, not a hand-written address: the label used to
         # say 0x89 for every request length, which was a lie for all but the
         # eight-byte one. What matters is that the third candidate is read at
@@ -549,11 +584,34 @@ def check_control_flow_pins():
         'dev_warn_ratelimited(dev, "SEQ: CapImg decode failed',
         'dev_warn_ratelimited(dev, "SEQ: poller CapImg decode failed',
     ):
-        if needle not in core_code:
+        if needle not in core_text:          # message text: strings-kept view
             print(f"FAIL driver/spi-hid-core.c: {needle!r} missing — a per-frame "
                   f"CapImg decode failure is back to flooding the log")
             failures += 1
 
+    return failures
+
+
+def check_no_dead_code_decoys():
+    """An `if (0)` statement is dead code, and dead code is where pins go to die.
+
+    The P2 double-blind wave reintroduced a defect behind
+    `if (0) (void)spi_hid_wire_vendor_init(spi_hid_wire_doubled());` while the
+    real call reverted to the literal `0` — every text pin stayed green (they
+    strip comments, #if 0 and strings, but a C-level `if (0)` is none of the
+    three). This repo carries no C-level dead code, so a planted one IS the
+    decoy; refuse it. The stripping ladder ends here on purpose: any deeper
+    unreachable-code shape still defeats a text pin, which is why the checks
+    that CAN run as code live in headers the host tests call.
+    """
+    failures = 0
+    for path in FILES:
+        text, _ = strip_comments_and_strings(path.read_text())
+        if re.search(r"\bif\s*\(\s*0\s*(?:\)|&&)", text):
+            print(f"FAIL {path.name}: an `if (0)`-style dead statement appeared — "
+                  f"dead code that carries a pin's needle while the real code is "
+                  f"reverted keeps every text pin green (P2 wave); remove it")
+            failures += 1
     return failures
 
 
@@ -603,6 +661,7 @@ def check_trace_event_liveness():
 
 def main():
     failures = check_control_flow_pins()
+    failures += check_no_dead_code_decoys()
     failures += check_trace_event_liveness()
     for path in FILES:
         text = path.read_text()

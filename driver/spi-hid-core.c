@@ -1206,9 +1206,9 @@ static int spi_hid_set_request(struct spi_hid *shid,
  * not settled by argument: one reload per variant, and the bundle says which
  * one the hardware accepted. */
 /* Default LEGACY: the only shape the device answers. Measured on the panel
- * (frame sweep 2026-09-16): variant 0 (reference, register at offset 7) is
- * showed variant 0 silent, variant 2 silent, variant 1 (register in bytes
- * 1-3) answered with reset_rsp=47 and stream frames on register 0x0A. That
+ * (frame sweep 2026-09-16): variant 0 (reference, register at offset 7)
+ * silent, variant 2 silent, variant 1 (register in bytes 1-3) answered with
+ * reset_rsp=47 and stream frames on register 0x0A. That
  * measured the DEVICE'S STATE, not the correct frame: the device was still
  * streaming from an earlier enable, and a device that is answered but not
  * addressed hands over its default content.
@@ -1340,13 +1340,22 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * In standard mode the descriptor's own register stands: the force at probe
 	 * is raw-only, for exactly this reason.
 	 *
-	 * The register is a property of the PHASE: the three-way selector below
-	 * is the rule (0 for the reset, the output register for the descriptor,
-	 * the stream register at DONE), and both cruder attempts that preceded it
-	 * are recorded in the field bundles — a sticky flag (141 reads on 0x0a,
-	 * none on 0), then a state gate the driver never entered (310 reads in
-	 * WAIT_DESC, one in WAIT_RESET). What the field's answers actually contain
-	 * is three leading bytes on this panel's raw-mode answers and the reference frame behind them, sync at
+	 * The register phase rule, and the three registers the reference's boot
+	 * trace names for it:
+	 *
+	 *   WAIT_RESET         register 0              TXN#1/#2   (the reset, drain)
+	 *   WAIT_DESC/WAIT_RPT register 3              TXN#4/#5   (descriptor hdr+body)
+	 *   DONE               the stream, 0x0A in raw  TXN#869+   (DATA frames)
+	 *
+	 * Earlier versions of it were each wrong, one field run apiece: a sticky
+	 * flag (141 reads on 0x0a, none on 0), a state gate the driver never
+	 * entered (310 reads in WAIT_DESC, one in WAIT_RESET), then "not DONE →
+	 * 0", which an adversarial leg showed would send the descriptor's own
+	 * header to register 0 while the reference reads it at 3. The three-way
+	 * selector below is exactly those three phases.
+	 *
+	 * What the field's answers actually contain is three leading bytes on this
+	 * panel's raw-mode answers and the reference frame behind them, sync at
 	 * eleven, which is why the read had to grow — not a frame "nine bytes out
 	 * of position", a reading a leg disproved with a harness over this header.
 	 * See docs/FRAME-MATRIX.md.
@@ -1355,23 +1364,6 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * by the raw path's own explicit calls, and the descriptor's responses by
 	 * the request path, which asks for register 3 — the register the reference
 	 * reads them from too.
-	 *
-	 * In standard mode the descriptor's own register stands: the force at probe
-	 * is raw-only, for exactly this reason.
-	 *
-	 * Which register a read goes to is a property of the PHASE, and the
-	 * reference's boot trace names all three of them:
-	 *
-	 *   WAIT_RESET         register 0              TXN#1/#2   (the reset, drain)
-	 *   WAIT_DESC/WAIT_RPT register 3              TXN#4/#5   (descriptor hdr+body)
-	 *   DONE               the stream, 0x0A in raw  TXN#869+   (DATA frames)
-	 *
-	 * Two earlier versions of this were wrong and one field run each was
-	 * enough to show it: a sticky flag (raw_stream_armed — one run reaching
-	 * DONE fixed it for the session: 141 reads on 0x0a, none on 0) and then
-	 * "not DONE → 0", which an adversarial leg showed would send the
-	 * descriptor's own header to register 0 while the reference reads it at 3.
-	 * The three phases above are exactly the three registers the trace uses.
 	 *
 	 * Both directions of getting this wrong are silent: pointing the handshake
 	 * at 0x0A produced a reset frame nine bytes out of position in every field
@@ -1824,20 +1816,9 @@ out:
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
-	/* SIXTEEN, and this time for a measured reason. This panel answers every
-	 * read with three leading bytes (`01 <status> EE`) — measured on this panel's
-	 * raw-mode answers only, never in a capture, because every capture records
-	 * the reference driver's standard-mode traffic — and then the same frame the
-	 * reference device sends; the frame's own header begins at offset 8
-	 * and its sync byte, which is what the typing code gates on, sits at
-	 * ELEVEN. A nine-byte read therefore cannot see a frame by construction:
-	 * the field's logs end at `... ff ff ff 32`, the frame's first header
-	 * byte, with the sync three bytes past the end of the buffer. Eight
-	 * further reads would have been enough; sixteen leaves room for the
-	 * header's fourth byte and the first body byte. Measured on this source
-	 * with a harness that links this header: the prefixed reset types as 3 at
-	 * offset 8, the prefixed descriptor as 7 at offset 8 — and both pins are
-	 * in the host suite now. */
+	/* Sixteen: this panel prefixes every answer with three bytes (`01 <status>
+	 * EE`) — frame header at offset 8, sync at ELEVEN. The full measurements,
+	 * and why nine bytes cannot hold a frame, at spi_hid_seq_thread(). */
 	u8 hdr[16];
 	u32 resp_reg;
 	int type, hdr_off;
@@ -1909,16 +1890,17 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		 * that between every pair of exchanges — so this branch used to hand
 		 * the device up to the hardcoded fallback while it was still
 		 * answering. Do what the IRQ path has always done: drain the reset
-		 * and send the DESCREQ again. If the budgets are spent and the
-		 * restart is refused, the watchdog owns the fallback, not this
-		 * branch. */
+		 * and send the DESCREQ again. A refusal below means the DESCREQ
+		 * write failed; a device that answers resets forever is the raw
+		 * handshake watchdog's case — standard mode has no timer for that
+		 * shape (see spi_hid_seq_set_state()). */
 		seq_dbg(shid, 1, "SEQ: poll-work: RESET_RSP, draining and retrying as the IRQ path does\n");
 		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
-			return; /* restarted: the 100 ms retry loop and the watchdog own it from here */
-		/* The restart was refused, so the budgets are spent. Fall back the way
-		 * this branch always did — and only now. Leaving this install to run
-		 * unconditionally is how this branch once retried and abandoned the
-		 * device in the same breath, with ready still false. */
+			return; /* restarted: the retry loop, and in raw mode the handshake watchdog, own it from here */
+		/* The restart was refused, so the DESCREQ write failed. Fall back the
+		 * way this branch always did — and only now. Leaving this install to
+		 * run unconditionally is how this branch once retried and abandoned
+		 * the device in the same breath, with ready still false. */
 		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
 		shid->ready = true;
 		dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors\n");
@@ -2402,20 +2384,9 @@ static void spi_hid_poll_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, poll_work);
 	struct device *dev = &shid->spi->dev;
-	/* SIXTEEN, and this time for a measured reason. This panel answers every
-	 * read with three leading bytes (`01 <status> EE`) — measured on this panel's
-	 * raw-mode answers only, never in a capture, because every capture records
-	 * the reference driver's standard-mode traffic — and then the same frame the
-	 * reference device sends; the frame's own header begins at offset 8
-	 * and its sync byte, which is what the typing code gates on, sits at
-	 * ELEVEN. A nine-byte read therefore cannot see a frame by construction:
-	 * the field's logs end at `... ff ff ff 32`, the frame's first header
-	 * byte, with the sync three bytes past the end of the buffer. Eight
-	 * further reads would have been enough; sixteen leaves room for the
-	 * header's fourth byte and the first body byte. Measured on this source
-	 * with a harness that links this header: the prefixed reset types as 3 at
-	 * offset 8, the prefixed descriptor as 7 at offset 8 — and both pins are
-	 * in the host suite now. */
+	/* Sixteen: this panel prefixes every answer with three bytes (`01 <status>
+	 * EE`) — frame header at offset 8, sync at ELEVEN. The full measurements,
+	 * and why nine bytes cannot hold a frame, at spi_hid_seq_thread(). */
 	u8 hdr[16];
 	int type, ret, hdr_off;
 	u16 blen;
@@ -2724,8 +2695,11 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 		goto out;
 	}
 	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
-	/* spi_hid_seq_hdr_type() already narrowed a nibble-only type 3 down to
-	 * Windows' rule, so a `32 10 00 5a` idle frame arrives here as -1. */
+	/* A `32 10 00 5a` frame types as 3 here — it IS the reference's own
+	 * reset answer (spi-hid-protocol.h) — and a sync-less `03 00 00 00`
+	 * drain types as -1. The narrowing that once made this frame arrive
+	 * as -1 was deleted after a field run showed the device behaving like
+	 * the reference while this driver answered upside down. */
 	seq_dbg(shid, 2, "SEQ[state=%s(%d)] type=%d hdr=[%*ph] dt=%lld us%s\n",
 		 spi_hid_seq_state_name(shid->seq_state), shid->seq_state,
 		 type, 4, &hdr[5], dbg_dt_us,
