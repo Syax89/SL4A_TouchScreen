@@ -10,17 +10,18 @@ and the same sequence.
 
 ### 1. Vendor Initialization
 
-Before the SET_FEATURE command, the driver sends a vendor-initialization
-write to register 0xC2 to prepare the device:
+Before the SET_FEATURE command, the driver sends the vendor-initialization
+write — command register `0x000003`, 18 bytes:
 
 ```
-Host → Device (register 0xC2):
-  [02 00 2F 00 00 00 01 00 00 00 00 00]
-  content_id  length  vendor_init payload
+02 00 00 03 C2 00 03 0A 00 56 BD 0C EE 5B 44 4C 00 00
 ```
 
-This matches the Windows touch initialization trace
-(`surface_init.csv` transaction #267).
+`C2` is the header byte (version | length), not a register; the payload is
+report ID `0x56` followed by the six-byte device key. This matches the Windows
+touch initialization trace (`captures/wintrace/surface_init.csv`); the frame is
+built by `spi_hid_wire_vendor_init()` and pinned byte for byte by
+`tests/wire_frames_test.c`.
 
 ### 2. SET_FEATURE Handshake
 

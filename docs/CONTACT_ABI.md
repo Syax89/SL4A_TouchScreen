@@ -58,13 +58,16 @@ does not implement classification.
 
 ## Contact Limits
 
+Where these rows conflicted with the driver's own constants, the driver value
+is named first; the DLL binary is not in this repository to adjudicate further.
+
 | Parameter | Value | Source |
 |-----------|-------|--------|
-| Max simultaneous contacts | 10 | DLL blob slot count |
-| Max blob candidates | 64 | Per-frame extraction limit |
-| History ring size | 8 | Position history depth |
-| Hold timeout | ~8 frames | Before forced lift |
-| Stationary lock frames | 6 | Before position freeze |
+| Max simultaneous contacts | 47 | `HEATMAP_MAX_SLOTS` — its comment cites the DLL blob slot count; an earlier revision of this table said 10 with no offset recorded |
+| Max blob candidates | 20 | `HEATMAP_MAX_BLOBS` (driver); the earlier 64 had no source |
+| History ring size | 10 | `SLOT_HISTORY_DEPTH` ("Surface: 10 samples"); the earlier 8 had no source |
+| Hold timeout | disabled | `hold_frames=0` — Windows enables hold only for tracks passing strict quality checks (`docs/CONFIG_TABLE.md`) |
+| Stationary lock frames | 2 | `HEATMAP_STATIONARY_FRAMES`; the earlier 6 was a pre-E0 estimate |
 
 ## References
 

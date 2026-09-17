@@ -13,10 +13,14 @@ matrix: `effective_radius = blob_max_distance × multiplier[n_fingers]`.
 | Offset | DLL Value | Usage | Linux Equivalent |
 |--------|-----------|-------|-----------------|
 | +0x8DC | 0.545009 | Normal radius (2 fingers) | `blob_max_distance=3` |
-| +0x8E0 | 1.218098 | Single-track continuity | 3 × 1.218 = 3.65 cells |
-| +0x8E4 | 1.549246 | 3-finger radius | 3 × 1.549 = 4.65 cells |
-| +0x8E8 | 1.845492 | 4-finger radius | 3 × 1.845 = 5.54 cells |
-| +0x8EC | 2.161228 | 5+ finger radius | 3 × 2.161 = 6.48 cells |
+| +0x8E0 | 1.218098 | Single-track continuity | 3 × 2.2 = 6.6 cells (ratio 1.218/0.545 ≈ 2.23; `ASSOC_RADIUS_1_FINGER=22`) |
+| +0x8E4 | 1.549246 | 3-finger radius | 3 × 2.8 = 8.4 cells (ratio 2.84; `ASSOC_RADIUS_3_FINGERS=28`) |
+| +0x8E8 | 1.845492 | 4-finger radius | 3 × 3.4 = 10.2 cells (ratio 3.39; `ASSOC_RADIUS_4_FINGERS=34`) |
+| +0x8EC | 2.161228 | 5+ finger radius | 3 × 4.0 = 12.0 cells (ratio 3.97; `ASSOC_RADIUS_5_FINGERS=40`) |
+
+The multiplier is the **ratio** to the +0x8DC normal radius, rounded to the
+driver's per-mille constants — not the raw DLL value applied directly
+(`driver/mshw0231-raw.c:874-889`).
 
 ## Edge Contact Weights (offset +0x8D0, +0x8D4)
 

@@ -1,6 +1,6 @@
 # Hardware Reference
 
-## Device: MSHW0231 (045E:0C19)
+## Device: MSHW0231 (045E:0C19) — Surface Laptop 4 (AMD)
 
 Surface Laptop 4 (AMD) touchscreen controller, connected via SPI bus
 on the AMD Cezanne (Ryzen 4000/5000 Mobile) FCH.
@@ -12,12 +12,14 @@ on the AMD Cezanne (Ryzen 4000/5000 Mobile) FCH.
 | HID Vendor ID | 0x045E (Microsoft) |
 | HID Product ID | 0x0C19 |
 | ACPI ID | MSHW0231 |
-| Touch grid | Current experimental fallback: 72 columns × 48 rows |
+| Touch grid | 72 columns × 48 rows (3456 cells) |
+| CapImg raster | 3456 bytes, one byte per cell, row-major, row stride = 72 (no padding) |
+| Resting level | `0xB4` (180) in the raster |
 | Technology | Mutual-capacitance projective touch |
 | Report rate | ~100 Hz (raw mode) |
-| SPI clock | ACPI requests 33.33 MHz; controller-speed validation remains open |
+| SPI clock | 12 MHz (initial), configurable |
 | SPI mode | 0 (CPOL=0, CPHA=0) |
-| Chip select | ACPI logical CS0; controller physical mapping requires target validation |
+| Chip select | 0 |
 
 ### SPI Wiring
 
@@ -26,7 +28,7 @@ The touch controller sits on the AMD FCH SPI bus 1:
 ```
 AMD Cezanne FCH (SPI1)               MSHW0231
 ───────────────────────               ────────
-Logical CS0  ─────────────────────── → controller-selected CS
+CS#0        ─────────────────────── → CS
 SCLK        ─────────────────────── → SCLK
 MOSI (SDO)  ─────────────────────── → MOSI
 MISO (SDI)  ─────────────────────── → MISO
@@ -54,6 +56,25 @@ Device (TPD0) {
 The driver uses `_PS0` / `_PS3` for power transitions but NEVER calls `_RST`
 (M010), which physically destroys the device on this hardware.
 
+## Device: MSHW0162 — Surface Laptop 3 (AMD)
+
+The SL3 AMD touchscreen uses a different controller with a larger sensor
+grid, but the same V0 HID-over-SPI transport on the same `AMDI0060`
+controller (values contributed by guskog from real SL3 hardware):
+
+| Property | Value |
+|----------|-------|
+| ACPI ID | MSHW0162 |
+| Touch grid | 78 columns × 52 rows (4056 cells) |
+| CapImg raster | 4056 bytes, one byte per cell, row-major, row stride = 78 (no padding) |
+| Technology | Mutual-capacitance projective touch |
+| Transport | HID-over-SPI V0 (same as MSHW0231) |
+| SPI controller | `AMDI0060` (same as SL4) |
+
+The driver selects the grid geometry, CapImg raster count (4056) and
+baseline frames (33) from the ACPI ID at probe time; SL4 keeps its
+original 3456/30 values.
+
 ## AMD FCH SPI Controller
 
 The Cezanne FCH integrates a multi-mode SPI controller supporting
@@ -75,7 +96,7 @@ PIO (Programmed I/O) and DMA modes. The Linux driver uses V2 PIO mode.
 
 ### PIO Mode Transfer Sequence (V2)
 
-1. **Select chip** — select logical CS0, configure CTRL1 with speed index
+1. **Select chip** — set CS#0, configure CTRL1 with speed index
 2. **Write opcodes** — program opcode FIFO with read/write commands
 3. **Set TX_COUNT** — program PIO byte count for write phase
 4. **Write TX FIFO** — push data to transmit
@@ -89,13 +110,11 @@ PIO (Programmed I/O) and DMA modes. The Linux driver uses V2 PIO mode.
 
 | Speed Index | Clock | Notes |
 |-------------|-------|-------|
-| 0 | 12.5 MHz | Default / safe speed |
+| 0 | 12 MHz | Default / safe speed |
 | 1 | 25 MHz | Requires SPI100 mode |
 | Higher | Up to 100 MHz | Requires evaluation |
 
-Older notes describe speed index 0 (12 MHz nominal), but the tracked ACPI
-resource requests 33.33 MHz. Do not use either as a release guarantee until
-target hardware evidence is recorded.
+The Windows driver uses speed index 0 (12 MHz nominal) for normal
 operation. The Linux driver follows this.
 
 ### TX_COUNT Quirk (PIO)
@@ -112,5 +131,8 @@ Larger reads must be split into 64-byte chunks.
 ## References
 
 - `docs/SPI_REGISTERS.md` — Complete register map and bit definitions
-Reverse-engineering source material retained locally. See `docs/SPI_REGISTERS.md`.
+- `docs/AMDI0060_CONTRACT.md` — SPI controller contract and quirks
+- `docs/decomp/SURFACE_TRACKER_DECOMP.md` — decompilation notes
+- `tools/ghidra/` — Ghidra scripts used for the analysis
+- `docs/acpi/dsdt.dsl` — DSDT with the device and controller declarations
 - AMD Cezanne FCH BIOS Specification (NDA)

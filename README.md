@@ -46,7 +46,7 @@ activation guide.
 | Standard HID report forwarding | Implemented | Contact behavior requires hardware evidence |
 | Raw CCL and multitouch pipeline | Implemented | Experimental |
 | Cold-boot retry and recovery | Implemented | Hardware matrix required |
-| Candidate classification and per-cycle gain | Not implemented | Not planned for v1.2.0 |
+| Candidate classification and per-cycle gain | Not implemented | Not planned for v1.x |
 
 ## Architecture
 

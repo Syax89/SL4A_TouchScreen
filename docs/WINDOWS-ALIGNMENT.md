@@ -25,7 +25,7 @@ so a cell rises when its raw byte falls below the resting value 180, one raw cou
 | baseline depth | 30 frames | `HEATMAP_BASELINE_FRAMES 30` |
 | ghost / velocity radius | 6 cells (36.0 in squared distance) | `HEATMAP_VELOCITY_REJECT_RADIUS 6`, `ghost_dist 6` |
 | edge penalty | 23% bottom, 97% top | `HEATMAP_EDGE_PENALTY_BOTTOM 23`, `_TOP 97` |
-| centroid | 5x5 weighted above baseline | `HEATMAP_PEAK_RADIUS 2` (5x5) |
+| centroid | 5x5 weighted above baseline | full-blob signal-weighted centroid (×100 fixed-point); the radius-2 scan is the peak gate, not a centroid window |
 
 ## Gaps to close
 

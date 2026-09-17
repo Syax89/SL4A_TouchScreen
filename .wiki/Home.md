@@ -1,66 +1,92 @@
 # SL4A TouchScreen — Linux Kernel Driver
 
-> Historical research summary. `docs/SUPPORT.md`, `docs/COMPATIBILITY.md`, and
-> `docs/EVIDENCE.md` define the current release contract and take precedence.
+> A reverse-engineered Linux kernel driver for the **Microsoft Surface Laptop 3/4 (AMD)** touchscreen: standard HID single-touch and pen out of the box, plus an experimental raw-heatmap multi-touch pipeline.
 
-Linux kernel driver for the Surface Laptop 4 (AMD) touchscreen, providing
-standard HID single-touch, pen, and raw multi-touch via a V0 HID-over-SPI
-transport on the AMD FCH SPI controller.
+The driver speaks the pre-release **HID-over-SPI Version 0 (V0)** protocol that Microsoft's `HidSpiDeviceV0` uses on these panels, over the AMD FCH SPI controller (`AMDI0060`). It is a from-scratch implementation validated against decompiled Windows drivers and real hardware traces — not a fork of an in-tree driver.
 
-**Device**: MSHW0231 (045E:0C19), experimental 72×48 fallback grid
-**Transport**: HID-over-SPI V0 protocol (AMD Cezanne FCH SPI controller V2)
-**Kernel**: historical research environment; see `docs/COMPATIBILITY.md`
-**Alignment**: experimental pipeline comparison, not a release claim
+## Supported hardware
 
-## Architecture
+| Component | Identity | Notes |
+|---|---|---|
+| Surface Laptop 4 (AMD) | touch controller ACPI `MSHW0231` (HID 045E:0C19) | 72×48 grid, 3456 CapImg cells |
+| Surface Laptop 3 (AMD) | touch controller ACPI `MSHW0162` | 78×52 grid, 4056 CapImg cells |
+| SPI controller (both) | `AMDI0060` (AMD Cezanne FCH SPI V2, MMIO 0xFEC10000) | PIO mode, 12 MHz, mode 0 |
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Userspace                                                     │
-│  libinput / X11 / Wayland ← evdev ← hid-multitouch            │
-├──────────────────────────────────────────────────────────────┤
-│  Kernel                                                        │
-│                                                                 │
-│  ┌─────────────┐   ┌──────────────┐   ┌───────────────────┐  │
-│  │ spi-hid-core │   │  spi-hid-core │   │    spi-amd         │  │
-│  │  HID LL      │ ← │  Heatmap + MT │ ← │  AMD FCH SPI V2   │  │
-│  │  transport   │   │  Pipeline     │   │  PIO controller    │  │
-│  └──────┬───────┘   └──────────────┘   └────────┬──────────┘  │
-│         │                                         │             │
-├─────────┼─────────────────────────────────────────┼─────────────┤
-│ Hardware│                                         │             │
-│         │       SPI bus (ACPI: 33.33 MHz)          │             │
-│  MSHW0231 Touch MCU ◄──────────────────────────────             │
-│  045E:0C19                                                      │
-└─────────────────────────────────────────────────────────────────┘
-```
+The driver selects device-specific tuning (grid geometry, CapImg sample count, baseline length) from the ACPI ID at probe time — see [Architecture](Architecture).
 
-## Feature Status
+## Two operating modes
 
-| Feature | Status |
-|---------|--------|
-| HID report descriptor | Implemented; hardware qualification pending |
-| Standard HID report forwarding | Implemented; contact qualification pending |
-| Multi-touch CCL pipeline | Experimental |
-| Touch ellipse and stationary lock | Experimental |
-| Cold boot auto-retry handshake | Implemented; hardware qualification pending |
+| Mode | `raw_mode` | What you get | Status |
+|---|---|---|---|
+| **Standard HID** | `0` (default) | Single-touch + pen, firmware-computed coordinates, ~10 ms reports | **Stable, recommended** |
+| **Raw heatmap** | `1` | Sensor-grid data processed host-side into 2–4 finger multi-touch | **Experimental** |
 
-## Navigation
+[Standard Touch Mode](Standard-Touch-Mode) is what you should run day to day. [Multi-touch (Experimental)](Multi-touch-Experimental) documents the raw path and its caveats.
 
-- [Protocol: HID over SPI V0](Protocol) — Wire format, DESCREQ, SET_FEATURE activation
-- [Touch Pipeline](Pipeline) — Peak gate, CCL, centroid, Hungarian, EMA, emission
-- [Config Table](Config-Table) — Values extracted from `TouchPenProcessor0C19.dll`
-- [Hardware Reference](Hardware) — MSHW0231, AMD FCH SPI controller, GPIO
-- [Build & Install](Build-and-Install) — DKMS, module parameters, troubleshooting
-- [Reverse Engineering](Reverse-Engineering) — Methodology, decompilation, known gaps
-
-## Quick Install
+## Quick start
 
 ```bash
-git clone git@github.com:Syax89/SL4A_TouchScreen.git
+git clone https://github.com/Syax89/SL4A_TouchScreen.git
 cd SL4A_TouchScreen
-sudo ./tools/sl4a-touch.sh install
-# → install activates immediately (Step 7) and enables a systemd unit that
-#   re-activates after every boot, once multi-user.target is reached — not
-#   during kernel boot, because the modules export no aliases.
+sudo ./tools/sl4a-touch.sh install     # hardware check, DKMS build, boot service
+sudo reboot
 ```
+
+After reboot the driver binds automatically. Verify with:
+
+```bash
+sudo ./tools/sl4a-touch.sh status      # hardware + runtime state
+sudo evtest                            # pick "spi 045E:0C19", touch the screen
+```
+
+Full instructions: [Build & Install](Build-and-Install) · [Usage & Troubleshooting](Building-Usage-and-Troubleshooting).
+
+## How it works, in one picture
+
+```
+Linux input subsystem (evdev)
+        ▲
+   hid-generic / hid-input         ┌───────────────────────────┐
+        ▲                          │  raw_mode=1               │
+   hid_input_report()              │  heatmap → baseline →     │
+        │                          │  peaks → CCL → Hungarian  │
+  ┌─────┴──────────┐               │  → MT slots → input_mt    │
+  │ spi-hid-core   │◄──────────────┤  (mshw0231-raw.c)         │
+  │ V0 protocol +  │               └───────────────────────────┘
+  │ IRQ sequencer  │
+  └─────┬──────────┘
+        │ SPI transfers
+  ┌─────┴──────────┐
+  │ spi-amd        │   AMD FCH SPI V2 PIO controller
+  └─────┬──────────┘
+        │ SPI bus (12 MHz, mode 0)
+   MSHW0231 / MSHW0162 touch controller
+```
+
+The two kernel modules, the sequencer state machine and the IRQ model are described in [Architecture](Architecture); the wire format in [Protocol](Protocol) and [Wire Protocol](Wire-Protocol).
+
+## Wiki map
+
+| Page | What it covers |
+|---|---|
+| [Architecture](Architecture) | Module split, sequencer state machine, IRQ model, sysfs interface, recovery |
+| [Protocol](Protocol) | HID-over-SPI V0: discovery, message types, feature exchange, timing |
+| [Wire Protocol](Wire-Protocol) | Byte-level framing: headers, bodies, opcodes, PIO continuations |
+| [Report Descriptor](Report-Descriptor) | The 936-byte descriptor: collections, reports, PIO read invariant |
+| [Touch Pipeline](Pipeline) | Raw multi-touch chain: baseline, peaks, CCL, Hungarian, slots |
+| [Config Table](Config-Table) | Windows DLL configuration values and their Linux mapping |
+| [Hardware](Hardware) | Both panels, AMD FCH SPI registers, wiring, ACPI power |
+| [Standard Touch Mode](Standard-Touch-Mode) | Default mode: report formats 0x40/0x01, why it is stable |
+| [Multi-touch (Experimental)](Multi-touch-Experimental) | Raw mode: activation, per-device geometry, operational safety |
+| [Build & Install](Build-and-Install) | Installer, DKMS, Secure Boot/MOK, module parameters, build from source |
+| [Usage & Troubleshooting](Building-Usage-and-Troubleshooting) | Day-to-day usage, debugging, recovery, common issues |
+| [Reverse Engineering](Reverse-Engineering) | Methodology, evidence, decompiled sources, known gaps |
+| [Further Reading](Further-Reading) | Repository docs: evidence files, testing procedure, register maps |
+
+## Repository documentation
+
+The repo's `docs/` directory holds the evidence-grade material this wiki is built on: protocol traces, ACPI/decompilation dumps, hardware validation procedures and the chronological investigation record. See [Further Reading](Further-Reading) for the map.
+
+## License and status
+
+GPL-2.0, **beta software**. This is an experimental, reverse-engineered driver — use at your own risk. The standard mode is the qualified profile; everything else is best-effort.

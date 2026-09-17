@@ -29,12 +29,16 @@ Each SPI exchange has a request (host→device) and response (device→host).
 
 ### Report Types (header byte 0, upper nibble)
 
-**One exception, and it is the one that matters at startup.** A message whose
-**first byte is `3`** is a reset response: the reference tests the whole byte
-(`VerifyResetResponse` compares `msg[0]` against 3), not a nibble. The device's
-idle frame `32 10 00 5a` shares the nibble but is not a reset — and treating it
-as one makes the driver answer a device that is merely idle with a descriptor
-request, which the device answers with another reset.
+**One exception, and it is the one that matters at startup.** The device's
+`32 10 00 5A` frame **is** the reset response: by the sync-based rule (high
+nibble is the type, the version nibble is 2, sync `5A` present) it types as 3,
+and the reference's own boot trace labels exactly that frame its RESET_RSP. A
+sync-less `03 00 00 00` is **not** a reset — it is the drain that answers the
+read after one. Two earlier readings inverted the pair: a narrowing taken from
+a Cx-layer function (`VerifyResetResponse` compares `msg[0]` against 3, the
+whole byte) rejected the real reset and typed the drain in its place. The
+trace bytes, read with `tools/parse_spi.py`, settle it; the rule lives in
+`spi_hid_protocol_frame_type()` (`driver/spi-hid-protocol.h`).
 
 These correspond to the `SPI_HID_REPORT_TYPE_*` constants defined
 in `driver/spi-hid-core.h`.
@@ -69,11 +73,11 @@ data boundary.
 
 ### 1. Device Descriptor Request (DESCREQ)
 
-The driver sends a 10-byte DESCREQ frame to inquire about device capabilities:
+The driver sends a 10-byte DESCREQ frame to inquire about device capabilities
+(wire bytes; the doubled-opcode legacy form is behind `wire_double_opcode=1`):
 
 ```
-Host sends: [02 00] [0A 00] [00 00 01 00] [00 00 00 00]
-            content_id  length   DESCREQ magic   padding
+Host sends: 02 00 00 01 42 00 00 03 00 00   (register 0x0001)
 ```
 
 The device responds with a 30-byte DEVICE_DESC (0x08) frame containing
@@ -109,9 +113,12 @@ containing the 936-byte HID report descriptor.
 ### 4. SET_FEATURE ID5 (Raw Mode Activation)
 
 ```
-Host sends: [0F 00] [length] [type=03, id=05, value=01]
-            content_id  COMND  SET_FEATURE frame
+Host sends: 02 00 00 03 82 00 03 04 00 05 01 0C EE 5B   (14 bytes)
 ```
+
+`0F` is the content-layer id, not a wire opcode. The frame is built by
+`spi_hid_wire_set_feature5()` (`driver/spi-hid-wire-frames.h`) and pinned byte
+for byte by `tests/wire_frames_test.c`.
 
 This command is part of the observed raw-mode sequence. It is not yet proven
 that ID5 alone establishes a reliable stream, and the frame layout is still
@@ -154,6 +161,13 @@ now the default (`wire_double_opcode=0`) and the doubled form is behind
 
 For AMD SPI V2 PIO reads, TX_COUNT must be 3 (not 0) to correctly
 trigger the read phase. This matches Windows `amdspi.sys` decompilation.
+
+Capture lengths are not wire lengths: the SPB capture records SpbCx
+transfer-descriptor **buffer** sizes (TX equal to RX on every read) and no
+TX_COUNT/RX_COUNT, so it cannot show what reaches the wire — do not port a
+length from a capture row into a frame builder. The driver sizes each request
+as the frame itself (`driver/spi-hid-core.c`, the read-approval caller; see
+also `docs/FRAME-MATRIX.md`).
 
 ### Cold Boot Handshake
 

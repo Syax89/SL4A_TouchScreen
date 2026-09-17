@@ -146,10 +146,12 @@ The 0C19 processor selector maps to static record `DAT_1808e0460` in
 is a coalescing radius of six grid cells. The default per-frame selector points
 `tracker + 0xc570` at `frame_data + 0x0c` for 0C19.
 
-The Linux beta's current `ghost_dist=15` test is an axis-aligned box and does
-not implement this contract. Replacing it alone would be unsafe: the preceding
-Surface association, suppression and hold/lift phases decide which records are
-eligible for coalescing.
+An earlier Linux beta used a `ghost_dist=15` axis-aligned box and did not
+implement this contract; the current driver uses the Euclidean form
+(`ghost_dist=6`, `dx²+dy² < ghost_dist²`, `driver/mshw0231-raw.c`). Replacing
+the coalescing step alone would be unsafe: the preceding Surface association,
+suppression and hold/lift phases decide which records are eligible for
+coalescing.
 
 ## Linux Requirements
 

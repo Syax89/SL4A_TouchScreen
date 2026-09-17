@@ -1,12 +1,12 @@
 # Reverse Engineering
 
 This driver was developed by reverse-engineering the Windows driver stack
-for the Surface Laptop 4 (AMD). This page documents the methodology, tools,
-and known gaps.
+for the Surface Laptop 4 (AMD) touchscreen. This page documents the
+methodology, tools, evidence and known gaps. The SL3 AMD panel (`MSHW0162`)
+was added later from the same protocol with geometry values contributed and
+tested on real hardware.
 
-## Windows Driver Stack
-
-The Windows touch pipeline consists of these components:
+## Windows driver stack
 
 ```
 User mode
@@ -15,113 +15,144 @@ User mode
     │
 Kernel mode
   SurfaceSystemTelemetryDriver.sys  ← Device firmware communication
-  hidspi.sys (PDB: b00863b3...)     ← HID over SPI protocol
+  hidspi.sys (PDB: b00863b3...)     ← HID-over-SPI protocol
   HidSpiCx.sys                      ← Class extension framework
     │
   amdspi.sys                        ← AMD FCH SPI controller driver
 ```
 
-## Driver Components Decompiled
+## What was decompiled
 
-| Component | Status | Documentation |
-|-----------|--------|---------------|
-| `amdspi.sys` | Fully decompiled | AMD FCH SPI controller driver |
-| `hidspi.sys` | Protocol layer decompiled | HID-over-SPI V0 protocol |
-| `HidSpiCx.sys` | Orchestrator decompiled | Class extension framework |
-| `TouchPenProcessor0C19.dll` | Partially decompiled | Core touch pipeline (config table, CCL, tracking) |
-| UEFI DXE drivers | Fully decompiled | Platform initialization drivers |
+| Component | Status | Evidence in repo |
+|---|---|---|
+| `amdspi.sys` | Fully decompiled | read/transfer/write handlers documented in `docs/SPI_REGISTERS.md`, `docs/AMDI0060_CONTRACT.md` |
+| `hidspi.sys` | Protocol layer decompiled | V0 protocol, descriptors — summarized in `docs/HIDSPI_PROTOCOL.md` |
+| `HidSpiCx.sys` | Orchestrator decompiled | descriptor handling, reset |
+| `TouchPenProcessor0C19.dll` | Partially decompiled | `docs/decomp/SURFACE_TRACKER_DECOMP.md`, `docs/decomp/MULTITOUCH_STATIC_DECOMP.md`, `docs/decomp/HEATCORE_REPORT_TABLE.md` |
+| UEFI DXE drivers | Fully decompiled | `AmdSpiHcProtocolDxe`, `SurfaceTouchHidDxe` and more (Ghidra projects/scripts in `tools/ghidra/`) |
 
 ## Methodology
 
-### 1. Windows Trace Capture
+### 1. Windows trace capture
 
-- **RWEverything**: Dumped MMIO register state and PCI config space on Windows boot
-- **ETW (Event Tracing for Windows)**: Captured HID-over-SPI bus traces via
-  `Microsoft-Windows-HIDSPI` provider at 0xFFFF verbosity level
-- **MSI analysis**: Extracted driver MSI package to find binaries and INF files
-  (`docs/msi-tables/`)
+- **RWEverything**: dumped MMIO register state and PCI config space on
+  Windows boot
+- **ETW**: captured HID-over-SPI bus traces via the
+  `Microsoft-Windows-HIDSPI` provider at 0xFFFF verbosity; CSV conversion
+  documented in `docs/ETW_CSV_FORMAT.md`
+- **MSI analysis**: extracted driver packages to find binaries and INF files
+  (`tools/windows_capture/`)
 
-### 2. Binary Analysis
+### 2. Binary analysis
 
-- **Ghidra**: Primary tool for decompiling Windows drivers and UEFI modules:
-  - `amdspi.sys` (no PDB): Analyzed via function boundary recovery and register
-    pattern matching against known AMD FCH SPI controller documentation
-  - `hidspi.sys` (PDB available): Full symbol recovery via
-    `b00863b38d904fcbbd2bf2db07f88cff2` PDB
-  - `HidSpiCx.sys`: Class extension with full PDB symbols
-  - `TouchPenProcessor0C19.dll`: Targeted decomp of specific pipeline functions
-  - UEFI DXE drivers (7 modules): Full decomp with register definitions
+- **Ghidra** — primary decompiler (`tools/ghidra/` contains the scripts:
+  `DecompileAll.java`, `DecompileByAddress.java`, `DecompileByKeyword.java`,
+  `DumpPointerTable.java`, …):
+  - `amdspi.sys` (no PDB): function-boundary recovery + register-pattern
+    matching against the AMD FCH SPI controller documentation
+  - `hidspi.sys` (PDB available): full symbol recovery
+  - `HidSpiCx.sys`: class extension with full PDB symbols
+  - `TouchPenProcessor0C19.dll`: targeted decomp of the pipeline functions
+  - UEFI DXE drivers: full decomp with register definitions
 
-- **Ghidra Scripts**: Custom scripts exported cross-references and consumer
-  chains for the CCL pipeline functions (`decomp/touchpen0c19_tables_20260716/`)
+### 3. Config table extraction
 
-### 3. Config Table Extraction
+The `TouchPenProcessor0C19.dll` static configuration table lives at virtual
+address `0x1808E0460` (file offset `0x8DF060`, `.data`). Extraction:
 
-The `TouchPenProcessor0C19.dll` contains a static configuration table at
-virtual address `0x1808E0460` (file offset `0x8DF060`, section `.rdata`).
-This table was extracted by:
+1. locate the table base via cross-reference to the pipeline init function
+   (FUN_180600c40),
+2. read float32 values at known offsets (+0x8DC…+0x8EC association radii,
+   +0x8D0/+0x8D4 edge weights, …),
+3. validate against ETW CSV traces showing actual association behavior.
 
-1. Identifying the table base address via cross-reference to the pipeline
-   initialization function (FUN_180600c40)
-2. Reading float32 values at known offsets (+0x8DC through +0x8EC for
-   association radii, +0x8D0/+0x8D4 for edge weights, etc.)
-3. Validating values against ETW CSV traces showing actual association
-   behavior
+See [Config Table](Config-Table) for the values and their Linux mapping.
 
-### 4. Protocol Validation
+### 4. Protocol validation
 
-The HID-over-SPI V0 protocol was validated against:
-- Windows EHCI trace dump (`surface_init.csv`, `surface_touch.csv`)
-- UEFI DXE drivers showing register-level interactions
-- The Microsoft HIDSPI specification (not public, but inferred from
-  multi-vendor implementations)
+The V0 protocol was validated against:
 
-### 5. Pipeline Validation
+- Windows trace dumps (`surface_init.csv`, `surface_touch.csv`),
+- UEFI DXE drivers showing register-level interactions,
+- the Microsoft HIDSPI specification (inferred from multi-vendor
+  implementations).
 
-The CCL pipeline was validated by comparing kernel driver output against:
-- ETW CSV traces showing Windows blob detection and tracking
-- Python oracle (`tools/surface_tracker.py`) implementing the Windows
-  algorithm on captured raw frames
-- Mathematical validation of eigenvalue formulas
+### 5. Pipeline validation
 
-## Known Gaps
+The CCL pipeline was validated by comparing driver output against:
 
-### Mahalanobis Contact Classifier (FUN_180601690)
+- ETW CSV traces of Windows blob detection and tracking,
+- a Python oracle (`tools/surface_tracker.py`) implementing the Windows
+  algorithm on captured raw frames,
+- mathematical validation of eigenvalue formulas,
+- host replay tests: `raw_pipeline_replay_test` runs synthetic 1–5-finger
+  heatmap fixtures through the real pipeline code (`tests/fixtures/raw-replay/`).
 
-The Windows driver classifies each CCL blob as `finger`, `palm`, or `noise`
-using a 10×11 Mahalanobis distance matrix. This matrix is populated at
-runtime from device firmware via `SurfaceSystemTelemetryDriver.sys` and
-is not present in the static DLL binary.
+## Known gaps
 
-**Impact**: Without classification, all blobs are treated as potential
-finger contacts. Noise rejection relies on peak gate + velocity rejection
-instead.
+### Detector input plane
 
-### Per-Cycle Gain Adaptation (FUN_180600820)
+The per-frame detector reads a byte plane whose row stride is 288 bytes while
+the image occupies only the first 72 bytes of each row — the plane is filled by
+the transport side and its pre-processing (accumulation, baseline handling) is
+not established. Scoring the raw CapImg raster with the detector's kernel and
+peak threshold does not reproduce the published contacts.
 
-The Windows pipeline adjusts per-cell gain values after each frame cycle
-based on noise floor measurements and signal distribution. These gains
-are runtime-populated via the same telemetry channel.
+**Impact**: the Linux peak criterion is the driver's own (rise threshold, noise
+floor, weight gate); it cannot be aligned with the reference until the plane's
+contents are understood.
 
-**Impact**: The Linux driver uses static c590 LUT values and a fixed
-noise floor threshold. Accuracy may degrade over long sessions.
+### Per-frame list provenance
 
-### Hold/Lift Policy (FUN_180606370)
+The frame carries two lists the detector consumes: a blob list (count plus
+4-byte `{x, y}` records) and a 16-slot fixed-point list (count plus u16
+entries). No writer for either exists in the DLL, and their values are not
+found in the raw device payload region.
 
-The Windows hold policy is a complex state machine that evaluates track
-history quality (duration, pixel count, eigenratio, signal level).
-Without this, the Linux driver uses simple frame-count-based lift.
+**Impact**: the Linux pipeline detects its own peaks and blobs; the reference
+candidate source cannot be replicated directly.
 
-**Impact**: Temporary contact loss during fast movement may be handled
-less gracefully than on Windows.
+### Centroid refinement (5×5)
 
-## References
+The published peak position is refined by a 5×5 centroid step whose moment
+accumulators and clamping are not fully modelled.
 
-- `docs/decomp/` — Complete decompilation notes and function analyses
-- `docs/HIDSPI_PROTOCOL.md` — HID-over-SPI V0 protocol specification
-- `docs/CSV_SEQUENCE.md` — ETW CSV trace format
+**Impact**: reference positions can be compared only to the nearest cell.
+
+### Mahalanobis contact classifier (FUN_180601690)
+
+Windows classifies each blob as `finger` / `palm` / `noise` with a 10×11
+Mahalanobis matrix populated **at runtime** from device firmware via
+`SurfaceSystemTelemetryDriver.sys` — absent from the static DLL.
+
+**Impact**: the Linux driver treats all blobs as potential contacts; noise
+rejection relies on the peak gate + velocity rejection instead.
+
+### Per-cycle gain adaptation (FUN_180600820)
+
+Windows adjusts per-cell gain each frame from noise-floor measurements and
+signal distribution, populated via the same telemetry channel.
+
+**Impact**: the Linux driver uses the static c590 LUT and a fixed noise
+floor; accuracy may degrade over long sessions.
+
+### Hold/lift policy (FUN_180606370)
+
+Windows hold is a quality-gated state machine (duration, pixel count,
+eigenratio, signal level). The Linux driver uses frame-count-based lift
+(`blob_lift_frames`) with hold disabled by default.
+
+**Impact**: temporary contact loss during fast movement may be handled less
+gracefully than on Windows.
+
+## Evidence and references
+
+- `docs/decomp/` — decompilation notes (tracker, multitouch static, heatcore)
+- `docs/HIDSPI_PROTOCOL.md` — HID-over-SPI V0 protocol reference
+- `docs/ETW_CSV_FORMAT.md` — ETW CSV trace format
 - `docs/SPI_REGISTERS.md` — AMD FCH SPI controller register map
-- `docs/acpi/` — DSDT and SSDT ACPI tables (ASL source)
-
-Reverse-engineering source material (decompilations, traces, binaries) is
-retained locally and excluded from this public repository.
+- `docs/AMDI0060_CONTRACT.md` — SPI controller contract
+- `docs/acpi/` — DSDT/SSDT ACPI tables (`dsdt.dsl`, `ssdt*.dsl`)
+- `tools/ghidra/` — decompilation scripts
+- `tools/windows_capture/` — Windows-side capture tooling
+- `docs/EVIDENCE.md` — chronological investigation record

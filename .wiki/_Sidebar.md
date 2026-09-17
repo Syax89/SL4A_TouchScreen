@@ -1,8 +1,15 @@
 **[Home](Home)**
 
+- [Architecture](Architecture)
 - [Protocol](Protocol)
-- [Pipeline](Pipeline)
+- [Wire Protocol](Wire-Protocol)
+- [Report Descriptor](Report-Descriptor)
+- [Touch Pipeline](Pipeline)
 - [Config Table](Config-Table)
 - [Hardware](Hardware)
+- [Standard Touch Mode](Standard-Touch-Mode)
+- [Multi-touch (Experimental)](Multi-touch-Experimental)
 - [Build & Install](Build-and-Install)
+- [Usage & Troubleshooting](Building-Usage-and-Troubleshooting)
 - [Reverse Engineering](Reverse-Engineering)
+- [Further Reading](Further-Reading)
