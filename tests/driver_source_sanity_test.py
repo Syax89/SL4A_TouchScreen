@@ -537,6 +537,26 @@ def check_control_flow_pins():
               "wire_double_opcode=1 would apply to the handshake and not to the enable")
         failures += 1
 
+    # raw_fallback_on_reset (2026-09-17 triage): declared, published, and
+    # consulted by the poller's RESET_RSP branch BEFORE the retry — the knob
+    # restores b1f8109's give-up-to-hardcoded-fallback, the one shape the
+    # field has never re-tested (b1f8109 = the last build the panel answered
+    # on; the retry replaced it afterwards). Unwiring the branch silently
+    # restores the endless re-drive the field ran against (H1 double-blind
+    # wave: both legs landed on this branch as the loop engine).
+    if "static bool raw_fallback_on_reset;" not in core_code:
+        print("FAIL driver/spi-hid-core.c: raw_fallback_on_reset is no longer declared")
+        failures += 1
+    if "module_param(raw_fallback_on_reset, bool, 0444);" not in core_code:
+        print("FAIL driver/spi-hid-core.c: raw_fallback_on_reset is no longer loadable")
+        failures += 1
+    _fb = core_code.split("if (raw_fallback_on_reset) {", 1)
+    if len(_fb) != 2 or "spi_hid_use_hardcoded_desc(shid);" not in _fb[1][:900] \
+            or "SPI_HID_SEQ_FALLBACK" not in _fb[1][:900]:
+        print("FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch no longer "
+              "reaches the hardcoded fallback — the give-up it restores is gone")
+        failures += 1
+
     # 7b. sync_timeout_ms is clamped at probe into the protocol's bounds — the
     # same class as the getfeat_delay_ms clamp above it: negative wraps
     # msecs_to_jiffies() into the far future (a synchronous request waits

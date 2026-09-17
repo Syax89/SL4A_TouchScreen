@@ -67,6 +67,16 @@ static bool wire_double_opcode = SPI_HID_WIRE_DOUBLE_DEFAULT;
  * Default 0: the reference sends them, and the stalled stream they cure is
  * real (tested in the field). */
 static bool skip_vendor_stop;
+/* Triage knob for the 2026-09-17 regression: b1f8109 — the last build this
+ * panel answered on — abandoned to the hardcoded fallback on the first
+ * poller RESET_RSP, so it always reached DONE; the retry added afterwards
+ * keeps re-driving a device that answers every poller read with a reset, so
+ * raw never leaves WAIT_DESC. Set to 1 to restore the give-up: one sweep
+ * tells whether reaching DONE (with the fallback's descriptor) is what
+ * separates the field's loop from a live raw pipeline. Default 0: the
+ * retry is right for a device still answering, and the watchdog owns the
+ * never-answering shape in raw mode. */
+static bool raw_fallback_on_reset;
 /* Deprecated alias: 1 asked for the frame without the doubled opcode, which is
  * the default now, so it only matters as an override of wire_double_opcode=1.
  * Kept declared so existing modprobe.d drop-ins keep loading. */
@@ -1899,6 +1909,20 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		seq_handle_rpt(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
+		if (raw_fallback_on_reset) {
+			/* b1f8109 behavior (the last build this panel answered on and
+			 * the shape the field has never re-tested): one poller
+			 * RESET_RSP is the verdict, not a trigger to re-drive. */
+			seq_dbg(shid, 1, "SEQ: poll-work: RESET_RSP, giving up to the fallback as b1f8109 did\n");
+			spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_FALLBACK);
+			shid->ready = true;
+			dev_warn(&shid->spi->dev, "SEQ: poll-work: DESCREQ failed, using hardcoded fallback descriptors (raw_fallback_on_reset)\n");
+			sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
+			spi_hid_use_hardcoded_desc(shid);
+			if (!shid->hid && !shid->raw_mode_active)
+				schedule_work(&shid->create_device_work);
+			goto out;
+		}
 		/* One reset is not a failure. The device answers a DESCREQ with a
 		 * reset whenever it has one pending — the field unit does exactly
 		 * that between every pair of exchanges — so this branch used to hand
@@ -2096,6 +2120,9 @@ MODULE_PARM_DESC(setfeat_speed_hz,
 module_param(skip_vendor_stop, bool, 0444);
 MODULE_PARM_DESC(skip_vendor_stop,
 	"skip the pre-DESCREQ vendor_stop + D2/D0 preamble (default 0)");
+module_param(raw_fallback_on_reset, bool, 0444);
+MODULE_PARM_DESC(raw_fallback_on_reset,
+	"poller RESET_RSP gives up to the hardcoded fallback as b1f8109 did (default 0)");
 module_param(wire_double_opcode, bool, 0444);
 MODULE_PARM_DESC(wire_double_opcode,
 	"Send the legacy doubled leading opcode (02 02 ..) instead of the "
