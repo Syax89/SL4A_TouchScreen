@@ -287,7 +287,7 @@ struct spi_hid {
 	u16 cost[HEATMAP_MAX_BLOBS][HEATMAP_MAX_SLOTS]; /* Hungarian cost matrix */
 
 	/* Slot state, duration, and coordinate history. */
-	u8 blob_slot_state[HEATMAP_MAX_SLOTS];      /* 0=empty 1=new 2=claimed 3=lift */
+	u8 blob_slot_state[HEATMAP_MAX_SLOTS];      /* 0=empty 1=new 2=claimed 3=lift 4=hold */
 	u32 blob_slot_duration[HEATMAP_MAX_SLOTS];  /* frames in current state */
 	u32 blob_slot_gx[HEATMAP_MAX_SLOTS];        /* last grid X, fixed-point */
 	u32 blob_slot_gy[HEATMAP_MAX_SLOTS];        /* last grid Y, fixed-point */

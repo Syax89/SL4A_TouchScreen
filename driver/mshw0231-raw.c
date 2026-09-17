@@ -370,6 +370,12 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
  * in mshw0231-raw-constants.h for the full replay evidence. Collect all
  * peaks for velocity rejection.
  *
+ * One peak per equal-signal region: the tie-break below lets a flat-topped
+ * plateau contribute a single cell, and the recorded position is re-anchored
+ * to the region's centre so it stays near the blob's centroid at any width.
+ * heatmap_label[] is used as scratch: it must be all-zero on entry (the
+ * caller memsets it immediately before) and is all-zero again on return.
+ *
  * Fills peaks_col[] and peaks_row[] (each size HEATMAP_MAX_PEAKS).
  * Returns npeaks. */
 static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
@@ -393,6 +399,12 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 			break;
 		rise = shid->heatmap_signal[i];
 		if (rise < HEATMAP_TOUCH_MIN_RISE)
+			continue;
+		/* Equal-signal region already claimed by an earlier peak: its
+		 * representative was recorded and the whole region marked, so
+		 * a second survivor (a non-convex plateau — an L, a cross)
+		 * must not become a second peak. */
+		if (shid->heatmap_label[i])
 			continue;
 
 		/* True local-maximum suppression over the full
@@ -424,13 +436,18 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 				/* Strictly higher neighbours reject the cell. Equal
 				 * signals (a flat-topped saturated plateau) are
 				 * settled by raster order: an equal neighbour with a
-				 * lower raster index counts as "higher", so every
-				 * plateau contributes exactly ONE peak (its first
-				 * cell). Without this, a 6x6 flat top produced 20
-				 * peaks on its own border and exhausted the shared
+				 * lower raster index counts as "higher", so one cell
+				 * of an equal-signal region survives the scan and
+				 * claims the whole region (below). Without the
+				 * tie-break, a 6x6 flat top produced 20 peaks on its
+				 * own border and exhausted the shared
 				 * HEATMAP_MAX_PEAKS budget, silently dropping the
 				 * frame's other real blobs at the CCL near-peak
-				 * check. */
+				 * check. The recorded peak is the region's centre
+				 * cell, not the surviving corner: a corner sits more
+				 * than HEATMAP_VELOCITY_REJECT_RADIUS from a wide
+				 * plateau's blob centroid and the whole contact used
+				 * to be silently velocity-rejected. */
 				if (shid->heatmap_touched[nidx] &&
 				    (shid->heatmap_signal[nidx] > rise ||
 				     (shid->heatmap_signal[nidx] == rise && nidx < i))) {
@@ -440,11 +457,101 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 			}
 		}
 		if (ok) {
-			peaks_col[npeaks] = col;
-			peaks_row[npeaks] = row;
+			/* One peak per equal-signal region, anchored to the
+			 * cell nearest the region's centroid. Flood the
+			 * 4-connected cells sharing this rise value (a
+			 * flat-topped plateau) and pick the member closest to
+			 * the region centroid, raster-first on a tie —
+			 * deterministic, and near the blob centroid at any
+			 * width, so CCL's velocity rejection keeps the
+			 * contact instead of silently dropping a wide
+			 * saturated one (>= 15 cells sat > the reject radius
+			 * from the corner that used to be recorded). */
+			u32 *queue = shid->heatmap_queue;
+			u32 head = 0, tail = 0;
+			s64 sc = 0, sr = 0;
+			u32 best = i;
+			u32 best_d = ~0u;
+			u32 k;
+
+			shid->heatmap_label[i] = 1;
+			queue[tail++] = i;
+			while (head < tail) {
+				u32 idx = queue[head++];
+				u32 c2 = idx % ncols;
+				u32 r2 = idx / ncols;
+				u32 nxt;
+
+				sc += c2;
+				sr += r2;
+				if (c2 > 0) {
+					nxt = idx - 1;
+					if (shid->heatmap_touched[nxt] &&
+					    shid->heatmap_signal[nxt] == rise &&
+					    !shid->heatmap_label[nxt] &&
+					    tail < HEATMAP_MAX_CELLS) {
+						shid->heatmap_label[nxt] = 1;
+						queue[tail++] = nxt;
+					}
+				}
+				if (c2 + 1 < ncols) {
+					nxt = idx + 1;
+					if (shid->heatmap_touched[nxt] &&
+					    shid->heatmap_signal[nxt] == rise &&
+					    !shid->heatmap_label[nxt] &&
+					    tail < HEATMAP_MAX_CELLS) {
+						shid->heatmap_label[nxt] = 1;
+						queue[tail++] = nxt;
+					}
+				}
+				if (r2 > 0) {
+					nxt = idx - ncols;
+					if (shid->heatmap_touched[nxt] &&
+					    shid->heatmap_signal[nxt] == rise &&
+					    !shid->heatmap_label[nxt] &&
+					    tail < HEATMAP_MAX_CELLS) {
+						shid->heatmap_label[nxt] = 1;
+						queue[tail++] = nxt;
+					}
+				}
+				if (r2 + 1 < nrows) {
+					nxt = idx + ncols;
+					if (shid->heatmap_touched[nxt] &&
+					    shid->heatmap_signal[nxt] == rise &&
+					    !shid->heatmap_label[nxt] &&
+					    tail < HEATMAP_MAX_CELLS) {
+						shid->heatmap_label[nxt] = 1;
+						queue[tail++] = nxt;
+					}
+				}
+			}
+			/* Nearest member to the region centroid; scaled by
+			 * tail so no division is needed. */
+			for (k = 0; k < tail; k++) {
+				u32 idx = queue[k];
+				s64 dcc = (s64)(idx % ncols) * tail - sc;
+				s64 drr = (s64)(idx / ncols) * tail - sr;
+				u32 dd = (u32)(dcc < 0 ? -dcc : dcc);
+				u32 dr2 = (u32)(drr < 0 ? -drr : drr);
+				u32 dist = dd > dr2 ? dd : dr2;
+
+				if (dist < best_d || (dist == best_d && idx < best)) {
+					best_d = dist;
+					best = idx;
+				}
+			}
+			peaks_col[npeaks] = (u16)(best % ncols);
+			peaks_row[npeaks] = (u16)(best / ncols);
 			npeaks++;
 		}
 	}
+
+	/* Clear the claim marks: raw_ccl_flood_fill() uses heatmap_label for
+	 * its own component labels and must start from all-zero. */
+	for (i = 0; i < cell_count; i++)
+		if (shid->heatmap_label[i])
+			shid->heatmap_label[i] = 0;
+
 	return npeaks;
 }
 
@@ -1074,7 +1181,7 @@ static u32 raw_hungarian_match(struct spi_hid *shid,
 
 /*
  * Process slot state transitions (GROUND_TRUTH §22.4):
- * 0=empty, 1=new, 2=claimed, 3=lift
+ * 0=empty, 1=new, 2=claimed, 3=lift, 4=hold
  *
  * Includes: jump rejection, EMA smoothing, deadband, stationary lock,
  * history ring push, state transitions.
@@ -1425,6 +1532,17 @@ static bool raw_emit_mt(struct spi_hid *shid, struct input_dev *input,
 				input_report_abs(input, ABS_MT_TOUCH_MAJOR, major);
 				input_report_abs(input, ABS_MT_TOUCH_MINOR, minor);
 				input_report_abs(input, ABS_MT_ORIENTATION, ori);
+			} else {
+				/* No ellipse for this blob (a split sub-blob,
+				 * or a blob whose second moment came out
+				 * zero): report the zero so the clear reaches
+				 * the client. Skipping these reports left the
+				 * previous frame's MAJOR/MINOR/ORIENTATION in
+				 * place — a stale oval exactly when two
+				 * fingers converge and split apart. */
+				input_report_abs(input, ABS_MT_TOUCH_MAJOR, 0);
+				input_report_abs(input, ABS_MT_TOUCH_MINOR, 0);
+				input_report_abs(input, ABS_MT_ORIENTATION, 0);
 			}
 		}
 	}

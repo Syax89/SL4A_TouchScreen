@@ -20,7 +20,9 @@
  * (see the Makefile rule) and calls the driver's own static stage functions
  * on the state the real run left behind:
  *
- *   raw_detect_peaks()    - the peak counter (reads shid->heatmap_*, no writes)
+ *   raw_detect_peaks()    - the peak counter (uses heatmap_label[] as
+ *                           scratch; the caller zeroes it first, as the real
+ *                           pipeline does)
  *   raw_ccl_flood_fill()  - the blob/CCL counter, on a COPY of shid
  *   raw_ghost_merge()     - the merge stage, on the blob list rebuilt from
  *                           shid->blob_* the way mshw0231_raw_process_samples()
@@ -561,6 +563,11 @@ static void analyse_frame(void)
 	int i, j;
 
 	ff.touched_cells = count_touched();
+	/* raw_detect_peaks() uses heatmap_label[] as scratch and requires it
+	 * all-zero on entry (mshw0231_raw_process_samples() memsets it right
+	 * before its own call); the frame that just ran left CCL labels in
+	 * there, so clear them exactly like the real pipeline does. */
+	memset(shid.heatmap_label, 0, GRID_CELLS * sizeof(shid.heatmap_label[0]));
 	ff.peaks = raw_detect_peaks(&shid, GRID_CELLS, GRID_COLS, GRID_ROWS,
 				    ff.peaks_col, ff.peaks_row);
 

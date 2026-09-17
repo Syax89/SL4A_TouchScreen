@@ -111,8 +111,12 @@ After stabilization, tracking is asymmetric:
 A true **local-maximum scan** over the full neighborhood
 (`HEATMAP_PEAK_RADIUS = 2`): a cell is a peak when no neighbor within radius 2
 is strictly higher; equal signals (flat-topped plateaus) settle by raster
-order, so a plateau contributes exactly one peak. Only the blob's true center
-qualifies — this replaced an
+order and contribute exactly **one** peak per equal-signal region, anchored
+to the cell nearest the region's centre — the peak has to stay near the blob
+centroid, or a wide saturated plateau's only peak falls outside the
+velocity-rejection radius and the whole contact is silently dropped. In a
+tapered blob only the true center qualifies — the
+scan replaced an
 earlier 4-point probe that over-counted ~13 peaks per blob and exhausted the
 shared **peak budget** (`HEATMAP_MAX_PEAKS`, 20 — kept ≥
 `HEATMAP_MAX_BLOBS` so the budget can never starve a committable blob),
@@ -121,7 +125,7 @@ simultaneous finger.
 
 ## 5. CCL flood-fill
 
-4-connected BFS over touched cells (`raw_ccl_flood_fill()`, queue 512).
+4-connected BFS over touched cells (`raw_ccl_flood_fill()`, queue `HEATMAP_MAX_CELLS` = 4300).
 Each connected component becomes a blob candidate, gated by:
 
 | Filter | Threshold |
@@ -129,7 +133,7 @@ Each connected component becomes a blob candidate, gated by:
 | Pixel count | ≥ 2 (`HEATMAP_MIN_BLOB_PIXELS`) |
 | Max rise | ≥ 200 |
 | Signal weight | ≥ 1000 (`blob_min_weight`, module param) |
-| Velocity rejection | centroid within **6 cells** of a detected peak (`HEATMAP_VELOCITY_REJECT_RADIUS`, DLL 36.0 = 6²) |
+| Velocity rejection | centroid within **6 cells** of a detected peak (`HEATMAP_VELOCITY_REJECT_RADIUS`; the Windows **36.0 = 6²** squared-distance constant sits in its association/coalescing layers — see Config-Table) |
 
 ## 6. Blob splitting
 

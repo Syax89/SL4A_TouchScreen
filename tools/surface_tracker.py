@@ -119,8 +119,9 @@ MIN_PEAK_RISE = 500  # filters noise (22-326), keeps touch (1448-1912)
 # ±5 cells, no touched/absolute gate. The LINUX DRIVER deliberately diverges:
 # raw_detect_peaks() scans the full (2*HEATMAP_PEAK_RADIUS+1)^2 neighbourhood
 # at radius 2, gated on heatmap_touched and rise >= 200 — the ±5 cross let
-# ~13 spurious peaks per blob qualify and starve the 16-peak budget
-# (driver/mshw0231-raw-constants.h carries the replay evidence). Do not
+# ~13 spurious peaks per blob qualify and starve the shared peak budget
+# (16 at the time, 20 now; driver/mshw0231-raw-constants.h carries the
+# replay evidence). Do not
 # compare peak counts between this oracle and the driver 1:1; a difference
 # here is expected, not a bug on either side.
 

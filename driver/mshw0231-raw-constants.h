@@ -45,7 +45,10 @@
  * radius of any of its own cells, correctly leaving only the center
  * as a peak regardless of taper shape. Flat-topped (plateau) regions
  * have no unique center; the raster-order tie-break in the scan makes
- * a plateau contribute exactly one peak (its first cell) instead of
+ * a plateau contribute exactly one peak, re-anchored to the cell nearest
+ * the centre of its equal-signal region (a raster-first corner cell left
+ * a wide saturated plateau's only peak outside the centroid's velocity-
+ * rejection radius and dropped the whole contact) instead of
  * one per border cell.
  * Verified via replay to
  * correctly detect 1-5 simultaneous synthetic blobs; the exact

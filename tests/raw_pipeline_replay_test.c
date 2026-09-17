@@ -242,15 +242,13 @@ static void test_single_touch(void)
 
 /* ── Scenario: 2 fingers, far apart ──────────────────────────────── */
 
-/* Note on the KNOWN BUG documented at the top of this file: 2 blobs
- * still exceed the 16-peak budget too (~13 peaks/blob here), but the
- * second blob still gets a partial handful of its own peaks recorded
- * before the scan hits the cap, and any single peak within
- * HEATMAP_VELOCITY_REJECT_RADIUS=6 of its own centroid is enough to
- * save it — trivially satisfied since this blob's own footprint is
- * only ~2 cells in radius. That's why 2 fingers passes while 3+ does
- * not: it isn't that 2-blob input avoids the bug, it's that 2-blob
- * input is small enough to survive it by luck of raster scan order. */
+/* Note on the KNOWN BUG documented at the top of this file — fixed, and
+ * asserted by test_n_finger() below: pre-fix, ~13 peaks per blob ate the
+ * then-16-peak budget, so this fixture survived only by raster-order luck.
+ * Today each blob contributes ONE peak (its centre cell, or the centre of
+ * its equal-signal plateau region) and HEATMAP_MAX_PEAKS=20 leaves every
+ * scenario here ample headroom — 3/4/5 simultaneous blobs are asserted
+ * normally. */
 static void test_two_finger_far(void)
 {
 	struct spi_hid shid;
