@@ -1738,11 +1738,15 @@ cmd_hunt() {
 			dmesg_mark="$(dmesg 2>/dev/null | wc -l)"
 			modprobe -r sl4a_spi_hid sl4a_spi_amd 2>/dev/null || true
 			sleep 1
-			modprobe sl4a_spi_amd 2>/dev/null || true
+			# The RX-region peek logs at the CONTROLLER's debug_trace=3
+			# (spi-amd.c) — its own module param, distinct from the core's
+			# sl4a_debug_level. Loading the controller bare kept the one
+			# line this sweep exists to capture out of every artifact.
+			modprobe sl4a_spi_amd debug_trace=3 2>/dev/null || true
 			# shellcheck disable=SC2086
 			modprobe sl4a_spi_hid $opts read_frame_variant="$variant" sl4a_debug_level=3 2>/dev/null || true
 			sleep 4
-			echo "running variant: $(cat /sys/module/sl4a_spi_hid/parameters/read_frame_variant 2>/dev/null) at debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null)"
+			echo "running variant: $(cat /sys/module/sl4a_spi_hid/parameters/read_frame_variant 2>/dev/null) at debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null) controller trace $(cat /sys/module/sl4a_spi_amd/parameters/debug_trace 2>/dev/null || echo '?')"
 			for _s in 6 5 4 3 2 1; do
 				printf '\r     >>> TOUCH THE PANEL NOW (tocca il pannello) — %d <<<   ' "$_s" >&3
 				sleep 1

@@ -37,10 +37,15 @@ done
 
 # `sleep` is stubbed so the sweep takes a second instead of 33; `make` so
 # run_host_self_tests cannot re-enter this very suite.
-for c in modprobe dkms systemctl depmod mokutil make modinfo sleep; do
+for c in dkms systemctl depmod mokutil make modinfo sleep; do
 	printf '#!/bin/bash\nexit 0\n' > "$SB/bin/$c"
 	chmod +x "$SB/bin/$c"
 done
+# modprobe records its arguments: the sweep must hand the controller's
+# debug_trace to sl4a_spi_amd, or the peek line — the one that answers the
+# RX-region question — can never appear in the artifact.
+printf '#!/bin/bash\necho "$*" >> "%s/modprobe.log"\nexit 0\n' "$SB" > "$SB/bin/modprobe"
+chmod +x "$SB/bin/modprobe"
 printf '#!/bin/bash\ncat "%s/dmesg.txt"\n' "$SB" > "$SB/bin/dmesg"
 chmod +x "$SB/bin/dmesg"
 
@@ -63,6 +68,13 @@ rc=$?
 n="$(grep -c '^VERDICT' "$SB/out.txt" || true)"
 [ "$n" -eq 3 ] || fail "expected 3 verdicts in the artifact, found ${n:-0}"
 
+# The peek line that settles the RX-region question only prints at the
+# controller's debug_trace=3; the sweep must pass it to sl4a_spi_amd. Without
+# this check the sweep loads the controller bare and the one artifact the
+# user sends can never carry the peek.
+grep -q '^sl4a_spi_amd debug_trace=3$' "$SB/modprobe.log" \
+	|| fail "hunt loaded sl4a_spi_amd without debug_trace=3 — the RX-region peek cannot reach the artifact"
+
 # The progress the user asked for has to be on the terminal too, not only in
 # the file — that is the whole point of it.
 grep -q '\[1/3\] variant 0' "$SB/run.txt" || fail "no per-variant progress on the terminal"
@@ -77,4 +89,4 @@ rc=$?
 grep -q 'rebuilding first' "$SB/run2.txt" || fail "a stale stamp did not trigger a rebuild"
 [ "$(grep -c '^VERDICT' "$SB/out2.txt" || true)" -eq 3 ] || fail "the artifact after a rebuild is incomplete"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 3 verdicts, progress on the terminal)"
+echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 3 verdicts, progress on the terminal, controller debug_trace passed)"
