@@ -51,8 +51,16 @@ def strip_comments_and_strings(text):
                 if text[i] == "\\":
                     i += 1
                 elif text[i] == "\n":
-                    break
-                i += 1
+                    # Unterminated literal (gcc rejects it): the next line must
+                    # NOT reach the code view. The old break-and-skip handed it
+                    # to the scanner as code, so a quote at end-of-line put the
+                    # needle right back (P15 wave bypass). Keep scanning as
+                    # literal; emit the newline for line accounting.
+                    line += 1
+                    out.append("\n")
+                    i += 1
+                else:
+                    i += 1
             i += 1
             out.append('""')
         else:
@@ -94,7 +102,10 @@ def check_control_flow_pins():
             text, _ = strip_comments_and_strings(text)
         # Preprocessor-disabled code is not code either: a leg neutralised a
         # guard inside `#if 0` and the comment-stripping pins stayed green.
-        text = re.sub(r"#if\s+0\b.*?#endif", " ", text, flags=re.S)
+        # The P15 wave: the zero here is a family — `#if 00`, `#if 0L`,
+        # `#if (0)`, `#if 0x0` all carried a needle into the code view.
+        text = re.sub(r"#if[ \t]*\(*[ \t]*(?:0[xX]0*|[0]+[uUlL]*)[ \t]*\)*[ \t]*(?://[^\n]*)?\n.*?#endif",
+                      " ", text, flags=re.S)
         return text
 
     core_code = strip_c_comments(core)
@@ -447,7 +458,19 @@ def check_control_flow_pins():
     # write in spi_hid_sync_request() races the IRQ thread's reads
     # (P1 double-blind wave, one leg). Order matters: the lock goes around the
     # response_lock section, before the send.
-    _sr = core_code.rsplit("static int spi_hid_sync_request(struct spi_hid *shid", 1)[1].split("\n}", 1)[0]
+    # The region is selected by CONTENT, not by position (P15 wave): rsplit to
+    # the last marker let a definition-shaped decoy appended below the real
+    # function deflect every check here while staying green. Exactly one
+    # marker segment may contain the lock; anything else is refused.
+    _sr_segs = [seg.split("\n}", 1)[0] for seg in
+                core_code.split("static int spi_hid_sync_request(struct spi_hid *shid")[1:]]
+    _sr_regions = [seg for seg in _sr_segs if "mutex_lock(&shid->seq_lock)" in seg]
+    _sr = _sr_regions[0] if len(_sr_regions) == 1 else ""
+    if len(_sr_regions) != 1:
+        print("FAIL driver/spi-hid-core.c: sync_request()'s seq_lock region is not "
+              f"identifiable ({len(_sr_regions)} candidate regions) — a second "
+              "definition-shaped occurrence deflects this check (P15 wave)")
+        failures += 1
     _l = _sr.find("mutex_lock(&shid->seq_lock)")
     _w = _sr.find("shid->read_resp_type = report->content_type;")
     _u = _sr.find("mutex_unlock(&shid->seq_lock)")
@@ -459,11 +482,44 @@ def check_control_flow_pins():
     # A leg kept that order pin green while leaking the mutex: an `if (!ready)
     # goto out;` planted between lock and unlock leaves the write inside the
     # region, but the `out:` path (which drops only response_mutex) then runs
-    # with seq_lock held. No exit other than the unlock may live in there.
-    if _l >= 0 and _u > _l and "goto" in _sr[_l:_u]:
+    # with seq_lock held. No exit other than the unlock may live in there —
+    # and `goto` was the whole ban (P15 wave: an early `return` leaked the
+    # same mutex with the pin green; return/break/continue now count too).
+    if _l >= 0 and _u > _l and re.search(r"\b(?:goto|return|break|continue)\b", _sr[_l:_u]):
         print("FAIL driver/spi-hid-core.c: sync_request() can leave the seq_lock "
-              "region through a goto — out: does not drop seq_lock, so the "
-              "mutex leaks (P2 wave bypass)")
+              "region other than through the unlock — out: does not drop seq_lock, "
+              "so the mutex leaks (P2/P15 wave bypass)")
+        failures += 1
+
+    # 7d. descreq_work() holds seq_lock for its whole body; out: is the only
+    # unlock. The P15 wave: the reset branch's plain `return` leaked the mutex
+    # whenever it fired, and its guard ran the hardcoded fallback on a
+    # SUCCESSFUL restart (the w7/w8 commits fixed exactly the opposite: the
+    # fallback runs only when the restart is refused). Pin both: no plain
+    # return in the body, and the restart decided by `!` with the exit through
+    # out:.
+    _dw = (core_code.rsplit("static void spi_hid_seq_descreq_work", 1)[1].split("\n}", 1)[0]
+           if "static void spi_hid_seq_descreq_work" in core_code else "")
+    if re.search(r"\breturn\b", _dw):
+        print("FAIL driver/spi-hid-core.c: descreq_work() exits with a plain return "
+              "while holding seq_lock — out: is the only unlock, so the mutex "
+              "leaks (P15 wave)")
+        failures += 1
+    if not re.search(
+            r"if\s*\(\s*!\s*spi_hid_seq_restart_discovery\(shid,\s*SPI_HID_SEQ_RESET_RESPONSE\)\)\s*\n\s*goto out;",
+            _dw):
+        print("FAIL driver/spi-hid-core.c: descreq_work()'s reset branch no longer "
+              "gates on the restart's REFUSAL (negated) with an exit through out: — "
+              "the w7/w8 shape the P15 wave re-derived")
+        failures += 1
+
+    # 7e. The stripper's own contract, executable: a quote at end-of-line must
+    # not hand the next line to the code view (P15 wave: that bypass satisfied
+    # the enable pin over reverted code).
+    _decoy = 'const char *d = "\nspi_hid_wire_vendor_init(spi_hid_wire_doubled())";\n'
+    if "spi_hid_wire_vendor_init" in strip_comments_and_strings(_decoy)[0]:
+        print("FAIL tests/driver_source_sanity_test.py: strip_comments_and_strings() "
+              "hands a newline-terminated literal's content to the code view (P15 wave)")
         failures += 1
     # The writes that ask for a response must record which request they are,
     # or the read that follows names nothing (trace: 00 04 03 00 06,
@@ -600,18 +656,39 @@ def check_no_dead_code_decoys():
     `if (0) (void)spi_hid_wire_vendor_init(spi_hid_wire_doubled());` while the
     real call reverted to the literal `0` — every text pin stayed green (they
     strip comments, #if 0 and strings, but a C-level `if (0)` is none of the
-    three). This repo carries no C-level dead code, so a planted one IS the
-    decoy; refuse it. The stripping ladder ends here on purpose: any deeper
-    unreachable-code shape still defeats a text pin, which is why the checks
-    that CAN run as code live in headers the host tests call.
+    three). The P15 double-blind wave showed the exact spelling was the whole
+    check: `if ((0))`, `if (0u)`, `if (0x0)`, `if (false)`, `while (0)`,
+    `switch (0)` and `#if 00` each carried the needle green, valid C. The
+    family below is the shapes both legs demonstrated, extended to their
+    obvious spellings; the repo carries none of it (verified: zero hits), so
+    a planted one IS the decoy; refuse it. The stripping ladder ends here on
+    purpose: any deeper unreachable-code shape still defeats a text pin, which
+    is why the checks that CAN run as code live in headers the host tests call.
     """
     failures = 0
+    dead = re.compile(
+        # Statement keywords with a constant-false condition. `(#` excludes
+        # preprocessor directives; `\(*` tolerates wrapping parentheses; the
+        # `}` before `while` excludes the `do {} while (0)` macro idiom, which
+        # RUNS its body once (all three driver copies use it).
+        r"(?<!#)\b(?:if|switch)\(\(*"
+        r"(?:false|!1|1==0|0==1|0[xX]0*|[0]+[uUlL]*)(?:\)|&&)"
+        r"|(?<!#)(?<!\})\bwhile\(\(*"
+        r"(?:false|!1|1==0|0==1|0[xX]0*|[0]+[uUlL]*)(?:\)|&&)"
+        # A for header whose condition is a zero literal.
+        r"|(?<!#)\bfor\(;[0]+[uUlL]*;\)"
+        # Constant-false preprocessor conditions: refused outright because the
+        # code-view strip above is a regex too, and `#if 00` slipped past it.
+        r"|#if\(*(?:0[xX]0*|[0]+[uUlL]*)\)*(?=[^0-9a-zA-Z]|$)"
+    )
     for path in FILES:
         text, _ = strip_comments_and_strings(path.read_text())
-        if re.search(r"\bif\s*\(\s*0\s*(?:\)|&&)", text):
-            print(f"FAIL {path.name}: an `if (0)`-style dead statement appeared — "
-                  f"dead code that carries a pin's needle while the real code is "
-                  f"reverted keeps every text pin green (P2 wave); remove it")
+        # Whitespace-free view: spacing must not defeat the family.
+        if dead.search(re.sub(r"\s+", "", text)):
+            print(f"FAIL {path.name}: a constant-false / dead `if (0)`-style statement "
+                  f"or `#if 0`-style directive appeared — dead code that carries a pin's "
+                  f"needle while the real code is reverted keeps every text pin green "
+                  f"(P2/P15 waves); remove it")
             failures += 1
     return failures
 

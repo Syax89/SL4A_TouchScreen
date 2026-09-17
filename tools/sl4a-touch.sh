@@ -1748,15 +1748,23 @@ cmd_hunt() {
 	opts="$(awk '/^options[ 	]+sl4a_spi_hid/ { for (i = 3; i <= NF; i++) if ($i !~ /^(read_frame_variant|sl4a_debug_level|wire_double_opcode|setfeat_no_double|acpi_probe_power_cycle|skip_vendor_stop)=/) printf "%s ", $i }' "$MODPROBE_CONF" 2>/dev/null || true)"
 
 	if [ -z "$opts" ]; then
-		# A missing profile must not masquerade as a raw sweep: raw_mode=N is
-		# STANDARD mode, where spi_hid_vendor_init() never runs (both call
-		# sites are raw-gated), so probe arms 2/3 would repeat arms 0/1
-		# exactly while the artifact still listed four variants. The run is
-		# kept — a refusal would strand a field trip — but labelled wherever
-		# it is printed (P14 wave, A:C6/F5).
-		opts="raw_mode=N"
-		opts_note=" (FALLBACK — no 'options sl4a_spi_hid' line in $MODPROBE_CONF: STANDARD mode, probe arms 2/3 are inert here)"
-		warn "no 'options sl4a_spi_hid' line in $MODPROBE_CONF — sweeping in fallback standard mode (raw_mode=N)"
+		# Two shapes reach an empty $opts, and only one of them is a missing
+		# profile (P15 wave, B:C1): a line whose every parameter is one the
+		# sweep itself controls leaves nothing to carry and is NOT a missing
+		# file — it used to print the missing-line warning about a file whose
+		# line was right there. A missing profile must not masquerade as a raw
+		# sweep either: raw_mode=N is STANDARD mode, where
+		# spi_hid_vendor_init() never runs (both call sites are raw-gated), so
+		# probe arms 2/3 would repeat arms 0/1 exactly while the artifact
+		# still listed four variants. The run is kept — a refusal would strand
+		# a field trip — but labelled wherever it is printed (P14 wave, A:C6/F5).
+		if grep -qE '^options[[:space:]]+sl4a_spi_hid' "$MODPROBE_CONF" 2>/dev/null; then
+			opts_note=" (profile line present, all of its parameters are sweep-controlled — no other options carried)"
+		else
+			opts="raw_mode=N"
+			opts_note=" (FALLBACK — no 'options sl4a_spi_hid' line in $MODPROBE_CONF: STANDARD mode, probe arms 2/3 are inert here)"
+			warn "no 'options sl4a_spi_hid' line in $MODPROBE_CONF — sweeping in fallback standard mode (raw_mode=N)"
+		fi
 	fi
 
 	info "Frame hunt: four probe variants, one file, no commands for you. Leave the panel alone until asked."

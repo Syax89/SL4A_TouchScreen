@@ -37,10 +37,20 @@ done
 
 # `sleep` is stubbed so the sweep takes a second instead of 33; `make` so
 # run_host_self_tests cannot re-enter this very suite.
-for c in dkms systemctl depmod mokutil make modinfo sleep; do
+for c in systemctl depmod mokutil make modinfo sleep; do
 	printf '#!/bin/bash\nexit 0\n' > "$SB/bin/$c"
 	chmod +x "$SB/bin/$c"
 done
+# dkms records what it was asked to do: the rebuild path (restage_and_rebuild)
+# must actually invoke it — a stale stamp that prints "rebuilding first" and
+# then rebuilds nothing swept the old modules silently with the sandbox green
+# (P15 wave, M9).
+cat > "$SB/bin/dkms" <<EOS
+#!/bin/bash
+echo "dkms \$*" >> "$SB/dkms.log"
+exit 0
+EOS
+chmod +x "$SB/bin/dkms"
 # modprobe records its arguments: the sweep must hand the controller's
 # debug_trace to sl4a_spi_amd, or the peek line — the one that answers the
 # RX-region question — can never appear in the artifact. A load of the driver
@@ -155,6 +165,8 @@ PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out2.txt" > "$SB/run2.txt" 
 rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run2.txt"; fail "hunt exited $rc with a stale stamp (the rebuild path)"; }
 grep -q 'rebuilding first' "$SB/run2.txt" || fail "a stale stamp did not trigger a rebuild"
+grep -q 'dkms build -m sl4a-touch -v ' "$SB/dkms.log" \
+	|| fail "a stale stamp printed the rebuild message but dkms was never asked to build (P15 wave, M9)"
 [ "$(grep -c '^VERDICT' "$SB/out2.txt" || true)" -eq 4 ] || fail "the artifact after a rebuild is incomplete"
 
 # No panel at all: the sysfs glob matches nothing and the sweep must say so.
@@ -196,9 +208,9 @@ printf '[1000.0] sl4a_spi_hid: SEQ: write op=0x02 reg=1 raw=[02 00 00 01 42 00 0
 PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out5.txt" > "$SB/run5.txt" 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run5.txt"; fail "hunt exited $rc on the wrapped-ring run"; }
-n_wr="$(grep -c 'first write on the wire (from the wrapped ring' "$SB/out5.txt" || true)"
+n_wr="$(grep -c 'first write on the wire (from the wrapped ring — may belong to an earlier load)' "$SB/out5.txt" || true)"
 [ "$n_wr" -eq 4 ] \
-	|| fail "wrapped-ring run: the first-write line did not search the fallback window (saw $n_wr)"
+	|| fail "wrapped-ring run: the first-write line did not search the fallback window (saw $n_wr) — or its caveat was dropped (P15 wave: the pin must cover the full label, not its prefix)"
 
 # No profile at all: the sweep still runs, but raw_mode=N is STANDARD mode
 # where the probe arms are inert (spi_hid_vendor_init is raw-gated) — the
@@ -210,22 +222,41 @@ rm -f "$SB/quiet"
 PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out6.txt" > "$SB/run6.txt" 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run6.txt"; fail "hunt exited $rc with a missing profile"; }
-grep -q 'FALLBACK' "$SB/out6.txt" \
-	|| fail "the missing-profile artifact does not label its raw_mode=N fallback"
+grep -q 'STANDARD mode, probe arms 2/3 are inert here' "$SB/out6.txt" \
+	|| fail "the missing-profile artifact does not label its raw_mode=N fallback (full note, P15 wave: a shortened ' (FALLBACK)' satisfied the old prefix-only pin)"
 grep -q 'fallback standard mode' "$SB/run6.txt" \
 	|| fail "the missing-profile run printed no warning about the fallback"
 [ "$(grep -c 'first write on the wire: \[999.0\]' "$SB/out6.txt" || true)" -eq 4 ] \
 	|| fail "the missing-profile sweep did not carry the first write (dmesg emission should have resumed)"
 mv "$SB/etc/sl4a-spi-hid.conf.bak" "$SB/etc/sl4a-spi-hid.conf"
 
-# Every sweep (control, rebuild, no-panel, quiet, wrapped ring, missing
-# profile) loaded the same four arms in the same order: 24 loads, the pattern
-# repeating. The profile now also carries the two knobs, and the $opts filter
-# must keep them OFF the load lines — a leaked pair ahead of the arm's own
-# could read as the arm's value (P14 wave: that mutation stayed green too).
+# A profile whose EVERY parameter is one the sweep controls empties the
+# carried-options set without the file being missing: the artifact must not
+# claim a missing 'options' line about a line that is right there (P15 wave,
+# B:C1), and the sweep must still run and label honestly.
+printf '# SL4A_TouchScreen\noptions sl4a_spi_hid acpi_probe_power_cycle=1 skip_vendor_stop=1\n' \
+	> "$SB/etc/sl4a-spi-hid.conf"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out7.txt" > "$SB/run7.txt" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run7.txt"; fail "hunt exited $rc with an all-filtered profile"; }
+[ "$(grep -c '^VERDICT' "$SB/out7.txt" || true)" -eq 4 ] \
+	|| fail "the all-filtered-profile artifact is incomplete"
+grep -q 'all of its parameters are sweep-controlled' "$SB/out7.txt" \
+	|| fail "an all-filtered profile is not labelled as such (P15 wave, B:C1)"
+grep -q "no 'options sl4a_spi_hid' line" "$SB/run7.txt" \
+	&& fail "the all-filtered profile took the missing-line warning about a line that exists (P15 wave, B:C1)"
+grep -q 'FALLBACK' "$SB/out7.txt" \
+	&& fail "the all-filtered profile is labelled FALLBACK though nothing is missing (P15 wave, B:C1)"
+
+# Every sweep so far (control, rebuild, no-panel, quiet, wrapped ring,
+# missing profile, all-filtered) loaded the same four arms in the same order:
+# 28 loads, the pattern repeating. The profile now also carries the two knobs,
+# and the $opts filter must keep them OFF the load lines — a leaked pair ahead
+# of the arm's own could read as the arm's value (P14 wave: that mutation
+# stayed green too).
 n_loaded="$(grep -c 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" || true)"
-[ "$n_loaded" -eq 24 ] \
-	|| fail "expected 24 driver loads after six sweeps, saw $n_loaded"
+[ "$n_loaded" -eq 28 ] \
+	|| fail "expected 28 driver loads after seven sweeps, saw $n_loaded"
 awk '
 	/sl4a_spi_hid/ && /acpi_probe_power_cycle=/ {
 		if (gsub(/acpi_probe_power_cycle=/, "&") != 1 ||
@@ -237,4 +268,16 @@ awk '
 	END { exit bad }
 ' "$SB/modprobe.log" || fail "the profile's knobs leaked onto a load line (the \$opts filter regressed)"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, missing profile labels the fallback mode)"
+# The profile's raw_mode must REACH the load lines: it is the mode the whole
+# probe sweep is about, and the $opts filter carries it (raw_mode is not one
+# of the six the sweep controls). Adding it to the filter dropped the field's
+# raw mode on every arm with the sandbox still green — every verdict read
+# productive while the sweep measured standard mode (P15 wave, M6).
+n_rawy="$(grep -c 'raw_mode=Y' "$SB/modprobe.log" || true)"
+[ "$n_rawy" -eq 20 ] \
+	|| fail "the profile's raw_mode=Y reached $n_rawy driver loads, expected 20 (five profile sweeps) — the \$opts filter dropped it (P15 wave, M6)"
+n_rawn="$(grep -c 'raw_mode=N' "$SB/modprobe.log" || true)"
+[ "$n_rawn" -eq 4 ] \
+	|| fail "the missing-profile fallback loads should carry raw_mode=N on the 4 loads, saw $n_rawn (P15 wave, M6)"
+
+echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives and really rebuilds, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, raw_mode carried, first write survives the window, live readback present, no-panel run warns and degrades honestly, quiet load states its absence and survives, wrapped ring labels the fallback read, missing profile labels the fallback mode, all-filtered profile labels itself)"

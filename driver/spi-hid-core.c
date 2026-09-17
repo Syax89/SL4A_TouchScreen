@@ -1909,8 +1909,13 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		 * handshake watchdog's case — standard mode has no timer for that
 		 * shape (see spi_hid_seq_set_state()). */
 		seq_dbg(shid, 1, "SEQ: poll-work: RESET_RSP, draining and retrying as the IRQ path does\n");
-		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
-			return; /* restarted: the retry loop, and in raw mode the handshake watchdog, own it from here */
+		if (!spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_RESET_RESPONSE))
+			/* Restarted: the retry loop, and in raw mode the handshake
+			 * watchdog, own it from here. Exit through out:, not a bare
+			 * return: seq_lock is held and only out: drops it (P15 wave —
+			 * the return this replaces leaked the mutex, and its polarity
+			 * ran the fallback below on a SUCCESSFUL restart). */
+			goto out;
 		/* The restart was refused, so the DESCREQ write failed. Fall back the
 		 * way this branch always did — and only now. Leaving this install to
 		 * run unconditionally is how this branch once retried and abandoned
