@@ -9,14 +9,14 @@ Linux kernel multitouch pipeline matching the Windows
 Frame (heatmap grid — 72×48/3456 cells on SL4 MSHW0231, 78×52/4056 on SL3 MSHW0162; selected by ACPI ID)
   │
   ├─ c590 LUT + baseline → signal rise per cell
-  │   c590[i] = max(0, 10000 - (i·22 + 6000))
+  │   c590[i] = max(0, 10000 - (i·22204/1000 + 6000))
   │   Baseline: 30-frame (SL4) / 33-frame (SL3) asymmetric per-cell EMA,
   │   recovery alpha 7 (12.5%) on both
   │
   ├─ Noise floor (c590 < 400 → suppressed, config+0xECC=0.04)
   │   heatmap_touched[i] = (rise >= 200)
   │
-  ├─ Peak Detection Gate (cross ±5, min_rise=200, FUN_1805fba00)
+  ├─ Peak Detection Gate (full radius-2 neighbourhood scan, min_rise=200, FUN_1805fba00)
   │   ├─ no peak → CCL SKIPPED → 0 blobs → lift all slots
   │   └─ peaks found → run CCL
   │
@@ -58,7 +58,7 @@ Frame (heatmap grid — 72×48/3456 cells on SL4 MSHW0231, 78×52/4056 on SL3 MS
 
 | Stage | Windows Function | Alignment |
 |-------|-----------------|-----------|
-| Peak gate | FUN_1805fba00 | ~90% (cross ±5, min_rise adapted) |
+| Peak gate | FUN_1805fba00 | ~90% (full radius-2 neighbourhood scan; Windows probes a ±5 cross) |
 | CCL | FUN_180600c40 | ~70% (4-connected BFS vs per-pixel) |
 | Centroid | FUN_180602e60 | ~85% (full blob, ×100 fixed-point) |
 | Velocity rejection | FUN_180600c40 | 100% (dist² ≤ 36.0) |

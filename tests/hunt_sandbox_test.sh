@@ -89,4 +89,18 @@ rc=$?
 grep -q 'rebuilding first' "$SB/run2.txt" || fail "a stale stamp did not trigger a rebuild"
 [ "$(grep -c '^VERDICT' "$SB/out2.txt" || true)" -eq 3 ] || fail "the artifact after a rebuild is incomplete"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 3 verdicts, progress on the terminal, controller debug_trace passed)"
+# No panel at all: the sysfs glob matches nothing and the sweep must say so.
+# `ls -d` on a vanished (nullglob) pattern lists the CURRENT DIRECTORY, so the
+# old one-liner set SYSFS_DIR="." — never empty — and the intended warning was
+# dead code. Move the fake panel away and demand the warning plus the honest
+# no-counters verdicts.
+mv "$D" "$SB/panel-away"
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out3.txt" > "$SB/run3.txt" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run3.txt"; fail "hunt exited $rc with no panel present"; }
+grep -q 'sysfs directory for the device not found' "$SB/run3.txt" \
+	|| fail "no-panel run: the missing-sysfs warning never fired (the glob still resolves to '.')"
+[ "$(grep -c 'NO COUNTERS READ' "$SB/out3.txt" || true)" -eq 3 ] \
+	|| fail "the no-panel artifact does not degrade honestly to NO COUNTERS READ"
+
+echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 3 verdicts, progress on the terminal, controller debug_trace passed, no-panel run warns)"

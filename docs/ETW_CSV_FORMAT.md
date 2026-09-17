@@ -21,16 +21,29 @@ The resulting CSV files contain raw SPI frames with bus-level detail.
 
 ## CSV Format
 
-Each row represents a single SPI bus transaction:
+`tracerpt -of CSV` emits one row per ETW event: a fixed 20-column header,
+then the event's own `User Data` fields in the following columns. An SPI
+transaction is a *sequence* of events sharing one `Activity ID`, not a
+single row.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| Sequence | u32 | Global transaction sequence number |
-| Timestamp | u64 | QPC timestamp (100ns ticks) |
-| Direction | str | "TX" (host→device) or "RX" (device→host) |
-| Length | u16 | Byte count |
-| Data | hex | Raw bytes (space-separated hex) |
-| Status | u32 | Bus status flags |
+| # | Column | Notes |
+|---|--------|-------|
+| 0 | `Event Name` | Provider, e.g. `Microsoft-Windows-SPB-ClassExtension` |
+| 1 | `Type` | Event name: `IoSpbPayloadStart`, `IoSpbPayloadTdStart`, `IoSpbPayloadTdBuffer`, `IoSpbPayloadStop` |
+| 2-11 | `Event ID` … `Processor Number` | The standard ETW columns (`Version`, `Channel`, `Level`, `Opcode`, `Task`, `Keyword`, `PID`, `TID`, `Processor Number`) |
+| 12-15 | `Instance ID`, `Parent Instance ID`, `Activity ID`, `Related Activity ID` | One transaction's events share an `Activity ID` |
+| 16 | `Clock-Time` | QPC timestamp, 100 ns ticks (the parsers divide by 10 for µs) |
+| 17-18 | `Kernel(ms)`, `User(ms)` | Per-event CPU times |
+| 19+ | `User Data` | Per-event payload, comma-separated like the columns above |
+
+The `User Data` fields the parsers consume (0-based indices):
+
+| Event | 19 | 20 | 21 |
+|-------|----|----|----|
+| `IoSpbPayloadStart` | total size (bytes) | transfer count | |
+| `IoSpbPayloadTdStart` | 0 | direction (`"ToDevice "` / `"FromDevice "`) | TD length (bytes) |
+| `IoSpbPayloadTdBuffer` | 0 | length (bytes) | buffer hex (`0x…`) |
+| `IoSpbPayloadStop` | `DataSize=0` | | |
 
 ## Frame Types
 

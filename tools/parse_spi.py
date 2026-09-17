@@ -16,11 +16,29 @@ def parse_hex(s):
         s = '0' + s
     return bytes.fromhex(s)
 
+def split_buffers(bufs):
+    """Split (direction, bytes) pairs into (tx, rx) byte strings.
+
+    Direction is carried per buffer from the IoSpbPayloadTdStart row that
+    precedes it ('ToDevice' / 'FromDevice'); every buffer of one direction
+    is concatenated, since one TD may carry several TdBuffer rows. An
+    unlabeled buffer lands in rx — never a fabricated TX.
+    """
+    tx_data = b''
+    rx_data = b''
+    for direction, data in bufs:
+        if direction.startswith('ToDevice'):
+            tx_data += data
+        else:
+            rx_data += data
+    return tx_data, rx_data
+
 def parse_boot_trace(path):
     """Parse a CSV boot trace and extract structured SPI transactions."""
     transactions = []  # list of dicts
     current = None
-    buffers = []  # list of (direction, bytes)
+    buffers = []  # list of (direction, bytes) — direction from the TD's TdStart
+    td_direction = ''
 
     with open(path, 'r', encoding='latin-1') as f:
         reader = csv.reader(f)
@@ -52,20 +70,23 @@ def parse_boot_trace(path):
                 }
 
             elif etype == 'IoSpbPayloadTdStart' and current:
-                direction = row[20].strip() if len(row) > 20 else ''
-                td_size = int(row[21]) if len(row) > 21 and row[21].strip() else 0
+                # Per-TD direction: it applies to the TdBuffer rows that
+                # follow. (The old code read it into a dead local, then
+                # guessed direction from buffer ordinal position.)
+                td_direction = row[20].strip() if len(row) > 20 else ''
 
             elif etype == 'IoSpbPayloadTdBuffer' and current:
                 if len(row) > 21 and row[21].strip():
                     try:
                         data = parse_hex(row[21])
-                        # Determine direction from preceding TdStart
-                        direction = 'TX'  # default
-                        if len(buffers) >= 1:
-                            direction = 'RX'
-                        buffers.append((direction, data))
-                    except:
-                        pass
+                    except ValueError:
+                        # A corrupt row must not silently vanish (and, with
+                        # direction carried per TD, it can no longer shift
+                        # the labels of the buffers after it).
+                        print(f"  warn: unparsable TdBuffer hex skipped: {row[21][:40]!r}",
+                              file=sys.stderr)
+                    else:
+                        buffers.append((td_direction, data))
 
             elif etype == 'IoSpbPayloadStop':
                 if current and buffers:
@@ -159,14 +180,8 @@ def analyze_trace(transactions, label):
 
         spi_count += 1
 
-        # Separate TX and RX
-        tx_data = b''
-        rx_data = b''
-        for direction, data in bufs:
-            if direction == 'TX' or (len(bufs) == 1 and not rx_data):
-                tx_data = data
-            else:
-                rx_data = data
+        # Separate TX and RX: direction comes from the TdStart rows
+        tx_data, rx_data = split_buffers(bufs)
 
         # Determine opcode from first TX byte
         if len(tx_data) == 0:
@@ -314,13 +329,7 @@ def analyze_touch(path):
         gap = clock_us - prev_clock if prev_clock > 0 else 0
         prev_clock = clock_us
 
-        tx_data = b''
-        rx_data = b''
-        for direction, data in bufs:
-            if direction == 'TX' or (len(bufs) == 1 and not rx_data):
-                tx_data = data
-            else:
-                rx_data = data
+        tx_data, rx_data = split_buffers(bufs)
 
         if len(tx_data) > 0 and tx_data[0] == 0x0B and len(rx_data) > 0:
             sync_idx = find_sync_index(rx_data)
@@ -364,13 +373,7 @@ def analyze_init(path):
         if 'buffers' not in txn:
             continue
         bufs = txn['buffers']
-        tx_data = b''
-        rx_data = b''
-        for direction, data in bufs:
-            if direction == 'TX' or (len(bufs) == 1 and not rx_data):
-                tx_data = data
-            else:
-                rx_data = data
+        tx_data, rx_data = split_buffers(bufs)
 
         if len(tx_data) >= 14 and tx_data[0] == 0x02 and tx_data[3] == 0x04:
             # Vendor init: write to register 0x04

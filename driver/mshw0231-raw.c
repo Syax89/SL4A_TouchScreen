@@ -347,14 +347,16 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
 	return true;
 }
 
-/* ── Pipeline stage 2: cross-shaped peak detection ───────────────── */
+/* ── Pipeline stage 2: local-maximum peak detection ──────────────── */
 
 /*
- * Peak-detection gate: cross-shaped ±5, min_rise=200.
- * Lowered from 300 to catch weaker fingers at 3+ density.
- * The cross-check (±5, higher neighbor) naturally suppresses
- * flat noise — only genuine signal maxima pass through.
- * Collect all peaks for velocity rejection.
+ * Peak-detection gate: touched cells only, rise >= 200, kept only when no
+ * higher touched neighbour exists in the full (2*HEATMAP_PEAK_RADIUS+1)^2
+ * neighbourhood. Lowered from 300 to catch weaker fingers at 3+ density.
+ * The previous ±5 cross probe (four points, one per axis) could not reject
+ * a tapering blob's non-center cells — see the HEATMAP_PEAK_RADIUS comment
+ * in mshw0231-raw-constants.h for the full replay evidence. Collect all
+ * peaks for velocity rejection.
  *
  * Fills peaks_col[] and peaks_row[] (each size 16). Returns npeaks. */
 static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
@@ -1404,7 +1406,7 @@ static bool raw_emit_mt(struct spi_hid *shid, struct input_dev *input,
  *
  * Pipeline stages:
  *   1. Baseline subtraction + noise floor
- *   2. Peak detection gate (cross-shaped +/-5 cells)
+ *   2. Peak detection gate (full neighbourhood scan, HEATMAP_PEAK_RADIUS)
  *   3. CCL flood-fill (4-connected BFS)
  *   4. Velocity rejection + edge penalty + blob splitting
  *   5. Centroid + eigenvalues computation

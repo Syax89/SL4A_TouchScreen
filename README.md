@@ -78,10 +78,10 @@ unresolved frame-layout assumptions are recorded in `docs/EVIDENCE.md`.
 
 | Stage | Function |
 |-------|----------|
-| **c590 LUT** | Byte-indexed CapImg sample → fixed-point: `max(0, 10000 - (i·22 + 6000))` |
+| **c590 LUT** | Byte-indexed CapImg sample → fixed-point: `max(0, 10000 - (i·22204/1000 + 6000))` |
 | **Baseline** | 30-frame asymmetric EMA per cell |
 | **Noise floor** | c590 < 400 → suppressed (Windows DAT_1806c08c8 = 0.04) |
-| **Peak gate** | Cross-shaped ±5 cells, min_rise=200, max 16 peaks |
+| **Peak gate** | Full radius-2 neighbourhood scan of touched cells, rise ≥200, max 16 peaks |
 | **CCL flood-fill** | 4-connected BFS, filters: n≥2, max_rise≥200, weight≥1000 |
 | **Velocity rejection** | Blob must be within 6 cells of a detected peak |
 | **Edge penalty** | Bottom edge ×0.23, other edges ×0.97 |

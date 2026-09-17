@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Surface TouchPenProcessor0C19 tracker oracle.
 
-Full pipeline: peak detection, Hungarian assignment, 48-track lifecycle,
-hold/lift, classification, contact emission, post-report coalescing.
+Pipeline modelled: peak detection, Hungarian assignment, 48-track lifecycle,
+contact emission, post-report coalescing.
+NOT modelled: hold/lift and per-sample classification — the state constants
+exist for accounting only, and Contact carries no class field.
 
 Input: .v0 CapImg frame files (4304 bytes each).
-Output: per-frame contact list with track ID, coordinates, classes.
+Output: per-frame contact list (track ID, coordinates, group, status).
 """
 
 from __future__ import annotations
@@ -15,11 +17,13 @@ from math import sqrt
 from pathlib import Path
 from typing import Optional
 
+from decode_v0_capimg import decode_body as _capimg_decode_body
+
 # ── recovered MSHW0231 / 0C19 static configuration ──────────────────
 
 NCOLS = 72
 NROWS = 48
-MAX_TRACKS = 48
+MAX_TRACKS = 48  # DLL track count (SURFACE_TRACKER_DECOMP.md); the driver's 47 slots are a different namespace
 HISTORY_DEPTH = 10
 
 # Radii from DLL static record DAT_1808e0460 (0C19 selector)
@@ -32,9 +36,12 @@ CONTINUITY_RADIUS_SQ = 16.0  # 4 grid cells, squared
 # 1806025c0_FUN_1806025c0.c:33-35: frame_data +0x0c default for 0C19
 COALESCE_DISTANCE_SQ = 36.0
 
-# C590 LUT: c590[i] = 1.0 - (i*0.00222035 + 0.6), ×10000 fixed-point
+# C590 LUT: c590[i] = 1.0 - (i*0.00222035428 + 0.6), ×10000 fixed-point.
+# Same integer form as the driver (C590_STEP_NUM/STEP_DEN = 22204/1000,
+# round-half); the earlier `raw * 22` truncated the step and drifted up
+# to 37 fixed-point units from the driver at high raw values.
 def c590(raw: int) -> int:
-    v = 10000 - (raw * 22 + 6000)
+    v = 10000 - (((raw * 22204 + 500) // 1000) + 6000)
     return v if v > 0 else 0
 
 # ── track state machine (180608430_FUN_180608430.c) ──────────────────
@@ -90,21 +97,32 @@ def set_state(tr: Tracker, t: Track, ns: int):
 # ── CapImg decoder ───────────────────────────────────────────────────
 
 def decode_raster(body: bytes) -> Optional[bytes]:
-    """Extract 3456-byte raster from 4304-byte V0 body. Section 0x0100 samples at body[28]."""
-    if len(body) != 4304 or body[2] != 0x0c:
+    """Extract the 3456-byte raster from a 4304-byte V0 body, or None.
+
+    Reuses the shared driver-faithful decoder (tools/decode_v0_capimg.py):
+    the previous local slice enforced only `body[2] == 0x0c` plus a
+    heatmap-first fixed offset, so it dropped driver-valid frames whose
+    vendor section came first and accepted frames the driver rejects
+    (CE/10 magic, container bounds, heatmap header, exact end).
+    """
+    try:
+        return _capimg_decode_body(body).raster
+    except ValueError:
         return None
-    # container: body[5:9]=u32 len, body[9:11]=u16 type, body[11]=flags
-    # section at body[12]: type at body[16:18]
-    if body[16] != 0x00 or body[17] != 0x01:  # 0x0100 little-endian
-        return None
-    # body[28:28+3456] = raster samples
-    samples = body[28:28+3456]
-    return samples if len(samples) == 3456 else None
 
 # ── peak detection (FUN_1805fba00) ──────────────────────────────────
 
 # Peak detection: minimum signal rise (c590 ×10000 fixed-point)
 MIN_PEAK_RISE = 500  # filters noise (22-326), keeps touch (1448-1912)
+
+# This is the WINDOWS rule (FUN_1805fba00): a cross-shaped probe at exactly
+# ±5 cells, no touched/absolute gate. The LINUX DRIVER deliberately diverges:
+# raw_detect_peaks() scans the full (2*HEATMAP_PEAK_RADIUS+1)^2 neighbourhood
+# at radius 2, gated on heatmap_touched and rise >= 200 — the ±5 cross let
+# ~13 spurious peaks per blob qualify and starve the 16-peak budget
+# (driver/mshw0231-raw-constants.h carries the replay evidence). Do not
+# compare peak counts between this oracle and the driver 1:1; a difference
+# here is expected, not a bug on either side.
 
 def _peaks(signal: list[int]) -> list[tuple[int, int, int]]:
     out = []
@@ -181,7 +199,10 @@ def process(raster: bytes, base: list[int], tr: Tracker, n: int = 0) -> list[Con
                 if d2 < ASSOCIATION_RADIUS_SQ:
                     cost[i][j] = int(sqrt(d2))
                 else:
-                    cost[i][j] = 100  # out-of-radius real edge, like Surface
+                    # DLL value: "cost 100 for an out-of-radius real pair,
+                    # and cost 1000 for padding" (SURFACE_TRACKER_DECOMP.md).
+                    # The driver deliberately uses 1500 > empty instead.
+                    cost[i][j] = 100
             for j in range(len(active), cols): cost[i][j] = 1000
         assign = _hungarian(cost, rows, cols)
         matched = set()
@@ -223,7 +244,12 @@ def process(raster: bytes, base: list[int], tr: Tracker, n: int = 0) -> list[Con
         if t.state >= S.ACTIVE:
             recs.append(Contact(x=t.x, y=t.y, status=1, group=t.idx, track=t.idx))
 
-    # Coalesce (FUN_1806025c0): merge close pairs, keep one survivor per group
+    # Coalesce (FUN_1806025c0): merge close pairs, one survivor per group.
+    # The DLL's literal mechanics — both eligible class-1 records switched
+    # to class 7 with the group label rewritten, both kept in its list
+    # (SURFACE_TRACKER_DECOMP.md "Report Coalescing") — are pinned by
+    # tools/surface_tracker_oracle.py + tests/surface_tracker_oracle_test.py.
+    # Here we model the egress view instead: the merged pair emits once.
     for a in range(len(recs)):
         if recs[a].status not in (1, 3): continue
         for b in range(a+1, len(recs)):
@@ -288,7 +314,6 @@ def main():
             s = "; ".join(f"t{c.track} g{c.group} s{c.status}({c.x:.2f},{c.y:.2f})" for c in contacts)
             print(f"f{i+1:4d}: {len(contacts)}→ {s}")
 
-    n_contacts = sum(1 for _ in (None for __ in rasters for ___ in process(__, base, tr, 0)))
     print(f"\n{len(rasters)} frames, {tr.alloc} tracks alloc, {tr.active} active")
     return 0
 

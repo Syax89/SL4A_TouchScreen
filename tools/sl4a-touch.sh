@@ -1688,10 +1688,15 @@ cmd_hunt() {
 	# where it can be cleaned up before the file is even sent.
 	[ -n "$OUT" ] || OUT="$REPO_DIR/sl4a-hunt-$(date +%Y%m%d-%H%M%S).txt"
 
-	local SYSFS_DIR
+	local SYSFS_DIR d
 	# Any supported Surface panel, not just the SL4 one: a glob matching nothing
 	# turned every counter unreadable and the verdict then blamed the device.
-	SYSFS_DIR="$(ls -d /sys/bus/spi/devices/*MSHW* 2>/dev/null | head -1)"
+	# The glob is resolved without `ls`: with nullglob on a no-match pattern
+	# vanishes, and `ls -d` then lists the current directory (SYSFS_DIR="."),
+	# which is never empty and made the warning below dead code.
+	for d in /sys/bus/spi/devices/*MSHW*; do
+		if [ -d "$d" ]; then SYSFS_DIR="$d"; break; fi
+	done
 
 	# The installed profile's own parameters, minus the two this command sets.
 	local opts

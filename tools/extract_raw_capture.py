@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Validate and extract fixed slots from the passive raw_capture sysfs file."""
+"""Validate and extract fixed slots from an 8-slot raw capture dump.
+
+The format is the one the historical passive raw_capture sysfs attribute
+recorded (8 concatenated 4304-byte V0 bodies; see
+captures/id5-20260718/raw_capture_status). That attribute is not part of
+the current driver build, so this reads pre-recorded dumps only.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +28,7 @@ def valid(body: bytes) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dump", type=Path, help="binary raw_capture sysfs snapshot")
+    parser.add_argument("dump", type=Path, help="binary 8-slot raw capture dump")
     parser.add_argument("--output", type=Path,
                         help="directory for validated complete V0 bodies")
     args = parser.parse_args()
