@@ -247,8 +247,12 @@ assert "rm -f \"$INSTALLED_HEAD_STAMP\"" in tool, \
 assert "Modules built from revision:" in tool, \
     "the sweep file no longer records the revision the modules came from"
 
+# The sweep's existence, as one contiguous load line: an intent-only token
+# ('acpi_probe_power_cycle="$pc"') was satisfiable by a decoy comment while the
+# real load was gone (P3 wave). The biting check for what is actually loaded
+# is the sandbox's modprobe.log assertions; this one only guards the text.
 assert "cmd_hunt" in tool and "hunt_verdict" in tool and \
-    'acpi_probe_power_cycle="$pc"' in tool, \
+    'modprobe sl4a_spi_hid $opts acpi_probe_power_cycle="$pc" skip_vendor_stop="$svs" sl4a_debug_level=3' in tool, \
     "the frame hunt is gone: a probe-axis bisect would need hand commands"
 assert "sl4a_debug_level=3" in tool, \
     "hunt no longer raises the debug level, so the read bytes are not captured"

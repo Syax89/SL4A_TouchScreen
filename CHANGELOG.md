@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### The hunt's artifact: honest when the load fails, present when it matters
+
+The P3 double-blind wave read `spi-hid-core.c` 2401-4394 and falsified the
+hunt sweep's evidence (the driver itself was unchanged at the pin). Four
+confirmed defects, all in the collector:
+
+- "first write on the wire" grepped only the last 60 lines of the variant's
+  log slice, so it vanished exactly when a load was productive (a level-3
+  load emits hundreds of frame lines after the first control write) — the
+  artifact's headline discriminator was missing when it mattered. Now the
+  whole per-load slice is searched, and an absent write says so.
+- the "running variant" line echoed what was REQUESTED, so a load that
+  failed still read as loaded; a "loaded params (read back)" line now reports
+  the live module parameters, or MODULE NOT LOADED.
+- the OS-binding block printed "bound driver: none" when the sysfs directory
+  was never found — indistinguishable from "panel enumerated, nothing
+  bound". It now says the dir was not found and nothing was probed, and the
+  block is labelled "(before the sweep)" so the snapshot cannot be read as
+  the state throughout.
+- the sandbox's arm assertions missed the control arm and the load ORDER: a
+  swapped case arm kept every pin green while the artifact misattributed
+  which load answered (the wave's stays-green mutation). The sandbox now
+  demands 0/0, 1/0, 0/1, 1/1 in order, grows its dmesg stub on each load so
+  the first write must survive a realistic burst, and the no-panel run must
+  print the honest not-probed text. The installer contract's sweep
+  assertion no longer doubles as a decoy.
+
+Driver-side LOWs from the same wave (a dead error-path arm at `err1_touch`,
+one stale comment in `spi-hid-protocol.h`) are queued for the first fix
+batch after the pending field run; the driver ships byte-identical to
+`4525811`.
+
 ### The wire axis is closed, and the hunt moves to the probe axes
 
 The 13:11 field run on the wire sweep settled it: single, doubled and

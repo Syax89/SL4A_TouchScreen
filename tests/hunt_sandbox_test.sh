@@ -43,8 +43,27 @@ for c in dkms systemctl depmod mokutil make modinfo sleep; do
 done
 # modprobe records its arguments: the sweep must hand the controller's
 # debug_trace to sl4a_spi_amd, or the peek line — the one that answers the
-# RX-region question — can never appear in the artifact.
-printf '#!/bin/bash\necho "$*" >> "%s/modprobe.log"\nexit 0\n' "$SB" > "$SB/bin/modprobe"
+# RX-region question — can never appear in the artifact. A load of the driver
+# also emits a realistic level-3 burst: the FIRST control write the sweep's
+# evidence line looks for, then a hundred-plus per-frame lines. The write is
+# deliberately far from the tail — a window that greps only the last 60 lines
+# must lose it (that was the P3 wave's finding).
+cat > "$SB/bin/modprobe" <<'EOS'
+#!/bin/bash
+echo "$*" >> "__SB__/modprobe.log"
+if [ "${1:-}" != "-r" ] && [[ " $* " == *" sl4a_spi_hid "* ]]; then
+	{
+		printf '[999.0] sl4a_spi_hid: SEQ: write op=0x02 reg=1 raw=[02 00 00 01 42 00 00 03 00 00]\n'
+		i=0
+		while [ "$i" -lt 120 ]; do
+			printf '[999.1] sl4a_spi_hid: read begin op=0x0b tx=8 rx=16\n'
+			i=$((i + 1))
+		done
+	} >> "__SB__/dmesg.txt"
+fi
+exit 0
+EOS
+sed -i "s#__SB__#$SB#g" "$SB/bin/modprobe"
 chmod +x "$SB/bin/modprobe"
 printf '#!/bin/bash\ncat "%s/dmesg.txt"\n' "$SB" > "$SB/bin/dmesg"
 chmod +x "$SB/bin/dmesg"
@@ -75,8 +94,13 @@ n="$(grep -c '^VERDICT' "$SB/out.txt" || true)"
 grep -q '^sl4a_spi_amd debug_trace=3$' "$SB/modprobe.log" \
 	|| fail "hunt loaded sl4a_spi_amd without debug_trace=3 — the RX-region peek cannot reach the artifact"
 
-# The wire-form axis is the one the artifact has to explain: if the sweep does
-# not actually load all three shapes, the bundle cannot say which one answered.
+# The probe arms are the axis the artifact has to explain: if the sweep does
+# not actually load all four, the bundle cannot say which one answered. Order
+# matters too — a swapped case arm loads every pair while mislabelling which
+# one ran (the P3 wave's stays-green mutation), so the pairs must appear as
+# 0/0, 1/0, 0/1, 1/1 repeating, once per sweep.
+grep -q 'acpi_probe_power_cycle=0 skip_vendor_stop=0' "$SB/modprobe.log" \
+	|| fail "the sweep never loaded the control arm"
 grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=0' "$SB/modprobe.log" \
 	|| fail "the sweep never loaded the power-cycle arm"
 grep -q 'acpi_probe_power_cycle=0 skip_vendor_stop=1' "$SB/modprobe.log" \
@@ -85,6 +109,37 @@ grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=1' "$SB/modprobe.log" \
 	|| fail "the sweep never loaded the combined arm"
 grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=1' "$SB/out.txt" \
 	|| fail "the artifact never names the probe variant it ran"
+
+grep -o 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" > "$SB/pairs.txt"
+k=0
+while IFS= read -r p; do
+	case "$k" in
+		0) want="acpi_probe_power_cycle=0 skip_vendor_stop=0" ;;
+		1) want="acpi_probe_power_cycle=1 skip_vendor_stop=0" ;;
+		2) want="acpi_probe_power_cycle=0 skip_vendor_stop=1" ;;
+		3) want="acpi_probe_power_cycle=1 skip_vendor_stop=1" ;;
+		*) break ;;
+	esac
+	[ "$p" = "$want" ] \
+		|| fail "load $((k + 1)) carried '$p', expected '$want' — variant order or pair swap"
+	k=$((k + 1))
+done < "$SB/pairs.txt"
+[ "$k" -eq 4 ] || fail "expected one full sweep of 4 driver loads so far, saw $k"
+
+# The artifact must carry the first control write of each load's OWN slice:
+# with the realistic burst above, the write sits far above the 60-line tail,
+# and a tail-only window dropped it exactly when the load was productive (P3).
+grep -q 'first write on the wire: \[999.0\] sl4a_spi_hid: SEQ: write op=0x02' "$SB/out.txt" \
+	|| fail "the artifact lost the first control write (the 60-line window again?)"
+
+# The "running variant" line echoes what was REQUESTED; the live readback
+# must accompany it so a failed load cannot masquerade as a productive one.
+# On this sandbox host the module is never loaded, and the artifact must say
+# exactly that (P3 wave).
+grep -q 'loaded params (read back): MODULE NOT LOADED' "$SB/out.txt" \
+	|| fail "no live module readback line: a failed load would still read as loaded"
+grep -q -- '-- OS binding (before the sweep) --' "$SB/out.txt" \
+	|| fail "the OS-binding block is not labelled as the pre-sweep snapshot it is"
 
 # The progress the user asked for has to be on the terminal too, not only in
 # the file — that is the whole point of it.
@@ -111,7 +166,15 @@ rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run3.txt"; fail "hunt exited $rc with no panel present"; }
 grep -q 'sysfs directory for the device not found' "$SB/run3.txt" \
 	|| fail "no-panel run: the missing-sysfs warning never fired (the glob still resolves to '.')"
+grep -q 'bound driver: (sysfs dir not found' "$SB/out3.txt" \
+	|| fail "no-panel run: the OS-binding block printed a bare 'none' as if it had probed (a reader would blame the OS)"
 [ "$(grep -c 'NO COUNTERS READ' "$SB/out3.txt" || true)" -eq 4 ] \
 	|| fail "the no-panel artifact does not degrade honestly to NO COUNTERS READ"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 4 verdicts, progress on the terminal, controller debug_trace passed, no-panel run warns)"
+# All three sweeps (control run, rebuild run, no-panel run) loaded the same
+# four arms in the same order: 12 loads, the pattern repeating.
+n_loaded="$(grep -c 'acpi_probe_power_cycle=[01] skip_vendor_stop=[01]' "$SB/modprobe.log" || true)"
+[ "$n_loaded" -eq 12 ] \
+	|| fail "expected 12 driver loads after three sweeps, saw $n_loaded"
+
+echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 4 verdicts, progress on the terminal, controller debug_trace passed, probe arms loaded in order, first write survives the window, live readback present, no-panel run warns and degrades honestly)"

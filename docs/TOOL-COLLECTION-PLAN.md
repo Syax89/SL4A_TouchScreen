@@ -1,6 +1,7 @@
 # Tool collection plan - one command, one file, everything
 
-Status: phase 1 landed with the hunt wire-form sweep (2026-09-17); phases 2-4
+Status: phase 1 landed (hunt sweep; probe axes since 2026-09-17 13:15 — the
+wire axis closed negative); phases 2-4
 open. Written after the 2026-09-17 field regression (raw touch answered on
 v1.6.3, reset-looped after the campaign's wire changes): the field bundle is
 what settles questions, so the tool that produces it must be able to name,
@@ -25,8 +26,10 @@ per run, which shape was on the wire and what the OS thinks it sees.
   the second byte) and an "OS binding" block: ACPI device, bound driver,
   registered input device - the "does the hardware present itself to the OS"
   question without extra commands.
-- pins: the sandbox test fails if any of the three wire shapes is not loaded,
-  or if the artifact does not name the one it ran.
+- pins: the sandbox test fails if any probe arm is not loaded in order, if the
+  artifact does not name the one it ran, if the live module-param readback is
+  missing, or if the first control write is lost from the artifact (the
+  60-line window bug the P3 wave found).
 
 ## Phase 2 - fold the static collector into the sweep
 

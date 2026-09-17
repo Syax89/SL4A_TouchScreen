@@ -1782,13 +1782,21 @@ cmd_hunt() {
 		# a different problem from one that binds and stays quiet.
 		local acpi_id drv input_state
 		acpi_id="$(touchscreen_acpi_id 2>/dev/null)" || acpi_id="none"
-		drv="$(bound_driver "$SYSFS_DIR" 2>/dev/null)" || drv="none"
+		if [ -n "$SYSFS_DIR" ]; then
+			drv="$(bound_driver "$SYSFS_DIR" 2>/dev/null)" || drv="none"
+		else
+			# "none" here reads as "no driver is bound" while the panel's
+			# sysfs directory was never found: nothing was probed, and a
+			# reader must not blame the OS binding for a wire problem
+			# (P3 wave).
+			drv="(sysfs dir not found, not probed)"
+		fi
 		if grep -qi MSHW /proc/bus/input/devices 2>/dev/null; then
 			input_state="registered"
 		else
 			input_state="not registered"
 		fi
-		echo "-- OS binding --"
+		echo "-- OS binding (before the sweep) --"
 		echo "ACPI device: $acpi_id"
 		echo "bound driver: $drv"
 		echo "input device (MSHW in /proc/bus/input/devices): $input_state"
@@ -1823,6 +1831,16 @@ cmd_hunt() {
 			modprobe sl4a_spi_hid $opts acpi_probe_power_cycle="$pc" skip_vendor_stop="$svs" sl4a_debug_level=3 2>/dev/null || true
 			sleep 4
 			echo "running variant: acpi_probe_power_cycle=$pc skip_vendor_stop=$svs at debug level $(cat /sys/module/sl4a_spi_hid/parameters/sl4a_debug_level 2>/dev/null) controller trace $(cat /sys/module/sl4a_spi_amd/parameters/debug_trace 2>/dev/null || echo '?')"
+			# The line above echoes what was REQUESTED — a load that failed
+			# leaves it looking the same. Read the live parameters back so
+			# the artifact states what is actually loaded; the module being
+			# absent is the explicit failure marker (P3 wave: the intent
+			# echo alone let a failed load masquerade as a productive one).
+			if [ -d /sys/module/sl4a_spi_hid ]; then
+				echo "loaded params (read back): acpi_probe_power_cycle=$(cat /sys/module/sl4a_spi_hid/parameters/acpi_probe_power_cycle 2>/dev/null || echo '?') skip_vendor_stop=$(cat /sys/module/sl4a_spi_hid/parameters/skip_vendor_stop 2>/dev/null || echo '?')"
+			else
+				echo "loaded params (read back): MODULE NOT LOADED — nothing was measured for this variant"
+			fi
 			for _s in 6 5 4 3 2 1; do
 				printf '\r     >>> TOUCH THE PANEL NOW (tocca il pannello) — %d <<<   ' "$_s" >&3
 				sleep 1
@@ -1836,11 +1854,12 @@ cmd_hunt() {
 			# `|| true` is load-bearing: under `set -e -o pipefail` a grep that
 			# matches nothing (every modprobe in this variant failed, say) aborted
 			# hunt after it had unloaded the driver and before putting it back.
-			local win
+			local all win
 			# The spi-amd prefix matters: the controller layer logs the read
 			# regions (peek) under its own name, and filtering it out threw
 			# away exactly the line the RX-region question needs answered.
-			win="$(dmesg 2>/dev/null | tail -n +"$((dmesg_mark + 1))" | grep -iE "sl4a_spi_hid|spi-amd" | tail -n 60)" || true
+			all="$(dmesg 2>/dev/null | tail -n +"$((dmesg_mark + 1))" | grep -iE "sl4a_spi_hid|spi-amd")" || true
+			win="$(printf '%s\n' "$all" | tail -n 60)" || true
 			if [ -n "$win" ]; then
 				echo "$win"
 			else
@@ -1853,8 +1872,17 @@ cmd_hunt() {
 			# The proof of what actually went on the wire for this load: the first
 			# control write, hex and all - doubled vs single is its second byte.
 			local wr
-			wr="$(printf '%s\n' "$win" | grep -m1 'write op=0x02')" || wr=""
-			[ -n "$wr" ] && echo "first write on the wire: $wr"
+			# Searched over the WHOLE slice for this load, not the 60-line
+			# tail kept for the reader: at debug level 3 a productive load
+			# logs hundreds of frame lines after the first control write,
+			# and the tail-only grep lost this line exactly when the load
+			# worked (P3 wave). Absence is stated, not silent.
+			wr="$(printf '%s\n' "$all" | grep -m1 'write op=0x02')" || wr=""
+			if [ -n "$wr" ]; then
+				echo "first write on the wire: $wr"
+			else
+				echo "first write on the wire: (none in this load's log)"
+			fi
 			echo "VERDICT (acpi_probe_power_cycle=$pc skip_vendor_stop=$svs): $(hunt_verdict "$variant" "$SYSFS_DIR")"
 			echo ""
 			info "variant $variant done"
