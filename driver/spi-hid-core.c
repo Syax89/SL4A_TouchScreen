@@ -58,6 +58,15 @@ static bool skip_getfeat = true;
  * in driver/spi-hid-wire-frames.h. 0 (the default) sends the Windows-identical
  * single-opcode frame, non-zero restores the legacy doubled-opcode form. */
 static bool wire_double_opcode = SPI_HID_WIRE_DOUBLE_DEFAULT;
+
+/* Triage knob for the 2026-09-17 regression: the pre-DESCREQ teardown +
+ * power preamble (vendor_stop, D2, D0 in spi_hid_vendor_init) postdates the
+ * last build this panel answered on, and the device now reset-loops with the
+ * handshake otherwise intact. Set to 1 to skip those three frames so one
+ * field sweep can tell whether they are what keeps the panel resetting.
+ * Default 0: the reference sends them, and the stalled stream they cure is
+ * real (tested in the field). */
+static bool skip_vendor_stop;
 /* Deprecated alias: 1 asked for the frame without the doubled opcode, which is
  * the default now, so it only matters as an override of wire_double_opcode=1.
  * Kept declared so existing modprobe.d drop-ins keep loading. */
@@ -682,6 +691,11 @@ static int spi_hid_vendor_init(struct spi_hid *shid)
 	struct spi_hid_wire_frame d2 = spi_hid_wire_set_power_d2(spi_hid_wire_doubled());
 	struct spi_hid_wire_frame d0 = spi_hid_wire_set_power_d0(spi_hid_wire_doubled());
 	int ret;
+
+	/* Skip the whole teardown + power preamble when the triage knob is set:
+	 * one sweep answers whether these are the frames the device rejects. */
+	if (skip_vendor_stop)
+		return 0;
 
 	/* First, tear down a stream that is still running. The device keeps
 	 * streaming across a host reboot: the state comes from an earlier
@@ -2074,6 +2088,9 @@ MODULE_PARM_DESC(setfeat_speed_hz,
  * puts on the bus: a single 0x02 opcode and the constant 0C EE 5B trailer.
  * 1 restores the legacy Linux form with the opcode sent twice and a zeroed
  * trailer, kept for A/B experiments. */
+module_param(skip_vendor_stop, bool, 0444);
+MODULE_PARM_DESC(skip_vendor_stop,
+	"skip the pre-DESCREQ vendor_stop + D2/D0 preamble (default 0)");
 module_param(wire_double_opcode, bool, 0444);
 MODULE_PARM_DESC(wire_double_opcode,
 	"Send the legacy doubled leading opcode (02 02 ..) instead of the "

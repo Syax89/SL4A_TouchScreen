@@ -66,7 +66,7 @@ rc=$?
 
 [ -s "$SB/out.txt" ] || fail "no artifact was written"
 n="$(grep -c '^VERDICT' "$SB/out.txt" || true)"
-[ "$n" -eq 3 ] || fail "expected 3 verdicts in the artifact, found ${n:-0}"
+[ "$n" -eq 4 ] || fail "expected 4 verdicts in the artifact, found ${n:-0}"
 
 # The peek line that settles the RX-region question only prints at the
 # controller's debug_trace=3; the sweep must pass it to sl4a_spi_amd. Without
@@ -77,18 +77,18 @@ grep -q '^sl4a_spi_amd debug_trace=3$' "$SB/modprobe.log" \
 
 # The wire-form axis is the one the artifact has to explain: if the sweep does
 # not actually load all three shapes, the bundle cannot say which one answered.
-grep -q 'wire_double_opcode=0 setfeat_no_double=0' "$SB/modprobe.log" \
-	|| fail "the sweep never loaded the control (single-opcode) wire shape"
-grep -q 'wire_double_opcode=1 setfeat_no_double=0' "$SB/modprobe.log" \
-	|| fail "the sweep never loaded the doubled (v1.6.3) wire shape"
-grep -q 'wire_double_opcode=1 setfeat_no_double=1' "$SB/modprobe.log" \
-	|| fail "the sweep never loaded the doubled-except-SET_FEATURE5 wire shape"
-grep -q 'wire_double_opcode=1 setfeat_no_double=1' "$SB/out.txt" \
-	|| fail "the artifact never names the wire variant it ran"
+grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=0' "$SB/modprobe.log" \
+	|| fail "the sweep never loaded the power-cycle arm"
+grep -q 'acpi_probe_power_cycle=0 skip_vendor_stop=1' "$SB/modprobe.log" \
+	|| fail "the sweep never loaded the skip-preamble arm"
+grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=1' "$SB/modprobe.log" \
+	|| fail "the sweep never loaded the combined arm"
+grep -q 'acpi_probe_power_cycle=1 skip_vendor_stop=1' "$SB/out.txt" \
+	|| fail "the artifact never names the probe variant it ran"
 
 # The progress the user asked for has to be on the terminal too, not only in
 # the file — that is the whole point of it.
-grep -q '\[1/3\] variant 0' "$SB/run.txt" || fail "no per-variant progress on the terminal"
+grep -q '\[1/4\] variant 0' "$SB/run.txt" || fail "no per-variant progress on the terminal"
 grep -q 'TOUCH THE PANEL NOW' "$SB/run.txt" || fail "no touch prompt on the terminal"
 
 # A stale stamp must take the rebuild path (it is the path that once died with
@@ -98,7 +98,7 @@ PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out2.txt" > "$SB/run2.txt" 
 rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run2.txt"; fail "hunt exited $rc with a stale stamp (the rebuild path)"; }
 grep -q 'rebuilding first' "$SB/run2.txt" || fail "a stale stamp did not trigger a rebuild"
-[ "$(grep -c '^VERDICT' "$SB/out2.txt" || true)" -eq 3 ] || fail "the artifact after a rebuild is incomplete"
+[ "$(grep -c '^VERDICT' "$SB/out2.txt" || true)" -eq 4 ] || fail "the artifact after a rebuild is incomplete"
 
 # No panel at all: the sysfs glob matches nothing and the sweep must say so.
 # `ls -d` on a vanished (nullglob) pattern lists the CURRENT DIRECTORY, so the
@@ -111,7 +111,7 @@ rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run3.txt"; fail "hunt exited $rc with no panel present"; }
 grep -q 'sysfs directory for the device not found' "$SB/run3.txt" \
 	|| fail "no-panel run: the missing-sysfs warning never fired (the glob still resolves to '.')"
-[ "$(grep -c 'NO COUNTERS READ' "$SB/out3.txt" || true)" -eq 3 ] \
+[ "$(grep -c 'NO COUNTERS READ' "$SB/out3.txt" || true)" -eq 4 ] \
 	|| fail "the no-panel artifact does not degrade honestly to NO COUNTERS READ"
 
-echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 3 verdicts, progress on the terminal, controller debug_trace passed, no-panel run warns)"
+echo "hunt sandbox contract: PASS (sweep completes, rebuild path survives, 4 verdicts, progress on the terminal, controller debug_trace passed, no-panel run warns)"
