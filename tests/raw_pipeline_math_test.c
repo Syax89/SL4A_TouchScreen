@@ -384,7 +384,7 @@ static void test_signal_thresholds(void)
 	CHECK(HEATMAP_TOUCH_MIN_RISE == 200, "min signal rise = 200");
 	CHECK(HEATMAP_TOUCH_MIN_ABSOLUTE == 400, "min absolute c590 = 400");
 	CHECK(HEATMAP_BASELINE_FRAMES == 30, "baseline frames = 30");
-	CHECK(HEATMAP_MAX_PEAKS == 16, "max peaks = 16");
+	CHECK(HEATMAP_MAX_PEAKS == 20, "max peaks = 20");
 	CHECK(HEATMAP_MIN_BLOB_PIXELS == 2, "min blob pixels = 2");
 	/* The peak gate is a full (2R+1)^2 neighbourhood scan; R is a budget
 	 * constant, not a free knob (a 2->5 change used to pass every replay

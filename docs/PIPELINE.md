@@ -24,7 +24,7 @@ Frame (heatmap grid — 72×48/3456 cells on SL4 MSHW0231, 78×52/4056 on SL3 MS
   │   Each connected component → blob candidate
   │   Filters: pixel_count ≥ 2, max_rise ≥ 200, weight ≥ 1000
   │
-  ├─ Velocity Rejection (blob within 6 cells of peak, dist² ≤ 36.0)
+  ├─ Velocity Rejection (blob centroid within 6 cells of a recorded peak, Chebyshev per axis)
   │
   ├─ Edge Penalty (config+0x8D0/0x8D4)
   │   Bottom edge: weight × 0.23
@@ -61,7 +61,7 @@ Frame (heatmap grid — 72×48/3456 cells on SL4 MSHW0231, 78×52/4056 on SL3 MS
 | Peak gate | FUN_1805fba00 | ~90% (full radius-2 neighbourhood scan; Windows probes a ±5 cross) |
 | CCL | FUN_180600c40 | ~70% (4-connected BFS vs per-pixel) |
 | Centroid | FUN_180602e60 | ~85% (full blob, ×100 fixed-point) |
-| Velocity rejection | FUN_180600c40 | 100% (dist² ≤ 36.0) |
+| Velocity rejection | FUN_180600c40 | radius 6 cells; Linux-side gate as a Chebyshev box (Windows' dist² < 36 is the track handover — Config-Table) |
 | Edge penalty | config+0x8D0/0x8D4 | 90% (0.967/0.228 from DLL) |
 | Hungarian | FUN_1805fd090 | ~90% (cost matrix matches) |
 | Association radii | config+0x8DC-0x8EC | 100% (DLL values verified) |

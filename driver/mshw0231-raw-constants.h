@@ -12,8 +12,11 @@
  * everywhere and the pipeline publishes phantom contacts until a reload. */
 #define HEATMAP_DRIFT_DIV           256
 
-/* Peak detection */
-#define HEATMAP_MAX_PEAKS            16
+/* Peak detection. Must stay >= HEATMAP_MAX_BLOBS (spi-hid-core.h): the
+ * frame's shared peak budget feeds CCL's velocity rejection, and a blob
+ * whose own maximum was never recorded is dropped silently — the static
+ * assert in mshw0231-raw.c enforces the relation. */
+#define HEATMAP_MAX_PEAKS            20
 /*
  * Neighborhood radius for local-maximum suppression in
  * raw_detect_peaks(): a touched cell is a "peak" only if no other
@@ -40,7 +43,11 @@
  * scan fixes this because the blob's true center — strictly higher
  * signal than every other cell in the blob — always falls within
  * radius of any of its own cells, correctly leaving only the center
- * as a peak regardless of taper shape. Verified via replay to
+ * as a peak regardless of taper shape. Flat-topped (plateau) regions
+ * have no unique center; the raster-order tie-break in the scan makes
+ * a plateau contribute exactly one peak (its first cell) instead of
+ * one per border cell.
+ * Verified via replay to
  * correctly detect 1-5 simultaneous synthetic blobs; the exact
  * optimal radius may still benefit from real multi-finger hardware
  * confirmation.

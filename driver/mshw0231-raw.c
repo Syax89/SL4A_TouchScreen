@@ -16,6 +16,14 @@
 #include "mshw0231-raw.h"
 #include "mshw0231-raw-constants.h"
 
+/* The peak budget must cover the blob budget: raw_ccl_flood_fill()'s
+ * velocity rejection needs a recorded peak near each committed blob, and a
+ * blob whose own local maximum was never recorded (scan cap reached) is
+ * dropped silently. A smaller peak budget than blob budget is a bug, not a
+ * tuning (P6 double-blind review). */
+_Static_assert(HEATMAP_MAX_PEAKS >= HEATMAP_MAX_BLOBS,
+	       "HEATMAP_MAX_PEAKS must be >= HEATMAP_MAX_BLOBS");
+
 extern int sl4a_debug_level;
 #define seq_dbg(shid, level, fmt, ...) \
 	do { if (sl4a_debug_level >= (level)) \
@@ -186,7 +194,9 @@ void mshw0231_raw_reset(struct spi_hid *shid)
 
 /* Signal lookup table (c590[256]). Extracted from TouchPenProcessor0C19.dll .rdata:
  *   c590[i] = 1.0 - (i * 0.00222035428 + 0.600000024)
- * Range: 0.4 (resting) down to ~-0.166 (byte 255).
+ * The polynomial itself spans 0.4 (byte 0) down to ~-0.166 (byte 255), but
+ * the LUT is clamped at 0: byte 0 -> 4000, byte 180 (the resting level on
+ * this panel) -> 3, byte >180 -> 0.
  * Fixed-point: c590[i] = (10000 - (i * 22204 / 1000 + 6000)), clamped >= 0.
  * Scaled to [0, 4000] with 4 decimal digits of precision. */
 #define C590_BASE   10000
@@ -237,8 +247,10 @@ void mshw0231_raw_init(struct spi_hid *shid)
 }
 
 /* Fixed-point atan2 approximation. Returns angle in degrees * 100.
- * Uses rational approximation: atan2(y,x) ≈ (y * 18000) / (PI * (abs(x) + abs(y) + 1))
- * with quadrant correction. Range: [-18000, 18000] (i.e., [-180.00°, 180.00°]). */
+ * Diamond-angle rational approximation:
+ *   angle = |y| * 9000 / (|x| + |y|), quadrant-corrected
+ * (exact on the axes and on the diagonal, approximate in between).
+ * Range: [-18000, 18000] (i.e., [-180.00°, 180.00°]). */
 static s32 atan2_approx(s32 y, s32 x)
 {
 	s32 ax = x < 0 ? -x : x;
@@ -276,8 +288,8 @@ struct blob_entry {
  * After baseline is established, use Exponential Moving Average (EMA)
  * to slowly track thermal drift: baseline[i] = (baseline[i]*7 + raw)/8.
  * This prevents single-count thermal shifts from being detected as
- * false touches (the 60% default threshold would catch a 1-count shift
- * at 62 vs baseline threshold 64, but EMA further smooths this).
+ * false touches (a single raw count is ~22 c590 units, far below the
+ * HEATMAP_TOUCH_MIN_RISE gate, but sustained drift accumulates).
  *
  * Returns true if processing should continue (baseline established,
  * touch_input available, signal computed). Returns false to abort early. */
@@ -358,7 +370,8 @@ static bool raw_compute_signal(struct spi_hid *shid, const u8 *data,
  * in mshw0231-raw-constants.h for the full replay evidence. Collect all
  * peaks for velocity rejection.
  *
- * Fills peaks_col[] and peaks_row[] (each size 16). Returns npeaks. */
+ * Fills peaks_col[] and peaks_row[] (each size HEATMAP_MAX_PEAKS).
+ * Returns npeaks. */
 static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 			   u32 ncols, u32 nrows,
 			   u16 *peaks_col, u16 *peaks_row)
@@ -408,7 +421,19 @@ static u8 raw_detect_peaks(struct spi_hid *shid, u32 cell_count,
 				if ((dr == 0 && dc == 0) || ncol < 0 || ncol >= (s32)ncols)
 					continue;
 				nidx = (u32)nrow * ncols + (u32)ncol;
-				if (shid->heatmap_touched[nidx] && shid->heatmap_signal[nidx] > rise) {
+				/* Strictly higher neighbours reject the cell. Equal
+				 * signals (a flat-topped saturated plateau) are
+				 * settled by raster order: an equal neighbour with a
+				 * lower raster index counts as "higher", so every
+				 * plateau contributes exactly ONE peak (its first
+				 * cell). Without this, a 6x6 flat top produced 20
+				 * peaks on its own border and exhausted the shared
+				 * HEATMAP_MAX_PEAKS budget, silently dropping the
+				 * frame's other real blobs at the CCL near-peak
+				 * check. */
+				if (shid->heatmap_touched[nidx] &&
+				    (shid->heatmap_signal[nidx] > rise ||
+				     (shid->heatmap_signal[nidx] == rise && nidx < i))) {
 					ok = false;
 					break;
 				}
@@ -568,10 +593,11 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 			 * corrupt the second-moment sums for an unrelated blob. */
 			next_label++;
 
-			/* Filter noise: at least 2 pixels, peak signal >= 300,
-			 * and total weight >= blob_min_weight. The max_rise check
-			 * alone rejects residual noise after lift (typically
-			 * 2-5 pixels at <200 rise). */
+			/* Filter noise: at least 2 pixels, max_rise >=
+			 * HEATMAP_TOUCH_MIN_RISE (200), and total weight >=
+			 * blob_min_weight. The max_rise check alone rejects
+			 * residual noise after lift (typically 2-5 pixels at
+			 * <200 rise). */
 			if (pixel_count < HEATMAP_MIN_BLOB_PIXELS || max_rise < HEATMAP_TOUCH_MIN_RISE || sw < blob_min_weight)
 				continue;
 
@@ -616,7 +642,7 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 				 * FUN_180602770 per-neighbor sub-centroids). */
 				if (npeaks >= HEATMAP_SPLIT_MIN_PEAKS && pixel_count >= 8) {
 					u8 p, split_count = 0;
-					u8 split_peaks[16];
+					u8 split_peaks[HEATMAP_MAX_PEAKS];
 					for (p = 0; p < npeaks && split_count < HEATMAP_MAX_PEAKS; p++) {
 						u32 pix = (u32)peaks_row[p] * ncols + (u32)peaks_col[p];
 						if (shid->heatmap_label[pix] == label)
@@ -770,8 +796,12 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
  * Ghost rejection (GROUND_TRUTH.md §22.7 step 3):
  * Merge blobs closer than ghost_dist threshold (grid cells).
  * Windows uses Euclidean squared distance (dx²+dy² < ghost_dist²),
- * not axis-aligned box. If two blobs are within radius, keep the
- * heavier one, discard the lighter.
+ * not axis-aligned box. If two blobs are within radius, keep the one
+ * with the larger PRE-PENALTY weight (raw_w): this is a tracker-stage
+ * decision, and the bottom-edge penalty (x0.23) can otherwise make a
+ * real bottom-edge finger lose the merge to a lighter interior
+ * artifact — the same contract the recovery guard already follows.
+ * The loser is zapped via its `w` field, the discard marker.
  *
  * Modifies sorted[] in-place; updates *sorted_count. */
 static void raw_ghost_merge(struct spi_hid *shid, struct blob_entry *sorted,
@@ -820,7 +850,7 @@ static void raw_ghost_merge(struct spi_hid *shid, struct blob_entry *sorted,
 			/* Strict, as in Windows and the in-tree oracle test: a
 			 * distance of exactly ghost_dist does not merge. */
 			if ((u32)(dx * dx) + (u32)(dy * dy) < gdsq) {
-				if (sorted[b].w > sorted[a].w) {
+				if (sorted[b].raw_w > sorted[a].raw_w) {
 					sorted[a].w = 0;
 					break;
 				} else {

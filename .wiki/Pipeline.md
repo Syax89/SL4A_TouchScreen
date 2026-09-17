@@ -110,9 +110,13 @@ After stabilization, tracking is asymmetric:
 
 A true **local-maximum scan** over the full neighborhood
 (`HEATMAP_PEAK_RADIUS = 2`): a cell is a peak when no neighbor within radius 2
-is strictly higher. Only the blob's true center qualifies — this replaced an
+is strictly higher; equal signals (flat-topped plateaus) settle by raster
+order, so a plateau contributes exactly one peak. Only the blob's true center
+qualifies — this replaced an
 earlier 4-point probe that over-counted ~13 peaks per blob and exhausted the
-shared **16-peak budget** (`HEATMAP_MAX_PEAKS`), silently dropping any 3rd+
+shared **peak budget** (`HEATMAP_MAX_PEAKS`, 20 — kept ≥
+`HEATMAP_MAX_BLOBS` so the budget can never starve a committable blob),
+silently dropping any 3rd+
 simultaneous finger.
 
 ## 5. CCL flood-fill

@@ -35,7 +35,8 @@
  * every touched cell of the blob (not just its true center)
  * independently qualified as a "peak", ~13 per blob on this hardware's
  * ~2-cell-radius fingertip contacts. Since raw_detect_peaks() shares
- * one global HEATMAP_MAX_PEAKS=16 budget across the whole frame and
+ * one global HEATMAP_MAX_PEAKS budget (16 at the time) across the whole
+ * frame and
  * scans in raster/row-major order, 2 blobs already exhausted it
  * partway through the second one, so any 3rd+ blob's row range was
  * never reached by the scan; its CCL component was still found (peak
@@ -297,7 +298,8 @@ static void test_two_finger_close(void)
 
 /* See the FIXED BUG block comment at the top of this file: 3+
  * simultaneous well-separated finger-sized blobs used to exhaust
- * raw_detect_peaks()'s shared HEATMAP_MAX_PEAKS=16 budget before the
+ * raw_detect_peaks()'s shared HEATMAP_MAX_PEAKS budget (16 at the time)
+ * before the
  * scan (which runs in raster/row-major order) ever reached the later
  * blob(s), silently dropping them at the CCL near-peak check. Fixed
  * by the local-maximum neighborhood scan in raw_detect_peaks() — this
@@ -499,6 +501,151 @@ static void test_recovery_guard_real_pipeline(void)
 	teardown_device(&shid);
 }
 
+/* ── Real-pipeline check: ghost merge decides on the PRE-PENALTY weight ── */
+
+/* raw_ghost_merge() is a tracker-stage decision, so it must compare the
+ * pre-penalty weights (the blob_entry contract: `w` is "what the input layer
+ * gets", `raw_w` is "what the tracker decides on"). Comparing the penalised
+ * `w` lets a real bottom-edge contact (x0.23) lose the merge to a lighter
+ * interior artifact sitting within ghost_dist — the finger disappears for
+ * the frame and re-presses the next (gestures see a new touch).
+ *
+ * The pair below is separated by a one-cell gap (so CCL finds two blobs) and
+ * 5 cells between centroids (< ghost_dist 6, so the merge fires): a 3x3
+ * bottom cone (rows 45-47: raw 15308, penalised 3520) and a 5x5 interior
+ * artifact (rows 39-43: raw = penalised = 14965). The artifact is the
+ * heavier one AFTER the penalty but the lighter one BEFORE it, so this test
+ * fails against a `w` comparison and passes on `raw_w`. */
+static void build_merge_pair(unsigned char *buf)
+{
+	int r, c;
+
+	memset(buf, 200, FRAME_BYTES);
+	for (r = 45; r <= 47; r++) {
+		for (c = 14; c <= 16; c++) {
+			int dr = r - 46, dc = c - 15, d;
+
+			if (dr < 0)
+				dr = -dr;
+			if (dc < 0)
+				dc = -dc;
+			d = dr > dc ? dr : dc;
+			buf[(u32)r * 72 + (u32)c] = (unsigned char)(100 + 4 * d);
+		}
+	}
+	for (r = 39; r <= 43; r++) {
+		for (c = 13; c <= 17; c++) {
+			int dr = r - 41, dc = c - 15, d;
+
+			if (dr < 0)
+				dr = -dr;
+			if (dc < 0)
+				dc = -dc;
+			d = dr > dc ? dr : dc;
+			buf[(u32)r * 72 + (u32)c] = (unsigned char)(150 + 2 * d);
+		}
+	}
+}
+
+static void test_ghost_merge_prepenalty_weight(void)
+{
+	struct spi_hid shid;
+	struct spi_device spidev;
+	unsigned char buf[FRAME_BYTES];
+	u32 i;
+	int s, seen = 0;
+
+	mt_record_reset();
+	setup_device(&shid, &spidev);
+
+	memset(buf, 200, sizeof(buf));
+	for (i = 0; i < 30; i++)
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.heatmap_have_baseline, "ghost merge: baseline established");
+
+	build_merge_pair(buf);
+	for (i = 0; i < 4; i++)
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+
+	CHECK(mt_record_active_count() == 1,
+	      "ghost merge: the pair collapses to one contact, got %d",
+	      mt_record_active_count());
+	/* Bottom cone centroid is grid row ~46 (screen y ~32000), the interior
+	 * artifact row ~41 (screen y ~28600): the survivor identifies which
+	 * side of the merge won. */
+	for (s = 0; s < MT_RECORD_MAX_SLOTS; s++) {
+		if (!mt_slots[s].active)
+			continue;
+		seen++;
+		CHECK(mt_slots[s].y > 30000,
+		      "ghost merge: survivor is the bottom-edge contact (slot %d y=%d)",
+		      s, mt_slots[s].y);
+	}
+	CHECK(seen == 1, "ghost merge: exactly one active slot carries the contact, got %d", seen);
+
+	teardown_device(&shid);
+}
+
+/* ── Real-pipeline check: a flat-top plateau must not eat the peak budget ── */
+
+/* A firm press can saturate a block of cells to one quantised raw value. A
+ * flat 6x6 top has no unique maximum: before the raster-order tie-break in
+ * raw_detect_peaks() every border cell of the plateau qualified as a peak —
+ * 20 of them, the whole shared budget at the time — so a second real finger
+ * later in raster order had no recorded peak near it and its otherwise valid
+ * blob was dropped by velocity rejection (silent finger loss while the flat
+ * top persists). The plateau must contribute exactly ONE peak, leaving the
+ * frame's other contacts their own. */
+static void build_plateau_and_finger(unsigned char *buf)
+{
+	int r, c;
+
+	memset(buf, 200, FRAME_BYTES);
+	/* flat-topped saturated region: rows 2..7, cols 2..7 (byte 140) */
+	for (r = 2; r <= 7; r++)
+		for (c = 2; c <= 7; c++)
+			buf[(u32)r * 72 + (u32)c] = 140;
+	/* a second, real finger far down the raster: 3x3 tapered cone */
+	for (r = 39; r <= 41; r++) {
+		for (c = 59; c <= 61; c++) {
+			int dr = r - 40, dc = c - 60, d;
+
+			if (dr < 0)
+				dr = -dr;
+			if (dc < 0)
+				dc = -dc;
+			d = dr > dc ? dr : dc;
+			buf[(u32)r * 72 + (u32)c] = (unsigned char)(130 + 4 * d);
+		}
+	}
+}
+
+static void test_plateau_peak_budget(void)
+{
+	struct spi_hid shid;
+	struct spi_device spidev;
+	unsigned char buf[FRAME_BYTES];
+	u32 i;
+
+	mt_record_reset();
+	setup_device(&shid, &spidev);
+
+	memset(buf, 200, sizeof(buf));
+	for (i = 0; i < 30; i++)
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+	CHECK(shid.heatmap_have_baseline, "plateau: baseline established");
+
+	build_plateau_and_finger(buf);
+	for (i = 0; i < 4; i++)
+		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
+
+	CHECK(mt_record_active_count() == 2,
+	      "plateau + finger: both contacts tracked, got %d",
+	      mt_record_active_count());
+
+	teardown_device(&shid);
+}
+
 int main(void)
 {
 	printf("raw_pipeline_replay_test: running (real driver/mshw0231-raw.c)...\n");
@@ -529,6 +676,12 @@ int main(void)
 
 	printf("-- recovery guard uses the pre-penalty weight --\n");
 	test_recovery_guard_real_pipeline();
+
+	printf("-- ghost merge uses the pre-penalty weight --\n");
+	test_ghost_merge_prepenalty_weight();
+
+	printf("-- flat-top plateau does not eat the peak budget --\n");
+	test_plateau_peak_budget();
 
 	printf("raw_pipeline_replay_test: %d assertions passed, %d failures\n",
 	       passed, failed);
