@@ -14,7 +14,6 @@ typedef uint16_t spi_hid_proto_u16;
 
 #define SPI_HID_PROTOCOL_VERSION 2
 #define SPI_HID_PROTOCOL_SYNC_BYTE 0x5a
-#define SPI_HID_PROTOCOL_READ_OPCODE 0x0b
 #define SPI_HID_PROTOCOL_WRITE_OPCODE 0x02
 #define SPI_HID_PROTOCOL_MAX_OUTPUT_LENGTH 0x0fff
 
@@ -47,12 +46,21 @@ static inline int spi_hid_protocol_output_length_valid(unsigned int output_lengt
 	return output_length <= SPI_HID_PROTOCOL_MAX_OUTPUT_LENGTH;
 }
 
-/* The only raw frame shape accepted by the passive capture path. */
+/* The only raw frame shape accepted by the passive capture path.
+ *
+ * Two numbers, two layers, not interchangeable: TOTAL_LENGTH is the V0
+ * content header's own `total_length` (what the driver's callers extract
+ * from the body), BODY_LENGTH is the FRAME — the same count plus the two
+ * transport-aligned tail bytes. raw_confirms_handshake() receives the
+ * semantic one; its parameter carries that name. */
 #define SPI_HID_RAW_CAPTURE_CONTENT_ID 0x0c
 #ifndef SPI_HID_RAW_CAPTURE_BODY_LENGTH
 #define SPI_HID_RAW_CAPTURE_BODY_LENGTH 4304
 #endif
 #define SPI_HID_RAW_CAPTURE_TOTAL_LENGTH 4302
+_Static_assert(SPI_HID_RAW_CAPTURE_BODY_LENGTH ==
+	       SPI_HID_RAW_CAPTURE_TOTAL_LENGTH + 2,
+	       "the raw frame body adds the two tail bytes to the semantic length");
 
 struct spi_hid_protocol_header {
 	spi_hid_proto_u8 version;
@@ -98,7 +106,12 @@ static inline int spi_hid_protocol_body_offset(const spi_hid_proto_u8 *body,
 		off = 3;
 	while (off + 3 < len && body[off] == 0xFF)
 		off++;
-	return off + 3;
+	/* Never an offset PAST the buffer: a body too short to hold the
+	 * structure (a three-byte prefixed stub used to return 6) returns -1,
+	 * and every caller rejects that before adding anything to it.
+	 * `off == len` is still returned as-is — the callers treat it as
+	 * empty, not as valid. */
+	return off + 3 > len ? -1 : off + 3;
 }
 
 static inline int spi_hid_protocol_encode_output_header(spi_hid_proto_u8 raw[6],
@@ -114,16 +127,6 @@ static inline int spi_hid_protocol_encode_output_header(spi_hid_proto_u8 raw[6],
 	raw[4] = SPI_HID_PROTOCOL_VERSION | ((output_length & 0x0f) << 4);
 	raw[5] = output_length >> 4;
 	return 0;
-}
-
-static inline void spi_hid_protocol_encode_read_approval(spi_hid_proto_u8 raw[5],
-		unsigned int input_register)
-{
-	raw[0] = SPI_HID_PROTOCOL_READ_OPCODE;
-	raw[1] = input_register >> 16;
-	raw[2] = input_register >> 8;
-	raw[3] = input_register;
-	raw[4] = 0xff;
 }
 
 static inline int spi_hid_protocol_parse_content(const spi_hid_proto_u8 *body,

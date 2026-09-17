@@ -73,7 +73,14 @@ def parse_boot_trace(path):
                 # Per-TD direction: it applies to the TdBuffer rows that
                 # follow. (The old code read it into a dead local, then
                 # guessed direction from buffer ordinal position.)
-                td_direction = row[20].strip() if len(row) > 20 else ''
+                # The cell arrives as ` "ToDevice "` — the quotes are DATA
+                # (the writer quoted a space-padded value) — so strip them
+                # too. `.strip()` alone left `"ToDevice "`, startswith()
+                # was false for every buffer, and this tool printed every
+                # transaction as RX-only: it could not emit a single TX
+                # frame, including the ones its own docs cite from it.
+                td_direction = (row[20].strip().strip('"').strip()
+                                if len(row) > 20 else '')
 
             elif etype == 'IoSpbPayloadTdBuffer' and current:
                 if len(row) > 21 and row[21].strip():

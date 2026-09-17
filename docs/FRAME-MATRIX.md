@@ -52,8 +52,8 @@ never in doubt after the parser learned to print bytes.
 
 | frame | bytes | source |
 |---|---|---|
-| SET_POWER D2 | `02 00 00 04 82 00 00 04 00 01 02 0C EE 5B` (14B) | capture: Clock-Time `134276314634377432` (len 14, prefix `02 00 00 04 82`); the D0 twin differs in the payload byte |
-| SET_POWER D0 | same with `01` | same transaction |
+| SET_POWER D0 | `02 00 00 04 82 00 00 04 00 01 01 0C EE 5B` (14B) | capture: Clock-Time `134276314634377432`, `captures/wintrace/surface_init.csv` (prefix `02 00 00 04 82`, payload byte `01`) |
+| SET_POWER D2 | same with `02` in the payload byte | **inferred from the D0 twin** — no D2 row exists in any capture (case-insensitive search over `captures/` and `traces/`); the single-byte delta is the whole evidence |
 
 **An apparent conflict, resolved.** V0's `ConfigurePowerTransfer` builds a frame
 in a zeroed buffer — `02 <reg> 82 00 00 04 00 01 <D0\|D2>` at length 14, tail

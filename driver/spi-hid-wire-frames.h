@@ -36,15 +36,13 @@
 
 #ifdef __KERNEL__
 #include <linux/kernel.h>
-#ifndef __KERNEL__
-#include <string.h>	/* memcmp in the host tests */
-#endif
 #include <linux/types.h>
 #define SPI_HID_WIRE_U8 u8
 #else
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>	/* memcmp in the host tests */
 #define SPI_HID_WIRE_U8 uint8_t
 #endif
 

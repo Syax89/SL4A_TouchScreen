@@ -74,6 +74,12 @@ def test_decode_raster_rejects_what_the_driver_rejects():
 
 
 def _csv_rows():
+    # The direction cell mirrors the REAL capture: the Windows writer emits
+    # ` "ToDevice "` — quoted AND space-padded — and csv.writer re-quotes it
+    # on the way in, so the parser sees the same cell the captures carry.
+    # The old fixture (plain "ToDevice ") passed while the tool on a real
+    # file labelled every buffer RX: the quotes stayed in the value and
+    # startswith('ToDevice') was false.
     def row(etype, **cols):
         r = [""] * 22
         r[0] = "provider"
@@ -114,12 +120,30 @@ def test_parse_spi_direction_and_append():
     assert (tx, rx) == (b"\xbb\xcc", b"\xaa"), (tx, rx)
 
 
+def test_parse_spi_prints_tx_on_the_real_capture():
+    """The tool's own claim on the committed capture: TX frames must exist and
+    carry the reference's own bytes. spi-hid-protocol.h cites this tool's
+    output for the boot frames; before the quote fix the TX set was empty and
+    no citation could have been produced."""
+    txns = parse_spi.parse_boot_trace(
+        str(ROOT / "captures" / "wintrace" / "surface_init.csv"))
+    tx = b""
+    for t in txns:
+        t_tx, _ = parse_spi.split_buffers(t.get("buffers", []))
+        tx += t_tx
+    assert len(tx) > 300, f"only {len(tx)} TX bytes out of the real capture"
+    # The reference's own first read (register 0), and the SET_POWER D0 row.
+    assert bytes.fromhex("0b000000ff00000000") in tx, "missing the reference boot read"
+    assert bytes.fromhex("02000004820000040001010cee5b") in tx, "missing SET_POWER D0"
+
+
 def main():
     test_c590_matches_the_driver_integer_form()
     test_decode_raster_matches_the_shared_decoder()
     test_decode_raster_accepts_vendor_first()
     test_decode_raster_rejects_what_the_driver_rejects()
     test_parse_spi_direction_and_append()
+    test_parse_spi_prints_tx_on_the_real_capture()
     print("tools_contract_test: PASS")
     return 0
 

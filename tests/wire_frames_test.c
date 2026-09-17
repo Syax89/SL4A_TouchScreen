@@ -396,6 +396,13 @@ static void test_driver_uses_header(void)
 	 * frame reappearing in the driver means a local table came back. */
 	CHECK(strstr(core, "0x02, 0x02") == NULL,
 	      "no doubled-opcode frame literal in spi-hid-core.c");
+	/* The read-frame default is a deliberate, field-settled choice (see the
+	 * block above `read_frame_variant` in spi-hid-core.c): this panel
+	 * answers the LEGACY shape, so the default must stay that variant until
+	 * the field says otherwise. Read here because the host build cannot
+	 * link a kernel TU. */
+	CHECK(strstr(core, "static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;") != NULL,
+	      "the read-frame default is still the field-settled LEGACY variant");
 	free(core);
 }
 
@@ -418,6 +425,13 @@ static void test_body_offset(void)
 	      "the raw-mode body shape parses past prefix + preamble + content header");
 	CHECK(spi_hid_protocol_body_offset(junk, sizeof(junk)) != 8,
 	      "a body with neither shape does not land on the structure");
+	/* Never PAST the buffer: these used to return 6 and 3 — offsets only
+	 * the callers' arithmetic kept from being read. -1 is the rejection
+	 * every caller now checks for. */
+	CHECK(spi_hid_protocol_body_offset(panel_body, 3) == -1,
+	      "a prefix-only body is refused, not returned past its end");
+	CHECK(spi_hid_protocol_body_offset(ref_body, 2) == -1,
+	      "a body shorter than the preamble is refused");
 }
 
 static void test_read_approval_frame(void)
@@ -465,8 +479,12 @@ static void test_read_approval_frame(void)
 
 	/* All three variants, through the function the driver actually calls.
 	 * The wrapper above builds variant 0 only, so every pin on it stayed
-	 * green while the LEGACY branch — the one the default once selected —
-	 * had no coverage at all. */
+	 * green while the LEGACY branch had no coverage at all. LEGACY is not
+	 * stale — read_frame_variant still defaults to it (field-settled; see
+	 * the block above it in spi-hid-core.c and the default pin in
+	 * test_driver_uses_header above) — so this variant is the shape the
+	 * field unit is sent by default. The earlier wording here ("the one
+	 * the default once selected") read as if the default had moved on. */
 	memset(buf, 0xAA, sizeof(buf));
 	n = spi_hid_wire_read_approval_variant(buf, 0x0003, 0x00, 0x00, 0);
 	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "variant 0 is nine bytes");
@@ -479,7 +497,16 @@ static void test_read_approval_frame(void)
 	memset(buf, 0xAA, sizeof(buf));
 	n = spi_hid_wire_read_approval_variant(buf, 0x0003, 0x00, 0x00, 2);
 	CHECK(n == SPI_HID_READ_APPROVAL_LEN, "variant 2 is nine bytes");
-	CHECK(buf[3] == 0x03, "variant 2 carries the register in both places");
+	{
+		/* The WHOLE frame, not one byte: out[1..3] is the address field
+		 * this variant exists for, and the old partial pin (n + buf[3])
+		 * stayed green while out[1] could be anything. */
+		static const uint8_t want_v2[9] = {
+			0x0b, 0x00, 0x00, 0x03, 0xff, 0x00, 0x00, 0x03, 0x00 };
+
+		CHECK(!memcmp(buf, want_v2, sizeof(want_v2)),
+		      "variant 2 carries the register in both places, byte for byte");
+	}
 
 	/* The frame the reference sends FIRST, at boot, before it asks for
 	 * anything: its own read of REGISTER 0, `0B 00 00 00 FF 00 00 00 00` in

@@ -100,29 +100,11 @@ static void test_encode_output(void)
 	CHECK(raw[4] == SPI_HID_PROTOCOL_VERSION, "encode: zero-length version byte");
 	CHECK(raw[5] == 0, "encode: zero-length len_hi");
 
-	/* Max output length (0xFFF * 4 = 4092) */
+	/* Max 4-aligned output length (0xFFC = 4092; the limit is 0x0FFF) */
 	CHECK(spi_hid_protocol_encode_output_header(raw, 0x100, 4092) == 0,
 	      "encode: valid maximum aligned length");
 	CHECK(raw[4] == (SPI_HID_PROTOCOL_VERSION | (0xc << 4)), "encode: max len_lo nibble");
 	CHECK(raw[5] == 0xff, "encode: max len_hi");
-}
-
-/* ── Read approval encoder ─────────────────────────────────────── */
-
-static void test_encode_read(void)
-{
-	spi_hid_proto_u8 raw[5];
-	const spi_hid_proto_u8 zero_reg[] = {0x0b, 0x00, 0x00, 0x00, 0xff};
-	const spi_hid_proto_u8 max_reg[] = {0x0b, 0xff, 0xff, 0xff, 0xff};
-
-	spi_hid_protocol_encode_read_approval(raw, 0);
-	CHECK(!memcmp(raw, zero_reg, 5), "encode_read: register 0");
-
-	spi_hid_protocol_encode_read_approval(raw, 0xFFFFFF);
-	CHECK(!memcmp(raw, max_reg, 5), "encode_read: max register");
-
-	spi_hid_protocol_encode_read_approval(raw, 0x000002);
-	CHECK(raw[1] == 0x00 && raw[2] == 0x00 && raw[3] == 0x02, "encode_read: RPT_DESC register");
 }
 
 /* ── Header search ─────────────────────────────────────────────── */
@@ -137,6 +119,8 @@ static void test_find_header(void)
 	spi_hid_proto_u8 short_buf[] = {0x12, 0x10, 0x00};
 	spi_hid_proto_u8 bare_sync[] = {0x01, 0x02, 0x03, 0x5a, 0x04, 0x05, 0x06};
 	spi_hid_proto_u8 trailing[] = {0x32, 0x10, 0x00, 0x5a, 0xff, 0xff};
+	spi_hid_proto_u8 type_nine[] = {0x92, 0x10, 0x00, 0x5a};
+	spi_hid_proto_u8 reserved_version[] = {0x9a, 0x10, 0x00, 0x5a};
 
 	/* Exact match at start */
 	CHECK(spi_hid_protocol_find_header(at_zero, 4, &off) == 7, "search: at offset 0");
@@ -161,6 +145,15 @@ static void test_find_header(void)
 
 	/* Match, trailing garbage, NULL offset */
 	CHECK(spi_hid_protocol_find_header(trailing, 6, NULL) == 3, "search: NULL offset ok");
+
+	/* Types above 7, and the version nibble pinned in FULL: 0x92 is type 9
+	 * with version 2 and must be found; 0x9a carries a reserved version
+	 * nibble (0xa) and must not — the `& 0x07` form of the version test
+	 * mistyped it as version 2 and stayed green until this vector. */
+	CHECK(spi_hid_protocol_find_header(type_nine, 4, NULL) == 9,
+	      "search: type 9 with version 2 is found");
+	CHECK(spi_hid_protocol_find_header(reserved_version, 4, NULL) == -1,
+	      "search: reserved version nibble is refused");
 }
 
 /* ── Content parser ────────────────────────────────────────────── */
@@ -407,7 +400,6 @@ int main(void)
 	test_decode_all_types();
 	test_decode_boundary();
 	test_encode_output();
-	test_encode_read();
 	test_find_header();
 	test_parse_content();
 	test_find_header_null_offset();

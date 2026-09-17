@@ -2834,8 +2834,15 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 			struct spi_hid_device_desc_raw raw = {};
 			u32 off = 0;
 			u32 required = sizeof(raw);
+			int boff = spi_hid_protocol_body_offset(body, (int)rblen);
 
-			off = (u32)spi_hid_protocol_body_offset(body, (int)rblen);
+			if (boff < 0) {
+				dev_warn(&shid->spi->dev,
+					 "SEQ: DEVICE_DESC body has no content header (%u bytes)\n",
+					 rblen);
+				return;
+			}
+			off = (u32)boff;
 			/* The offset is logged at the default level on purpose: whether a
 			 * body arrives with this panel's prefix is exactly what the field
 			 * has never shown, and a line the field has to reveal cannot sit
@@ -2938,10 +2945,15 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			 * were the descriptor, and stat_wire_patches counted it as a wire
 			 * success. Silent twice over: the wrong bytes are identical to the
 			 * hardcoded copy, so nothing downstream noticed. */
-			off = (u32)spi_hid_protocol_body_offset(body, (int)rblen);
-			if (off >= rblen) {
-				dev_warn(&shid->spi->dev, "SEQ: RPT_DESC body has no content header\n");
-				return;
+			{
+				int boff = spi_hid_protocol_body_offset(body, (int)rblen);
+
+				if (boff < 0 || (u32)boff >= rblen) {
+					dev_warn(&shid->spi->dev,
+						 "SEQ: RPT_DESC body has no content header\n");
+					return;
+				}
+				off = (u32)boff;
 			}
 			/* The layer boundary here is load-bearing and invisible when it is
 			 * crossed. `rblen` counts the FRAME (the header's word count,

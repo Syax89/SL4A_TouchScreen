@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### The wire contract against the capture: a tool that printed no TX, and four shapes no pin held
+
+The P4 double-blind wave read the wire contract — `spi-hid-protocol.h`,
+`spi-hid-wire-frames.h`, `hardcoded_rd.h` — against the Windows capture, byte
+for byte, over `31ea922` (two model families, separate clones; every finding
+re-derived from the raw CSV columns by the controller before anything here was
+changed). The builders matched the reference on every init frame; the defects
+were in what the repository claimed about them, and in the shapes no pin held.
+
+`tools/parse_spi.py` could not print a single TX frame: the capture writes the
+direction cell as ` "ToDevice "` — quoted AND space-padded — so `.strip()`
+left the quote in place, `startswith('ToDevice')` was false for every buffer,
+and every transaction printed as RX-only. The citations in
+`spi_hid_wire_read_approval_variant()` and `wire_frames_test.c` that refer to
+this tool's output were describing bytes it could not emit. Fixed, and pinned
+twice: the contract test now feeds the REAL quoted shape, and a second test
+runs the tool on the committed capture and demands the reference's own frames
+(`0B 00 00 00 FF 00 00 00 00`, the SET_POWER D0 row) in its TX output.
+
+`tests/wire_frames_test.c`: variant 2 of the read approval now gets a full
+nine-byte compare — its address bytes `out[1..3]` had no pin (a partial check
+on `n` and `buf[3]` stayed green while `out[1]` could be anything) — and the
+comment that called LEGACY "the one the default once selected" now says it
+plainly: the default IS LEGACY, field-settled, with a structural check in
+`test_driver_uses_header()` that reads `spi-hid-core.c` and fails if that
+default ever moves.
+
+`spi_hid_protocol_body_offset()` can no longer return an offset past the
+buffer: a three-byte prefixed stub used to return 6, it now returns -1, and
+BOTH callers (DEVICE_DESC and RPT_DESC) reject that before doing any
+arithmetic. `raw_confirms_handshake()`'s parameter is renamed to
+`total_length` — it receives the V0 semantic length, not the frame's word
+count — and `spi-hid-protocol.h` carries a `_Static_assert` pinning
+BODY == TOTAL + 2, the two-byte transport tail that separates the layers.
+
+`spi_hid_protocol_encode_read_approval()` is gone: zero callers, a duplicate
+of the wire layer's legacy variant, a second source of truth for one encoding.
+`find_header` gained vectors for type 9 and for a reserved version nibble (the
+`& 0x07` form of the version test stayed green until these existed). And
+`docs/FRAME-MATRIX.md` no longer cites the D0 capture row as the D2 evidence:
+the D2 frame is inferred from its twin and no D2 row exists in any capture.
+
+New gate: `tests/hardcoded_descriptor_pin_test.py` compares the 936 bytes of
+`hardcoded_rd.h` to the descriptor the device served in `surface_init.csv`.
+Nothing else in the suite read those bytes, so a corrupted array passed CI and
+would have surfaced only on a device.
+
 ### Guards before writes, one spelling for `raw_mode`, and an honest uninstall banner
 
 The P12 double-blind wave (the user-facing path: installer lifecycle, packaging,
