@@ -319,7 +319,7 @@ Commands:
                     bytes, filtered dmesg) into a single text file for bug
                     reports. Default output path is printed at the end.
   hunt [-o PATH]   One command for a display problem: runs the full battery —
-                    every field variant the campaign designed (7 raw + 4
+                    every field variant the campaign designed (10 raw + 4
                     standard), one per driver reload, on the command line so
                     /etc/modprobe.d is never edited. For each it unloads and
                     reloads the driver at debug level 3, waits while you touch
@@ -1717,6 +1717,12 @@ cmd_rebuild() {
 # (acpi_probe_power_cycle × skip_vendor_stop, the P13-P16 waves) are NOT
 # re-run: that question is answered (all four arms negative), and running it
 # twice wastes a field trip. Revive it by adding a line here.
+#
+# The three `wire_double_opcode=1` combinations after its first row are the
+# 2026-09-17 battery's one positive: raw wire_double_opcode=1 was the only
+# variant that delivered a descriptor, so its read-side partners
+# (read_frame_variant=2, raw_pre_desc_reg0=1, both) are the shapes that have
+# never been run. Kept next to the row they extend, not appended at the end.
 HUNT_VARIANTS=(
 	"raw|raw control|"
 	"raw|raw raw_pre_desc_reg0=1|raw_pre_desc_reg0=1"
@@ -1724,6 +1730,9 @@ HUNT_VARIANTS=(
 	"raw|raw raw_pre_desc_reg0=1+raw_fallback_on_reset=1|raw_pre_desc_reg0=1 raw_fallback_on_reset=1"
 	"raw|raw read_frame_variant=2|read_frame_variant=2"
 	"raw|raw wire_double_opcode=1|wire_double_opcode=1"
+	"raw|raw wire_double_opcode=1+read_frame_variant=2|wire_double_opcode=1 read_frame_variant=2"
+	"raw|raw wire_double_opcode=1+raw_pre_desc_reg0=1|wire_double_opcode=1 raw_pre_desc_reg0=1"
+	"raw|raw wire_double_opcode=1+read_frame_variant=2+raw_pre_desc_reg0=1|wire_double_opcode=1 read_frame_variant=2 raw_pre_desc_reg0=1"
 	"raw|raw wire_double_opcode=1+skip_vendor_stop=1|wire_double_opcode=1 skip_vendor_stop=1"
 	"standard|std control|"
 	"standard|std wire_double_opcode=1|wire_double_opcode=1"
@@ -1732,6 +1741,20 @@ HUNT_VARIANTS=(
 )
 
 hunt_variant_count() { printf '%s\n' "${#HUNT_VARIANTS[@]}"; }
+
+# Width of the summary table's label column: the longest planned label, with a
+# floor of 48. Computing it from the plan keeps the whole table aligned when a
+# longer combination is added — the data-driven promise of "a new variant is a
+# one-line addition and nothing else changes" would otherwise need a second
+# edit here to stop the numeric columns drifting.
+hunt_summary_label_width() {
+	local w=48 v label
+	for v in "${HUNT_VARIANTS[@]}"; do
+		label="${v#*|}"; label="${label%%|*}"
+		[ "${#label}" -gt "$w" ] && w="${#label}"
+	done
+	printf '%s' "$w"
+}
 
 # Base module parameters for a plan profile.
 hunt_profile_params() {
@@ -1751,17 +1774,40 @@ hunt_input_events() {
 	done
 }
 
-# The input-event node whose device name looks like our panel, or nothing.
+# The input-event node that belongs to OUR panel, or nothing. Two shapes
+# exist for the same hardware and only one of them carries the panel's name:
+#   raw mode      -> the driver's own device, named "MSHW0231 Touchscreen";
+#   standard HID  -> the hid-core device, named after the hid device
+#                    ("spi 045E:0C19", hid->name in spi-hid-core.c), which
+#                    matches none of MSHW/sl4a/Touchscreen.
+# Matching on the node NAME alone (as this did) therefore found only the raw
+# node and dropped every standard variant into the human y/n fallback while
+# its node sat right there — the 2026-09-17 battery's "every standard row is
+# human:no". So the name test is joined by an ancestry test: both nodes hang
+# off the panel's controller (the raw device's parent IS the SPI device; the
+# standard hid device's parent is too), so the resolved event-node device
+# path is under $SYSFS_DIR. Name first (a raw run then prefers its own
+# stream device over the HID one), then ancestry (finds the standard node).
 # Matched by name, not by "new since boot": the battery reloads the driver
 # between variants, so the node is present before and after each load and a
 # set-difference would call the panel "old".
 hunt_touch_event() {
-	local e name
+	local e name dev panel
 	for e in "$INPUT_SYSFS"/event*; do
 		[ -e "$e" ] || continue
 		name="$(cat "$e/device/name" 2>/dev/null || true)"
 		case "$name" in
 			*MSHW*|*sl4a*|*SL4A*|*[Tt]ouchscreen*)
+				basename "$e"; return 0 ;;
+		esac
+	done
+	panel="$(readlink -f "$SYSFS_DIR" 2>/dev/null || true)"
+	[ -n "$panel" ] || return 1
+	for e in "$INPUT_SYSFS"/event*; do
+		[ -e "$e" ] || continue
+		dev="$(readlink -f "$e/device" 2>/dev/null || true)"
+		case "$dev" in
+			"$panel"|"$panel"/*)
 				basename "$e"; return 0 ;;
 		esac
 	done
@@ -2019,11 +2065,16 @@ cmd_hunt() {
 
 			# Touch window. An evdev client must be open WHILE the finger is
 			# down (events delivered with no reader are dropped), so the
-			# bounded read runs in the background under the countdown. When
-			# the node is absent, the human y/n answer is the fallback.
-			local ev_tmp ev_bytes=0 ev_events=0 touch_cell
+			# bounded read runs in the background under the countdown. The
+			# human y/n answer is the fallback ONLY when there is no node to
+			# read — and never silently: the artifact states which fallback
+			# reason applied (no node registered by this load, or a node whose
+			# char device is not readable). A bare "human:no" hid the standard
+			# profile's node-naming bug for a whole battery (2026-09-17).
+			local ev_tmp ev_bytes=0 ev_events=0 touch_cell ev_chardev
 			ev_tmp="$(mktemp 2>/dev/null)" || ev_tmp="/tmp/sl4a-hunt-ev.$$"
-			if [ -n "$touch_node" ] && [ -r "$INPUT_DEV_ROOT/$touch_node" ]; then
+			ev_chardev="$INPUT_DEV_ROOT/${touch_node:-none}"
+			if [ -n "$touch_node" ] && [ -r "$ev_chardev" ]; then
 				hunt_evdev_read "$touch_node" "$ev_tmp" &
 				local ev_pid=$!
 				for _s in 6 5 4 3 2 1; do
@@ -2052,8 +2103,21 @@ cmd_hunt() {
 					y|Y) touch_cell="human:yes" ;;
 					*)   touch_cell="human:no" ;;
 				esac
-				echo "-- touch (no evdev node for this panel) --"
-				echo "human fallback (evdev node '${touch_node:-not found}'): $touch_cell"
+				if [ -n "$touch_node" ]; then
+					# A node exists but its char device is not readable: name
+					# the path, do not blame the panel.
+					echo "-- touch (evdev node $touch_node present but not readable) --"
+					echo "no readable char device at $ev_chardev for $touch_node"
+					echo "human fallback (evdev node '$touch_node' not readable): $touch_cell"
+				else
+					# No node registered by THIS load. In standard mode that is
+					# the honest answer whenever the handshake never delivered
+					# a descriptor (no HID device -> no input node); state it
+					# rather than turning it silently into a y/n.
+					echo "-- touch (no evdev node for this panel) --"
+					echo "no input event node under the panel's controller (${SYSFS_DIR:-sysfs not found}) — this load registered none"
+					echo "human fallback (evdev node '${touch_node:-not found}'): $touch_cell"
+				fi
 			fi
 			rm -f "$ev_tmp" 2>/dev/null || true
 
@@ -2136,12 +2200,14 @@ cmd_hunt() {
 		# before the self-tests, so a reader sees the shape at a glance.
 		echo ""
 		echo "=== SUMMARY ($total variants) ==="
-		printf '%-48s | %-11s | %-4s | %-9s | %-15s | %s\n' \
+		local lw
+		lw="$(hunt_summary_label_width)"
+		printf "%-${lw}s | %-11s | %-4s | %-9s | %-15s | %s\n" \
 			"variant" "device_desc" "data" "reset_rsp" "touch(evdev events)" "note"
 		local r_label r_dd r_data r_rr r_touch r_note
 		for row in "${rows[@]}"; do
 			IFS='|' read -r r_label r_dd r_data r_rr r_touch r_note <<< "$row"
-			printf '%-48s | %-11s | %-4s | %-9s | %-15s | %s\n' \
+			printf "%-${lw}s | %-11s | %-4s | %-9s | %-15s | %s\n" \
 				"$r_label" "$r_dd" "$r_data" "$r_rr" "$r_touch" "$r_note"
 		done
 		echo ""

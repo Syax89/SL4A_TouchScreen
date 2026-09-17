@@ -21,18 +21,24 @@ trap 'rm -rf "$SB"' EXIT
 fail() { echo "hunt sandbox contract: FAIL — $*"; exit 1; }
 
 mkdir -p "$SB/bin" "$SB/etc" "$SB/var" "$SB/src" \
-         "$SB/sys/bus/spi/devices/spi-MSHW0231:00" \
-         "$SB/sys/class/input/event10/device" "$SB/dev/input"
+         "$SB/sys/bus/spi/devices/spi-MSHW0231:00/input/input10" \
+         "$SB/sys/class/input/event10" "$SB/dev/input"
 D="$SB/sys/bus/spi/devices/spi-MSHW0231:00"
 printf 'reset_rsp=0\ndevice_desc=0\ndata=0\nirq_count=0\n' > "$D/protocol_stats"
 for f in ready seq_state lifecycle_status bus_error_count device_initiated_reset_count; do
 	printf 'stub\n' > "$D/$f"
 done
-# The panel's input event node (found by name) and its evdev char device. The
-# raw device is a regular file inside the sandbox: the bounded read that a real
-# run performs against /dev/input/eventN finishes instantly here (EOF), so the
-# flow stays covered without a touch surface and without the fallback prompt.
-printf 'MSHW0231 Touchscreen\n' > "$SB/sys/class/input/event10/device/name"
+# The panel's input event node and its evdev char device. The node's `device`
+# path resolves UNDER the panel's controller ($D/input/input10) — that is how
+# the battery finds the standard profile's node, whose name ("spi 045E:0C19")
+# matches none of the raw-name patterns the discovery used to rely on. The
+# name is (re)written per profile by the modprobe stub below, exactly as the
+# driver names its node in each mode. The raw device is a regular file inside
+# the sandbox: the bounded read that a real run performs against
+# /dev/input/eventN finishes instantly here (EOF), so the flow stays covered
+# without a touch surface and without the fallback prompt.
+printf 'MSHW0231 Touchscreen\n' > "$D/input/input10/name"
+ln -s "$D/input/input10" "$SB/sys/class/input/event10/device"
 head -c 48 /dev/zero > "$SB/dev/input/event10"
 printf '# SL4A_TouchScreen\noptions sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y\n' \
 	> "$SB/etc/sl4a-spi-hid.conf"
@@ -87,6 +93,17 @@ chmod +x "$SB/bin/dkms"
 cat > "$SB/bin/modprobe" <<'EOS'
 #!/bin/bash
 echo "$*" >> "__SB__/modprobe.log"
+if [ "${1:-}" != "-r" ] && [[ " $* " == *" sl4a_spi_hid "* ]]; then
+	# Name the panel's input node the way the driver does for this profile:
+	# the standard HID path names it after the hid device ("spi 045E:0C19"),
+	# raw mode names it "MSHW0231 Touchscreen". The battery must find the node
+	# in BOTH cases, so the standard name matches none of the raw ones.
+	if [[ " $* " == *" raw_mode=Y "* ]]; then
+		printf 'MSHW0231 Touchscreen\n' > "__SB__/sys/bus/spi/devices/spi-MSHW0231:00/input/input10/name"
+	else
+		printf 'spi 045E:0C19\n' > "__SB__/sys/bus/spi/devices/spi-MSHW0231:00/input/input10/name"
+	fi
+fi
 if [ "${1:-}" != "-r" ] && [[ " $* " == *" sl4a_spi_hid "* ]] && [ ! -f "__SB__/quiet" ]; then
 	{
 		printf '[999.0] sl4a_spi_hid: SEQ: write op=0x02 reg=1 raw=[02 00 00 01 42 00 00 03 00 00]\n'
@@ -129,13 +146,16 @@ sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y raw_fallback_on_reset=1 
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y raw_pre_desc_reg0=1 raw_fallback_on_reset=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y read_frame_variant=2 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 read_frame_variant=2 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 raw_pre_desc_reg0=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 read_frame_variant=2 raw_pre_desc_reg0=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 skip_vendor_stop=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=N sl4a_debug_level=3
 sl4a_spi_hid raw_mode=N wire_double_opcode=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=N skip_std_getfeat=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=N wire_double_opcode=1 skip_std_getfeat=1 sl4a_debug_level=3
 EOS
-NVARIANTS=11
+NVARIANTS=14
 # Sweeps this script runs (main, stale-stamp rebuild, no-panel, quiet, wrapped
 # ring, evdev fallback, stubbed module).
 NSWEEPS=7
@@ -166,14 +186,14 @@ fi
 
 # The summary table is the "where are we" the user asked for: one row per
 # variant, right before the self-tests, with the evdev touch verdict.
-grep -q '=== SUMMARY (11 variants) ===' "$SB/out.txt" \
+grep -q '=== SUMMARY (14 variants) ===' "$SB/out.txt" \
 	|| fail "the artifact has no summary table"
 grep -q 'variant .*| device_desc .*| data .*| reset_rsp .*| touch(evdev events) .*| note' "$SB/out.txt" \
 	|| fail "the summary table header is missing a column"
 n_rows="$(grep -cE '^raw |^std ' "$SB/out.txt" || true)"
 [ "$n_rows" -eq "$NVARIANTS" ] \
 	|| fail "the summary table has $n_rows rows, expected $NVARIANTS"
-awk '/^=== SUMMARY/{found=1; next} found && /^raw |^std /{n++} END{exit (n == 11) ? 0 : 1}' "$SB/out.txt" \
+awk '/^=== SUMMARY/{found=1; next} found && /^raw |^std /{n++} END{exit (n == 14) ? 0 : 1}' "$SB/out.txt" \
 	|| fail "the summary rows are not all after the SUMMARY header"
 # The summary must precede the self-tests section.
 grep -n '=== SUMMARY' "$SB/out.txt" | head -1 | cut -d: -f1 > "$SB/summary.line"
@@ -191,6 +211,17 @@ grep -q 'evdev event10: 48 bytes, 2 events' "$SB/out.txt" \
 	|| fail "the evdev read did not report bytes/events from the node"
 grep -qE '^raw control +\| \+0 +\| \+0 +\| \+6 +\| 2 events +\| resets \+6' "$SB/out.txt" \
 	|| fail "the summary row does not carry the deltas and the evdev verdict"
+
+# …and the same for the STANDARD profile. The raw node is named "MSHW0231
+# Touchscreen" and was always found; the standard node is named "spi 045E:0C19"
+# after the hid device and matches none of the raw-name patterns, so before the
+# fix every standard row fell through to "human:no" while its node sat right
+# there. Discovery must now reach it by its ancestry under the panel's
+# controller, and the standard row must carry an event count too.
+grep -q 'spi 045E:0C19.*<-- touch device' "$SB/out.txt" \
+	|| fail "the standard profile's HID node was not recognised as the touch device"
+grep -qE '^std control +\| \+0 +\| \+0 +\| \+6 +\| 2 events +\| resets \+6' "$SB/out.txt" \
+	|| fail "the standard profile fell back to the human y/n instead of reading its evdev node"
 
 # The deltas are measured from the counters around the touch window. The sleep
 # stub advances reset_rsp once per countdown second (6), so a run that dropped
@@ -218,7 +249,7 @@ grep -q -- '-- OS binding (before the sweep) --' "$SB/out.txt" \
 
 # The progress the user asked for has to be on the terminal too, not only in
 # the file — that is the whole point of it.
-grep -q '\[1/11\] raw control' "$SB/run.txt" || fail "no per-variant progress on the terminal"
+grep -q '\[1/14\] raw control' "$SB/run.txt" || fail "no per-variant progress on the terminal"
 grep -q 'TOUCH THE PANEL NOW' "$SB/run.txt" || fail "no touch prompt on the terminal"
 grep -q 'raw AND standard variants' "$SB/run.txt" \
 	|| fail "the terminal intro still describes the retired probe sweep (it must name the raw+standard battery)"
@@ -244,9 +275,11 @@ grep -q 'dkms build -m sl4a-touch -v ' "$SB/dkms.log" \
 # `ls -d` on a vanished (nullglob) pattern lists the CURRENT DIRECTORY, so the
 # old one-liner set SYSFS_DIR="." — never empty — and the intended warning was
 # dead code. Move the fake panel away and demand the warning plus the honest
-# no-counters verdicts.
+# no-counters verdicts. The panel's input node hangs off the controller, so it
+# goes with it (its `device` link dangles) and the touch verdict is the honest
+# fallback — keep stdin at /dev/null so that fallback read returns at once.
 mv "$D" "$SB/panel-away"
-PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out3.txt" > "$SB/run3.txt" 2>&1
+PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out3.txt" > "$SB/run3.txt" 2>&1 </dev/null
 rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run3.txt"; fail "hunt exited $rc with no panel present"; }
 grep -q 'sysfs directory for the device not found' "$SB/run3.txt" \
@@ -255,6 +288,8 @@ grep -q 'bound driver: (sysfs dir not found' "$SB/out3.txt" \
 	|| fail "no-panel run: the OS-binding block printed a bare 'none' as if it had probed (a reader would blame the OS)"
 [ "$(grep -c 'NO COUNTERS READ' "$SB/out3.txt" || true)" -eq "$NVARIANTS" ] \
 	|| fail "the no-panel artifact does not degrade honestly to NO COUNTERS READ"
+grep -q 'no input event node under the panel' "$SB/out3.txt" \
+	|| fail "no-panel run: the artifact did not state that no input node was registered"
 
 # A load that logs nothing must not abort the battery, and its absence must be
 # STATED: under `set -e -o pipefail` an unguarded `dmesg | grep` that matched
@@ -336,8 +371,8 @@ n_hid="$(grep -c '^sl4a_spi_hid ' "$SB/modprobe.log" || true)"
 	|| fail "expected $((NSWEEPS * NVARIANTS)) driver loads after $NSWEEPS sweeps, saw $n_hid"
 n_rawy="$(grep -c 'raw_mode=Y' "$SB/modprobe.log" || true)"
 n_rawn="$(grep -c 'raw_mode=N' "$SB/modprobe.log" || true)"
-[ "$n_rawy" -eq "$((NSWEEPS * 7))" ] \
-	|| fail "raw_mode=Y reached $n_rawy driver loads, expected $((NSWEEPS * 7)) (7 raw variants per sweep)"
+[ "$n_rawy" -eq "$((NSWEEPS * 10))" ] \
+	|| fail "raw_mode=Y reached $n_rawy driver loads, expected $((NSWEEPS * 10)) (10 raw variants per sweep)"
 [ "$n_rawn" -eq "$((NSWEEPS * 4))" ] \
 	|| fail "raw_mode=N reached $n_rawn driver loads, expected $((NSWEEPS * 4)) (4 standard variants per sweep)"
 
