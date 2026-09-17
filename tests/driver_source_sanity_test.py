@@ -543,19 +543,55 @@ def check_control_flow_pins():
     # field has never re-tested (b1f8109 = the last build the panel answered
     # on; the retry replaced it afterwards). Unwiring the branch silently
     # restores the endless re-drive the field ran against (H1 double-blind
-    # wave: both legs landed on this branch as the loop engine).
+    # wave: both legs landed on this branch as the loop engine). The H2
+    # fix-verification leg ranked the hole signatures: reorder after the
+    # retry, dropped goto, dropped ready/notify, wrong target state — all
+    # four are pinned below, window-scoped to the function body and the
+    # branch, so a gutted-but-needled branch cannot stay green.
     if "static bool raw_fallback_on_reset;" not in core_code:
         print("FAIL driver/spi-hid-core.c: raw_fallback_on_reset is no longer declared")
         failures += 1
     if "module_param(raw_fallback_on_reset, bool, 0444);" not in core_code:
         print("FAIL driver/spi-hid-core.c: raw_fallback_on_reset is no longer loadable")
         failures += 1
-    _fb = core_code.split("if (raw_fallback_on_reset) {", 1)
-    if len(_fb) != 2 or "spi_hid_use_hardcoded_desc(shid);" not in _fb[1][:900] \
-            or "SPI_HID_SEQ_FALLBACK" not in _fb[1][:900]:
-        print("FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch no longer "
-              "reaches the hardcoded fallback — the give-up it restores is gone")
+    _dw = core_code.split("static void spi_hid_seq_descreq_work", 1)
+    if len(_dw) != 2:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_descreq_work is gone")
         failures += 1
+    else:
+        _body = _dw[1].split("\n}", 1)[0]
+        _fb = _body.split("if (raw_fallback_on_reset) {", 1)
+        if len(_fb) != 2:
+            print("FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch is gone "
+                  "from the poller")
+            failures += 1
+        else:
+            if "spi_hid_seq_restart_discovery" not in _body:
+                print("FAIL driver/spi-hid-core.c: the poller's restart path is gone — "
+                      "the give-up knob rides a branch that no longer has its retry")
+                failures += 1
+            elif _body.index("if (raw_fallback_on_reset) {") > \
+                    _body.index("spi_hid_seq_restart_discovery"):
+                print("FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch sits "
+                      "AFTER the retry — the first reset always restarts and the knob "
+                      "never fires on a live device (H2 leg B, M1)")
+                failures += 1
+            for _needle, _why in (
+                ("goto out;",
+                 "a fall-through into the retry clobbers DONE back to WAIT_DESC (M2)"),
+                ("ready = true;",
+                 "DONE with nobody woken hangs every `ready` client (M3)"),
+                ("sysfs_notify",
+                 "a `ready` flip nobody is notified of is invisible to clients (M3)"),
+                ("SPI_HID_SEQ_DONE",
+                 "the branch no longer targets DONE and never completes (M4)"),
+                ("spi_hid_use_hardcoded_desc(shid);",
+                 "the give-up no longer installs the fallback descriptor"),
+            ):
+                if _needle not in _fb[1][:900]:
+                    print(f"FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch "
+                          f"lost '{_needle}' — {_why}")
+                    failures += 1
 
     # 7b. sync_timeout_ms is clamped at probe into the protocol's bounds — the
     # same class as the getfeat_delay_ms clamp above it: negative wraps
