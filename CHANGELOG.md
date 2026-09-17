@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Two dead trace classes, three pins for the glue, and log hygiene
+
+The P8 double-blind wave (capimg decoder, trace header, raw constants, the
+reset/power glue; two model families over one pinned revision) found two event
+classes that can never fire: `spi_hid_transfer` and `spi_hid_irq` have no
+`DEFINE_EVENT` instance left and no producer anywhere (`spi_hid_irq`'s only
+instance went with the earlier producer-less sweep; `spi_hid_transfer` never had
+one in this tree). Removed like the earlier ones, and the rule is now structural
+in `tests/driver_source_sanity_test.py`: a class needs an instance, an instance
+needs a producer.
+
+The same wave proved three test gaps by mutation — each reintroduced defect left
+the whole suite green. Each now has a pin that fails on the mutation: the
+container bound the decoder resolves as "the container may use the whole body"
+(container == body_length-5; before the pin, changing `>` to `>=` kept the suite
+green), the reserved container byte at +6, and `HEATMAP_DRIFT_DIV`, whose ~2.5 s
+decay could be retuned silently because every drift oracle mirrors the macro.
+
+Two lines from the same wave: the CapImg decode failures are ratelimited (a
+wrong-SKU or truncated stream logged once per frame, up to ~100 Hz), and the
+powered-OFF recovery fence is visible at the default level instead of returning
+in silence. The ACPI `_PS3 failed` path returns 0 with the part never powered
+down; the comment at the re-advertise site now says that instead of "cycle
+completed". Still open, not fixed: a failed `_PS0` leaves the part unpowered
+with no driver-side retry — that needs a recovery timer of its own.
+
 ### The stream was never switched on
 
 With the read frame correct and the responses readable, the traces showed one

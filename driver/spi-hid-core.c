@@ -475,8 +475,14 @@ static int spi_hid_error_handler(struct spi_hid *shid)
 	bool acpi_recovery = false;
 
 	mutex_lock(&shid->power_lock);
-	if (shid->power_state == SPI_HID_POWER_MODE_OFF)
+	if (shid->power_state == SPI_HID_POWER_MODE_OFF) {
+		/* Left unpowered by a failed ACPI _PS0 (see reset_via_acpi):
+		 * recovery cannot run against a dark part. Visible at the
+		 * default level, ratelimited so a persistent error stream
+		 * against a dark part cannot flood the log. */
+		dev_warn_ratelimited(dev, "recovery requested while the part is unpowered; skipped\n");
 		goto out;
+	}
 
 	dev_dbg(dev, "error handler entered\n");
 	trace_spi_hid_lifecycle(shid, SPI_HID_LIFECYCLE_RECOVERY, 0);
@@ -537,11 +543,12 @@ out:
 		ret = spi_hid_reset_via_acpi(shid);
 		if (ret && ret != -ESHUTDOWN)
 			dev_err(dev, "Reset failed\n");
-		/* Either the cycle completed (0) or we bailed before touching
-		 * power (-ESHUTDOWN): the part is powered in both cases, so
-		 * re-advertise ACTIVE; a racing remove/suspend owns the rest.
-		 * Any other error (-EIO: _PS0 failed) means the part is dark:
-		 * leave power_state OFF. */
+		/* 0 covers the completed cycle AND the aborted-before-powerdown
+		 * cases (no ACPI handle, _PS3 failed): the part is powered in all
+		 * of them, so re-advertise ACTIVE. -ESHUTDOWN means we bailed
+		 * before touching power: same, and a racing remove/suspend owns
+		 * the rest. Any other error (-EIO: _PS0 failed after _PS3
+		 * succeeded) means the part is dark: leave power_state OFF. */
 		if (ret == 0 || ret == -ESHUTDOWN) {
 			mutex_lock(&shid->power_lock);
 			shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
@@ -2495,7 +2502,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 				if (raw_input_beta) {
 					ret = mshw0231_raw_consume_v0(shid, &shid->data_buf[5], rblen - 5);
 					if (ret) {
-						dev_warn(dev, "SEQ: poller CapImg decode failed: %d (rblen=%u)\n", ret, rblen);
+						dev_warn_ratelimited(dev, "SEQ: poller CapImg decode failed: %d (rblen=%u)\n", ret, rblen);
 						shid->stat_frames_dropped++;
 					}
 				}
@@ -3234,7 +3241,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 			if (raw_input_beta) {
 				cret = mshw0231_raw_consume_v0(shid, &body[5], rblen - 5);
 				if (cret) {
-					dev_warn(dev, "SEQ: CapImg decode failed: %d (rblen=%u)\n", cret, rblen);
+					dev_warn_ratelimited(dev, "SEQ: CapImg decode failed: %d (rblen=%u)\n", cret, rblen);
 					shid->stat_frames_dropped++;
 					return;
 				}

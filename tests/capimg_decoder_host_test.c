@@ -248,6 +248,14 @@ static void test_body_length_boundaries(void)
 	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
 	      "body_length=4304 accepted");
 
+	/* Exact fit: the container's last byte is the body's last byte, so the
+	 * decoder is entitled to read every byte it needs — accept it. The
+	 * bound is `>` (reject only when the container does NOT fit); changing
+	 * it to `>=` kept the whole suite green before this pin existed, because
+	 * no other case here places the container at the body's end. */
+	CHECK(spi_hid_capimg_decode_v0(body, 4302, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
+	      "body_length=4302 accepted (container == body_length-5, exact fit)");
+
 	CHECK(spi_hid_capimg_decode_v0(body, 4400, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == 0,
 	      "body_length=4400 accepted (max valid)");
 	CHECK(spi_hid_capimg_decode_v0(body, 4401, SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
@@ -266,6 +274,11 @@ static void test_reject_reserved_fields(void)
 	put_le16(payload + 4, 1);
 	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
 	      "reserved u16 at payload+4 non-zero rejected");
+
+	make_valid_body(body);
+	payload[6] = 1;
+	CHECK(spi_hid_capimg_decode_v0(body, sizeof(body), SPI_HID_CAPIMG_RASTER_SAMPLES, &raster) == -EINVAL,
+	      "reserved container byte 6 non-zero rejected");
 
 	make_valid_body(body);
 	payload[HEATMAP_OFFSET + 6] = 0x00;

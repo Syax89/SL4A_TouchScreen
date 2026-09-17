@@ -10,63 +10,13 @@
 #include <linux/tracepoint.h>
 #include "spi-hid-core.h"
 
-DECLARE_EVENT_CLASS(spi_hid_transfer,
-	TP_PROTO(struct spi_hid *shid, const void *tx_buf, int tx_len,
-			const void *rx_buf, u16 rx_len, int ret),
-
-	TP_ARGS(shid, tx_buf, tx_len, rx_buf, rx_len, ret),
-
-	TP_STRUCT__entry(
-		__field(int, bus_num)
-		__field(int, chip_select)
-		__field(int, len)
-		__field(int, ret)
-		__dynamic_array(u8, rx_buf, rx_len)
-		__dynamic_array(u8, tx_buf, tx_len)
-	),
-
-	TP_fast_assign(
-		__entry->bus_num = shid->spi->controller->bus_num;
-		__entry->chip_select = spi_get_chipselect(shid->spi, 0);
-		__entry->len = rx_len + tx_len;
-		__entry->ret = ret;
-
-		memcpy(__get_dynamic_array(tx_buf), tx_buf,
-		       tx_len > 0 ? (unsigned int)tx_len : 0);
-		memcpy(__get_dynamic_array(rx_buf), rx_buf, rx_len);
-	),
-
-	TP_printk("spi%d.%d: len=%d tx=[%*phD] rx=[%*phD] --> %d",
-		__entry->bus_num, __entry->chip_select, __entry->len,
-		__get_dynamic_array_len(tx_buf), __get_dynamic_array(tx_buf),
-		__get_dynamic_array_len(rx_buf), __get_dynamic_array(rx_buf),
-		__entry->ret)
-);
-
-
-
-DECLARE_EVENT_CLASS(spi_hid_irq,
-	TP_PROTO(struct spi_hid *shid, int irq),
-
-	TP_ARGS(shid, irq),
-
-	TP_STRUCT__entry(
-		__field(int, bus_num)
-		__field(int, chip_select)
-		__field(int, irq)
-	),
-
-	TP_fast_assign(
-		__entry->bus_num = shid->spi->controller->bus_num;
-		__entry->chip_select = spi_get_chipselect(shid->spi, 0);
-		__entry->irq = irq;
-	),
-
-	TP_printk("spi%d.%d: IRQ %d",
-		__entry->bus_num, __entry->chip_select, __entry->irq)
-);
-
-
+/*
+ * spi_hid_transfer and spi_hid_irq were removed here: neither has a
+ * DEFINE_EVENT instance or a producer left (spi_hid_irq's only instance,
+ * spi_hid_dev_irq, went in the producer-less-event sweep; spi_hid_transfer
+ * never had one in this tree), so neither can ever fire. The invariant is
+ * pinned in tests/driver_source_sanity_test.py.
+ */
 DECLARE_EVENT_CLASS(spi_hid,
 	TP_PROTO(struct spi_hid *shid),
 

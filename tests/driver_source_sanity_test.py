@@ -495,11 +495,69 @@ def check_control_flow_pins():
                   f"back to being settled by argument")
             failures += 1
 
+    # 11. A per-frame failure may not be a per-frame log line: the CapImg
+    # decode failures fire once per received frame (up to ~100 Hz on a
+    # wrong-SKU or truncated stream), and an unratelimited dev_warn would
+    # flood the ring buffer the field bundles are read from. Both paths.
+    for needle in (
+        'dev_warn_ratelimited(dev, "SEQ: CapImg decode failed',
+        'dev_warn_ratelimited(dev, "SEQ: poller CapImg decode failed',
+    ):
+        if needle not in core_code:
+            print(f"FAIL driver/spi-hid-core.c: {needle!r} missing — a per-frame "
+                  f"CapImg decode failure is back to flooding the log")
+            failures += 1
+
+    return failures
+
+
+def check_trace_event_liveness():
+    """No trace event may outlive its last producer.
+
+    Two sweeps already deleted producer-less trace events (their DEFINE_EVENT
+    instances went in af72664 / 8d33a8f); this campaign found two more — whole
+    event classes with no instance and no `trace_<event>()` producer anywhere,
+    i.e. tracepoints the field can enable and that can never fire. The rule is
+    structural: a class needs an instance, an instance needs a producer.
+    Comments and #if 0 blocks are stripped before matching — a pin a comment
+    can satisfy is decorative.
+    """
+    failures = 0
+
+    def live_code(text):
+        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        text = re.sub(r"//[^\n]*", " ", text)
+        text = re.sub(r"#if\s+0\b.*?#endif", " ", text, flags=re.S)
+        return text
+
+    trace = live_code((ROOT / "driver" / "spi-hid_trace.h").read_text())
+    producers = "\n".join(
+        live_code(p.read_text())
+        for p in sorted((ROOT / "driver").glob("*.c"))
+        + sorted((ROOT / "driver").glob("*.h"))
+        if p.name != "spi-hid_trace.h"
+    )
+
+    classes = set(re.findall(r"\bDECLARE_EVENT_CLASS\(\s*(\w+)", trace))
+    instances = re.findall(r"\bDEFINE_EVENT\(\s*(\w+)\s*,\s*(\w+)", trace)
+    event_names = {name for _, name in instances} | set(
+        re.findall(r"\bTRACE_EVENT\(\s*(\w+)", trace))
+
+    for cls in sorted(classes - {cls for cls, _ in instances}):
+        print(f"FAIL driver/spi-hid_trace.h: event class '{cls}' has no "
+              f"DEFINE_EVENT instance — it can never fire; delete it or wire it")
+        failures += 1
+    for event in sorted(event_names):
+        if f"trace_{event}(" not in producers:
+            print(f"FAIL driver/spi-hid_trace.h: trace event '{event}' has no "
+                  f"trace_{event}() producer — it can never fire; delete it or wire it")
+            failures += 1
     return failures
 
 
 def main():
     failures = check_control_flow_pins()
+    failures += check_trace_event_liveness()
     for path in FILES:
         text = path.read_text()
         stripped, unterminated = strip_comments_and_strings(text)

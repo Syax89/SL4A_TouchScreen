@@ -443,6 +443,13 @@ static void test_baseline_drift_decay(void)
 	bl_sim s = { .base = 200, .drift_div = HEATMAP_DRIFT_DIV };
 	u16 i;
 
+	/* Every loop below sizes itself with the macro, so retuning it keeps
+	 * them green while the decay rate on hardware changes. This is the
+	 * independent literal: 256 frames at 100 Hz = ~2.5 s, the time constant
+	 * the header documents. */
+	CHECK(HEATMAP_DRIFT_DIV == 256,
+	      "drift divider = 256 frames (~2.5 s at 100 Hz)");
+
 	/* Upward: resting raw rises, baseline follows at 12.5%. */
 	bl_sim_update(&s, 232, 7);
 	CHECK(s.base == (u8)(((u16)200 * 7 + 232) / 8), "baseline recovers upward, got %u", s.base);
