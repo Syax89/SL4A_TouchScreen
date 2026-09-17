@@ -136,14 +136,16 @@ After SET_FEATURE the device starts streaming raw **CapImg frames**
 
 | Parameter | Default | Role |
 |---|---|---|
-| `sync_timeout_ms` | 6000 | Bounds every synchronous request (descriptor + feature) |
+| `sync_timeout_ms` | 6000 | Bounds every synchronous request this driver issues (feature queries; clamped to [100, 60000] at probe) |
 | `getfeat_delay_ms` | 0 | Optional delay between RPT_DESC and GET_FEATURE (Windows traces show ~3.6 s device settle; the original doc cited ~5.9 s) |
 | descreq work delay | 100 ms | Deferred `DESCREQ` re-send on `WAIT_DESC` entry |
 
 A connect-time feature GET_REPORT (e.g. hidraw `HIDIOCGFEATURE`) can take up
 to ~3.6 s while the device settles. Feature-query timeouts are **non-fatal**
-(`SPI_HID_SYNC_FEATURE` class); descriptor-request timeouts are **fatal** and
-trigger recovery (see [Architecture](Architecture) — Recovery paths).
+(`SPI_HID_SYNC_FEATURE` class) — the only synchronous-request class this
+driver issues, since descriptor geometry is learned through the DESCREQ
+sequencer path. The protocol's descriptor class is classified fatal, but the
+driver has no caller for it (see `driver/spi-hid-protocol.h`).
 
 ## Raw CapImg frame
 

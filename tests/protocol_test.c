@@ -368,6 +368,17 @@ static void test_sync_timeout_policy(void)
 	 * cold boot). */
 	CHECK(SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT == 6000,
 	      "sync policy: default timeout is 6000 ms");
+
+	/* Probe clamps the read-only parameter into these bounds. A minimum
+	 * below 1 would let 0/negative through: 0 turns every missed response
+	 * into an instant timeout storm, negative wraps msecs_to_jiffies()
+	 * into the far future (the request would never return, holding
+	 * response_mutex). */
+	CHECK(SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_MIN >= 1,
+	      "sync policy: minimum timeout keeps the jiffies conversion positive");
+	CHECK(SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_MIN < SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT &&
+	      SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT < SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_MAX,
+	      "sync policy: default sits strictly between the clamp bounds");
 	CHECK(SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT >= 5900,
 	      "sync policy: default covers the original 5900 ms doc figure");
 	CHECK(SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT > 1000,

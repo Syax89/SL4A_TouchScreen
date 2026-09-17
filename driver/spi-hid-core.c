@@ -268,6 +268,10 @@ static void spi_hid_parse_dev_desc(struct spi_hid_device_desc_raw *raw,
 	desc->version_id = le16_to_cpu(raw->wVersionID);
 }
 
+/* The one call site passes `available = sizeof(*raw)`, so the bounds below
+ * are exact: only a descriptor with desc_len == sizeof(*raw) passes. This is
+ * not the buffer-length guard — the caller's min_t copy above bounds the
+ * read; the parameter name suggests a buffer bound it never was (P1 wave). */
 static int spi_hid_validate_dev_desc(const struct spi_hid_device_desc_raw *raw,
 		size_t available)
 {
@@ -849,7 +853,14 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 		goto out;
 	}
 
-	/* A completion is single-use: never let a prior response satisfy this request. */
+	/* A completion is single-use: never let a prior response satisfy this request.
+	 *
+	 * The read-approval pair below is written under seq_lock as well: the
+	 * sequencer reads it under that lock (spi_hid_seq_read_reg()) and every
+	 * sequencer-side writer of it already holds the lock, so without it this
+	 * write races those readers across threads (P1 double-blind wave, one
+	 * leg). Lock order: lock -> seq_lock -> leaf spinlocks (spi-hid-core.h). */
+	mutex_lock(&shid->seq_lock);
 	spin_lock_irqsave(&shid->response_lock, flags);
 	generation = ++shid->response_generation;
 	reinit_completion(&shid->output_done);
@@ -863,6 +874,7 @@ static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 	shid->output_pending = true;
 	shid->response_valid = false;
 	spin_unlock_irqrestore(&shid->response_lock, flags);
+	mutex_unlock(&shid->seq_lock);
 	ret = spi_hid_send_output_report(shid, output_register,
 			report);
 	if (ret) {
@@ -1119,10 +1131,14 @@ static void spi_hid_create_device_work(struct work_struct *work)
 static int spi_hid_raw_enable_stream(struct spi_hid *shid)
 {
 	/* The plain vendor-init frame is exactly the reference's enable
-	 * (02 00 00 03 C2 00 03 0A 00 56 BD 0C EE 5B 44 4C 00 00), built and
-	 * sent by the same code the handshake uses — one frame, one path, so a
-	 * fix to either is a fix to both. */
-	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(0);
+	 * (02 00 00 03 C2 00 03 0A 00 56 BD 0C EE 5B 44 4C 00 00), from the
+	 * same builder the handshake uses, so the two sites cannot drift. It
+	 * goes through spi_hid_wire_doubled() like every other sequencer write:
+	 * with the knob off — the default — the bytes above are what goes out,
+	 * and wire_double_opcode=1 reaches the enable too instead of the A/B
+	 * experiment silently skipping this frame (P1 double-blind wave: the
+	 * hardcoded 0 bypassed the knob; both legs found it). */
+	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(spi_hid_wire_doubled());
 
 	if (!shid->raw_mode_active)
 		return 0;
@@ -3818,6 +3834,15 @@ static int spi_hid_probe(struct spi_device *spi)
 	 * msecs_to_jiffies() into the far future: the watchdog would stay armed
 	 * and never fire. Clamp once here; the parameter is read-only. */
 	getfeat_delay_ms = clamp_t(int, getfeat_delay_ms, 0, 10000);
+
+	/* Same failure for sync_timeout_ms, plus one more: a negative value
+	 * wraps msecs_to_jiffies() into the far future (a synchronous request
+	 * would wait forever holding response_mutex) and 0 turns every missed
+	 * response into an instant timeout storm. Same clamp-once rule; the
+	 * bounds live in spi-hid-protocol.h. */
+	sync_timeout_ms = clamp_t(int, sync_timeout_ms,
+				  SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_MIN,
+				  SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_MAX);
 
 	if (dev->of_node && spi->irq <= 0) {
 		dev_err(dev, "Missing IRQ\n");

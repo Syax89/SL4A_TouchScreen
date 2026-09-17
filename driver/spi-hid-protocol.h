@@ -19,9 +19,13 @@ typedef uint16_t spi_hid_proto_u16;
 
 /* Synchronous request classes (spi_hid_sync_request in spi-hid-core.c).
  * Feature queries (GET_FEATURE) are independent of the IRQ-driven input
- * stream: a timeout there must not tear the transport down. Descriptor
- * requests are the only way to learn the transport geometry, so their
- * failure remains fatal. */
+ * stream: a timeout there must not tear the transport down. The DESCRIPTOR
+ * class exists for the protocol table only — this driver never issues a
+ * descriptor sync (descriptor geometry is learned through the DESCREQ
+ * sequencer path) — so the one kind spi_hid_sync_request() is called with
+ * today is FEATURE, and the fatal classification below has no live call
+ * path until one is wired (P1 double-blind wave: unreachable, not a bug;
+ * do not delete the branch without re-wiring the caller first). */
 enum spi_hid_sync_kind {
 	SPI_HID_SYNC_FEATURE = 0,
 	SPI_HID_SYNC_DESCRIPTOR = 1,
@@ -33,6 +37,15 @@ enum spi_hid_sync_kind {
  * documented worst case while the pre-fix hardcoded 1000 ms timed out on
  * a cold-boot feature query and tore the transport down. */
 #define SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_DEFAULT 6000
+
+/* Probe clamps the read-only parameter into this range (clamp once, like
+ * getfeat_delay_ms). Below the minimum a timeout cannot cover one round
+ * trip — and 0 makes every missed response an instant timeout — while a
+ * negative value would wrap msecs_to_jiffies() into the far future and
+ * lose the fail-safe entirely; the maximum bounds a typo in a modprobe.d
+ * drop-in. */
+#define SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_MIN 100
+#define SPI_HID_PROTOCOL_SYNC_TIMEOUT_MS_MAX 60000
 
 /* Whether a failed synchronous request of this kind must be treated as a
  * fatal transport error (1 = fatal, 0 = caller-side error only). */

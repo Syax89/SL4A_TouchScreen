@@ -388,13 +388,58 @@ def check_control_flow_pins():
     # id only when it reads a body. Without the enable the device never streams;
     # with the id on a header read the frame differs from the reference.
     for needle, why in (
-        ("spi_hid_wire_vendor_init(0)", "the stream enable no longer sends the reference's frame"),
         ("SPI_HID_RAW_STREAM_CONTENT_ID", "the stream enable no longer names content id 0x56"),
         ("SPI_HID_RAW_STREAM_REGISTER 0x0A", "the stream register is no longer 0x0A"),
     ):
         if needle not in core_code:
             print(f"FAIL driver/spi-hid-core.c: {why} (trace #0531 / #0004-#0873)")
             failures += 1
+    # The enable must go through the shared builder WITH the wire_double_opcode
+    # knob, like every other sequencer write: with the knob off (default) it
+    # sends the reference's frame unchanged (the builder's default form is
+    # byte-pinned in wire_frames_test.c), and with the knob on the A/B
+    # experiment must not silently skip this one frame — which is exactly what
+    # the old literal `vendor_init(0)` did (P1 double-blind wave: both legs
+    # found the knob bypassed here, and this needle used to pin the literal
+    # that made it look deliberate). Scoped to the function body via rsplit
+    # (the last occurrence is the definition): the handshake's identical call
+    # up the file must not satisfy it.
+    _en = core_code.rsplit("static int spi_hid_raw_enable_stream", 1)[1].split("\n}", 1)[0]
+    if "spi_hid_wire_vendor_init(spi_hid_wire_doubled())" not in _en:
+        print("FAIL driver/spi-hid-core.c: the stream enable no longer goes through "
+              "the shared vendor-init builder with spi_hid_wire_doubled() — "
+              "wire_double_opcode=1 would apply to the handshake and not to the enable")
+        failures += 1
+
+    # 7b. sync_timeout_ms is clamped at probe into the protocol's bounds — the
+    # same class as the getfeat_delay_ms clamp above it: negative wraps
+    # msecs_to_jiffies() into the far future (a synchronous request waits
+    # forever holding response_mutex), 0 turns every missed response into an
+    # instant timeout storm, and a typo like 600000 hangs a workqueue for
+    # minutes. The bound VALUES are pinned by protocol_test.c; this pins that
+    # the clamp is actually applied (kernel-only code). Scoped to probe.
+    _probe = core_code.rsplit("static int spi_hid_probe(struct spi_device *spi)", 1)[1].split("\n}", 1)[0]
+    if "clamp_t(int, sync_timeout_ms" not in _probe:
+        print("FAIL driver/spi-hid-core.c: probe no longer clamps sync_timeout_ms — "
+              "a negative or zero modprobe value loses the fail-safe timeout "
+              "(negative = never returns, zero = instant timeout storm)")
+        failures += 1
+
+    # 7c. The read-approval pair is written under seq_lock like every other
+    # writer and reader of it (spi_hid_seq_read_reg() asserts the lock; the
+    # sequencer-side writers hold it). Without the lock, this client-context
+    # write in spi_hid_sync_request() races the IRQ thread's reads
+    # (P1 double-blind wave, one leg). Order matters: the lock goes around the
+    # response_lock section, before the send.
+    _sr = core_code.rsplit("static int spi_hid_sync_request(struct spi_hid *shid", 1)[1].split("\n}", 1)[0]
+    _l = _sr.find("mutex_lock(&shid->seq_lock)")
+    _w = _sr.find("shid->read_resp_type = report->content_type;")
+    _u = _sr.find("mutex_unlock(&shid->seq_lock)")
+    if _l < 0 or _w < 0 or _u < 0 or not (_l < _w < _u):
+        print("FAIL driver/spi-hid-core.c: sync_request() no longer writes the "
+              "read-approval pair inside seq_lock — the write races the "
+              "sequencer's reads across threads again")
+        failures += 1
     # The writes that ask for a response must record which request they are,
     # or the read that follows names nothing (trace: 00 04 03 00 06,
     # 00 03 0A 00 56). The descriptor requests are the 0/0 case.

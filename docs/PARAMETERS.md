@@ -60,12 +60,15 @@ protocol doc cited ~5.9 s, not reproducible from trace rows); neither
 figure is a Linux default.
 
 `sync_timeout_ms` defaults to `6000` and bounds every synchronous request
-(report-descriptor and feature queries). 6000 ms covers the measured ~3.6 s
+this driver issues — feature queries; descriptor geometry is learned through
+the DESCREQ sequencer path, not through synchronous requests. Probe clamps
+the read-only value into `[100, 60000]`: a negative value would wrap
+`msecs_to_jiffies()` into the far future and a `0` would turn every missed
+response into an instant timeout. 6000 ms covers the measured ~3.6 s
 settle plus the ~5.9 s documented worst case; the pre-fix hardcoded 1000 ms
 timed out on a cold-boot feature query and killed the touchscreen (issue
 #4). A feature-query timeout is non-fatal — the input stream is IRQ-driven
-and independent of feature queries — while a descriptor-request timeout
-still triggers recovery.
+and independent of feature queries.
 
 `touch_signal_mode` and
 `touch_threshold_pct` are currently unused placeholders.
