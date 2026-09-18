@@ -157,6 +157,14 @@ now the default (`wire_double_opcode=0`) and the doubled form is behind
 `driver/spi-hid-wire-frames.h` and asserted byte for byte by
 `tests/wire_frames_test.c`.
 
+> Field note (MSHW0231, 2026-09-19): this panel never answers the
+> single-opcode DESCREQ — discovery reset-loops (~9 RESET_RSP/s,
+> `device_desc=0`) until the doubled form is used, so both installed profiles
+> ship `wire_double_opcode=1`. Likewise, sixteen-byte header reads over-clock
+> the bare nine-byte handshake answers and stall discovery; pre-DONE header
+> reads are nine bytes in both modes (sixteen only for the raw DONE stream).
+> See `spi_hid_hdr_len()` and the CHANGELOG Unreleased entry.
+
 ### TX_COUNT Quirk
 
 For AMD SPI V2 PIO reads, TX_COUNT must be 3 (not 0) to correctly

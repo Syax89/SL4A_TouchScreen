@@ -3034,6 +3034,32 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 }
 
 /**
+ * seq_handle_desc_request_rpt() - request the report descriptor.
+ * @shid: device instance; caller holds seq_lock.
+ *
+ * Builds the report-descriptor DESCREQ (register 0x000002) from the parsed
+ * device descriptor — Windows sends 02 00 00 02 42 00 00 03 00 00 — and
+ * advances to WAIT_RPT. Returns 0, or the write error.
+ */
+static int seq_handle_desc_request_rpt(struct spi_hid *shid)
+{
+	/* Report-descriptor DESCREQ: Windows sends
+	 * 02 00 00 02 42 00 00 03 00 00, with the register value
+	 * coming from the device descriptor. */
+	u8 dr2[SPI_HID_WIRE_DESCREQ_MAX];
+	unsigned int dr2_len = spi_hid_wire_descreq(dr2,
+			shid->desc.report_descriptor_register,
+			spi_hid_wire_doubled());
+
+	if (spi_hid_seq_write(shid, dr2, (int)dr2_len, NULL, 0)) {
+		dev_warn(&shid->spi->dev, "SEQ: RPT_DESC request write failed\n");
+		return -EIO;
+	}
+	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RPT, SPI_HID_SEQ_DEVICE_DESCRIPTOR);
+	return 0;
+}
+
+/**
  * seq_handle_desc() - handle one frame while in WAIT_DESC.
  * @shid: device instance; caller holds seq_lock.
  * @type: parsed frame type (7 = DEVICE_DESC, 3 = RESET_RSP, else ignored).
@@ -3108,21 +3134,9 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 				shid->desc.max_input_length,
 				shid->desc.max_output_length);
 		}
-		{
-			/* Report-descriptor DESCREQ: Windows sends
-			 * 02 00 00 02 42 00 00 03 00 00, with the register value
-			 * coming from the device descriptor. */
-			u8 dr2[SPI_HID_WIRE_DESCREQ_MAX];
-			unsigned int dr2_len = spi_hid_wire_descreq(dr2,
-					shid->desc.report_descriptor_register,
-					spi_hid_wire_doubled());
-
-			if (spi_hid_seq_write(shid, dr2, (int)dr2_len, NULL, 0)) {
-				dev_warn(&shid->spi->dev, "SEQ: RPT_DESC request write failed\n");
-				return;
-			}
-		}
-		spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RPT, SPI_HID_SEQ_DEVICE_DESCRIPTOR);
+		if (seq_handle_desc_request_rpt(shid))
+			return;
+	} else if (type == 3) {
 	} else if (type == 3) {
 		u8 body[16];
 		u32 rblen = min_t(u32, blen + 5, sizeof(body));
