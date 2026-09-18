@@ -24,7 +24,7 @@ mkdir -p "$SB/bin" "$SB/etc" "$SB/var" "$SB/src" \
          "$SB/sys/bus/spi/devices/spi-MSHW0231:00/input/input10" \
          "$SB/sys/class/input/event10" "$SB/dev/input"
 D="$SB/sys/bus/spi/devices/spi-MSHW0231:00"
-printf 'reset_rsp=0\ndevice_desc=0\ndata=0\nirq_count=0\n' > "$D/protocol_stats"
+printf 'reset_rsp=0\ndevice_desc=0\nrpt_desc=0\ndata=0\nirq_count=0\n' > "$D/protocol_stats"
 for f in ready seq_state lifecycle_status bus_error_count device_initiated_reset_count; do
 	printf 'stub\n' > "$D/$f"
 done
@@ -61,10 +61,26 @@ cat > "$SB/bin/sleep" <<EOS
 #!/bin/bash
 f="$D/protocol_stats"
 if [ -f "\$f" ]; then
+	# Which load is CURRENT: the last sl4a_spi_hid load line in the modprobe
+	# log. Only the raw_b1f8109_preset variant advances the descriptor-reply
+	# counters (b1f8109 is the dialect that answered), so its summary note's
+	# device_desc/rpt_desc deltas are non-zero and that note's wiring is
+	# actually tested; every other load stays at zero, exactly as before.
+	last="\$(grep '^sl4a_spi_hid ' "$SB/modprobe.log" 2>/dev/null | tail -1)"
+	desc=0
+	case " \$last " in
+		*" raw_b1f8109_preset=1 "*) desc=1 ;;
+	esac
 	{
 		while IFS= read -r line; do
 			case "\$line" in
 				reset_rsp=*) n="\${line#reset_rsp=}"; echo "reset_rsp=\$((n + 1))" ;;
+				device_desc=*)
+					n="\${line#device_desc=}"
+					if [ "\$desc" = 1 ]; then echo "device_desc=\$((n + 1))"; else echo "\$line"; fi ;;
+				rpt_desc=*)
+					n="\${line#rpt_desc=}"
+					if [ "\$desc" = 1 ]; then echo "rpt_desc=\$((n + 1))"; else echo "\$line"; fi ;;
 				*) echo "\$line" ;;
 			esac
 		done < "\$f"
@@ -146,6 +162,7 @@ sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y raw_fallback_on_reset=1 
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y raw_pre_desc_reg0=1 raw_fallback_on_reset=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y read_frame_variant=2 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 sl4a_debug_level=3
+sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y raw_b1f8109_preset=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 read_frame_variant=2 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 raw_pre_desc_reg0=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1 read_frame_variant=2 raw_pre_desc_reg0=1 sl4a_debug_level=3
@@ -155,7 +172,7 @@ sl4a_spi_hid raw_mode=N wire_double_opcode=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=N skip_std_getfeat=1 sl4a_debug_level=3
 sl4a_spi_hid raw_mode=N wire_double_opcode=1 skip_std_getfeat=1 sl4a_debug_level=3
 EOS
-NVARIANTS=14
+NVARIANTS=15
 # Sweeps this script runs (main, stale-stamp rebuild, no-panel, quiet, wrapped
 # ring, evdev fallback, stubbed module).
 NSWEEPS=7
@@ -186,14 +203,14 @@ fi
 
 # The summary table is the "where are we" the user asked for: one row per
 # variant, right before the self-tests, with the evdev touch verdict.
-grep -q '=== SUMMARY (14 variants) ===' "$SB/out.txt" \
+grep -q '=== SUMMARY (15 variants) ===' "$SB/out.txt" \
 	|| fail "the artifact has no summary table"
 grep -q 'variant .*| device_desc .*| data .*| reset_rsp .*| touch(evdev events) .*| note' "$SB/out.txt" \
 	|| fail "the summary table header is missing a column"
 n_rows="$(grep -cE '^raw |^std ' "$SB/out.txt" || true)"
 [ "$n_rows" -eq "$NVARIANTS" ] \
 	|| fail "the summary table has $n_rows rows, expected $NVARIANTS"
-awk '/^=== SUMMARY/{found=1; next} found && /^raw |^std /{n++} END{exit (n == 14) ? 0 : 1}' "$SB/out.txt" \
+awk '/^=== SUMMARY/{found=1; next} found && /^raw |^std /{n++} END{exit (n == 15) ? 0 : 1}' "$SB/out.txt" \
 	|| fail "the summary rows are not all after the SUMMARY header"
 # The summary must precede the self-tests section.
 grep -n '=== SUMMARY' "$SB/out.txt" | head -1 | cut -d: -f1 > "$SB/summary.line"
@@ -223,6 +240,14 @@ grep -q 'spi 045E:0C19.*<-- touch device' "$SB/out.txt" \
 grep -qE '^std control +\| \+0 +\| \+0 +\| \+6 +\| 2 events +\| resets \+6' "$SB/out.txt" \
 	|| fail "the standard profile fell back to the human y/n instead of reading its evdev node"
 
+# The raw_b1f8109_preset row is the "restart from where it worked" candidate, so
+# its note must surface BOTH descriptor-reply counters (device_desc, rpt_desc)
+# explicitly — those two say whether b1f8109's dialect lands. The sleep stub
+# advances them only for this load, so the note carries the real deltas and a
+# hard-coded or generic note cannot satisfy the pin.
+grep -qE '^raw raw_b1f8109_preset=1 +\| \+6 +\| \+0 +\| \+6 +\| 2 events +\| device_desc \+6 rpt_desc \+6' "$SB/out.txt" \
+	|| fail "the b1f8109-preset row does not surface its device_desc/rpt_desc deltas in the note"
+
 # The deltas are measured from the counters around the touch window. The sleep
 # stub advances reset_rsp once per countdown second (6), so a run that dropped
 # the before/after snapshots would report +0.
@@ -249,7 +274,7 @@ grep -q -- '-- OS binding (before the sweep) --' "$SB/out.txt" \
 
 # The progress the user asked for has to be on the terminal too, not only in
 # the file — that is the whole point of it.
-grep -q '\[1/14\] raw control' "$SB/run.txt" || fail "no per-variant progress on the terminal"
+grep -q '\[1/15\] raw control' "$SB/run.txt" || fail "no per-variant progress on the terminal"
 grep -q 'TOUCH THE PANEL NOW' "$SB/run.txt" || fail "no touch prompt on the terminal"
 grep -q 'raw AND standard variants' "$SB/run.txt" \
 	|| fail "the terminal intro still describes the retired probe sweep (it must name the raw+standard battery)"
@@ -290,6 +315,12 @@ grep -q 'bound driver: (sysfs dir not found' "$SB/out3.txt" \
 	|| fail "the no-panel artifact does not degrade honestly to NO COUNTERS READ"
 grep -q 'no input event node under the panel' "$SB/out3.txt" \
 	|| fail "no-panel run: the artifact did not state that no input node was registered"
+
+# The descfocus branch must not fire without counters: with the panel gone every
+# row degrades to "no counters" (including the preset row), never a fabricated
+# "device_desc +0 rpt_desc +0" that would read as a measured dialect.
+grep -qE '^raw raw_b1f8109_preset=1 .*\| no counters$' "$SB/out3.txt" \
+	|| fail "no-panel run: the preset row's note did not degrade to 'no counters'"
 
 # A load that logs nothing must not abort the battery, and its absence must be
 # STATED: under `set -e -o pipefail` an unguarded `dmesg | grep` that matched
@@ -349,7 +380,7 @@ mkdir -p "$SB/sys/module/sl4a_spi_hid/parameters" "$SB/sys/module/sl4a_spi_amd/p
 for p in raw_mode raw_input_beta skip_getfeat read_frame_variant wire_double_opcode; do
 	printf 'Y\n' > "$SB/sys/module/sl4a_spi_hid/parameters/$p"
 done
-for p in raw_pre_desc_reg0 raw_fallback_on_reset skip_vendor_stop; do
+for p in raw_pre_desc_reg0 raw_fallback_on_reset skip_vendor_stop raw_b1f8109_preset; do
 	printf 'N\n' > "$SB/sys/module/sl4a_spi_hid/parameters/$p"
 done
 printf '3\n' > "$SB/sys/module/sl4a_spi_hid/parameters/sl4a_debug_level"
@@ -358,7 +389,7 @@ git -C "$ROOT" rev-parse HEAD > "$SB/var/installed-head"
 PATH="$SB/bin:$PATH" bash "$SB/tool.sh" hunt -o "$SB/out7.txt" > "$SB/run7.txt" 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || { sed -n '1,40p' "$SB/run7.txt"; fail "hunt exited $rc with a stubbed module present"; }
-grep -q 'loaded params (read back): raw_mode=Y raw_input_beta=Y skip_getfeat=Y read_frame_variant=Y wire_double_opcode=Y raw_pre_desc_reg0=N raw_fallback_on_reset=N skip_vendor_stop=N' "$SB/out7.txt" \
+grep -q 'loaded params (read back): raw_mode=Y raw_input_beta=Y skip_getfeat=Y read_frame_variant=Y wire_double_opcode=Y raw_pre_desc_reg0=N raw_fallback_on_reset=N skip_vendor_stop=N raw_b1f8109_preset=N' "$SB/out7.txt" \
 	|| fail "the readback did not quote the scoped sysfs — the staging sed lost the /sys/module/ rewrite and the host is being read"
 
 # ── the whole battery, every sweep, in aggregate ───────────────────────────
@@ -371,8 +402,8 @@ n_hid="$(grep -c '^sl4a_spi_hid ' "$SB/modprobe.log" || true)"
 	|| fail "expected $((NSWEEPS * NVARIANTS)) driver loads after $NSWEEPS sweeps, saw $n_hid"
 n_rawy="$(grep -c 'raw_mode=Y' "$SB/modprobe.log" || true)"
 n_rawn="$(grep -c 'raw_mode=N' "$SB/modprobe.log" || true)"
-[ "$n_rawy" -eq "$((NSWEEPS * 10))" ] \
-	|| fail "raw_mode=Y reached $n_rawy driver loads, expected $((NSWEEPS * 10)) (10 raw variants per sweep)"
+[ "$n_rawy" -eq "$((NSWEEPS * 11))" ] \
+	|| fail "raw_mode=Y reached $n_rawy driver loads, expected $((NSWEEPS * 11)) (11 raw variants per sweep)"
 [ "$n_rawn" -eq "$((NSWEEPS * 4))" ] \
 	|| fail "raw_mode=N reached $n_rawn driver loads, expected $((NSWEEPS * 4)) (4 standard variants per sweep)"
 

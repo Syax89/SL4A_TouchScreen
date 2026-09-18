@@ -319,7 +319,7 @@ Commands:
                     bytes, filtered dmesg) into a single text file for bug
                     reports. Default output path is printed at the end.
   hunt [-o PATH]   One command for a display problem: runs the full battery —
-                    every field variant the campaign designed (10 raw + 4
+                    every field variant the campaign designed (11 raw + 4
                     standard), one per driver reload, on the command line so
                     /etc/modprobe.d is never edited. For each it unloads and
                     reloads the driver at debug level 3, waits while you touch
@@ -1723,6 +1723,13 @@ cmd_rebuild() {
 # variant that delivered a descriptor, so its read-side partners
 # (read_frame_variant=2, raw_pre_desc_reg0=1, both) are the shapes that have
 # never been run. Kept next to the row they extend, not appended at the end.
+#
+# raw raw_b1f8109_preset=1 sits right after the doubled-write row it gener-
+# alises: the preset is the whole b1f8109 raw dialect behind one switch
+# (doubled writes PLUS the pre-DONE reg0 reads, the poller give-up and the
+# D2/D0-without-STOP teardown). It is the "restart from where it worked"
+# candidate, so the operator reads it directly under the doubled-write row it
+# extends rather than appended at the end.
 HUNT_VARIANTS=(
 	"raw|raw control|"
 	"raw|raw raw_pre_desc_reg0=1|raw_pre_desc_reg0=1"
@@ -1730,6 +1737,7 @@ HUNT_VARIANTS=(
 	"raw|raw raw_pre_desc_reg0=1+raw_fallback_on_reset=1|raw_pre_desc_reg0=1 raw_fallback_on_reset=1"
 	"raw|raw read_frame_variant=2|read_frame_variant=2"
 	"raw|raw wire_double_opcode=1|wire_double_opcode=1"
+	"raw|raw raw_b1f8109_preset=1|raw_b1f8109_preset=1"
 	"raw|raw wire_double_opcode=1+read_frame_variant=2|wire_double_opcode=1 read_frame_variant=2"
 	"raw|raw wire_double_opcode=1+raw_pre_desc_reg0=1|wire_double_opcode=1 raw_pre_desc_reg0=1"
 	"raw|raw wire_double_opcode=1+read_frame_variant=2+raw_pre_desc_reg0=1|wire_double_opcode=1 read_frame_variant=2 raw_pre_desc_reg0=1"
@@ -1843,7 +1851,8 @@ hunt_evdev_read() {
 hunt_param_readback() {
 	local p out=""
 	for p in raw_mode raw_input_beta skip_getfeat read_frame_variant wire_double_opcode \
-	         raw_pre_desc_reg0 raw_fallback_on_reset skip_vendor_stop; do
+	         raw_pre_desc_reg0 raw_fallback_on_reset skip_vendor_stop \
+	         raw_b1f8109_preset; do
 		out="$out$p=$(cat "/sys/module/sl4a_spi_hid/parameters/$p" 2>/dev/null || echo '?') "
 	done
 	printf '%s' "$out"
@@ -1868,10 +1877,15 @@ hunt_delta() {
 	printf '%d' "$((b - a))"
 }
 
-# Short verdict cell for the summary table.
+# Short verdict cell for the summary table. `rpt` is the rpt_desc delta.
+# `descfocus` is set for the raw_b1f8109_preset row: whether b1f8109's dialect
+# has landed is decided by the two descriptor-reply counters (device_desc,
+# rpt_desc), so that one row surfaces BOTH explicitly — even at zero, where a
+# generic "silent" would hide the very pair the row exists to read.
 hunt_note() {
-	local have="$1" dd="$2" rr="$3"
+	local have="$1" dd="$2" rr="$3" rpt="${4:-0}" descfocus="${5:-}"
 	if [ "$have" != 1 ]; then echo "no counters"; return; fi
+	if [ "$descfocus" = 1 ]; then echo "device_desc +$dd rpt_desc +$rpt"; return; fi
 	if [ "${dd:-0}" -gt 0 ]; then echo "descriptor +$dd"; return; fi
 	if [ "${rr:-0}" -gt 0 ]; then echo "resets +$rr"; return; fi
 	echo "silent"
@@ -2122,19 +2136,27 @@ cmd_hunt() {
 			rm -f "$ev_tmp" 2>/dev/null || true
 
 			# Snapshot again and compute the deltas the summary reports.
-			local stats_after have d_rr d_dd d_data d_irq note
+			local stats_after have d_rr d_dd d_rpt d_data d_irq descfocus note
 			stats_after="$(cat "$SYSFS_DIR/protocol_stats" 2>/dev/null || true)"
 			echo "-- protocol_stats (after touch) --"
 			if [ -n "$stats_after" ]; then printf '%s\n' "$stats_after"; else echo "(unavailable)"; fi
 			have=0
 			if [ -n "$stats_after" ]; then have=1; fi
-			d_rr=0; d_dd=0; d_data=0; d_irq=0
+			d_rr=0; d_dd=0; d_rpt=0; d_data=0; d_irq=0
 			if [ "$have" = 1 ]; then
 				d_rr="$(hunt_delta "$stats_before" "$stats_after" reset_rsp)"
 				d_dd="$(hunt_delta "$stats_before" "$stats_after" device_desc)"
+				d_rpt="$(hunt_delta "$stats_before" "$stats_after" rpt_desc)"
 				d_data="$(hunt_delta "$stats_before" "$stats_after" data)"
 				d_irq="$(hunt_delta "$stats_before" "$stats_after" irq_count)"
 			fi
+			# The raw_b1f8109_preset row is singled out in the summary note: the
+			# two descriptor-reply counters (device_desc, rpt_desc) say whether
+			# b1f8109's dialect lands, so that row surfaces both explicitly.
+			descfocus=""
+			case " $vparams " in
+				*" raw_b1f8109_preset=1 "*) descfocus=1 ;;
+			esac
 			echo "-- deltas (after - before) --"
 			if [ "$have" = 1 ]; then
 				echo "reset_rsp=$d_rr device_desc=$d_dd data=$d_data irq_count=$d_irq"
@@ -2191,7 +2213,7 @@ cmd_hunt() {
 			fi
 			echo "VERDICT ($label): $(hunt_verdict "$label" "$have" "$d_dd" "$d_rr")"
 			echo ""
-			note="$(hunt_note "$have" "$d_dd" "$d_rr")"
+			note="$(hunt_note "$have" "$d_dd" "$d_rr" "$d_rpt" "$descfocus")"
 			rows+=("$label|+$d_dd|+$d_data|+$d_rr|$touch_cell|$note")
 			printf '     [%d/%d] %s done\n' "$vi" "$total" "$label" >&3
 		done
