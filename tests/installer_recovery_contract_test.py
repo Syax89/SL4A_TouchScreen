@@ -267,6 +267,14 @@ assert "HUNT_VARIANTS=(" in tool and "hunt_profile_params()" in tool, \
     "the variant plan is gone: the battery would no longer be data-driven"
 assert "raw_mode=Y raw_input_beta=Y skip_getfeat=Y" in tool, \
     "the raw profile's base parameters are gone from the battery"
+# Field bisect 2026-09-19 (MSHW0231): the single-opcode DESCREQ is never
+# answered by this panel, so both installed profiles ship wire_double_opcode=1.
+# Reverting either heredoc re-wedges standard (and raw) discovery into the
+# WAIT_DESC reset-loop.
+assert "options sl4a_spi_hid raw_mode=N wire_double_opcode=1" in tool, \
+    "the installed standard profile lost wire_double_opcode=1 — single-opcode DESCREQ loops"
+assert "options sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1" in tool, \
+    "the installed raw profile lost wire_double_opcode=1 — single-opcode DESCREQ loops"
 assert "sl4a_debug_level=3" in tool, \
     "hunt no longer raises the debug level, so the read bytes are not captured"
 assert ">>> TOUCH THE PANEL NOW" in tool, \

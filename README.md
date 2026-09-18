@@ -155,11 +155,11 @@ complete rollback and upgrade procedure.
 
 ```
 /etc/modprobe.d/sl4a-spi-hid.conf:
-  options sl4a_spi_hid raw_mode=N
+  options sl4a_spi_hid raw_mode=N wire_double_opcode=1
 ```
 
 The explicit raw profile written by `sl4a-touch.sh install --raw` uses
-`raw_mode=Y raw_input_beta=Y skip_getfeat=Y`. Every raw control is experimental
+`raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1`. Every raw control is experimental
 and load-time-only. The complete release, diagnostic, and experimental contract
 is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
 

@@ -2,6 +2,65 @@
 
 ## Unreleased
 
+### HID-mode cleanup: probe decomposition, one header-length rule, kernel-doc
+
+Readability pass over the standard path, no behaviour change (live-verified:
+standard DONE in 2 resets, full host suite green):
+
+- `spi_hid_probe()` 448 → ~290 lines: extracted `spi_hid_probe_selfcheck()`,
+  `spi_hid_probe_power()`, `spi_hid_probe_gpio()`, `spi_hid_probe_acpi_cycle()`
+  with identical error semantics (same err1 unwinds, same errno values).
+- `spi_hid_seq_thread()`: storm guard extracted to `spi_hid_seq_storm_guard()`
+  with its lock-free contract documented; logic byte-identical.
+- `spi_hid_hdr_len()` + `spi_hid_resp_reg()`: the header-length rule and the
+  response-register default now live in one documented place instead of three
+  copied ternaries; pin 0c and theseq_read/descriptor-poller pins updated to
+  the helper form (mutation-verified).
+- kernel-doc headers on the sequencer entry points (`probe`, `seq_thread`,
+  `seq_handle_reset/desc/rpt/data`, `sync_request` incl. its lock-region
+  contract) and a LOCKING section on `struct spi_hid` (lock -> seq_lock ->
+  leaf spinlocks; removing/suspended/seq_enabled re-checked under seq_lock).
+- `seq_handle_rpt()` split: body-read + wire retain is now
+  `seq_handle_rpt_retain()`; fixed a mis-indented SET_FEATURE error block.
+- `spi_hid_probe_power/gpio/acpi_cycle` stay extracted; `gpiod` field removed
+  (never acquired — SPI core IRQ is used directly), `?: true : false`
+  simplified, declarations-before-statements in `restart_discovery`, OF/ACPI
+  IRQ assignment collapsed to one.
+
+### Standard handshake restored: doubled DESCREQ in both profiles, nine-byte standard header reads
+
+Field bisect on MSHW0231 (2026-09-19, v1.5.0 vs HEAD, live reloads): HEAD's
+standard handshake reset-looped (~9 RESET_RSP/s, `device_desc=0`, no input
+nodes) while v1.5.0 reached DONE in 2 resets. Two independent regressions,
+both required for the fix:
+
+- the v1.7.0 single-opcode DESCREQ is never answered by this panel — it needs
+  the doubled form (`02 02 00 00 01 …`). Both installed profiles now carry
+  `wire_double_opcode=1`; the driver default stays single (pinned by
+  `wire_frames_test.c`) for units that accept the reference shape.
+- sixteen-byte header reads over-clock the bare nine-byte standard answers:
+  the extra clocks consume the descriptor body, validation fails, and
+  discovery loops in WAIT_DESC. Standard-mode header reads (descriptor
+  poller, IRQ thread, DONE poller) are nine bytes again, as in v1.5.0; raw
+  mode keeps sixteen for its three-byte-prefixed frames. Pinned by check 0c
+  in `driver_source_sanity_test.py`.
+
+Matrix on this panel (25 s each): single+hdr16 FAIL, doubled+hdr16 FAIL,
+doubled+hdr9 DONE (2 resets), single+hdr9 FAIL — read destination
+(reg3-first vs reg0-only) is not decisive once hdr9 holds. The 2026-09-17
+claim that opcode doubling is not the regression does not hold on this unit.
+
+Raw stream, same panel (passive signals only, no touch): the hdr9 fix
+unblocked descriptor acquisition in raw too (device_desc up to 41, rpt_desc
+up to 40 per minute), and the full Windows-order sequence runs (GET_FEATURE 6
+answered). But no 0x0C CapImg frame has ever arrived (`frame_count=0` in every
+variant: preset, reg0-only, 3.6 s delay, single/doubled enable, single
+SET_FEATURE 5, STOP skipped). The device emits 0x40 standard reports instead;
+after 3 attempts the driver falls back to working single-touch on its own.
+The 0x56 enable is therefore necessary but not sufficient on this unit — the
+stream switch needs its own hunt (enable register/payload, 0x0A read shape,
+_DSM/GPIO preconditions).
+
 ### The hunt's artifact: honest when the load fails, present when it matters
 
 The P3 double-blind wave read `spi-hid-core.c` 2401-4394 and falsified the

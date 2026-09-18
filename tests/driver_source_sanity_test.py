@@ -257,6 +257,37 @@ def check_control_flow_pins():
                       "sequence instead of before the handshake")
                 failures += 1
 
+    # 0c. Header-read lengths: spi_hid_hdr_len() is the one rule — nine
+    # pre-DONE in both modes, sixteen only for the raw DONE stream (field
+    # bisect 2026-09-19: doubled DESCREQ + hdr16 loops forever, + hdr9 reaches
+    # DONE in 2 resets; v1.5.0/v1.6.3 read nine on every handshake header).
+    # All three header sites (descriptor poller, IRQ thread, DONE poller) must
+    # go through the helper; a local sixteen at any one of them re-wedges
+    # discovery while the others still pass.
+    _hl = core_code.split("static inline unsigned int spi_hid_hdr_len", 1)
+    if len(_hl) != 2:
+        print("FAIL driver/spi-hid-core.c: spi_hid_hdr_len() is gone — header "
+              "lengths are local magic numbers again")
+        failures += 1
+    else:
+        _hlw = "".join(_hl[1].split("\n}", 1)[0].split())
+        if "SPI_HID_SEQ_DONE)?16:9" not in _hlw or "raw_mode_active" not in _hlw:
+            print("FAIL driver/spi-hid-core.c: spi_hid_hdr_len() no longer yields "
+                  "sixteen only for the raw DONE stream (nine everywhere else)")
+            failures += 1
+    for _fn in ("static void spi_hid_seq_descreq_work",
+                "spi_hid_seq_thread",
+                "static void spi_hid_poll_work"):
+        _win = core_code.split(_fn, 1)
+        if len(_win) != 2:
+            print(f"FAIL driver/spi-hid-core.c: {_fn} is gone — the header-length "
+                  f"pin has nothing to hold")
+            failures += 1
+        elif "spi_hid_hdr_len(shid)" not in "".join(_win[1].split("\n}", 1)[0].split()):
+            print(f"FAIL driver/spi-hid-core.c: {_fn} no longer reads headers through "
+                  f"spi_hid_hdr_len() — a local length re-wedges one path silently")
+            failures += 1
+
     # 1. spi_hid_ll_parse(): the mutex_unlock must not be the body of an `else`.
     # A dangling `else` had put the unlock in the success branch only, so a
     # failed hardcoded-descriptor parse returned with shid->lock held — and
@@ -322,7 +353,8 @@ def check_control_flow_pins():
               "descriptor bodies would only ever be read from the input register")
         failures += 1
     body = core_code.split("static void spi_hid_seq_descreq_work", 1)[1].split("\n}", 1)[0]
-    if "desc.output_register" not in body or "desc.input_register" not in body:
+    if "desc.input_register" not in body or ("desc.output_register" not in body
+                                             and "spi_hid_resp_reg(shid)" not in body):
         print("FAIL driver/spi-hid-core.c: the descriptor poller no longer tries "
               "both registers (responses live on the output register, events on "
               "the input one)")
@@ -407,8 +439,8 @@ def check_control_flow_pins():
     # stream register from probe setup, before the stream existed.
     _rd = (core_code.split("static int spi_hid_seq_read(struct", 1)[1].split("\n}", 1)[0]
            if "static int spi_hid_seq_read(struct" in core_code else "")
-    if not ("SPI_HID_SEQ_WAIT_RESET" in _rd and "output_register" in _rd
-            and "SPI_HID_SEQ_DONE" in _rd):
+    if not ("SPI_HID_SEQ_WAIT_RESET" in _rd and "SPI_HID_SEQ_DONE" in _rd
+            and ("output_register" in _rd or "spi_hid_resp_reg(shid)" in _rd)):
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() no longer points the handshake "
               "reads at register 0 — that is the reference's own register for them")
         failures += 1

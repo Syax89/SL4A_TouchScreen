@@ -18,6 +18,9 @@
 
 /* Protocol constants */
 #define SPI_HID_DEFAULT_INPUT_REGISTER		0x0000
+/* Pre-descriptor output register: the reference reads responses here until
+ * the descriptor names the real one. */
+#define SPI_HID_DEFAULT_OUTPUT_REGISTER		0x0003
 
 /* The read approval's shape is the one frame the traces and the field
  * disagree on: the trace's bytes put the register at offset 7 with the
@@ -161,6 +164,25 @@ struct latency_instance {
 	u64 end_time;
 };
 
+/**
+ * struct spi_hid - HID-over-SPI device instance.
+ *
+ * Locking rules (enforced by lockdep-facing asserts and the host suite):
+ *
+ * - shid->lock serialises HID client entry points (ll_parse, raw_request,
+ *   output_report, power) against removal.
+ * - shid->seq_lock serialises the discovery sequencer: the IRQ thread, the
+ *   descriptor poller, the watchdogs and the resume path. Client code that
+ *   touches sequencer state (e.g. the read-approval pair in
+ *   spi_hid_sync_request()) takes seq_lock too.
+ * - shid->response_lock and shid->input_lock are leaf spinlocks; they nest
+ *   inside the mutexes, never outside.
+ * - Lock order: lock -> seq_lock -> leaf spinlocks. No path may sleep while
+ *   holding a spinlock; delayed works sleep via msleep only where they own
+ *   no spinlock.
+ * - @removing, @suspended and @seq_enabled are the cross-thread gates: every
+ *   work and the IRQ thread re-check them under seq_lock after taking it.
+ */
 struct spi_hid {
 	struct spi_device	*spi;         /* SPI bus controller device */
 	struct hid_device	*hid;         /* HID subsystem device handle */
@@ -186,8 +208,7 @@ struct spi_hid {
 	bool suspended;             /* PM has quiesced driver I/O */
 	bool removing;              /* Driver removal in progress */
 	bool works_initialized;      /* Work items have been initialized */
-	int irq;                    /* GPIO interrupt line number */
-	struct gpio_desc *gpiod;    /* GPIO descriptor for device interrupt */
+	int irq;                    /* GPIO interrupt line number (from the SPI core) */
 	struct delayed_work descreq_work; /* DESCREQ retry work */
 	u32 wait_reset_kicks;             /* Standard-mode WAIT_RESET kicks used */
 	u32 wait_reset_irqs;              /* IRQ-edge snapshot taken when the kick timer was armed */

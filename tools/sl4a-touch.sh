@@ -837,12 +837,12 @@ cmd_install() {
 	if [ "$PROFILE" = "raw" ]; then
 		cat > "$tmp_config" <<'EOF'
 # SL4A_TouchScreen experimental raw heatmap profile
-options sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y
+options sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1
 EOF
 	else
 		cat > "$tmp_config" <<'EOF'
 # SL4A_TouchScreen standard HID profile
-options sl4a_spi_hid raw_mode=N
+options sl4a_spi_hid raw_mode=N wire_double_opcode=1
 EOF
 	fi
 	install -m 0644 "$tmp_config" "$MODPROBE_CONF"

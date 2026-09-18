@@ -85,7 +85,7 @@ static bool raw_fallback_on_reset;
  * restore v1.5.0's pre-DONE read destination: skip the probe-time
  * stream-register force (leave input_register exactly as v1.5.0 did — 0 until a
  * descriptor parses) and, in spi_hid_seq_read()'s raw branch, route every
- * pre-DONE state to input_register instead of the output_register ?: 0x0003
+ * pre-DONE state to input_register instead of spi_hid_resp_reg()
  * fallback. DONE keeps the current stream-register behavior either way. One raw
  * sweep tells whether the register destination is the wedge — first-try
  * DEVICE_DESC and stat_device_desc > 0 — or not. Default 0: byte-for-byte the
@@ -911,11 +911,26 @@ static void spi_hid_abort_pending_sync(struct spi_hid *shid)
 	spin_unlock_irqrestore(&shid->response_lock, flags);
 }
 
-/*
-* This function shouldn't be called from the interrupt thread context since it
-* waits for completion that gets completed in one of the future runs of the
-* interrupt thread.
-*/
+/**
+ * spi_hid_sync_request() - synchronous HID request/response round-trip.
+ * @shid: device instance.
+ * @output_register: register the request is written to.
+ * @report: request frame; its content type/id name the response the
+ *          sequencer will read back.
+ * @response: on success, the response body.
+ * @response_buffer_size: size of @response.
+ * @expected_response_type: frame type to wait for.
+ * @response_length: on success, bytes placed in @response.
+ *
+ * Client context only: must never run in the IRQ thread, it sleeps waiting
+ * for a completion the IRQ thread completes. The read-approval pair is
+ * published under seq_lock (lock order: lock -> seq_lock -> response_lock)
+ * so the write cannot race the sequencer's readers; the single exit is the
+ * unlock — no goto/return/break may live between them or seq_lock leaks.
+ *
+ * Returns 0 on success, negative errno (or -EOPNOTSUPP for suppressed
+ * feature reads) otherwise.
+ */
 static int spi_hid_sync_request(struct spi_hid *shid, u16 output_register,
 		struct spi_hid_output_report *report, u8 expected_response_type,
 		enum spi_hid_sync_kind kind)
@@ -1155,7 +1170,7 @@ static void spi_hid_use_hardcoded_desc(struct spi_hid *shid)
 	 * value is the cap the standard-mode reads use (raw mode uses the
 	 * buffer's own size). */
 	shid->desc.max_input_length = 0x2000;
-	shid->desc.output_register = 0x0003;
+	shid->desc.output_register = SPI_HID_DEFAULT_OUTPUT_REGISTER;
 	/* 0x0200 is what the device's own descriptor declares; the fallback
 	 * used to say 0x0100, a value the wire never carries. */
 	shid->desc.max_output_length = 0x0200;
@@ -1324,6 +1339,29 @@ static int spi_hid_set_request(struct spi_hid *shid,
  * fallback. That is the open problem, not a consequence of this line. */
 static int read_frame_variant = SPI_HID_READ_FRAME_LEGACY;
 
+/* Response register: the descriptor's output register once parsed, the
+ * default above until then. Callers hold seq_lock. */
+static inline u32 spi_hid_resp_reg(struct spi_hid *shid)
+{
+	return shid->desc.output_register ? shid->desc.output_register :
+		SPI_HID_DEFAULT_OUTPUT_REGISTER;
+}
+
+/* Header-read length, the one rule for all three header sites (descriptor
+ * poller, IRQ thread, DONE poller). Nine pre-DONE in both modes: the
+ * handshake answers with bare nine-byte headers, and a sixteen-byte read
+ * over-clocks the answer — the extra clocks consume the descriptor body, the
+ * body then fails validation, and discovery loops in WAIT_DESC with the panel
+ * self-resetting ~9/s (field bisect 2026-09-19: doubled DESCREQ + hdr16 loops
+ * forever, + hdr9 reaches DONE in 2 resets; v1.5.0 read 9 bytes on every
+ * standard header, v1.6.3 on every header). Sixteen only for the raw DONE
+ * stream with its three-byte-prefixed frames. Callers hold seq_lock. */
+static inline unsigned int spi_hid_hdr_len(struct spi_hid *shid)
+{
+	return (shid->raw_mode_active &&
+		shid->seq_state == SPI_HID_SEQ_DONE) ? 16 : 9;
+}
+
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
 {
 	u8 *tx = shid->read_tx_buf;
@@ -1476,7 +1514,7 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 				 * WAIT_DESC; DONE is excluded above because there the stream
 				 * register is the point. The comment here used to claim header and
 				 * body read the same register; they did not. */
-				reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+				reg = spi_hid_resp_reg(shid);
 		}
 		/* DONE keeps the current stream-register behavior: reg stays the
 		 * descriptor's input_register, which the raw path forced to 0x0A
@@ -1502,7 +1540,7 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
  */
 static int spi_hid_seq_read_resp(struct spi_hid *shid, u8 *rx, int rx_len)
 {
-	u32 resp_reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+	u32 resp_reg = spi_hid_resp_reg(shid);
 	int ret;
 
 	if (resp_reg != shid->desc.input_register) {
@@ -1649,11 +1687,21 @@ static int spi_hid_seq_hdr_type(const u8 *rx, int len, int *hdr_off)
 	return spi_hid_protocol_frame_type(rx, len, hdr_off);
 }
 
+/**
+ * spi_hid_seq_restart_discovery() - park in WAIT_DESC with a fresh DESCREQ.
+ * @shid: device instance; caller holds seq_lock.
+ * @reason: why discovery restarts (traced with the state change).
+ *
+ * Clears `ready` first: a usable-looking touchscreen lets HID clients
+ * interleave sync requests with the sequencer's DESCREQ and steal its
+ * responses. Returns 0, or the DESCREQ write error.
+ */
 static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 {
+	int ret;
+
 	shid->read_resp_type = 0;
 	shid->read_resp_content_id = 0;
-	int ret;
 
 	/* Re-discovery means the touchscreen is not usable until it completes:
 	 * leaving `ready` set lets HID clients interleave sync requests with the
@@ -1914,13 +1962,14 @@ out:
 static void spi_hid_seq_descreq_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, descreq_work.work);
-	/* Sixteen: this panel prefixes every answer with three bytes (`01 <status>
-	 * EE`) — frame header at offset 8, sync at ELEVEN. The full measurements,
-	 * and why nine bytes cannot hold a frame, at spi_hid_seq_thread(). */
+	/* Header length comes from spi_hid_hdr_len() above (nine here: this
+	 * poller only runs pre-DONE). The sixteen-byte shape and its raw-mode
+	 * measurements live at spi_hid_seq_thread(). */
 	u8 hdr[16];
 	u32 resp_reg;
 	int type, hdr_off;
 	int i, got = -1;
+	const unsigned int hdr_len = spi_hid_hdr_len(shid);
 
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
@@ -1934,15 +1983,15 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 	 * This poller used to read the input register only, so a device that
 	 * answers on the other stayed in discovery forever. Take the first
 	 * register whose read yields a frame header. */
-	resp_reg = shid->desc.output_register ? shid->desc.output_register : 0x0003;
+	resp_reg = spi_hid_resp_reg(shid);
 	for (i = 0; i < 2 && got < 0; i++) {
 		u32 reg = i == 0 ? resp_reg : shid->desc.input_register;
 
 		if (i == 1 && reg == resp_reg)
 			break;
-		if (spi_hid_seq_read_reg(shid, reg, hdr, sizeof(hdr)))
+		if (spi_hid_seq_read_reg(shid, reg, hdr, hdr_len))
 			continue;
-		type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
+		type = spi_hid_seq_hdr_type(hdr, hdr_len, &hdr_off);
 		if (type >= 0 && (hdr_off == 5 || hdr_off == 8))
 			got = i;
 	}
@@ -2524,6 +2573,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 	u8 hdr[16];
 	int type, ret, hdr_off;
 	u16 blen;
+	unsigned int hdr_len;
 
 	mutex_lock(&shid->seq_lock);
 	seq_dbg(shid, 3, "SEQ: poll_work tick (active=%d state=%d confirmed=%d)\n",
@@ -2537,11 +2587,14 @@ static void spi_hid_poll_work(struct work_struct *work)
 	 * by the IRQ path, which is exactly what may never fire (lost edge).
 	 * This poller must be able to confirm the handshake itself below. */
 
-	ret = spi_hid_seq_read(shid, hdr, sizeof(hdr));
+	/* Nine pre-DONE (this poller only runs at DONE, so the helper selects on
+	 * raw_mode_active: sixteen for the raw stream, nine standard). */
+	hdr_len = spi_hid_hdr_len(shid);
+	ret = spi_hid_seq_read(shid, hdr, hdr_len);
 	if (ret)
 		goto resched;
 
-	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
+	type = spi_hid_seq_hdr_type(hdr, hdr_len, &hdr_off);
 	if (type >= 0 && hdr_off != 5 && hdr_off != 8) {
 		seq_dbg(shid, 1, "SEQ: poller header at unexpected offset %d\n", hdr_off);
 		shid->poll_missed++;
@@ -2744,6 +2797,50 @@ static ssize_t heatmap_raw_read(struct file *filp, struct kobject *kobj,
 }
 static BIN_ATTR_RO(heatmap_raw, 0);
 
+/* IRQ-storm guard: more than 100 failed reads inside one second means the
+ * transport is not making progress. Park the sequencer and hand recovery to
+ * the error handler — parking used to be the end of the story (only a reload
+ * or suspend/resume re-enabled it) with nothing in the log. `ready` is
+ * cleared too so userspace stops believing the touchscreen works.
+ * Lock-free by design (runs before seq_lock); returns true when the caller
+ * must return IRQ_HANDLED immediately. */
+static bool spi_hid_seq_storm_guard(struct spi_hid *shid)
+{
+	struct device *dev = &shid->spi->dev;
+
+	if (shid->seq_storm_count <= 100)
+		return false;
+	if (jiffies - shid->seq_last_valid_jiffies >= HZ) {
+		shid->seq_storm_count = 0;
+		return false;
+	}
+	dev_warn_ratelimited(dev,
+		"SEQ: input IRQ storm (%u failed reads in <%u jiffies), parking the sequencer and scheduling recovery\n",
+		shid->seq_storm_count, HZ);
+	WRITE_ONCE(shid->seq_enabled, false);
+	shid->seq_storm_count = 0;
+	if (shid->ready) {
+		shid->ready = false;
+		sysfs_notify(&dev->kobj, NULL, "ready");
+	}
+	schedule_work(&shid->error_work);
+	return true;
+}
+
+/**
+ * spi_hid_seq_thread() - threaded IRQ handler: the discovery sequencer.
+ * @irq: GPIO interrupt line (unused beyond accounting).
+ * @_shid: device instance.
+ *
+ * Each edge means the device staged a frame. The thread reads one header
+ * (nine bytes pre-DONE, sixteen for the raw DONE stream), classifies it and
+ * dispatches to the seq_handle_*() handler for the current state. Failed
+ * reads feed the storm guard; anything that parks the sequencer also clears
+ * `ready` so userspace is told.
+ *
+ * Context: may sleep (SPI transfers); takes seq_lock. Returns IRQ_HANDLED
+ * always, IRQ_NONE only when not our device (removing/disabled).
+ */
 static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 {
 	struct spi_hid *shid = _shid;
@@ -2764,35 +2861,15 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	 * in the host suite now. */
 	u8 hdr[16]; int type; u16 blen = 0;
 	int hdr_off;
+	unsigned int hdr_len;
 	s64 dbg_dt_us;
 	irqreturn_t result = IRQ_HANDLED;
 
 	if (READ_ONCE(shid->removing) || !READ_ONCE(shid->seq_enabled))
 		return IRQ_NONE;
 
-	if (shid->seq_storm_count > 100) {
-		unsigned long delta = jiffies - shid->seq_last_valid_jiffies;
-		if (delta < HZ) {
-			/* The transport is not making progress. Stop it and hand the
-			 * recovery to the error handler: parking the sequencer here
-			 * used to be the end of the story (only a reload or a
-			 * suspend/resume re-enabled it), with nothing in the log at
-			 * the default verbosity. Ready is cleared too so userspace
-			 * stops believing the touchscreen works. */
-			dev_warn_ratelimited(dev,
-				"SEQ: input IRQ storm (%u failed reads in <%u jiffies), parking the sequencer and scheduling recovery\n",
-				shid->seq_storm_count, HZ);
-			WRITE_ONCE(shid->seq_enabled, false);
-			shid->seq_storm_count = 0;
-			if (shid->ready) {
-				shid->ready = false;
-				sysfs_notify(&dev->kobj, NULL, "ready");
-			}
-			schedule_work(&shid->error_work);
-			return IRQ_HANDLED;
-		}
-		shid->seq_storm_count = 0;
-	}
+	if (spi_hid_seq_storm_guard(shid))
+		return IRQ_HANDLED;
 
 	mutex_lock(&shid->seq_lock);
 	if (READ_ONCE(shid->removing) || !READ_ONCE(shid->seq_enabled)) {
@@ -2822,13 +2899,16 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	 * typing code gates on at ELEVEN. No capture shows that shape: they record
 	 * standard-mode traffic, a question this one never asks. Nine
 	 * bytes can never contain a frame from this device; sixteen holds the
-	 * header's fourth byte and the first body byte as well. */
-	if (spi_hid_seq_read(shid, hdr, sizeof(hdr))) {
+	 * header's fourth byte and the first body byte as well.
+	 *
+	 * Nine pre-DONE, sixteen for the raw DONE stream: spi_hid_hdr_len(). */
+	hdr_len = spi_hid_hdr_len(shid);
+	if (spi_hid_seq_read(shid, hdr, hdr_len)) {
 		dev_dbg(dev, "sequencer header read failed\n");
 		shid->seq_storm_count++;
 		goto out;
 	}
-	type = spi_hid_seq_hdr_type(hdr, sizeof(hdr), &hdr_off);
+	type = spi_hid_seq_hdr_type(hdr, hdr_len, &hdr_off);
 	/* A `32 10 00 5a` frame types as 3 here — it IS the reference's own
 	 * reset answer (spi-hid-protocol.h) — and a sync-less `03 00 00 00`
 	 * drain types as -1. The narrowing that once made this frame arrive
@@ -2901,6 +2981,19 @@ out:
 }
 
 /* ── State handler: WAIT_RESET ───────────────────────────────────── */
+/**
+ * seq_handle_reset() - handle one frame while in WAIT_RESET.
+ * @shid: device instance; caller holds seq_lock.
+ * @type: parsed frame type (3 = RESET_RSP, 7/8 = late descriptor, else forced).
+ * @blen: body length in bytes from the frame header.
+ * @expect_fast: set when a DESCREQ goes out synchronously, so the thread can
+ *               tell a live answer (IRQ within microseconds) from an ignored
+ *               write (the device just re-resets).
+ *
+ * A type-3 frame is drained and answered immediately — the reference answers
+ * ~156 us later, and any wait here livelocks. Late descriptors delegate to
+ * their own handlers; anything else is drained and forced back to WAIT_DESC.
+ */
 static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *expect_fast)
 {
 	if (type == 3) {
@@ -2940,7 +3033,16 @@ static void seq_handle_reset(struct spi_hid *shid, int type, u16 blen, bool *exp
 	}
 }
 
-/* ── State handler: WAIT_DESC ────────────────────────────────────── */
+/**
+ * seq_handle_desc() - handle one frame while in WAIT_DESC.
+ * @shid: device instance; caller holds seq_lock.
+ * @type: parsed frame type (7 = DEVICE_DESC, 3 = RESET_RSP, else ignored).
+ * @blen: body length in bytes from the frame header.
+ *
+ * A type-7 frame is body-read and parsed; on success the report-descriptor
+ * request goes out and the sequencer advances to WAIT_RPT. A type-3 frame
+ * re-arms discovery with a fresh DESCREQ. Anything else is dropped.
+ */
 static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 7) {
@@ -3039,69 +3141,90 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 	}
 }
 
-/* ── State handler: WAIT_RPT ─────────────────────────────────────── */
+/**
+ * seq_handle_rpt_retain() - read and retain one report descriptor body.
+ * @shid: device instance; caller holds seq_lock.
+ * @blen: body length in bytes from the frame header.
+ *
+ * Body-reads the wire descriptor (bounded), dumps it for the bundle, then
+ * copies the payload past the content preamble into the retained wire copy;
+ * when it does not fit, the hardcoded fallback stays in force and the log
+ * says so. Returns false when there is nothing to publish yet.
+ */
+static bool seq_handle_rpt_retain(struct spi_hid *shid, u16 blen)
+{
+	u8 body[1024] = {};
+	u32 rblen = min_t(u32, blen + 5, sizeof(body));
+	u32 off, len;
+
+	shid->stat_rpt_desc++;
+	dev_info(&shid->spi->dev, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
+	if (rblen < 3 || spi_hid_seq_read_resp(shid, body, rblen)) {
+		dev_warn(&shid->spi->dev, "SEQ: RPT_DESC read failed or was truncated\n");
+		return false;
+	}
+	for (off = 0; off < rblen; off += 64) {
+		u32 chunk = min_t(u32, 64, rblen - off);
+
+		seq_dbg(shid, 3, "DIFFCHECK: RPT_DESC+%u=[%*ph]\n", off, chunk, body + off);
+	}
+	/* Same helper as the DEVICE_DESC path: it skips both shapes of
+	 * preamble and lands on the content. The prefix-blind loop this
+	 * replaces did not advance on a raw-mode body — off stopped at 3
+	 * instead of 11, the copy took the prefix and preamble as if they
+	 * were the descriptor, and stat_wire_patches counted it as a wire
+	 * success. Silent twice over: the wrong bytes are identical to the
+	 * hardcoded copy, so nothing downstream noticed. */
+	{
+		int boff = spi_hid_protocol_body_offset(body, (int)rblen);
+
+		if (boff < 0 || (u32)boff >= rblen) {
+			dev_warn(&shid->spi->dev,
+				 "SEQ: RPT_DESC body has no content header\n");
+			return false;
+		}
+		off = (u32)boff;
+	}
+	/* The layer boundary here is load-bearing and invisible when it is
+	 * crossed. `rblen` counts the FRAME (the header's word count,
+	 * padded to a 4-byte word); `report_descriptor_length` counts the
+	 * PAYLOAD. Copy with the frame number, or size the read with the
+	 * payload number, and the guard below fires — silently, because the
+	 * hardcoded copy it falls back to is byte-identical to the wire one
+	 * today. A future "unification" of the two numbers is a regression,
+	 * not a tidy-up. The gap between them is not a constant either: the
+	 * two frames this device sends differ by 4 and by 2
+	 * (3 + padding to the next 4-byte word). */
+	len = min_t(u32, shid->desc.report_descriptor_length,
+		    sizeof(shid->wire_report_descriptor));
+	if (off < rblen && len > 0 && off + len <= rblen) {
+		memcpy(shid->wire_report_descriptor, body + off, len);
+		shid->wire_report_descriptor_len = len;
+		shid->stat_wire_patches++;
+		dev_info(&shid->spi->dev, "SEQ: report descriptor %u bytes read from wire\n", len);
+	} else {
+		dev_warn(&shid->spi->dev, "SEQ: report descriptor copy did not fit (off %u len %u rblen %u), using the hardcoded copy\n",
+			 off, len, rblen);
+		shid->wire_report_descriptor_len = 0;
+	}
+	return true;
+}
+
+/**
+ * seq_handle_rpt() - handle one frame while in WAIT_RPT.
+ * @shid: device instance; caller holds seq_lock.
+ * @type: parsed frame type (8 = RPT_DESC, 3 = RESET_RSP, else ignored).
+ * @blen: body length in bytes from the frame header.
+ *
+ * A type-8 frame is body-read (bounded, with wire/hardcoded fallback) and
+ * published; standard mode then reaches DONE and arms input, raw mode
+ * continues into the feature handshake. A type-3 frame restarts discovery.
+ */
 static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 {
 	if (type == 8) {
-		u8 body[1024] = {};
-		u32 rblen = min_t(u32, blen + 5, sizeof(body));
-
-		shid->stat_rpt_desc++;
-		dev_info(&shid->spi->dev, "SEQ: RPT_DESC! reading body (%u bytes)...\n", blen);
-		if (rblen < 3 || spi_hid_seq_read_resp(shid, body, rblen)) {
-			dev_warn(&shid->spi->dev, "SEQ: RPT_DESC read failed or was truncated\n");
+		if (!seq_handle_rpt_retain(shid, blen))
 			return;
-		}
-		{
-			u32 off;
-			for (off = 0; off < rblen; off += 64) {
-				u32 chunk = min_t(u32, 64, rblen - off);
-				seq_dbg(shid, 3, "DIFFCHECK: RPT_DESC+%u=[%*ph]\n", off, chunk, body + off);
-			}
-		}
-		{
-			u32 off, len;
-
-			/* Same helper as the DEVICE_DESC path: it skips both shapes of
-			 * preamble and lands on the content. The prefix-blind loop this
-			 * replaces did not advance on a raw-mode body — off stopped at 3
-			 * instead of 11, the copy took the prefix and preamble as if they
-			 * were the descriptor, and stat_wire_patches counted it as a wire
-			 * success. Silent twice over: the wrong bytes are identical to the
-			 * hardcoded copy, so nothing downstream noticed. */
-			{
-				int boff = spi_hid_protocol_body_offset(body, (int)rblen);
-
-				if (boff < 0 || (u32)boff >= rblen) {
-					dev_warn(&shid->spi->dev,
-						 "SEQ: RPT_DESC body has no content header\n");
-					return;
-				}
-				off = (u32)boff;
-			}
-			/* The layer boundary here is load-bearing and invisible when it is
-			 * crossed. `rblen` counts the FRAME (the header's word count,
-			 * padded to a 4-byte word); `report_descriptor_length` counts the
-			 * PAYLOAD. Copy with the frame number, or size the read with the
-			 * payload number, and the guard below fires — silently, because the
-			 * hardcoded copy it falls back to is byte-identical to the wire one
-			 * today. A future "unification" of the two numbers is a regression,
-			 * not a tidy-up. The gap between them is not a constant either: the
-			 * two frames this device sends differ by 4 and by 2
-			 * (3 + padding to the next 4-byte word). */
-			len = min_t(u32, shid->desc.report_descriptor_length,
-				    sizeof(shid->wire_report_descriptor));
-			if (off < rblen && len > 0 && off + len <= rblen) {
-				memcpy(shid->wire_report_descriptor, body + off, len);
-				shid->wire_report_descriptor_len = len;
-				shid->stat_wire_patches++;
-				dev_info(&shid->spi->dev, "SEQ: report descriptor %u bytes read from wire\n", len);
-			} else {
-				dev_warn(&shid->spi->dev, "SEQ: report descriptor copy did not fit (off %u len %u rblen %u), using the hardcoded copy\n",
-					 off, len, rblen);
-				shid->wire_report_descriptor_len = 0;
-			}
-		}
 		seq_dbg(shid, 1, "SEQ: report descriptor received, shid->hid=%p, scheduling create_device_work...\n", shid->hid);
 		shid->ready = true;
 		/* Every flip of `ready` wakes pollers of the attribute (the rest of
@@ -3140,11 +3263,11 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 					spi_hid_getfeat6_read(shid);
 					seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
 					if (spi_hid_seq_write_setfeat(shid)) {
-							dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
-							schedule_delayed_work(&shid->raw_handshake_watchdog,
-								msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
-							return;
-						}
+						dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
+						schedule_delayed_work(&shid->raw_handshake_watchdog,
+							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+						return;
+					}
 					spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 				}
 			} else {
@@ -3279,7 +3402,18 @@ static void seq_handle_vendor(struct spi_hid *shid, int type, u16 blen)
 	}
 }
 
-/* ── State handler: DONE ─────────────────────────────────────────── */
+/**
+ * seq_handle_data() - handle one frame while in DONE.
+ * @shid: device instance; caller holds seq_lock.
+ * @type: parsed frame type (1 = DATA, 3 = device reset, sync responses).
+ * @blen: body length in bytes from the frame header.
+ *
+ * Sync responses complete a pending client request; a type-3 frame means the
+ * device reset itself and restarts discovery. Type-1 DATA frames are
+ * body-read and dispatched: report 0x40 to the HID input path (standard and
+ * raw-fallback), report 0x0C to the heatmap pipeline (raw only, and the only
+ * frame class that confirms the raw handshake).
+ */
 static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 {
 	struct device *dev = &shid->spi->dev;
@@ -3928,6 +4062,211 @@ static void spi_hid_free_irq(struct spi_hid *shid)
  * Auto-retries on cold boot handshake failure (up to 3 attempts).
  * Returns 0 on success, negative errno on failure.
  */
+/* Behavioural self-check at probe, on the frames BOTH sides produce.
+ * A cross-family leg showed that a host test cannot see a divergence
+ * confined to THIS translation unit (a `#undef`/`#define` of the function
+ * name, or an early return): tests/wire_frames_test.c stayed green while
+ * the shipped driver would never detect a reset. This runs inside the
+ * driver's own TU, and its result lands in the diagnostics bundle — the one
+ * channel that reports what the shipped code actually does.
+ *
+ * A LATER leg found the check itself decorative: it tested only the
+ * reference traces' buffers, so it printed "frame typing ok" through days
+ * in which every frame this driver actually received typed as -1. The
+ * raw-mode answers are in the check now — a prefix of three bytes and
+ * the reference frame behind it, header at offset 8 — because they are
+ * the shapes a regression here would silence. */
+static void spi_hid_probe_selfcheck(struct spi_hid *shid)
+{
+	struct device *dev = &shid->spi->dev;
+	/* The reset and the drain, from the reference's own boot trace. */
+	static const u8 self_reset[9] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10, 0x00, 0x5a
+	};
+	static const u8 self_drain[9] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00
+	};
+	/* And this panel's answers, verbatim from the field bundles: three-byte
+	 * three leading bytes seen on this unit's raw-mode reads, then the same
+	 * frame with the sync at ELEVEN — beyond
+	 * every nine-byte read the driver made until now. */
+	static const u8 self_panel_reset[12] = {
+		0x01, 0xff, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10,
+		0x00, 0x5a
+	};
+	static const u8 self_panel_desc[12] = {
+		0x01, 0x07, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x72, 0x80,
+		0x00, 0x5a
+	};
+	int self_off = -1;
+	bool self_ok;
+
+	self_ok = spi_hid_seq_hdr_type(self_reset, sizeof(self_reset), &self_off) == 3 &&
+		  self_off == 5;
+	self_ok = self_ok &&
+		  spi_hid_seq_hdr_type(self_drain, sizeof(self_drain), NULL) == -1;
+	self_off = -1;
+	self_ok = self_ok &&
+		  spi_hid_seq_hdr_type(self_panel_reset, sizeof(self_panel_reset), &self_off) == 3 &&
+		  self_off == 8;
+	self_off = -1;
+	self_ok = self_ok &&
+		  spi_hid_seq_hdr_type(self_panel_desc, sizeof(self_panel_desc), &self_off) == 7 &&
+		  self_off == 8;
+	if (self_ok)
+		dev_info(dev, "self-check: frame typing ok (reference reset 32 10 00 5a types 3 at offset 5; the drain is not a frame; THE PANEL'S answers type too — prefixed reset 3, prefixed descriptor 7, both header at offset 8)\n");
+	else
+		dev_err(dev, "self-check: FRAME TYPING BROKEN — the reference reset is not typed 3 at offset 5, or the drain is treated as a frame, or the panel's own prefixed answers (01 ?? ee + frame, header at offset 8) no longer type; discovery will stall on the field unit\n");
+}
+
+/* OF/DT power and pin setup. On ACPI the firmware's _INI has already
+ * powered the panel before probe, so there is nothing to enable here —
+ * `powered` just records that, and the power-down path early-returns on it.
+ * Returns 0 or a negative errno; probe maps failures to err1. */
+static int spi_hid_probe_power(struct spi_hid *shid)
+{
+	struct device *dev = &shid->spi->dev;
+
+	if (!dev->of_node) {
+		/* ACPI _INI has already powered the MSHW0231 before probe. On an
+		 * OF/DT platform nothing enables the regulator and `powered` stays
+		 * false, so the power-down path below early-returns and
+		 * regulator_disable() is never reached: unqualified by design for
+		 * now, as these parts are ACPI-only (review R1d-F6). */
+		shid->powered = true;
+		return 0;
+	}
+
+	shid->supply = devm_regulator_get(dev, "vdd");
+	if (IS_ERR(shid->supply)) {
+		if (PTR_ERR(shid->supply) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get regulator: %ld\n",
+				PTR_ERR(shid->supply));
+		return PTR_ERR(shid->supply);
+	}
+
+	shid->pinctrl = devm_pinctrl_get(dev);
+	if (IS_ERR(shid->pinctrl)) {
+		dev_err(dev, "Could not get pinctrl handle: %ld\n",
+			PTR_ERR(shid->pinctrl));
+		return PTR_ERR(shid->pinctrl);
+	}
+
+	shid->pinctrl_reset = pinctrl_lookup_state(shid->pinctrl, "reset");
+	if (IS_ERR(shid->pinctrl_reset)) {
+		dev_err(dev, "Could not get pinctrl reset: %ld\n",
+			PTR_ERR(shid->pinctrl_reset));
+		return PTR_ERR(shid->pinctrl_reset);
+	}
+
+	shid->pinctrl_active = pinctrl_lookup_state(shid->pinctrl, "active");
+	if (IS_ERR(shid->pinctrl_active)) {
+		dev_err(dev, "Could not get pinctrl active: %ld\n",
+			PTR_ERR(shid->pinctrl_active));
+		return PTR_ERR(shid->pinctrl_active);
+	}
+
+	shid->pinctrl_sleep = pinctrl_lookup_state(shid->pinctrl, "sleep");
+	if (IS_ERR(shid->pinctrl_sleep)) {
+		dev_err(dev, "Could not get pinctrl sleep: %ld\n",
+			PTR_ERR(shid->pinctrl_sleep));
+		return PTR_ERR(shid->pinctrl_sleep);
+	}
+
+	{
+		int ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_sleep);
+
+		if (ret) {
+			dev_err(dev, "Could not select sleep state\n");
+			return ret;
+		}
+	}
+
+	msleep(100);
+	return 0;
+}
+
+/* Windows-style GPIO dance BEFORE arming the IRQ: mask, reconfigure the
+ * trigger type, acknowledge and clear anything pending. Mirrors
+ * ClearActiveInterrupts → ReconfigureInterrupt → UnmaskInterrupt. */
+static void spi_hid_probe_gpio(struct spi_hid *shid, unsigned long irqflags)
+{
+	struct device *dev = &shid->spi->dev;
+	int irq = shid->irq;
+	struct irq_data *id = irq_get_irq_data(irq);
+
+	dev_info(dev, "GPIO dance: irq=%d\n", irq);
+	seq_dbg(shid, 1, "GPIO dance begin\n");
+
+	/* Mask IRQ */
+	irq_set_irqchip_state(irq, IRQCHIP_STATE_MASKED, 1);
+
+	/* Reconfigure trigger type */
+	irq_set_irq_type(irq, irqflags & IRQF_TRIGGER_MASK);
+
+	/* Clear pending interrupt */
+	if (id && id->chip && id->chip->irq_ack)
+		id->chip->irq_ack(id);
+	irq_set_irqchip_state(irq, IRQCHIP_STATE_PENDING, 0);
+
+	dev_info(dev, "GPIO dance: mask→reconf→clear done\n");
+	seq_dbg(shid, 1, "GPIO dance complete\n");
+}
+
+/* Opt-in probe-time power cycle (_PS3 → _PS0). A device-specific legacy
+ * experiment, not generic power management: keep it behind
+ * acpi_probe_power_cycle until cold-boot A/B traces prove it required.
+ * Never wait as if a failed AML transition had succeeded. */
+static int spi_hid_probe_acpi_cycle(struct spi_hid *shid)
+{
+	struct device *dev = &shid->spi->dev;
+	acpi_handle h = ACPI_HANDLE(dev);
+
+	if (!acpi_probe_power_cycle)
+		return 0;
+	if (h) {
+		acpi_status status;
+
+		dev_info(dev, "SEQ: Power cycling device via ACPI _PS3 -> _PS0...\n");
+		seq_dbg(shid, 1, "ACPI _PS3 begin\n");
+		status = acpi_evaluate_object(h, "_PS3", NULL, NULL);
+		if (ACPI_FAILURE(status)) {
+			dev_err(dev, "SEQ: ACPI _PS3 failed: %s\n",
+				acpi_format_exception(status));
+			return -EIO;
+		}
+		seq_dbg(shid, 1, "ACPI _PS3 complete\n");
+		msleep(50);
+		seq_dbg(shid, 1, "ACPI _PS0 begin\n");
+		status = acpi_evaluate_object(h, "_PS0", NULL, NULL);
+		if (ACPI_FAILURE(status)) {
+			dev_err(dev, "SEQ: ACPI _PS0 failed: %s\n",
+				acpi_format_exception(status));
+			return -EIO;
+		}
+		seq_dbg(shid, 1, "ACPI _PS0 complete\n");
+		msleep(100);
+	}
+	return 0;
+}
+
+/**
+ * spi_hid_probe() - bind the driver to a MSHW0231/MSHW0162 panel.
+ * @spi: SPI device instantiated from ACPI/DT.
+ *
+ * Brings the device from power-on to IRQ-armed discovery: clamp load-time
+ * parameters, allocate state, publish sysfs, resolve the descriptor
+ * register, run the frame-typing self-check, set up OF power (ACPI panels
+ * are already powered by _INI), initialise workers, run the GPIO dance,
+ * optionally power-cycle, settle, then request the threaded IRQ and arm the
+ * watchdogs. Discovery itself runs asynchronously from the first RESET_RSP.
+ *
+ * The body is deliberately a checklist: each step is one helper call, and
+ * every failure after sysfs creation unwinds through err1 (err1_touch when
+ * the heatmap input device exists too).
+ *
+ * Returns 0 on success, negative errno otherwise.
+ */
 static int spi_hid_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
@@ -4007,60 +4346,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	}
 	dev_info(dev, "HID desc reg = 0x%08x\n", shid->device_descriptor_register);
 
-	/* Behavioural self-check at probe, on the frames BOTH sides produce.
-	 * A cross-family leg showed that a host test cannot see a divergence
-	 * confined to THIS translation unit (a `#undef`/`#define` of the function
-	 * name, or an early return): tests/wire_frames_test.c stayed green while
-	 * the shipped driver would never detect a reset. This runs inside the
-	 * driver's own TU, and its result lands in the diagnostics bundle — the one
-	 * channel that reports what the shipped code actually does.
-	 *
-	 * A LATER leg found the check itself decorative: it tested only the
-	 * reference traces' buffers, so it printed "frame typing ok" through days
-	 * in which every frame this driver actually received typed as -1. The
-	 * raw-mode answers are in the check now — a prefix of three bytes and
-	 * the reference frame behind it, header at offset 8 — because they are
-	 * the shapes a regression here would silence. */
-	{
-		/* The reset and the drain, from the reference's own boot trace. */
-		static const u8 self_reset[9] = {
-			0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10, 0x00, 0x5a
-		};
-		static const u8 self_drain[9] = {
-			0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00
-		};
-		/* And this panel's answers, verbatim from the field bundles: three-byte
-		 * three leading bytes seen on this unit's raw-mode reads, then the same
-		 * frame with the sync at ELEVEN — beyond
-		 * every nine-byte read the driver made until now. */
-		static const u8 self_panel_reset[12] = {
-			0x01, 0xff, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x32, 0x10,
-			0x00, 0x5a
-		};
-		static const u8 self_panel_desc[12] = {
-			0x01, 0x07, 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0x72, 0x80,
-			0x00, 0x5a
-		};
-		int self_off = -1;
-		bool self_ok;
-
-		self_ok = spi_hid_seq_hdr_type(self_reset, sizeof(self_reset), &self_off) == 3 &&
-			  self_off == 5;
-		self_ok = self_ok &&
-			  spi_hid_seq_hdr_type(self_drain, sizeof(self_drain), NULL) == -1;
-		self_off = -1;
-		self_ok = self_ok &&
-			  spi_hid_seq_hdr_type(self_panel_reset, sizeof(self_panel_reset), &self_off) == 3 &&
-			  self_off == 8;
-		self_off = -1;
-		self_ok = self_ok &&
-			  spi_hid_seq_hdr_type(self_panel_desc, sizeof(self_panel_desc), &self_off) == 7 &&
-			  self_off == 8;
-		if (self_ok)
-			dev_info(dev, "self-check: frame typing ok (reference reset 32 10 00 5a types 3 at offset 5; the drain is not a frame; THE PANEL'S answers type too — prefixed reset 3, prefixed descriptor 7, both header at offset 8)\n");
-		else
-			dev_err(dev, "self-check: FRAME TYPING BROKEN — the reference reset is not typed 3 at offset 5, or the drain is treated as a frame, or the panel's own prefixed answers (01 ?? ee + frame, header at offset 8) no longer type; discovery will stall on the field unit\n");
-	}
+	spi_hid_probe_selfcheck(shid);
 	/* The DESCREQ that starts discovery is built from the compile-time
 	 * constant, so a device whose _DSM names another register can never
 	 * answer with a DEVICE_DESC. No capture and nothing in the DLL analysis
@@ -4081,63 +4367,9 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	init_completion(&shid->output_done);
 
-	if (dev->of_node) {
-		shid->supply = devm_regulator_get(dev, "vdd");
-		if (IS_ERR(shid->supply)) {
-			if (PTR_ERR(shid->supply) != -EPROBE_DEFER)
-				dev_err(dev, "Failed to get regulator: %ld\n",
-						PTR_ERR(shid->supply));
-			ret = PTR_ERR(shid->supply);
-			goto err1;
-		}
-
-		shid->pinctrl = devm_pinctrl_get(dev);
-		if (IS_ERR(shid->pinctrl)) {
-			dev_err(dev, "Could not get pinctrl handle: %ld\n",
-					PTR_ERR(shid->pinctrl));
-			ret = PTR_ERR(shid->pinctrl);
-			goto err1;
-		}
-
-		shid->pinctrl_reset = pinctrl_lookup_state(shid->pinctrl, "reset");
-		if (IS_ERR(shid->pinctrl_reset)) {
-			dev_err(dev, "Could not get pinctrl reset: %ld\n",
-					PTR_ERR(shid->pinctrl_reset));
-			ret = PTR_ERR(shid->pinctrl_reset);
-			goto err1;
-		}
-
-		shid->pinctrl_active = pinctrl_lookup_state(shid->pinctrl, "active");
-		if (IS_ERR(shid->pinctrl_active)) {
-			dev_err(dev, "Could not get pinctrl active: %ld\n",
-					PTR_ERR(shid->pinctrl_active));
-			 ret = PTR_ERR(shid->pinctrl_active);
-			 goto err1;
-		}
-
-		shid->pinctrl_sleep = pinctrl_lookup_state(shid->pinctrl, "sleep");
-		if (IS_ERR(shid->pinctrl_sleep)) {
-			dev_err(dev, "Could not get pinctrl sleep: %ld\n",
-					PTR_ERR(shid->pinctrl_sleep));
-			ret = PTR_ERR(shid->pinctrl_sleep);
-			goto err1;
-		}
-
-		ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_sleep);
-		if (ret) {
-			dev_err(dev, "Could not select sleep state\n");
-			goto err1;
-		}
-
-		msleep(100);
-	} else {
-		/* ACPI _INI has already powered the MSHW0231 before probe. On an
-		 * OF/DT platform nothing enables the regulator and `powered` stays
-		 * false, so the power-down path below early-returns and
-		 * regulator_disable() is never reached: unqualified by design for
-		 * now, as these parts are ACPI-only (review R1d-F6). */
-		shid->powered = true;
-	}
+	ret = spi_hid_probe_power(shid);
+	if (ret)
+		goto err1;
 
 
 	INIT_WORK(&shid->create_device_work, spi_hid_create_device_work);
@@ -4163,11 +4395,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->works_initialized = true;
 
 	seq_dbg(shid, 1, "probe configuring IRQ\n");
-	if (dev->of_node) {
-		shid->irq = spi->irq;
-	} else {
-		/* Use SPI core's IRQ directly — skip gpiod_get to avoid EBUSY */
-		shid->irq = spi->irq;
+	/* Use SPI core's IRQ directly — skip gpiod_get to avoid EBUSY */
+	shid->irq = spi->irq;
+	if (!dev->of_node) {
 		if (shid->irq <= 0) {
 			dev_err(dev, "No IRQ from SPI core\n");
 			ret = -ENODEV;
@@ -4178,67 +4408,17 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	irqflags = irq_get_trigger_type(shid->irq) | IRQF_ONESHOT;
 
-	/* Windows-style GPIO dance BEFORE arming IRQ:
-	 * ClearActiveInterrupts → ReconfigureInterrupt → UnmaskInterrupt
-	 */
-	if (!dev->of_node) {
-		int irq = shid->irq;
-		struct irq_data *id = irq_get_irq_data(irq);
+	if (!dev->of_node)
+		spi_hid_probe_gpio(shid, irqflags);
 
-		dev_info(dev, "GPIO dance: irq=%d\n", irq);
-		seq_dbg(shid, 1, "GPIO dance begin\n");
-
-		/* Mask IRQ */
-		irq_set_irqchip_state(irq, IRQCHIP_STATE_MASKED, 1);
-
-		/* Reconfigure trigger type */
-		irq_set_irq_type(irq, irqflags & IRQF_TRIGGER_MASK);
-
-		/* Clear pending interrupt */
-		if (id && id->chip && id->chip->irq_ack)
-			id->chip->irq_ack(id);
-		irq_set_irqchip_state(irq, IRQCHIP_STATE_PENDING, 0);
-
-		dev_info(dev, "GPIO dance: mask→reconf→clear done\n");
-		seq_dbg(shid, 1, "GPIO dance complete\n");
-	}
-
-	/* This is a device-specific legacy experiment, not generic SPI-HID power
-	 * management. Keep it controllable until cold-boot A/B traces prove it is
-	 * required. Never wait as if a failed AML transition had succeeded. */
-	if (acpi_probe_power_cycle) {
-		acpi_handle h = ACPI_HANDLE(dev);
-		if (h) {
-			acpi_status status;
-
-			dev_info(dev, "SEQ: Power cycling device via ACPI _PS3 -> _PS0...\n");
-			seq_dbg(shid, 1, "ACPI _PS3 begin\n");
-			status = acpi_evaluate_object(h, "_PS3", NULL, NULL);
-			if (ACPI_FAILURE(status)) {
-				dev_err(dev, "SEQ: ACPI _PS3 failed: %s\n",
-					acpi_format_exception(status));
-				ret = -EIO;
-				goto err1;
-			}
-			seq_dbg(shid, 1, "ACPI _PS3 complete\n");
-			msleep(50);
-			seq_dbg(shid, 1, "ACPI _PS0 begin\n");
-			status = acpi_evaluate_object(h, "_PS0", NULL, NULL);
-			if (ACPI_FAILURE(status)) {
-				dev_err(dev, "SEQ: ACPI _PS0 failed: %s\n",
-					acpi_format_exception(status));
-				ret = -EIO;
-				goto err1;
-			}
-			seq_dbg(shid, 1, "ACPI _PS0 complete\n");
-			msleep(100);
-		}
-	}
+	ret = spi_hid_probe_acpi_cycle(shid);
+	if (ret)
+		goto err1;
 
 	mutex_lock(&shid->seq_lock);
 	shid->seq_enabled = true;
 	spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_RESET, SPI_HID_SEQ_PROBE);
-	shid->ready = shid->seq_state >= SPI_HID_SEQ_DONE ? true : false;
+	shid->ready = shid->seq_state >= SPI_HID_SEQ_DONE;
 	mutex_unlock(&shid->seq_lock);
 
 	/* Wait for device to stabilize after ACPI _INI power-on.
@@ -4249,7 +4429,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	seq_dbg(shid, 1, "probe settling delay begin\n");
 	msleep(300);
 	seq_dbg(shid, 1, "probe settling delay complete\n");
-	shid->desc.input_register = 0x000000;
+	shid->desc.input_register = SPI_HID_DEFAULT_INPUT_REGISTER;
 
 	dev_info(dev, "SEQ: device powered by ACPI _INI, arming IRQ\n");
 
