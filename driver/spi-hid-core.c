@@ -1492,8 +1492,8 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 	 * log, and pointing the stream at 0 is a poller that reads zeros forever.
 	 * The leg that checked this function's claim that "the stream uses its own
 	 * explicit calls" found no such call anywhere — the claim was mine. */
-	if (shid->raw_mode_active) {
-		if (shid->seq_state != SPI_HID_SEQ_DONE) {
+	if (shid->seq_state != SPI_HID_SEQ_DONE) {
+		if (shid->raw_mode_active) {
 			/* H4 falsifier: with raw_pre_desc_reg0 set (and the probe
 			 * force above skipped), every pre-DONE read goes to the
 			 * input_register — still 0 until a descriptor parses, the
@@ -1515,10 +1515,15 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 				 * register is the point. The comment here used to claim header and
 				 * body read the same register; they did not. */
 				reg = spi_hid_resp_reg(shid);
+		} else {
+			/* Standard mode follows the same Windows phase map: the 9-byte
+			 * TX explicitly selects the register (v1.5.0's 5-byte TX did
+			 * not), so reg 0 never sees the descriptor staged on reg 3. */
+			if (shid->seq_state == SPI_HID_SEQ_WAIT_RESET)
+				reg = 0;
+			else
+				reg = spi_hid_resp_reg(shid);
 		}
-		/* DONE keeps the current stream-register behavior: reg stays the
-		 * descriptor's input_register, which the raw path forced to 0x0A
-		 * at probe (unless raw_pre_desc_reg0 skipped that force). */
 	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
@@ -1534,9 +1539,12 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
  * everything. On the field unit that register only ever yields RESET_RSP, so
  * the response was never seen and discovery stayed in WAIT_DESC forever.
  *
- * Both registers are tried, response register first: a device (or a build
- * older than this one) may still answer on the input register, and the caller
- * only sees the first read that succeeded.
+ * Both registers are tried, response register first (Windows boot trace:
+ * RESET on reg 0, DEVICE_DESC/RPT_DESC headers+bodies on reg 3; v1.5.0's
+ * 5-byte TX did not select a register, the 9-byte TX does, so reg 0 never
+ * sees the descriptor staged on reg 3). A device (or a build older than this
+ * one) may still answer on the input register, and the caller only sees the
+ * first read that succeeded.
  */
 static int spi_hid_seq_read_resp(struct spi_hid *shid, u8 *rx, int rx_len)
 {
@@ -1979,10 +1987,9 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		goto out;
 
 	/* Both registers can carry a frame (see spi_hid_seq_read_resp): the one
-	 * a device answers requests on, and the one it pushes its own events on.
-	 * This poller used to read the input register only, so a device that
-	 * answers on the other stayed in discovery forever. Take the first
-	 * register whose read yields a frame header. */
+	 * a device answers requests on (reg 3: DEVICE_DESC/RPT_DESC per the
+	 * Windows boot trace), and the one it pushes its own events on.
+	 * Take the first register whose read yields a frame header. */
 	resp_reg = spi_hid_resp_reg(shid);
 	for (i = 0; i < 2 && got < 0; i++) {
 		u32 reg = i == 0 ? resp_reg : shid->desc.input_register;
@@ -3136,7 +3143,6 @@ static void seq_handle_desc(struct spi_hid *shid, int type, u16 blen)
 		}
 		if (seq_handle_desc_request_rpt(shid))
 			return;
-	} else if (type == 3) {
 	} else if (type == 3) {
 		u8 body[16];
 		u32 rblen = min_t(u32, blen + 5, sizeof(body));

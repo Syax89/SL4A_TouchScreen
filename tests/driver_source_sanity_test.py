@@ -353,11 +353,30 @@ def check_control_flow_pins():
               "descriptor bodies would only ever be read from the input register")
         failures += 1
     body = core_code.split("static void spi_hid_seq_descreq_work", 1)[1].split("\n}", 1)[0]
-    if "desc.input_register" not in body or ("desc.output_register" not in body
-                                             and "spi_hid_resp_reg(shid)" not in body):
+    _bd = "".join(body.split())
+    if "desc.input_register" not in body:
+        print("FAIL driver/spi-hid-core.c: the descriptor poller no longer reads "
+              "the input register")
+        failures += 1
+    elif "spi_hid_resp_reg(shid)" not in body:
         print("FAIL driver/spi-hid-core.c: the descriptor poller no longer tries "
-              "both registers (responses live on the output register, events on "
-              "the input one)")
+              "the response register — DEVICE_DESC/RPT_DESC live on reg 3 "
+              "(Windows boot trace #0003/#0006)")
+        failures += 1
+    # read_resp: response register first, input register as fallback.
+    _rr = core_code.split("static int spi_hid_seq_read_resp(struct", 1)[1].split("\n}", 1)[0]
+    if "spi_hid_resp_reg(shid)" not in _rr or "desc.input_register" not in _rr:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read_resp() lost the "
+              "response-first order — descriptors live on reg 3 (Windows trace)")
+        failures += 1
+    # spi_hid_seq_read: standard pre-DONE follows the Windows phase map
+    # (WAIT_RESET -> 0, WAIT_DESC/WAIT_RPT -> resp reg), not input-only: the
+    # 9-byte TX selects the register, reg 0 never sees the desc on reg 3.
+    _sr = core_code.split("static int spi_hid_seq_read(struct", 1)[1].split("\n}", 1)[0]
+    _srw = "".join(_sr.split())
+    if "WAIT_RESET" not in _sr or "spi_hid_resp_reg(shid)" not in _sr:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() lost the Windows "
+              "phase map — standard pre-DONE must read reg 3 for descriptors")
         failures += 1
 
     # 6. the read approval frame: nine bytes, the register at offset 7, the
