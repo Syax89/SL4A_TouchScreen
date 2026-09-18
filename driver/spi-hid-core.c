@@ -91,6 +91,44 @@ static bool raw_fallback_on_reset;
  * DEVICE_DESC and stat_device_desc > 0 — or not. Default 0: byte-for-byte the
  * parent. */
 static bool raw_pre_desc_reg0;
+/* raw_b1f8109_preset — the one-switch restore of the working raw dialect.
+ *
+ * b1f8109 (v1.6.3) is the last build this panel answered on in RAW: the
+ * 2026-09-15 field bundle shows the descriptors received 19x, data=6073 and 26
+ * resets, and the 2026-09-17 battery's single positive was wire_double_opcode=1
+ * alone delivering a DEVICE_DESC where the other 13 variants stayed at +0.
+ * The complete dialect, reconstructed from the H1/H4 double-blind findings
+ * (file:line @ b1f8109), is five points:
+ *
+ *   1. Doubled opcode on every write. b1f8109's sequencer frame tables carry
+ *      the opcode twice — seq_descreq / vendor_init_cmd / sf_cmd / gf_cmd /
+ *      vd2 / vd0 all begin `02 02 ..` — which is exactly the
+ *      wire_double_opcode=1 form today (default OFF). Its spi_hid_output()
+ *      transport also prepended 0x02 ("the observed Linux workaround"), but
+ *      that function is dead in b1f8109: the doubling that reached the wire
+ *      lives in those frame tables, not in the transport.
+ *   2. Pre-DONE reads go to desc.input_register (0 until a descriptor parses)
+ *      — no three-phase {3, 0x0A} selector, no probe-time 0x0A force.
+ *      spi_hid_seq_read() @b1f8109 read the plain input_register. Today behind
+ *      raw_pre_desc_reg0 (default OFF).
+ *   3. Poller RESET_RSP gives up to the hardcoded fallback —
+ *      spi_hid_seq_descreq_work type==3 @b1f8109:1513-24 (DONE/FALLBACK, ready,
+ *      fallback descriptor). Today behind raw_fallback_on_reset (default OFF;
+ *      the default retries forever).
+ *   4. spi_hid_vendor_init = D2/D0 only, NO STOP frame (@b1f8109:640-658; the
+ *      STOP frame entered later with 6bb72a6).
+ *   5. Legacy 5-byte read frames — the current default; no change needed.
+ *
+ * When set AND raw_mode_active, the effective behavior of (1)(2)(3) is ON
+ * regardless of their own knob values, implemented as an explicit OR at each
+ * consumption site — spi_hid_wire_doubled()/spi_hid_wire_doubled_setfeat() for
+ * the doubled flag, the two read destinations in spi_hid_seq_read() and
+ * spi_hid_probe(), and the poller RESET_RSP branch — NEVER by overwriting those
+ * globals in probe. In spi_hid_vendor_init it skips ONLY the STOP frame: D2/D0
+ * still go out exactly as b1f8109 sent them (this is NOT skip_vendor_stop's
+ * all-three semantics). Default 0: byte-for-byte the parent at every site. This
+ * is the "restore the working dialect" switch for the 2026-09-17 regression. */
+static bool raw_b1f8109_preset;
 /* Deprecated alias: 1 asked for the frame without the doubled opcode, which is
  * the default now, so it only matters as an override of wire_double_opcode=1.
  * Kept declared so existing modprobe.d drop-ins keep loading. */
@@ -645,7 +683,9 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen);
 /* Whether command frames use the legacy doubled leading opcode. */
 static bool spi_hid_wire_doubled(void)
 {
-	return wire_double_opcode;
+	/* raw_b1f8109_preset forces the legacy doubled form b1f8109 sent on every
+	 * write, whatever wire_double_opcode says. */
+	return wire_double_opcode || raw_b1f8109_preset;
 }
 
 /* SET_FEATURE decides separately: the deprecated setfeat_no_double=1 asked for
@@ -653,7 +693,7 @@ static bool spi_hid_wire_doubled(void)
  * only take effect as an override of wire_double_opcode=1. */
 static bool spi_hid_wire_doubled_setfeat(void)
 {
-	return wire_double_opcode && !setfeat_no_double;
+	return (wire_double_opcode || raw_b1f8109_preset) && !setfeat_no_double;
 }
 
 /* DESCREQ for the device descriptor (register 0x000001), used by every state
@@ -721,19 +761,25 @@ static int spi_hid_vendor_init(struct spi_hid *shid)
 	if (skip_vendor_stop)
 		return 0;
 
-	/* First, tear down a stream that is still running. The device keeps
-	 * streaming across a host reboot: the state comes from an earlier
-	 * session's enable, it is there on the very first probe, and the
-	 * descriptor handshake cannot complete while it lasts (the field sweep
-	 * shows register 0 answering with stream frames and device_desc=0).
-	 * The reference sends exactly this frame before its DESCREQ
-	 * (surface_init.csv #0257, then RESET_RSP on register 0 at #0258/#0259
-	 * and a fresh DESCREQ at #0260). Six bytes separate it from the enable
-	 * key the sequencer sends later. Review S41-F1. */
-	ret = spi_hid_seq_write(shid, stop.bytes, (int)stop.len, NULL, 0);
-	if (ret)
-		return ret;
-	msleep(50);
+	/* b1f8109 — and so the raw_b1f8109_preset restore — sent only D2 then D0,
+	 * with no STOP frame. With the preset set, skip ONLY this teardown; the
+	 * D2/D0 pair below still goes out exactly as b1f8109 sent it. This is NOT
+	 * skip_vendor_stop's all-three semantics (that one returns before D2/D0). */
+	if (!raw_b1f8109_preset) {
+		/* First, tear down a stream that is still running. The device keeps
+		 * streaming across a host reboot: the state comes from an earlier
+		 * session's enable, it is there on the very first probe, and the
+		 * descriptor handshake cannot complete while it lasts (the field sweep
+		 * shows register 0 answering with stream frames and device_desc=0).
+		 * The reference sends exactly this frame before its DESCREQ
+		 * (surface_init.csv #0257, then RESET_RSP on register 0 at #0258/#0259
+		 * and a fresh DESCREQ at #0260). Six bytes separate it from the enable
+		 * key the sequencer sends later. Review S41-F1. */
+		ret = spi_hid_seq_write(shid, stop.bytes, (int)stop.len, NULL, 0);
+		if (ret)
+			return ret;
+		msleep(50);
+	}
 
 	ret = spi_hid_seq_write(shid, d2.bytes, (int)d2.len, NULL, 0);
 	if (ret)
@@ -1417,7 +1463,7 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 			 * {3, 0x0A}. One raw sweep tells whether the register
 			 * destination is the wedge: first-try DEVICE_DESC and
 			 * stat_device_desc > 0, or not. */
-			if (raw_pre_desc_reg0)
+			if (raw_pre_desc_reg0 || raw_b1f8109_preset)
 				reg = shid->desc.input_register;
 			else if (shid->seq_state == SPI_HID_SEQ_WAIT_RESET)
 				reg = 0;              /* the reset, and its drain */
@@ -1937,7 +1983,7 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 		seq_handle_rpt(shid, type, blen);
 	} else if (type == 3) {
 		shid->stat_reset_rsp++;
-		if (raw_fallback_on_reset) {
+		if (raw_fallback_on_reset || raw_b1f8109_preset) {
 			/* b1f8109 behavior (the last build this panel answered on and
 			 * the shape the field has never re-tested): one poller
 			 * RESET_RSP is the verdict, not a trigger to re-drive. */
@@ -2155,6 +2201,13 @@ module_param(raw_pre_desc_reg0, bool, 0444);
 MODULE_PARM_DESC(raw_pre_desc_reg0,
 	"H4 falsifier: skip the raw probe stream-register force and read every pre-DONE "
 	"register 0 / input_register instead of {3, 0x0A} (default 0)");
+module_param(raw_b1f8109_preset, bool, 0444);
+MODULE_PARM_DESC(raw_b1f8109_preset,
+	"One-switch restore of the working raw dialect as b1f8109 (v1.6.3), the last "
+	"build the panel answered on in RAW: doubled opcode on every write, pre-DONE "
+	"reads on input_register (no 0x0A probe force / {3, 0x0A} selector), poller "
+	"RESET_RSP gives up to the hardcoded fallback, and vendor init skips the STOP "
+	"frame (D2/D0 unchanged). Default 0: byte-for-byte the parent");
 module_param(wire_double_opcode, bool, 0444);
 MODULE_PARM_DESC(wire_double_opcode,
 	"Send the legacy doubled leading opcode (02 02 ..) instead of the "
@@ -4232,7 +4285,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	 * skips this force so the H4 falsifier can read register 0 through
 	 * WAIT_DESC: with it set input_register stays 0 until a descriptor parses,
 	 * exactly as v1.5.0 had it. */
-	if (shid->raw_mode_active && !raw_pre_desc_reg0)
+	if (shid->raw_mode_active && !(raw_pre_desc_reg0 || raw_b1f8109_preset))
 		shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;
 	/* The enable is NOT sent here any more: it is sent when the sequencer
 	 * reaches DONE, after the descriptor exchange, as the reference does. See

@@ -560,7 +560,7 @@ def check_control_flow_pins():
         failures += 1
     else:
         _body = _dw[1].split("\n}", 1)[0]
-        _fb = _body.split("if (raw_fallback_on_reset) {", 1)
+        _fb = _body.split("if (raw_fallback_on_reset", 1)
         if len(_fb) != 2:
             print("FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch is gone "
                   "from the poller")
@@ -588,7 +588,7 @@ def check_control_flow_pins():
                 print("FAIL driver/spi-hid-core.c: the poller's restart path is gone — "
                       "the give-up knob rides a branch that no longer has its retry")
                 failures += 1
-            elif _body.index("if (raw_fallback_on_reset) {") > \
+            elif _body.index("if (raw_fallback_on_reset") > \
                     _body.index("spi_hid_seq_restart_discovery"):
                 print("FAIL driver/spi-hid-core.c: the raw_fallback_on_reset branch sits "
                       "AFTER the retry — the first reset always restarts and the knob "
@@ -653,7 +653,8 @@ def check_control_flow_pins():
                   "consults raw_pre_desc_reg0 — with the knob set input_register is still "
                   "forced to 0x0A and the H4 sweep can never read register 0")
             failures += 1
-        elif "!raw_pre_desc_reg0" not in _pr0_g:
+        elif ("!raw_pre_desc_reg0" not in _pr0_g and
+              "!(raw_pre_desc_reg0" not in _pr0_g):
             print("FAIL driver/spi-hid-core.c: the probe stream-register force consults "
                   "raw_pre_desc_reg0 without negating it — the force now fires exactly when "
                   "the H4 sweep sets the knob, the opposite of spec item 1")
@@ -687,6 +688,174 @@ def check_control_flow_pins():
                   "pre-DONE would then route to input_register when the knob is OFF, inverting "
                   "spec item 1 (the default build must keep {3, 0x0A})")
             failures += 1
+
+    # raw_b1f8109_preset (H9): the one-switch restore of the working raw
+    # dialect. b1f8109 = v1.6.3, the last build the panel answered on in RAW
+    # (2026-09-15 bundle: descriptors received 19x, data=6073, 26 resets; the
+    # 2026-09-17 battery's single positive was wire_double_opcode=1 alone
+    # delivering a DEVICE_DESC where the other 13 variants stayed at +0).
+    # Declared, loadable, and CONSULTED at every site the dialect names:
+    #   1. the doubled-opcode consumption (spi_hid_wire_doubled() and its
+    #      SET_FEATURE sibling spi_hid_wire_doubled_setfeat()),
+    #   2a. the probe-time stream-register force guard,
+    #   2b. spi_hid_seq_read()'s raw pre-DONE branch,
+    #   3. the poller's RESET_RSP branch (joins raw_fallback_on_reset), and
+    #   4. spi_hid_vendor_init's STOP frame (skip ONLY the stop; D2/D0 stand).
+    # Each window is scoped to the branch/guard that consumes the knob, never a
+    # fixed byte reach (the raw_fallback_on_reset lesson): removing any one
+    # consultation leaves the knob declared and loadable but inert, and the
+    # default build silently stops being byte-for-byte the parent at that site.
+    if "static bool raw_b1f8109_preset;" not in core_code:
+        print("FAIL driver/spi-hid-core.c: raw_b1f8109_preset is no longer declared")
+        failures += 1
+    if "module_param(raw_b1f8109_preset, bool, 0444);" not in core_code:
+        print("FAIL driver/spi-hid-core.c: raw_b1f8109_preset is no longer loadable")
+        failures += 1
+    # 1. Doubled opcode on every write: spi_hid_wire_doubled() must OR the
+    # preset into the doubled flag (and its SET_FEATURE sibling — b1f8109's
+    # sf_cmd was doubled as well).
+    _bp_rd = core_code.split("static bool spi_hid_wire_doubled(void)", 1)
+    if len(_bp_rd) != 2:
+        print("FAIL driver/spi-hid-core.c: spi_hid_wire_doubled() is gone — "
+              "raw_b1f8109_preset has no doubled-flag consumption to reach")
+        failures += 1
+    else:
+        _bp_rdb = _bp_rd[1].split("\n}", 1)[0]
+        if ("wire_double_opcode" not in _bp_rdb or
+                "raw_b1f8109_preset" not in _bp_rdb):
+            print("FAIL driver/spi-hid-core.c: spi_hid_wire_doubled() no longer ORs "
+                  "raw_b1f8109_preset with wire_double_opcode — with the preset set every "
+                  "sequencer write would still go out single-opcode, not b1f8109's doubled form")
+            failures += 1
+        elif "||" not in "".join(_bp_rdb.split()):
+            print("FAIL driver/spi-hid-core.c: spi_hid_wire_doubled() mentions the preset "
+                  "without ORing it (spec item 1 is an explicit OR, not an overwrite)")
+            failures += 1
+    _bp_sf = core_code.split("static bool spi_hid_wire_doubled_setfeat(void)", 1)
+    if len(_bp_sf) == 2 and \
+            "raw_b1f8109_preset" not in _bp_sf[1].split("\n}", 1)[0]:
+        print("FAIL driver/spi-hid-core.c: spi_hid_wire_doubled_setfeat() ignores "
+              "raw_b1f8109_preset — b1f8109's SET_FEATURE 5 frame (sf_cmd) was doubled too")
+        failures += 1
+    # 2a. The probe-time stream-register force guard must name the preset
+    # (negated with raw_pre_desc_reg0), so with it set the 0x0A force is
+    # skipped and input_register stays 0, b1f8109's pre-DONE read destination.
+    _bp_probe = (core_code.rsplit("static int spi_hid_probe(struct spi_device *spi)", 1)[1]
+                 .split("\n}", 1)[0]
+                 if "static int spi_hid_probe(struct spi_device *spi)" in core_code else "")
+    _bp_force = _bp_probe.split(
+        "shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;", 1)
+    if len(_bp_force) != 2:
+        print("FAIL driver/spi-hid-core.c: the probe's raw stream-register force is gone — "
+              "raw_b1f8109_preset has nothing to skip")
+        failures += 1
+    else:
+        _bp_fg = _bp_force[0].rsplit("if (", 1)
+        _bp_g = "".join(_bp_fg[1].split()) if len(_bp_fg) == 2 else ""
+        if "raw_b1f8109_preset" not in _bp_g:
+            print("FAIL driver/spi-hid-core.c: the probe stream-register force no longer "
+                  "consults raw_b1f8109_preset — with the preset set input_register is still "
+                  "forced to 0x0A, not b1f8109's register 0")
+            failures += 1
+        elif ("!raw_b1f8109_preset" not in _bp_g and
+              "!(raw_pre_desc_reg0" not in _bp_g):
+            print("FAIL driver/spi-hid-core.c: the probe force consults raw_b1f8109_preset "
+                  "without negating it — the force would fire exactly when the preset is set, "
+                  "inverting the dialect")
+            failures += 1
+    # 2b. spi_hid_seq_read()'s raw branch: pre-DONE reads must be routed to
+    # input_register when the preset is set, alongside raw_pre_desc_reg0.
+    _bp_rd2 = (core_code.split("static int spi_hid_seq_read(struct", 1)[1].split("\n}", 1)[0]
+               if "static int spi_hid_seq_read(struct" in core_code else "")
+    _bp_raw = _bp_rd2.split("if (shid->raw_mode_active) {", 1)
+    if len(_bp_raw) != 2:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read()'s raw branch is gone — "
+              "raw_b1f8109_preset has no read destination to reroute")
+        failures += 1
+    else:
+        _bp_rb = _bp_raw[1].split("\n\t}", 1)
+        if len(_bp_rb) != 2:
+            print("FAIL driver/spi-hid-core.c: the raw read branch is not closed at its own "
+                  "indent — raw_b1f8109_preset cannot be scoped to the branch")
+            failures += 1
+        elif "raw_b1f8109_preset" not in _bp_rb[0]:
+            print("FAIL driver/spi-hid-core.c: the raw read branch no longer consults "
+                  "raw_b1f8109_preset — pre-DONE reads stay on {3, 0x0A} under the preset")
+            failures += 1
+        elif "shid->desc.input_register" not in \
+                _bp_rb[0].split("raw_b1f8109_preset", 1)[1]:
+            print("FAIL driver/spi-hid-core.c: the raw read branch consults "
+                  "raw_b1f8109_preset but no longer routes the read to input_register — "
+                  "the register destination is the preset's whole subject")
+            failures += 1
+    # 3. The poller RESET_RSP branch: the preset must join raw_fallback_on_reset
+    # in the branch guard (b1f8109 gave up after one reset).
+    _bp_dw = core_code.split("static void spi_hid_seq_descreq_work", 1)
+    if len(_bp_dw) != 2:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_descreq_work is gone — "
+              "raw_b1f8109_preset has no poller branch to reach")
+        failures += 1
+    else:
+        _bp_body = _bp_dw[1].split("\n}", 1)[0]
+        if "if (raw_fallback_on_reset" not in _bp_body:
+            print("FAIL driver/spi-hid-core.c: the poller's RESET_RSP branch is gone — "
+                  "raw_b1f8109_preset has nothing to join")
+            failures += 1
+        else:
+            _bp_guard = "".join(
+                _bp_body.split("if (raw_fallback_on_reset", 1)[1]
+                .split(") {", 1)[0].split())
+            if "raw_b1f8109_preset" not in _bp_guard:
+                print("FAIL driver/spi-hid-core.c: the poller's RESET_RSP branch no longer "
+                      "consults raw_b1f8109_preset — with the preset set it retries forever "
+                      "instead of giving up to the hardcoded fallback as b1f8109 did")
+                failures += 1
+    # 4. spi_hid_vendor_init skips ONLY the STOP frame under the preset: the
+    # stop write must still exist (the default path sends it) AND be gated by
+    # the preset, with the D2/D0 writes OUTSIDE the gate (b1f8109 sent them).
+    _bp_vi = core_code.rsplit("static int spi_hid_vendor_init(struct spi_hid *shid)", 1)
+    if len(_bp_vi) != 2:
+        print("FAIL driver/spi-hid-core.c: spi_hid_vendor_init is gone")
+        failures += 1
+    else:
+        _bp_vb = _bp_vi[1].split("\n}", 1)[0]
+        if "stop.bytes" not in _bp_vb:
+            print("FAIL driver/spi-hid-core.c: spi_hid_vendor_init no longer writes the STOP "
+                  "frame — raw_b1f8109_preset has nothing to skip")
+            failures += 1
+        elif "raw_b1f8109_preset" not in _bp_vb:
+            print("FAIL driver/spi-hid-core.c: spi_hid_vendor_init ignores "
+                  "raw_b1f8109_preset — the STOP frame is never skipped under b1f8109's dialect")
+            failures += 1
+        elif _bp_vb.index("raw_b1f8109_preset") > _bp_vb.index("stop.bytes"):
+            print("FAIL driver/spi-hid-core.c: the preset gate in spi_hid_vendor_init sits "
+                  "AFTER the STOP write — it can never skip the frame b1f8109 never sent")
+            failures += 1
+        else:
+            # Scope the gate to its own braces: the STOP write must be INSIDE it
+            # and the D2/D0 writes OUTSIDE it. A gate that wraps all three is
+            # skip_vendor_stop's semantics, not b1f8109's D2/D0-only dialect, and
+            # the two ordering checks above would both stay green on it.
+            _bp_gate = _bp_vb.split("if (!raw_b1f8109_preset) {", 1)
+            if len(_bp_gate) != 2:
+                print("FAIL driver/spi-hid-core.c: the preset gate in spi_hid_vendor_init is "
+                      "not `if (!raw_b1f8109_preset) {` — the STOP-only skip cannot be scoped")
+                failures += 1
+            else:
+                _bp_gb = _bp_gate[1].split("\n\t}", 1)
+                if len(_bp_gb) != 2:
+                    print("FAIL driver/spi-hid-core.c: the preset gate in spi_hid_vendor_init "
+                          "is not closed at its own indent — the STOP-only skip cannot be scoped")
+                    failures += 1
+                elif "stop.bytes" not in _bp_gb[0]:
+                    print("FAIL driver/spi-hid-core.c: the preset gate no longer wraps the STOP "
+                          "write — nothing is skipped under the preset")
+                    failures += 1
+                elif "d2.bytes" in _bp_gb[0] or "d0.bytes" in _bp_gb[0]:
+                    print("FAIL driver/spi-hid-core.c: the preset gate wraps D2/D0 too — that is "
+                          "skip_vendor_stop's all-three semantics, not b1f8109's D2/D0-only "
+                          "dialect (the preset must skip ONLY the STOP frame)")
+                    failures += 1
 
     # 7b. sync_timeout_ms is clamped at probe into the protocol's bounds — the
     # same class as the getfeat_delay_ms clamp above it: negative wraps
