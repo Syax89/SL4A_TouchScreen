@@ -281,7 +281,7 @@ Commands:
                     profile if none is given on a terminal; defaults to
                     --standard otherwise.
                       --standard  Single-touch + pen. Stable, supported. (default)
-                      --raw       EXPERIMENTAL heatmap multitouch. May be
+                      --raw       Beta heatmap multitouch. May be
                                   unstable; no hardware-qualified result yet.
                       --check     Validate prerequisites only, write nothing.
                       --dry-run   Validate and print the selected profile.
@@ -480,7 +480,7 @@ cmd_install() {
 			echo ""
 			echo -e "  ${GREEN}1) Standard HID${NC}   — single-touch + pen. Stable; this is the"
 			echo    "                       supported default. [recommended]"
-			echo -e "  ${YELLOW}2) Raw multitouch${NC} — EXPERIMENTAL. Heatmap-based multi-finger"
+			echo -e "  ${YELLOW}2) Raw multitouch${NC} — Beta. Heatmap-based multi-finger"
 			echo    "                       tracking. May fail to activate after a cold"
 			echo    "                       boot, may be unstable with 3+ fingers, and has"
 			echo    "                       no hardware-qualified compatibility result yet."
@@ -1009,7 +1009,7 @@ EOF
 	echo ""
 	rule
 	if [ "$PROFILE" = "raw" ]; then
-		echo -e "${YELLOW}${BOLD}Install complete${NC} ${YELLOW}— EXPERIMENTAL raw multitouch profile selected.${NC}"
+		echo -e "${YELLOW}${BOLD}Install complete${NC} ${YELLOW}— Beta raw multitouch profile selected.${NC}"
 	else
 		echo -e "${GREEN}${BOLD}Install complete${NC} ${GREEN}— standard HID profile selected.${NC}"
 	fi
@@ -1311,14 +1311,14 @@ cmd_status() {
 	local profile live_raw
 	profile="$(modprobe_profile)"
 	case "$profile" in
-		raw)      warn "Modprobe profile for the next boot: raw (EXPERIMENTAL multitouch)" ;;
+		raw)      warn "Modprobe profile for the next boot: raw (Beta multitouch)" ;;
 		standard) pass "Modprobe profile for the next boot: standard HID" ;;
 		none)     info "No modprobe profile configured (nothing installed)" ;;
 		*)        warn "Unrecognized contents in $MODPROBE_CONF — no profile will be applied" ;;
 	esac
 	if live_raw="$(loaded_raw_mode)"; then
 		if [ "$live_raw" = "Y" ]; then
-			warn "Profile running right now: raw (EXPERIMENTAL multitouch) — it stays until the next boot"
+			warn "Profile running right now: raw (Beta multitouch) — it stays until the next boot"
 		else
 			pass "Profile running right now: standard HID"
 		fi

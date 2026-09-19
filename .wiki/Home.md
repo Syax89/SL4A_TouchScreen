@@ -13,7 +13,7 @@ real hardware — not a fork of an in-tree driver.
 |---|---|---|
 | Surface Laptop 4 (AMD) | touch controller ACPI `MSHW0231` (HID 045E:0C19) | 72×48 grid, 3456 CapImg cells |
 | Surface Laptop 3 (AMD) | touch controller ACPI `MSHW0162` | 78×52 grid, 4056 CapImg cells |
-| SPI controller (both) | `AMDI0060` (AMD Cezanne FCH SPI V2, MMIO 0xFEC10000) | PIO mode, 12 MHz, mode 0 |
+| SPI controller (both) | `AMDI0060` (AMD Cezanne FCH SPI V2, MMIO 0xFEC10000) | PIO mode, 33.33 MHz, mode 0 |
 
 The driver selects device-specific tuning (grid geometry, CapImg sample count,
 baseline length) from the ACPI ID at probe time — see [Architecture](Architecture).
@@ -22,7 +22,7 @@ baseline length) from the ACPI ID at probe time — see [Architecture](Architect
 
 | Mode | `raw_mode` | What you get | Status |
 |---|---|---|---|
-| **Standard HID** | `0` (default) | Single-touch + pen, firmware-computed coordinates, ~10 ms reports | **Stable, recommended** |
+| **Standard HID** | `0` (default) | Single-touch + pen, firmware-computed coordinates, ~10 ms reports (field observation) | **Qualified profile, recommended** |
 | **Raw heatmap** | `1` | Sensor-grid data processed host-side into multi-touch | **Beta** |
 
 [Standard Touch Mode](Standard-Touch-Mode) is what you should run day to day.
@@ -65,7 +65,7 @@ Linux input subsystem (evdev)
   ┌─────┴──────────┐
   │ spi-amd        │   AMD FCH SPI V2 PIO controller
   └─────┬──────────┘
-        │ SPI bus (12 MHz, mode 0)
+        │ SPI bus (33.33 MHz, mode 0)
    MSHW0231 / MSHW0162 touch controller
 ```
 

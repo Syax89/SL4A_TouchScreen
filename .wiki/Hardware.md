@@ -16,8 +16,8 @@ on the AMD Cezanne (Ryzen 4000/5000 Mobile) FCH.
 | CapImg raster | 3456 bytes, one byte per cell, row-major, row stride = 72 (no padding) |
 | Resting level | `0xB4` (180) in the raster |
 | Technology | Mutual-capacitance projective touch |
-| Report rate | ~100 Hz (raw mode) |
-| SPI clock | 12 MHz (initial), configurable |
+| Report rate | ~100 Hz (raw mode, field observation) |
+| SPI clock | 33.33 MHz (bus default), configurable |
 | SPI mode | 0 (CPOL=0, CPHA=0) |
 | Chip select | 0 |
 
@@ -34,6 +34,10 @@ MOSI (SDO)  ──────────────────────�
 MISO (SDI)  ─────────────────────── → MISO
 GPIO (IRQ)  ←───────────────────────  INT (data-ready)
 ```
+
+The controller's alternate chip-select register is programmed to index 1
+(physical **ALT_CS 1**) for this board (`spi-amd.c`); the ACPI `_CRS` declares
+bus chip-select 0.
 
 ### GPIO
 
@@ -108,14 +112,12 @@ PIO (Programmed I/O) and DMA modes. The Linux driver uses V2 PIO mode.
 
 ### Speed Configuration
 
-| Speed Index | Clock | Notes |
-|-------------|-------|-------|
-| 0 | 12 MHz | Default / safe speed |
-| 1 | 25 MHz | Requires SPI100 mode |
-| Higher | Up to 100 MHz | Requires evaluation |
+The bus default is **33.33 MHz**. The controller exposes a fixed tier table
+from **800 kHz** up to **100 MHz** (100, 66.66, 50, 33.33, 22.22, 16.66, 4,
+3.17 MHz and 800 kHz); the 50, 4 and 3.17 MHz tiers use the SPI100 (SPD7)
+path.
 
-The Windows driver uses speed index 0 (12 MHz nominal) for normal
-operation. The Linux driver follows this.
+The Linux driver uses the bus default for normal operation.
 
 ### TX_COUNT Quirk (PIO)
 

@@ -656,3 +656,65 @@ removed from "What Will Not Work" for exactly that reason).
 - Independent `review` pass over the diff: "ship as-is"; every checked claim
   grep-traceable, the 40-param/once table and the beta/qualified wording verified
   consistent; the only nit (the 4-contact wording) was folded in above.
+
+---
+## M5a — fix list F1-F22
+
+
+---
+
+# M5a — apply the adversarial fix list (docs + the F21 installer string)
+
+Docs-only plus the F21 installer strings. Touched `README.md`,
+`docs/PARAMETERS.md`, 14 `.wiki/` files and `tools/sl4a-touch.sh` (plus this
+file). No driver change. `make -C tests test` → **exit 0**.
+`bash -n tools/sl4a-touch.sh` → OK. Baseline HEAD = `597e8f2`;
+`grep -rh module_param driver/*.c` → **45** params.
+
+## Per-F result
+
+| # | Result | Change / why (file:line) |
+|---|---|---|
+| F1 | **applied** | `docs/PARAMETERS.md:13` — `get_noread`, `raw_handshake_first_ms`, `raw_no_enable`, `raw_watchdog_teardown`, `std_raw_transition` appended to the Experimental activation row. Defaults verified at each declaration: `get_noread=0` (spi-hid-core.c:2511), `raw_handshake_first_ms=2000` (=`RAW_HANDSHAKE_TIMEOUT_MS`, :217/:227), `raw_no_enable=0` (:1266), `raw_watchdog_teardown=1` (:1780), `std_raw_transition=0` (:2559). |
+| F2 | **applied** | `.wiki/Config-Table.md:180-184` — same 5 rows (class Experimental activation) added. |
+| F3 | **applied** | `.wiki/Protocol.md:12-18` — `hid_desc_addr` removed; states the geometry comes from the device's `DEVICE_DESC` (type 7) body via `spi_hid_parse_dev_desc()` (spi-hid-core.c:3268-3309). The descriptor *register* is the compile-time DESCREQ target, cross-checked against DT `hid-descr-addr` / ACPI `_DSM` fn 1 (:4228/:4210). Lead of the Descriptor register section fixed at :70. |
+| F4 | **applied** | `.wiki/Protocol.md:12,20` — `PNP0C50`→`PNP0C51` (docs/acpi/dsdt.dsl:1550). |
+| F5 | **applied** | `.wiki/Protocol.md:73-87` — rebuild from `struct spi_hid_device_desc_raw` (spi-hid-core.h:110-124): VendorID@18, ProductID@20, VersionID@22 (**0x0004**, spi-hid-core.c:1180-1181), wFlags@24 (u32); the invented "Data register"/"Reserved" rows are gone. |
+| F6 | **applied** | `.wiki/Protocol.md:41-52` and `.wiki/Wire-Protocol.md:64-77` — code comment stated as truth ("register decoded at offset 7; 5-byte/address-field → `RESET_RSP`"); the "only shape this panel answers" field result moved into a marked note "*observed on hardware, not derivable from the source*". |
+| F7 | **applied** | `.wiki/Architecture.md:26-33` — opt-in paragraph now: `install` activates at Step 7; the boot unit repeats it; the two deferral cases (unenrolled Secure Boot MOK, load-time `raw_mode` profile change) are named. |
+| F8 | **applied** | `.wiki/Building-Usage-and-Troubleshooting.md:16-27` — install activates at Step 7; reboot framed as the recovery path, not a required step. |
+| F9 | **applied (site list expanded — flagged)** | 12 MHz → 33.33 MHz at `Hardware.md:20,115-117`, `Protocol.md:21`, `Wire-Protocol.md:109`, `Home.md:16,68`. The Hardware "Speed Configuration" table (`Hardware.md:113-117`) had to be rebuilt, not just relabelled: the code's tier list (spi-amd.c:174-184) is 800 kHz…100 MHz with **no index table and no 12 MHz entry**, so the old "index 0/1/Higher" rows could not survive the fix. **Extra sites** not in the list, fixed for consistency because they carried the same false claim: `Architecture.md:17`, `Home.md:68`. |
+| F10 | **applied** | `.wiki/Hardware.md:37-40`, `.wiki/Protocol.md:28-30` — panel wired to the controller's alternate chip-select index 1 (physical ALT_CS 1, spi-amd.c:151-152); ACPI `_CRS` declares bus chip-select 0. |
+| F11 | **applied** | `.wiki/Build-and-Install.md:82` — `skip_getfeat` default `0`→`1` (spi-hid-core.c:56). |
+| F12 | **applied** | `.wiki/Build-and-Install.md:154` — `/sys/module/spi_amd/…` → `/sys/module/sl4a_spi_amd/parameters/debug_trace` (`debug_trace` is owned by spi-amd.c:47). |
+| F13 | **applied** | `.wiki/Pipeline.md:171-172` — re-rendered as README:92 does: ×`blob_max_distance` multipliers 1×2.2 / 2×1.0 / 3×2.8 / 4×3.4 / 5+×4.0 (constants `ASSOC_RADIUS_*` = 22/28/34/40 at mshw0231-raw-constants.h:122-125, applied `/10` at mshw0231-raw.c:1020-1026). |
+| F14 | **applied** | `README.md:81` — c590 formula now carries the `+500` rounding (`C590_STEP_DEN/2`, mshw0231-raw.c:211). |
+| F15 | **applied** | `.wiki/Architecture.md:158`, `.wiki/Build-and-Install.md:14` — `soak` added (cmd_soak at tools/sl4a-touch.sh:2305, dispatched at :2649). |
+| F16 | **applied** | `.wiki/Home.md:25` — standard mode `**Stable, recommended**` → `**Qualified profile, recommended**`. |
+| F17 | **applied** | `README.md:39`, `.wiki/Hardware.md:19`, `.wiki/Home.md:25`, `.wiki/Standard-Touch-Mode.md:21` — `~100 Hz` / `~10 ms` now marked as field observations. |
+| F18 | **applied (+1 extra)** | `.wiki/Protocol.md:5,8` (HidSpiDeviceV0 / decompiled `.sys` → "the reference stack"); `.wiki/Config-Table.md` rewritten end-to-end (title :1; DLL name, virtual/file addresses, all `+0x` offset columns/headers, `FUN_`/`DAT_` names, "static DLL binary" and "device object" gone, every constant + Linux mapping kept); `.wiki/Pipeline.md:16` (the DLL → the reference stack); `README.md:83` (DAT_1806c08c8 removed). **Extra:** `README.md:215` (`DLL config table values` → `Config table values`) — the last `DLL` token in the README under review. |
+| F19 | **applied (cited range read literally, flagged)** | `docs/PARAMETERS.md:61` (date `2026-09-16` removed), `:63` (`field-settled` removed), `:14` (`Field-tested before any of these become defaults.` re-narrated to `None of these becomes a default before it is field-tested.`); `Protocol.md` `field-settled` folded into the F6 rewrite; `Pipeline.md:116-120` dev-history narration dropped. **Deviation:** the citation `PARAMETERS.md:61 (+4,63)` — line 4 carries the mandated Beta label ("still under field review") and was left intact, so the `+4` was read as the field-log sentence at line 14 (handled). |
+| F20 | **applied** | `.wiki/Build-and-Install.md:164` — dropped `which calls M010` from the `_RST` note. |
+| F21 | **applied (scope = the 5 user-facing status labels)** | `tools/sl4a-touch.sh:284,483,1012,1314,1321` — the raw-profile status label `EXPERIMENTAL` → `Beta`. Lowercase adjectival `experimental` (modprobe comment :855, two rollback error strings :1259-1260) left as-is, matching README's adjectival use ("the experimental controller"). |
+| F22 | **applied** | `.wiki/Building-Usage-and-Troubleshooting.md:46-48` — the literal pen node name `045E:0C19 Stylus` is not produced anywhere in `driver/` (the driver's own raw node is `MSHW0231 Touchscreen`, mshw0231-raw.c:1900), so it was dropped for a generic description (the HID stack assigns the name). |
+
+## Out-of-scope binary refs left in place
+
+`docs/CONFIG_TABLE.md` and `README.md:219` (`docs/decomp/`) still reference the
+reference-binary analysis. They are in `docs/`, which is **not** in this leg's
+surveyed set (README, `docs/PARAMETERS.md`, the 15 `.wiki/` pages) and not in any
+F-row, so they were not touched; flagged here in case the house rule is meant to
+cover `docs/` too.
+
+## Verification
+
+- `make -C tests test` → **exit 0** (full host + python + hunt-sandbox suite).
+- `bash -n tools/sl4a-touch.sh` → OK.
+- Param parity (scripted): every one of the **45** `module_param` names is
+  present in `docs/PARAMETERS.md`; `.wiki/Config-Table.md` has **45** parameter
+  rows. (`raw_mode` matches as the `raw_mode=0` cell.)
+- Sweeps over `README.md` + `.wiki/`: no `12 MHz`, no `2026`, no `field-settled`/
+  `field sweep`, no `DLL`/`.sys`/`FUN_`/`DAT_`/`0x180`/`decompil`, no
+  `hid_desc_addr`/`PNP0C50`.
+- Independent `review` pass over the diff: **"ship as-is"**; the one precision
+  nit (the SPI100/SPD7 tier labelling) was folded into `Hardware.md:115-118`.

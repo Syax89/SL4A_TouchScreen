@@ -13,7 +13,7 @@ row-major, **row stride = grid width** (no padding); the resting level is
 
 ## Reference chain: the Windows detector
 
-The DLL splits the work differently from the Linux pipeline below: a
+The reference stack splits the work differently from the Linux pipeline below: a
 per-frame **detector** selects one peak, and a separate **tracker** turns the
 sequence of peaks into contacts. The detector's stages:
 
@@ -114,13 +114,10 @@ order and contribute exactly **one** peak per equal-signal region, anchored
 to the cell nearest the region's centre — the peak has to stay near the blob
 centroid, or a wide saturated plateau's only peak falls outside the
 velocity-rejection radius and the whole contact is silently dropped. In a
-tapered blob only the true center qualifies — the
-scan replaced an
-earlier 4-point probe that over-counted ~13 peaks per blob and exhausted the
-shared **peak budget** (`HEATMAP_MAX_PEAKS`, 20 — kept ≥
-`HEATMAP_MAX_BLOBS` so the budget can never starve a committable blob),
-silently dropping any 3rd+
-simultaneous finger.
+tapered blob only the true center qualifies. One peak per equal-signal region
+keeps a single blob from exhausting the shared **peak budget**
+(`HEATMAP_MAX_PEAKS`, 20), which is kept ≥ `HEATMAP_MAX_BLOBS` so the budget
+can never starve a committable blob.
 
 ## 5. CCL flood-fill
 
@@ -171,8 +168,8 @@ Cost model (×`HUNGARIAN_COST_SCALE` = 100):
 | Continuity bonus | 5 | Keep two actively-tracked fingers from swapping mid-gesture |
 | Jump-reject margin | 200 | Reject implausible jumps |
 
-Association radii widen with finger count: 22 / 28 / 34 / 40 cells
-(`ASSOC_RADIUS_1/3/4/5_FINGERS`).
+Association radius multipliers (×`blob_max_distance`, stored ×10 as
+`ASSOC_RADIUS_*`): 1×2.2, 2×1.0, 3×2.8, 4×3.4, 5+×4.0.
 
 ## 10. Position smoothing, deadband, stationary lock
 

@@ -16,10 +16,15 @@ sudo reboot
 The unified installer checks for `MSHW0231`/`MSHW0162` +
 `AMDI0060`, builds `sl4a-spi-amd` and `sl4a-spi-hid` with DKMS for
 every installed kernel with an available build tree, removes obsolete
-`sl4a-touch` DKMS versions, and installs `sl4a-touch-activate.service`
-for boot activation. It deliberately leaves active modules untouched:
-replacing the AMD SPI controller while running can freeze the system.
-Reboot is required after every install or update.
+`sl4a-touch` DKMS versions, installs `sl4a-touch-activate.service`
+for boot activation, and activates the modules at **Step 7** — it binds
+them as soon as it finishes. Two cases skip that first activation and
+leave it to the boot unit: an unenrolled Secure Boot MOK key, and a
+profile that changes the load-time-only `raw_mode` (the modules then keep
+the previous profile until the next boot). Replacing the AMD SPI
+controller while running can freeze the system, so a reboot is the
+recovery path after a failed experiment, not a required step of a normal
+install.
 
 The installer chooses the compiler required by the running kernel. With
 Secure Boot enabled it generates/re-encodes the DKMS MOK signing key
@@ -39,7 +44,8 @@ leaves loaded modules active until reboot.
 ## Input devices
 
 After a successful boot, the touchscreen normally appears as `spi 045E:0C19`
-and the pen as `spi 045E:0C19 Stylus` under `/dev/input/eventN`. In raw mode the
+under `/dev/input/eventN`, with the pen published as its own HID input node
+(whose name the HID stack assigns, not this driver). In raw mode the
 driver publishes its own node named `MSHW0231 Touchscreen`.
 
 ## Development

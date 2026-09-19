@@ -63,9 +63,16 @@ reference: 0B 00 00 00 FF 00 00 <reg> 00   (9 bytes; register at offset 7)
 legacy:    0B <reg3> FF                     (5 bytes; register in the address field)
 ```
 
-The driver's default is the **legacy** shape (`read_frame_variant=1`), the only
-shape this panel answers; the reference shape is `read_frame_variant=0`, both is
-`2`. (`SPI_HID_WIRE_OPCODE_READ = 0x0B`; the write opcode is `0x02`.)
+The builder decodes the register from **offset 7** in the nine-byte reference
+shape; a five-byte frame with the register in the address field asks for
+register 0 and is answered with the device's `RESET_RSP`. `read_frame_variant`
+selects the shape: `1` (legacy, the default), `0` (reference), `2` (both).
+(`SPI_HID_WIRE_OPCODE_READ = 0x0B`; the write opcode is `0x02`.)
+
+> **Note — observed on hardware, not derivable from the source.** On this panel
+the five-byte, address-field form is the one that answered and the nine-byte
+reference form stayed silent; that field result is why the default is
+`read_frame_variant=1`.
 
 ## Response types
 
@@ -99,7 +106,7 @@ FIFO `0x85`, selecting an unwritten slot that returns stale `0xFF` data.
 | Offset | Register | Purpose |
 |---:|---|---|
 | `0x1D` | `ALT_CS` | Alternate chip select (physical ALT_CS 1 for this board) |
-| `0x22` | `SPI100_SPEED_CONFIG` | SPI speed tiers (index 0 = 12 MHz default) |
+| `0x22` | `SPI100_SPEED_CONFIG` | SPI speed tiers (bus default 33.33 MHz) |
 | `0x45` | `OPCODE_REG` | V2 transaction opcode |
 | `0x47` | `CMD_TRIGGER` | Bit 7 starts a transaction |
 | `0x48` | `TX_COUNT` | Transmitted byte count (≤ FIFO depth − 4) |

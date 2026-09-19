@@ -18,7 +18,8 @@ coordinates in the default mode — no one has to ask for it. The driver in its
 default configuration therefore **never sends GET_FEATURE/SET_FEATURE at all**:
 it reaches sequencer state `4` (`DONE`) right after the report-descriptor
 exchange (see [Architecture](Architecture)), and the device streams Report ID
-`0x40`/`0x01` with real coordinates at roughly 10 ms intervals — no calibration,
+`0x40`/`0x01` with real coordinates at roughly 10 ms intervals (a field
+observation) — no calibration,
 no signal processing on the Linux side.
 
 ## Report ID 0x40 — TouchScreen

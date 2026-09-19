@@ -36,7 +36,7 @@ activation guide.
 | SPI Controller | `AMDI0060` (AMD FCH SPI V2 at MMIO 0xFEC10000) |
 | Protocol | HID-over-SPI Version 0 |
 | Touch grid | 72×48 cells (SL4) / 78×52 cells (SL3) — selected by ACPI ID |
-| Report rate | ~100 Hz (raw mode) |
+| Report rate | ~100 Hz (raw mode, field observation) |
 
 ## Feature Status
 
@@ -78,9 +78,9 @@ unresolved frame-layout assumptions are recorded in `docs/EVIDENCE.md`.
 
 | Stage | Function |
 |-------|----------|
-| **c590 LUT** | Byte-indexed CapImg sample → fixed-point: `max(0, 10000 - (i·22204/1000 + 6000))` |
+| **c590 LUT** | Byte-indexed CapImg sample → fixed-point: `max(0, 10000 - ((i·22204 + 500)/1000 + 6000))` |
 | **Baseline** | 30-frame asymmetric EMA per cell |
-| **Noise floor** | c590 < 400 → suppressed (Windows DAT_1806c08c8 = 0.04) |
+| **Noise floor** | c590 < 400 → suppressed (0.04 in the reference stack's fixed-point units) |
 | **Peak gate** | Full radius-2 neighbourhood scan of touched cells, rise ≥200, max 20 peaks (equal-signal plateaus contribute one peak, anchored at the region's centre) |
 | **CCL flood-fill** | 4-connected BFS, filters: n≥2, max_rise≥200, weight≥1000 |
 | **Velocity rejection** | Blob must be within 6 cells of a detected peak |
@@ -212,7 +212,7 @@ unit that repeats the binding automatically.
 | [`docs/PIPELINE.md`](docs/PIPELINE.md) | Touch pipeline specification |
 | [`docs/SPI_REGISTERS.md`](docs/SPI_REGISTERS.md) | AMD FCH SPI controller registers |
 | [`docs/AMDI0060_CONTRACT.md`](docs/AMDI0060_CONTRACT.md) | AMDI0060 controller boundary and safety contract |
-| [`docs/CONFIG_TABLE.md`](docs/CONFIG_TABLE.md) | DLL config table values |
+| [`docs/CONFIG_TABLE.md`](docs/CONFIG_TABLE.md) | Config table values |
 | [`docs/ACTIVATION.md`](docs/ACTIVATION.md) | Raw mode activation (SET_FEATURE ID5) |
 | [`docs/CONTACT_ABI.md`](docs/CONTACT_ABI.md) | Contact struct ABI |
 | [`docs/ETW_CSV_FORMAT.md`](docs/ETW_CSV_FORMAT.md) | Windows ETW trace format |

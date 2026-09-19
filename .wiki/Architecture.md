@@ -14,7 +14,7 @@ V0 protocol + HID integration          AMD FCH SPI V2 controller
 • IRQ-driven sequencer                 • TX/RX FIFO transaction execution
 • descriptor parsing (936-byte RD)     • bulk PIO segmentation (64-byte)
 • report forwarding → hid_input        • TX_COUNT=3 read quirk
-• raw heatmap pipeline (mshw0231-raw)  • speed/CS config (12 MHz, mode 0)
+• raw heatmap pipeline (mshw0231-raw)  • speed/CS config (33.33 MHz, mode 0)
           \                                /
            └────────── SPI framework ──────┘
                           │
@@ -23,10 +23,15 @@ V0 protocol + HID integration          AMD FCH SPI V2 controller
               MSHW0231 / MSHW0162 (SPI1, CS0)
 ```
 
-Both modules are **opt-in**: the installer never loads them at install time, and
-neither replaces the in-tree SPI/HID drivers while running. Loading
-`sl4a-spi-amd` while the system is live can freeze it — always install and
-reboot.
+Both modules are **opt-in**: the kernel never loads them on its own (neither
+exports an alias), and neither replaces the in-tree SPI/HID drivers while
+running. `install` activates them at **Step 7** as soon as it finishes — the
+boot unit it enables repeats the binding after every future boot. Two cases
+defer that first activation to the boot unit: with Secure Boot the MOK key must
+be enrolled first, and a profile change of the load-time-only `raw_mode` keeps
+the previous profile until the next boot. Loading
+`sl4a-spi-amd` while the system is live can freeze it, so recovery after a
+failed experiment is a reboot.
 
 ## Sequencer state machine
 
@@ -150,7 +155,7 @@ The driver exposes read-only diagnostics under the SPI device's sysfs node
 | `driver/mshw0231-raw.c` | Raw heatmap pipeline: baseline, peaks, CCL, Hungarian, MT slots |
 | `driver/mshw0231-raw-constants.h` | All pipeline constants |
 | `driver/spi-amd.c` | AMD FCH SPI V2 controller driver (PIO) |
-| `tools/sl4a-touch.sh` | Installer: install/uninstall/activate/status/logs/rebuild/hunt |
+| `tools/sl4a-touch.sh` | Installer: install/uninstall/activate/status/logs/rebuild/hunt/soak |
 
 See [Protocol](Protocol) for the wire format and [Touch Pipeline](Pipeline) for
 the raw processing chain.

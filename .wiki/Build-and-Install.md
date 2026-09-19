@@ -11,7 +11,7 @@
 
 All operations live in one tool: `tools/sl4a-touch.sh`
 (subcommands: `install`, `uninstall`, `activate`, `status`, `logs`,
-`rebuild`, `hunt`).
+`rebuild`, `hunt`, `soak`).
 
 ```bash
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
@@ -79,7 +79,7 @@ Profile parameters live in `/etc/modprobe.d/sl4a-spi-hid.conf`
 | `sync_timeout_ms` | 6000 | Bounds every synchronous request (covers the ~3.6 s device settle) |
 | `stream_watchdog_ms` | 2000 | Runtime streaming watchdog interval (0 disables) |
 | `stream_watchdog_max_retries` | 3 | Re-init retries before giving up |
-| `skip_getfeat` | 0 | Skip the connect-time GET_FEATURE exchange |
+| `skip_getfeat` | 1 | Skip the connect-time GET_FEATURE exchange |
 | `getfeat_delay_ms` | 0 | Delay between RPT_DESC and GET_FEATURE |
 | `ema_alpha` | 2 | Position-smoothing EMA coefficient (position only) |
 | `blob_max_distance` | 3 | Hungarian association base radius (cells) |
@@ -151,7 +151,7 @@ SET_FEATURE ID5=01 to activate raw mode.
 
 - Reduce `ema_alpha` for more responsive movement (trade-off: more jitter)
 - Increase `blob_lift_frames` if fingers are lost prematurely
-- Check SPI bus speed with `cat /sys/module/spi_amd/parameters/debug_trace`
+- Check SPI bus speed with `cat /sys/module/sl4a_spi_amd/parameters/debug_trace`
 
 ### Touch not using full screen
 
@@ -161,8 +161,8 @@ Override if your display resolution or DPI scaling requires it.
 
 ## Known Issues
 
-1. **No `_RST` support**: The ACPI `_RST` method calls `M010` which destroys
-   the device. The driver never invokes it (recovery uses `_PS3`→`_PS0`).
+1. **No `_RST` support**: The ACPI `_RST` method physically destroys
+   the device on this hardware. The driver never invokes it (recovery uses `_PS3`→`_PS0`).
 2. **4+ finger instability**: Without the Mahalanobis contact classifier
    and per-cycle gain adaptation (both unavailable without device firmware
    access), tracking 4+ simultaneous fingers has partial contact loss.

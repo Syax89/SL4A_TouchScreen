@@ -2,26 +2,32 @@
 
 Both supported panels — `MSHW0231` (Surface Laptop 4 AMD) and `MSHW0162`
 (Surface Laptop 3 AMD) — speak the same **HID-over-SPI Version 0 (V0)** protocol,
-Microsoft's pre-release HidSpiDeviceV0 variant. It differs from the public
+Microsoft's pre-release V0 variant. It differs from the public
 HID-over-SPI v1.0 spec in framing, descriptor layout and enumeration order.
 This page documents the protocol as implemented by the Linux driver,
-cross-validated against decompiled Windows `hidspi.sys` / `HidSpiCx.sys`.
+cross-validated against the reference Windows stack.
 
 ## Discovery via ACPI
 
-The device is declared in the DSDT under `\_SB.SPI1` with a `PNP0C50`
-(compatible) HID-over-SPI ID. The driver reads the **`hid_desc_addr`** ACPI
-device property to locate the HID descriptor register.
+The device is declared in the DSDT under `\_SB.SPI1` with a `PNP0C51`
+(compatible) HID-over-SPI ID. The transport geometry is not read from a static
+property: the driver learns it from the device's own `DEVICE_DESC` (type 7)
+response, parsed by `spi_hid_parse_dev_desc()` into `shid->desc`.
 
 ```
 Device (TPD0) {
     Name (_HID, "MSHW0231")        // or "MSHW0162" on SL3 AMD
-    Name (_CID, "PNP0C50")         // HID-over-SPI compatible
-    Method (_CRS) { ... }          // SPI1: chip-select 0, 12 MHz, mode 0
+    Name (_CID, "PNP0C51")         // HID-over-SPI compatible
+    Method (_CRS) { ... }          // SPI1: chip-select 0, 33.33 MHz, mode 0
 }
 ```
 
-The SPI controller is `AMDI0060` (AMD FCH SPI V2). The driver's ACPI match
+The SPI controller is `AMDI0060` (AMD FCH SPI V2). The discovery register is
+the compile-time `DESCREQ` target; the ACPI `_DSM` (function 1) or the DT
+`hid-descr-addr` property names the same register, and a different value is
+warned about rather than used. The panel is wired to the controller's alternate
+chip-select index 1 (physical ALT_CS 1, `spi-amd.c`), while the ACPI `_CRS`
+declares bus chip-select 0. The driver's ACPI match
 table selects per-device tuning from the ACPI ID (see [Architecture](Architecture)).
 
 ## Transport model
@@ -34,10 +40,16 @@ Every exchange is host-initiated over one SPI transaction:
    selects the doubled form.
 2. The device asserts the data-ready GPIO **IRQ** when a response is available.
 3. Host sends a **read approval** (`0x0B` frame), then reads the response from
-   the FIFO. The driver's default is the field-settled **5-byte legacy shape**
-   (`0B <reg3> FF`, register in the address field) — the only shape this panel
-   answers; the 9-byte reference shape (register at offset 7) is
-   `read_frame_variant=0` and silent on it.
+   the FIFO. The builder decodes the register from **offset 7** in the
+   nine-byte reference shape; a five-byte frame with the register in the
+   address field asks for register 0 and is answered with the device's
+   `RESET_RSP`. `read_frame_variant` selects the shape (`1` five-byte legacy,
+   the default; `0` nine-byte reference; `2` both).
+
+> **Note — observed on hardware, not derivable from the source.** On this panel
+the five-byte, address-field form is the one that answered and the nine-byte
+reference form stayed silent; that field result is why the default is
+`read_frame_variant=1`.
 
 All input is IRQ-driven; there is no polling in normal operation.
 
@@ -55,12 +67,12 @@ Response frames carry a type nibble in the header. The driver handles:
 
 ## Descriptor register
 
-The HID descriptor register (at `hid_desc_addr`) describes the transport
-geometry:
+The device descriptor returned in the `DEVICE_DESC` (type 7) body describes the
+transport geometry:
 
 | Offset | Size | Field |
 |---:|---:|---|
-| 0 | 2 | Register length |
+| 0 | 2 | Device descriptor length |
 | 2 | 2 | BCD version (0x0100 = V0) |
 | 4 | 2 | Report descriptor length (936) |
 | 6 | 2 | Report descriptor register |
@@ -69,11 +81,10 @@ geometry:
 | 12 | 2 | Output register |
 | 14 | 2 | Max output length |
 | 16 | 2 | Command register |
-| 18 | 2 | Data register |
-| 20 | 2 | Vendor ID (0x045E) |
-| 22 | 2 | Product ID (0x0C19) |
-| 24 | 2 | Version ID (0x0101) |
-| 26 | 2 | Reserved |
+| 18 | 2 | Vendor ID (0x045E) |
+| 20 | 2 | Product ID (0x0C19) |
+| 22 | 2 | Version ID (0x0004) |
+| 24 | 4 | Flags (`wFlags`) |
 
 The driver parses these with `spi_hid_parse_dev_desc()` and stores them in
 `shid->desc`; nothing is hardcoded in the standard path (a descriptor that
