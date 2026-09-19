@@ -238,24 +238,16 @@ def check_control_flow_pins():
         failures += 1
     else:
         body = core_code.split("static int spi_hid_vendor_init(struct spi_hid *shid)", 1)[1].split("\n}", 1)[0]
-        if "spi_hid_wire_vendor_stop" not in body:
-            print("FAIL driver/spi-hid-core.c: the probe no longer sends the stream stop")
+        # No STOP: e541dd0 (last working raw) and the Windows init trace send
+        # D2+D0 only; the STOP never unblocked a handshake and several arms
+        # showed the stream never starting after one.
+        if "spi_hid_seq_write(shid, stop.bytes" in body:
+            print("FAIL driver/spi-hid-core.c: the STOP frame is back")
             failures += 1
-        else:
-            # Pin the WRITE ORDER, not the position of a declaration: the
-            # previous form matched the `struct ... stop = spi_hid_wire_vendor_stop()`
-            # line, which sits before the d2 declaration whatever the code
-            # below does with it. An adversarial leg moved the actual write
-            # after the D0 write and the pin stayed green.
-            stop_w = body.find("spi_hid_seq_write(shid, stop.bytes")
-            d2_w = body.find("spi_hid_seq_write(shid, d2.bytes")
-            if stop_w < 0 or d2_w < 0:
-                print("FAIL driver/spi-hid-core.c: cannot find the stop / d2 send sites")
-                failures += 1
-            elif stop_w > d2_w:
-                print("FAIL driver/spi-hid-core.c: the stream stop is SENT after the power "
-                      "sequence instead of before the handshake")
-                failures += 1
+        if "spi_hid_seq_write(shid, d2.bytes" not in body or \
+                "spi_hid_seq_write(shid, d0.bytes" not in body:
+            print("FAIL driver/spi-hid-core.c: cannot find the d2/d0 send sites")
+            failures += 1
 
     # 0c. Header-read lengths: spi_hid_hdr_len() is the one rule — nine
     # everywhere (the reference stages stream headers at offset 5 in nine
@@ -377,9 +369,9 @@ def check_control_flow_pins():
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() lost the Windows "
               "phase map — standard pre-DONE must read reg 3 for descriptors")
         failures += 1
-    # raw DONE reads the command register (0x04 touch dialect; the probe
-    # 0x0A force is overwritten by the DEVICE_DESC parse and 0x0A idles).
-    if "command_register" not in _sr:
+    # raw DONE reads the input register (reg 0): e541dd0 read reg 0 with
+    # five-byte frames everywhere and captured live heatmaps multitouch.
+    if "desc.input_register" not in _sr:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() lost the raw DONE "
               "stream register — DONE polled reg 0 until reset (2026-09-19)")
         failures += 1
@@ -879,52 +871,23 @@ def check_control_flow_pins():
                       "consults raw_b1f8109_preset — with the preset set it retries forever "
                       "instead of giving up to the hardcoded fallback as b1f8109 did")
                 failures += 1
-    # 4. spi_hid_vendor_init skips ONLY the STOP frame under the preset: the
-    # stop write must still exist (the default path sends it) AND be gated by
-    # the preset, with the D2/D0 writes OUTSIDE the gate (b1f8109 sent them).
+    # 4. spi_hid_vendor_init sends D2+D0 with no STOP (Tuesday parity):
+    # the STOP write must be gone and the D2/D0 writes present. The preset
+    # keeps its other effects (doubled writes, pre-DONE reg-0 reads,
+    # poller give-up), asserted at their own sites.
     _bp_vi = core_code.rsplit("static int spi_hid_vendor_init(struct spi_hid *shid)", 1)
     if len(_bp_vi) != 2:
         print("FAIL driver/spi-hid-core.c: spi_hid_vendor_init is gone")
         failures += 1
     else:
         _bp_vb = _bp_vi[1].split("\n}", 1)[0]
-        if "stop.bytes" not in _bp_vb:
-            print("FAIL driver/spi-hid-core.c: spi_hid_vendor_init no longer writes the STOP "
-                  "frame — raw_b1f8109_preset has nothing to skip")
+        if "stop.bytes" in _bp_vb:
+            print("FAIL driver/spi-hid-core.c: spi_hid_vendor_init still writes the STOP "
+                  "frame — Tuesday's working raw never sent it")
             failures += 1
-        elif "raw_b1f8109_preset" not in _bp_vb:
-            print("FAIL driver/spi-hid-core.c: spi_hid_vendor_init ignores "
-                  "raw_b1f8109_preset — the STOP frame is never skipped under b1f8109's dialect")
+        if "d2.bytes" not in _bp_vb or "d0.bytes" not in _bp_vb:
+            print("FAIL driver/spi-hid-core.c: spi_hid_vendor_init lost the D2/D0 writes")
             failures += 1
-        elif _bp_vb.index("raw_b1f8109_preset") > _bp_vb.index("stop.bytes"):
-            print("FAIL driver/spi-hid-core.c: the preset gate in spi_hid_vendor_init sits "
-                  "AFTER the STOP write — it can never skip the frame b1f8109 never sent")
-            failures += 1
-        else:
-            # Scope the gate to its own braces: the STOP write must be INSIDE it
-            # and the D2/D0 writes OUTSIDE it. A gate that wraps all three is
-            # skip_vendor_stop's semantics, not b1f8109's D2/D0-only dialect, and
-            # the two ordering checks above would both stay green on it.
-            _bp_gate = _bp_vb.split("if (!raw_b1f8109_preset) {", 1)
-            if len(_bp_gate) != 2:
-                print("FAIL driver/spi-hid-core.c: the preset gate in spi_hid_vendor_init is "
-                      "not `if (!raw_b1f8109_preset) {` — the STOP-only skip cannot be scoped")
-                failures += 1
-            else:
-                _bp_gb = _bp_gate[1].split("\n\t}", 1)
-                if len(_bp_gb) != 2:
-                    print("FAIL driver/spi-hid-core.c: the preset gate in spi_hid_vendor_init "
-                          "is not closed at its own indent — the STOP-only skip cannot be scoped")
-                    failures += 1
-                elif "stop.bytes" not in _bp_gb[0]:
-                    print("FAIL driver/spi-hid-core.c: the preset gate no longer wraps the STOP "
-                          "write — nothing is skipped under the preset")
-                    failures += 1
-                elif "d2.bytes" in _bp_gb[0] or "d0.bytes" in _bp_gb[0]:
-                    print("FAIL driver/spi-hid-core.c: the preset gate wraps D2/D0 too — that is "
-                          "skip_vendor_stop's all-three semantics, not b1f8109's D2/D0-only "
-                          "dialect (the preset must skip ONLY the STOP frame)")
-                    failures += 1
 
     # 7b. sync_timeout_ms is clamped at probe into the protocol's bounds — the
     # same class as the getfeat_delay_ms clamp above it: negative wraps

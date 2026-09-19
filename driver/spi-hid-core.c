@@ -794,25 +794,13 @@ static int spi_hid_vendor_init(struct spi_hid *shid)
 		return ret;
 	}
 
-	/* b1f8109 — and so the raw_b1f8109_preset restore — sent only D2 then D0,
-	 * with no STOP frame. With the preset set, skip ONLY this teardown; the
-	 * D2/D0 pair below still goes out exactly as b1f8109 sent it. This is NOT
-	 * skip_vendor_stop's all-three semantics (that one returns before D2/D0). */
-	if (!raw_b1f8109_preset) {
-		/* First, tear down a stream that is still running. The device keeps
-		 * streaming across a host reboot: the state comes from an earlier
-		 * session's enable, it is there on the very first probe, and the
-		 * descriptor handshake cannot complete while it lasts (the field sweep
-		 * shows register 0 answering with stream frames and device_desc=0).
-		 * The reference sends exactly this frame before its DESCREQ
-		 * (surface_init.csv #0257, then RESET_RSP on register 0 at #0258/#0259
-		 * and a fresh DESCREQ at #0260). Six bytes separate it from the enable
-		 * key the sequencer sends later. Review S41-F1. */
-		ret = spi_hid_seq_write(shid, stop.bytes, (int)stop.len, NULL, 0);
-		if (ret)
-			return ret;
-		msleep(50);
-	}
+	/* b1f8109 sent only D2 then D0, and so does everyone now: the STOP
+	 * teardown is retired (e541dd0, last working raw, never sent it, and
+	 * no field arm ever showed a descriptor handshake blocked by a
+	 * running stream — while several showed the stream never starting
+	 * after a STOP). The preset keeps its other effects (doubled writes,
+	 * pre-DONE reg-0 reads, poller give-up). */
+	(void)stop;
 
 	ret = spi_hid_seq_write(shid, d2.bytes, (int)d2.len, NULL, 0);
 	if (ret)
@@ -1451,33 +1439,13 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 
 	/* The reference names the content id only when it reads a body; a
 	 * nine-byte read (a header) carries none, whatever request it answers.
-	 * Two request families carry a fixed Windows shape regardless of the
-	 * global variant, which stays legacy for the handshake — the panel
-	 * answers descriptors only to the five-byte form:
-	 * - raw DONE on the stream register: header `0B 00 00 00 FF 00 03 0A 00`
-	 *   (SET_FEATURE named, no id), body `... 56 ...` (id 0x56 named);
-	 *   on 0x04 the touch dialect names nothing (`00 00 04 00`).
-	 * - GET_FEATURE reads: the reply lives on register 3 named `04 03`
-	 *   (boot #0220: `0B 00 00 00 FF 00 04 03 00`, body `... 00 06`).
-	 *   With the legacy five-byte form the reply never stages
-	 *   ("no reply after 3 attempts" in every raw arm); the July one-shot
-	 *   captured 1616 valid 0x0c bodies with the single ten-byte GET
-	 *   vector `02 00 00 03 42 00 04 03 00 06`. */
-	if ((shid->raw_mode_active && shid->seq_state == SPI_HID_SEQ_DONE &&
-	     (reg == SPI_HID_RAW_STREAM_REGISTER || reg == 0x04)) ||
-	    shid->read_resp_type == SPI_HID_CONTENT_TYPE_GET_FEATURE)
-		n = spi_hid_wire_read_approval_variant(tx, reg,
-						       reg == 0x04 ? 0 :
-						       shid->read_resp_type,
-						       (rx_len > SPI_HID_READ_APPROVAL_LEN &&
-						        reg != 0x04) ?
-						       shid->read_resp_content_id : 0,
-						       SPI_HID_READ_FRAME_REFERENCE);
-	else
-		n = spi_hid_wire_read_approval_variant(tx, reg, shid->read_resp_type,
-						       rx_len > SPI_HID_READ_APPROVAL_LEN ?
-						       shid->read_resp_content_id : 0,
-						       read_frame_variant);
+	 * The global variant selects the encoding (legacy five-byte default:
+	 * the panel answers descriptors — and, in raw DONE on reg 0, the
+	 * stream — only to this form, e541dd0 live multitouch verified). */
+	n = spi_hid_wire_read_approval_variant(tx, reg, shid->read_resp_type,
+					       rx_len > SPI_HID_READ_APPROVAL_LEN ?
+					       shid->read_resp_content_id : 0,
+					       read_frame_variant);
 	/* The request is the frame and nothing more: `tx_len = n`, the padded form
 	 * removed for reasons of THIS transport, not because the reference's own
 	 * behaviour was established. Two adversarial legs read the same capture and
@@ -1604,16 +1572,13 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 				reg = spi_hid_resp_reg(shid);
 		}
 	} else if (shid->raw_mode_active && !raw_b1f8109_preset) {
-		/* Raw DONE read destination. Default: the command register — the
-		 * touch-time trace streams heatmaps (216/4304B, CE 10 0C) on
-		 * 0x04 right after D0. With raw_pre_desc_reg0, the input
-		 * register instead (July passive recipe: transition, then reg-0
-		 * legacy reads captured 1616 valid bodies). The probe 0x0A force
-		 * is overwritten by the DEVICE_DESC parse either way. */
-		if (raw_pre_desc_reg0)
-			reg = shid->desc.input_register;
-		else
-			reg = shid->desc.command_register ? shid->desc.command_register : 0x04;
+		/* Raw DONE reads the input register, nothing else: e541dd0 (Tue
+		 * 17:31, last working raw, live multitouch verified) read reg 0
+		 * with five-byte frames everywhere and captured live heatmaps
+		 * (content_id=0x0c, 72x48, pinch working). The 0x04/0x0A
+		 * overrides never staged a header in any field arm. The probe
+		 * 0x0A force is overwritten by the DEVICE_DESC parse anyway. */
+		reg = shid->desc.input_register;
 	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
@@ -3412,20 +3377,18 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 						return;
 					}
 					usleep_range(36000, 39000);
-					/* Windows order: the Report ID 6 configuration read sits
-					 * between the report descriptor and the SET_FEATURE that
-					 * enables the heatmap. Once per probe (July one-shot):
-					 * repeats reset the panel into a DESCREQ loop. */
-					if (!shid->transition_done) {
-						spi_hid_getfeat6_read(shid);
-						seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
-						if (spi_hid_seq_write_setfeat(shid)) {
-							dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
-							schedule_delayed_work(&shid->raw_handshake_watchdog,
-								msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
-							return;
-						}
-						shid->transition_done = true;
+					/* e541dd0 parity: NO GET here. The skip_getfeat
+					 * branch sends vendor-init + SET_FEATURE only;
+					 * the GET reply never validated in any field arm
+					 * and the 127-byte reply reads disturb the panel
+					 * out of staging the stream. GET lives on in the
+					 * WAIT_FEATURE path below (skip_getfeat=0). */
+					seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
+					if (spi_hid_seq_write_setfeat(shid)) {
+						dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
+						schedule_delayed_work(&shid->raw_handshake_watchdog,
+							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+						return;
 					}
 					spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 				}
