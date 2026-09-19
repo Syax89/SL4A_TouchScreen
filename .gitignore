@@ -1,6 +1,7 @@
 # tools/sl4a-touch.sh output (default paths are the repo root)
 sl4a-touch-diagnostics-*.txt
 sl4a-hunt-*.txt
+sl4a-soak-*.txt
 
 # Build artifacts
 driver/*.o

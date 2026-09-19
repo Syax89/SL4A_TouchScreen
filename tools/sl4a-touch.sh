@@ -330,6 +330,22 @@ Commands:
                     and a final summary table. Send that file.
                     Default output: next to the driver, like the
                     diagnostics bundle (sl4a-hunt-<timestamp>.txt).
+   soak --minutes N [-o FILE] [--profile raw|standard|current] [--interactive]
+                     Observe the RUNNING driver for N minutes WITHOUT
+                     unloading, reloading, or asking anything: every 30 s it
+                     snapshots ready, seq_state and protocol_stats, slices
+                     the kernel log for the interval, and watches the touch
+                     evdev node in the background (no prompts — 'evdev
+                     unavailable' is recorded when there is no node). The
+                     pinch phase is skipped unless --interactive is given on
+                     a terminal. Writes ONE file with per-interval deltas, a
+                     VERDICT line (PASS only when ready and seq_state 4 hold
+                     steady and either touch data flows with zero drops or
+                     the IRQ line stays flat with no storm) and a summary
+                     table. Run with sudo so the dmesg slices are populated;
+                     without root the counters still work.
+                     Default output: next to the driver, like the
+                     hunt battery (sl4a-soak-<timestamp>.txt).
 
 
   rebuild           Developer use only: rebuild the .ko files against the
@@ -2277,6 +2293,352 @@ hunt_verdict() {
 	fi
 }
 
+# ── soak: non-interactive stability observation ──────────────────────────
+#
+# Unlike hunt this command NEVER unloads or reloads the driver: the panel is
+# assumed to be streaming live, and every sample is a read (cat) of the
+# running module's sysfs attributes plus a dmesg slice. No touch prompts, no
+# questions, nothing loaded or unloaded — safe to leave running next to a
+# live session. The verdict is PASS only when ready and seq_state 4 (DONE)
+# hold steady for the whole run AND either touch data flows with zero drops
+# or the IRQ line stays flat with no storm (no drops, no device resets).
+cmd_soak() {
+	local OUT="" MINUTES="" PROFILE="current" INTERACTIVE=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--minutes)
+				[ $# -ge 2 ] || fail "--minutes requires a number of minutes"
+				[ -n "$2" ] || fail "--minutes requires a non-empty number of minutes"
+				MINUTES="$2"
+				shift 2 ;;
+			--minutes=*)
+				MINUTES="${1#--minutes=}"
+				shift ;;
+			-o|--output)
+				[ $# -ge 2 ] || fail "-o requires a path"
+				[ -n "$2" ] || fail "-o requires a non-empty path"
+				OUT="$2"
+				shift 2 ;;
+			--profile)
+				[ $# -ge 2 ] || fail "--profile requires one of raw, standard or current"
+				[ -n "$2" ] || fail "--profile requires a non-empty profile"
+				PROFILE="$2"
+				shift 2 ;;
+			--profile=*)
+				PROFILE="${1#--profile=}"
+				shift ;;
+			--interactive)
+				INTERACTIVE=1
+				shift ;;
+			-h|--help)
+				usage
+				exit 0 ;;
+			*) fail "unknown soak option: $1 (see --help)" ;;
+		esac
+	done
+	case "$MINUTES" in ''|*[!0-9]*|0) fail "soak needs --minutes N with N a positive whole number (got '${MINUTES:-none}')" ;; esac
+	case "$PROFILE" in raw|standard|current) ;; *) fail "unknown soak profile: $PROFILE (raw, standard or current)" ;; esac
+
+	# -o feeds a root redirect: the same guards hunt carries (symlink,
+	# non-regular file, foreign file, dash-leading path, and never one of
+	# the driver's own files).
+	if [ -n "$OUT" ]; then
+		case "$OUT" in -*) OUT="./$OUT" ;; esac
+		local _real
+		_real="$(readlink -f -- "$OUT" 2>/dev/null || echo "$OUT")"
+		case "$_real" in
+			"$MODPROBE_CONF"|"$SYSTEMD_UNIT"|"$INSTALLED_HEAD_STAMP")
+				fail "refusing to write the soak file over $OUT — that is one of the driver's own files, not a diagnostic" ;;
+		esac
+		[ -L "$OUT" ] && fail "refusing to write the soak file through the symlink $OUT"
+		if [ -e "$OUT" ]; then
+			[ -f "$OUT" ] && [ ! -L "$OUT" ] || fail "$OUT is not a regular file; refusing to write it"
+			if [ -s "$OUT" ]; then
+				head -n 1 "$OUT" | grep -q SL4A_TouchScreen || \
+					fail "$OUT does not look like a diagnostic file of ours; refusing to overwrite it"
+			fi
+		fi
+	fi
+
+	# Same place as the hunt battery: next to the driver, not in /tmp
+	# where it can be cleaned up before the file is even sent.
+	[ -n "$OUT" ] || OUT="$REPO_DIR/sl4a-soak-$(date +%Y%m%d-%H%M%S).txt"
+
+	# Read-only by construction: no elevation (a sudo password prompt
+	# would itself be an interactive question), no module loads, no
+	# reloads. Under sudo the dmesg slices are populated; without root
+	# they come out empty while the counters still work.
+	# Seconds between samples: 30 unless the sandbox says otherwise
+	# (the same SL4A_-override pattern HUNT_TOUCH_SECS uses for tests).
+	local SOAK_INTERVAL="${SL4A_SOAK_INTERVAL_SECS:-30}"
+	case "$SOAK_INTERVAL" in ''|*[!0-9]*) fail "SL4A_SOAK_INTERVAL_SECS must be a non-negative whole number of seconds (got '$SOAK_INTERVAL')" ;; esac
+	local NSAMPLES
+	if [ "$SOAK_INTERVAL" -eq 0 ]; then
+		NSAMPLES="$MINUTES"
+	else
+		NSAMPLES=$(( 10#$MINUTES * 60 / SOAK_INTERVAL ))
+	fi
+	[ "$NSAMPLES" -ge 1 ] || NSAMPLES=1
+
+	local SYSFS_DIR d
+	# Same discovery as hunt (kept literal so the sandbox staging
+	# rewrites it the same way): any supported Surface panel.
+	for d in /sys/bus/spi/devices/*MSHW*; do
+		if [ -d "$d" ]; then SYSFS_DIR="$d"; break; fi
+	done
+
+	info "Soak: observing the RUNNING driver for ${MINUTES} min ($NSAMPLES samples every ${SOAK_INTERVAL}s). Nothing is unloaded, reloaded or asked."
+	[ -n "$SYSFS_DIR" ] || warn "sysfs directory for the device not found — statistics will be missing"
+
+	trap 'rc=$?; printf "\n\033[0;31m\xe2\x9c\x97 soak stopped at line $LINENO (rc=$rc)\033[0m\n" >&3; printf "  artifact so far: %s\n" "$OUT" >&3; printf "  send that file: it ends where the error is\n" >&3; exit $rc' ERR
+	# fd 3 is the terminal itself, duplicated before the run redirects
+	# both streams into the artifact (the same arrangement hunt uses).
+	exec 3>&2
+	info "Soak goes to: $OUT"
+	printf '%s samples, one every %ss; the verdict and the summary are printed here at the end.\n' "$NSAMPLES" "$SOAK_INTERVAL" >&3
+
+	{
+		echo "=== SL4A_TouchScreen soak ==="
+		echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+		echo "Soak plan: ${MINUTES} min, $NSAMPLES samples every ${SOAK_INTERVAL}s (observe only — no unload, no reload, no prompts)"
+		echo "Modules built from revision: $(installed_head)  (checkout: $(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown))"
+		# What the OS itself sees right now (observe only): a panel that
+		# never binds, or an input device that never registers, is a
+		# different problem from one that binds and goes quiet.
+		local acpi_id drv input_state
+		acpi_id="$(touchscreen_acpi_id 2>/dev/null)" || acpi_id="none"
+		if [ -n "$SYSFS_DIR" ]; then
+			drv="$(bound_driver "$SYSFS_DIR" 2>/dev/null)" || drv="none"
+		else
+			drv="(sysfs dir not found, not probed)"
+		fi
+		if grep -qi MSHW /proc/bus/input/devices 2>/dev/null; then
+			input_state="registered"
+		else
+			input_state="not registered"
+		fi
+		echo "-- OS binding (at soak start, observe only) --"
+		echo "ACPI device: $acpi_id"
+		echo "bound driver: $drv"
+		echo "input device (MSHW in /proc/bus/input/devices): $input_state"
+		echo ""
+
+		# The requested profile only selects what the run is COMPARED
+		# against: soak never reloads, so a mismatch is reported and the
+		# run observes whatever is actually loaded.
+		local live_raw cfg
+		live_raw="$(loaded_raw_mode 2>/dev/null)" || live_raw="(module not loaded)"
+		cfg="$(modprobe_profile)"
+		echo "-- profile (observe only — soak never reloads) --"
+		echo "requested: $PROFILE"
+		echo "running now (raw_mode): $live_raw"
+		echo "configured for next boot: $cfg"
+		if [ -d /sys/module/sl4a_spi_hid ]; then
+			echo "loaded params (read back): $(hunt_param_readback)(sysfs spells booleans Y/N)"
+		else
+			echo "loaded params (read back): MODULE NOT LOADED — nothing was measured for this run"
+		fi
+		case "$PROFILE/$live_raw" in
+			raw/Y|standard/N|current/*) ;;
+			*) echo "note: requested $PROFILE but the running module reports raw_mode=$live_raw — observing it anyway (no reload)" ;;
+		esac
+		echo ""
+
+		# The pinch phase runs only as a bounded, question-free evdev
+		# window on a real terminal. Anything else — the default, or
+		# --interactive with stdin redirected — skips it and says so.
+		if [ "$INTERACTIVE" -eq 1 ] && [ -t 0 ]; then
+			echo "-- pinch phase (interactive terminal: one bounded evdev window, nothing to answer) --"
+			local pinch_node pinch_tmp pinch_bytes pinch_events
+			pinch_node="$(hunt_touch_event)" || pinch_node=""
+			if [ -n "$pinch_node" ] && [ -r "$INPUT_DEV_ROOT/$pinch_node" ]; then
+				printf 'pinch observation: use two fingers on the panel (%ss window, nothing to answer)\n' "$HUNT_TOUCH_SECS" >&3
+				pinch_tmp="$(mktemp 2>/dev/null)" || pinch_tmp="/tmp/sl4a-soak-pinch.$$"
+				hunt_evdev_read "$pinch_node" "$pinch_tmp"
+				pinch_bytes="$(awk '{print $1}' "$pinch_tmp" 2>/dev/null || echo 0)"
+				pinch_events="$(awk '{print $2}' "$pinch_tmp" 2>/dev/null || echo 0)"
+				case "$pinch_bytes" in ''|*[!0-9]*) pinch_bytes=0 ;; esac
+				case "$pinch_events" in ''|*[!0-9]*) pinch_events=0 ;; esac
+				echo "pinch window on $pinch_node: $pinch_bytes bytes, $pinch_events events (${HUNT_TOUCH_SECS}s window)"
+				rm -f "$pinch_tmp" 2>/dev/null || true
+			else
+				echo "pinch phase: evdev unavailable (no readable node for this panel) — skipped"
+			fi
+		elif [ "$INTERACTIVE" -eq 1 ]; then
+			echo "-- pinch phase: SKIP (--interactive needs a terminal; stdin is not a tty) --"
+		else
+			echo "-- pinch phase: SKIP (non-interactive soak; re-run with --interactive on a tty to observe it) --"
+		fi
+		echo ""
+
+		# Baseline before the first interval: whole-run deltas are
+		# measured from here, per-interval deltas from sample to sample.
+		local base_stats base_ready base_seq
+		base_ready="$(cat "$SYSFS_DIR/ready" 2>/dev/null || echo '(unavailable)')"
+		base_seq="$(cat "$SYSFS_DIR/seq_state" 2>/dev/null || echo '(unavailable)')"
+		base_stats="$(cat "$SYSFS_DIR/protocol_stats" 2>/dev/null || true)"
+		echo "-- baseline (before interval 1) --"
+		echo "ready: $base_ready"
+		echo "seq_state: $base_seq"
+		if [ -n "$base_stats" ]; then printf '%s\n' "$base_stats"; else echo "(protocol_stats unavailable)"; fi
+		echo ""
+
+		local i ready_now seq_now cur_stats prev_stats dmesg_mark all win
+		local have=0 ready_bad=0 ready_bad_at="" seq_bad=0 seq_bad_at=""
+		local ev_total_bytes=0 ev_total_events=0 ev_unavail=0
+		local s_n=() s_ready=() s_seq=() s_data=() s_irq=() s_drops=() s_ev=()
+		[ -n "$base_stats" ] && have=1
+		prev_stats="$base_stats"
+		for i in $(seq 1 "$NSAMPLES"); do
+			printf '\n[%d/%d] sample %d: reading counters (no reload)\n' "$i" "$NSAMPLES" "$i" >&3
+			dmesg_mark="$(dmesg 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+			case "$dmesg_mark" in ''|*[!0-9]*) dmesg_mark=0 ;; esac
+
+			# The evdev client must be open WHILE the interval elapses
+			# (events delivered with no reader are dropped), so the
+			# bounded read runs in the background under the sleep —
+			# with no countdown and no questions. When there is no
+			# node to read, that is recorded, not asked about.
+			local touch_node ev_tmp ev_pid ev_bytes ev_events ev_cell
+			touch_node="$(hunt_touch_event)" || touch_node=""
+			ev_tmp="$(mktemp 2>/dev/null)" || ev_tmp="/tmp/sl4a-soak-ev.$$"
+			if [ -n "$touch_node" ] && [ -r "$INPUT_DEV_ROOT/$touch_node" ]; then
+				hunt_evdev_read "$touch_node" "$ev_tmp" &
+				ev_pid=$!
+			else
+				ev_pid=""
+			fi
+			if [ "$SOAK_INTERVAL" -gt 0 ]; then sleep "$SOAK_INTERVAL"; fi
+			if [ -n "$ev_pid" ]; then
+				wait "$ev_pid" 2>/dev/null || true
+				ev_bytes="$(awk '{print $1}' "$ev_tmp" 2>/dev/null || echo 0)"
+				ev_events="$(awk '{print $2}' "$ev_tmp" 2>/dev/null || echo 0)"
+				case "$ev_bytes" in ''|*[!0-9]*) ev_bytes=0 ;; esac
+				case "$ev_events" in ''|*[!0-9]*) ev_events=0 ;; esac
+				ev_total_bytes=$((ev_total_bytes + ev_bytes))
+				ev_total_events=$((ev_total_events + ev_events))
+				ev_cell="$ev_events events"
+			else
+				ev_bytes=0; ev_events=0
+				ev_cell="evdev unavailable"
+				ev_unavail=$((ev_unavail + 1))
+			fi
+			rm -f "$ev_tmp" 2>/dev/null || true
+
+			ready_now="$(cat "$SYSFS_DIR/ready" 2>/dev/null || echo '(unavailable)')"
+			seq_now="$(cat "$SYSFS_DIR/seq_state" 2>/dev/null || echo '(unavailable)')"
+			cur_stats="$(cat "$SYSFS_DIR/protocol_stats" 2>/dev/null || true)"
+			[ -n "$cur_stats" ] && have=1
+			case "$ready_now" in
+				ready) ;;
+				*) ready_bad=$((ready_bad + 1)); [ -n "$ready_bad_at" ] || ready_bad_at="$i:$ready_now" ;;
+			esac
+			case "$seq_now" in
+				4) ;;
+				*) seq_bad=$((seq_bad + 1)); [ -n "$seq_bad_at" ] || seq_bad_at="$i:$seq_now" ;;
+			esac
+
+			local d_data d_irq d_drops
+			d_data="$(hunt_delta "$prev_stats" "$cur_stats" data)"
+			d_irq="$(hunt_delta "$prev_stats" "$cur_stats" irq_count)"
+			d_drops="$(hunt_delta "$prev_stats" "$cur_stats" frames_dropped)"
+			prev_stats="$cur_stats"
+
+			echo "--- interval $i/$NSAMPLES (${SOAK_INTERVAL}s, observe only) ---"
+			echo "ready: $ready_now"
+			echo "seq_state: $seq_now"
+			if [ -n "$cur_stats" ]; then printf '%s\n' "$cur_stats"; else echo "(protocol_stats unavailable)"; fi
+			echo "deltas (this interval): data=+$d_data irq_count=+$d_irq frames_dropped=+$d_drops"
+			if [ "$ev_cell" != "evdev unavailable" ]; then
+				echo "evdev $touch_node: $ev_bytes bytes, $ev_events events (${SOAK_INTERVAL}s background window)"
+			else
+				echo "evdev: evdev unavailable (no readable node for this panel)"
+			fi
+			echo "-- dmesg, this interval only --"
+			# `|| true` is load-bearing (see hunt): under
+			# `set -e -o pipefail` a grep that matches nothing would
+			# abort the run mid-soak.
+			all="$(dmesg 2>/dev/null | tail -n +"$((dmesg_mark + 1))" | grep -iE "sl4a_spi_hid|spi-amd")" || true
+			win="$(printf '%s\n' "$all" | tail -n 60)" || true
+			if [ -n "$win" ]; then
+				echo "$win"
+			else
+				echo "(no driver lines in this interval)"
+			fi
+			echo ""
+			s_n+=("$i"); s_ready+=("$ready_now"); s_seq+=("$seq_now")
+			s_data+=("$d_data"); s_irq+=("$d_irq"); s_drops+=("$d_drops"); s_ev+=("$ev_cell")
+			printf '     [%d/%d] sample %d done\n' "$i" "$NSAMPLES" "$i" >&3
+		done
+
+		# Whole-run deltas decide the verdict: ready and seq_state 4
+		# (DONE) must hold every sample, AND either touch data flows
+		# with zero drops or the IRQ line stays flat with no storm (no
+		# drops, no device resets — an untouched but healthy panel
+		# idles instead of streaming).
+		local t_data t_drops t_irq t_reset t_ddesc t_rdesc
+		t_data="$(hunt_delta "$base_stats" "$prev_stats" data)"
+		t_drops="$(hunt_delta "$base_stats" "$prev_stats" frames_dropped)"
+		t_irq="$(hunt_delta "$base_stats" "$prev_stats" irq_count)"
+		t_reset="$(hunt_delta "$base_stats" "$prev_stats" reset_rsp)"
+		t_ddesc="$(hunt_delta "$base_stats" "$prev_stats" device_desc)"
+		t_rdesc="$(hunt_delta "$base_stats" "$prev_stats" rpt_desc)"
+		local verdict verdict_reason
+		if [ "$have" != 1 ]; then
+			verdict="FAIL"
+			verdict_reason="no counters read (sysfs not found for this panel) — nothing was measured"
+		elif [ "$ready_bad" -gt 0 ]; then
+			verdict="FAIL"
+			verdict_reason="ready unstable ($ready_bad/$NSAMPLES samples not 'ready', first at sample $ready_bad_at)"
+		elif [ "$seq_bad" -gt 0 ]; then
+			verdict="FAIL"
+			verdict_reason="seq_state left 4 (DONE) ($seq_bad/$NSAMPLES samples, first at sample $seq_bad_at)"
+		elif [ "$t_data" -gt 0 ] && [ "$t_drops" -eq 0 ]; then
+			verdict="PASS"
+			verdict_reason="streaming: data +$t_data with zero drops (irq +$t_irq, resets +$t_reset, evdev $ev_total_events events)"
+		elif [ "$t_irq" -eq 0 ] && [ "$t_drops" -eq 0 ] && [ "$t_reset" -eq 0 ]; then
+			verdict="PASS"
+			verdict_reason="idle-stable: irq flat (+0), zero drops, zero resets over ${MINUTES} min"
+		else
+			verdict="FAIL"
+			if [ "$t_drops" -gt 0 ]; then
+				verdict_reason="frames dropped +$t_drops over the run (data +$t_data, irq +$t_irq)"
+			elif [ "$t_reset" -gt 0 ]; then
+				verdict_reason="device resets +$t_reset over the run (data +$t_data, irq +$t_irq)"
+			else
+				verdict_reason="no touch data delivered (data +$t_data) while irqs moved (irq +$t_irq)"
+			fi
+		fi
+		echo "VERDICT (soak ${MINUTES}min profile=$PROFILE): $verdict — $verdict_reason"
+		echo ""
+		echo "whole-run deltas: data=+$t_data irq_count=+$t_irq frames_dropped=+$t_drops reset_rsp=+$t_reset device_desc=+$t_ddesc rpt_desc=+$t_rdesc"
+		echo "evdev totals: $ev_total_bytes bytes, $ev_total_events events ($ev_unavail/$NSAMPLES intervals evdev unavailable)"
+		echo ""
+		echo "=== SUMMARY ($NSAMPLES samples over ${MINUTES} min) ==="
+		printf "%-8s | %-12s | %-9s | %-9s | %-9s | %-9s | %s\n" \
+			"sample" "ready" "seq_state" "data+" "irq+" "drops+" "evdev"
+		local idx
+		for idx in "${!s_n[@]}"; do
+			printf "%-8s | %-12s | %-9s | +%-8s | +%-8s | +%-8s | %s\n" \
+				"${s_n[$idx]}" "${s_ready[$idx]}" "${s_seq[$idx]}" \
+				"${s_data[$idx]}" "${s_irq[$idx]}" "${s_drops[$idx]}" "${s_ev[$idx]}"
+		done
+		echo ""
+
+		run_host_self_tests
+		echo ""
+		echo "--- module objects (which build ran) ---"
+		modinfo sl4a_spi_hid 2>/dev/null | head -4 || true
+		echo ""
+	} >"$OUT" 2>&1
+	chmod 644 "$OUT" 2>/dev/null || true
+
+	pass "Wrote $OUT (soak: $NSAMPLES samples over ${MINUTES} min, observe-only — nothing was unloaded or reloaded)"
+	grep -h '^VERDICT' "$OUT" 2>/dev/null || true
+	echo ""
+	echo "Send that file: it already contains every sample with its deltas, the verdict and the summary table."
+}
+
 case "$CMD" in
 	install)   cmd_install "$@" ;;
 	uninstall) cmd_uninstall "$@" ;;
@@ -2284,6 +2646,7 @@ case "$CMD" in
 	status)    cmd_status "$@" ;;
 	logs)      cmd_logs "$@" ;;
 	hunt)      cmd_hunt "$@" ;;
+	soak)      cmd_soak "$@" ;;
 	rebuild)   cmd_rebuild "$@" ;;
 	*) echo "Unknown command: $CMD"; echo ""; usage; exit 1 ;;
 esac
