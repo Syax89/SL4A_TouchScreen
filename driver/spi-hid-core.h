@@ -362,6 +362,10 @@ struct spi_hid {
 	u8 raw_handshake_wait_feature_defers;  /* WAIT_FEATURE deferral counter */
 	bool raw_handshake_confirmed;             /* Handshake successfully completed */
 	u8 raw_probe_attempts;                    /* Deferred probe retry counter */
+	u32 wd_handshake_data;                    /* stat_data at last watchdog firing (progress check) */
+	u32 wd_handshake_dropped;                 /* frames_dropped at last firing */
+	u32 wd_handshake_observed;                /* stat_raw_observed at last firing */
+	bool done_latched;                        /* First DONE reached this probe (ready stability) */
 
 	struct delayed_work feat_delay_work;      /* GET_FEATURE delay work (matches Windows ~3.6 s settle; original doc cited ~5.9 s) */
 	bool feat_delay_pending;                  /* Delay work is scheduled */

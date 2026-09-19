@@ -598,6 +598,24 @@ def check_control_flow_pins():
               "GET+ID5 repeats reset the panel")
         failures += 1
 
+    # Watchdog plan: progress (data/observed advance, no new drops) re-arms
+    # instead of DESCREQ-aborting a live stream; DONE latches ready.
+    _wd = core_code.split("static void spi_hid_raw_handshake_watchdog", 1)
+    if len(_wd) != 2:
+        print("FAIL driver/spi-hid-core.c: raw handshake watchdog is gone")
+        failures += 1
+    else:
+        _wdb = _wd[1].split("\n}", 1)[0]
+        if "wd_handshake_data" not in _wdb:
+            print("FAIL driver/spi-hid-core.c: watchdog lost its progress check — "
+                  "it DESCREQs a flowing stream every 2 s again")
+            failures += 1
+    _rd = core_code.rsplit("static int spi_hid_seq_restart_discovery", 1)
+    if len(_rd) == 2 and "done_latched" not in _rd[1].split("\n}", 1)[0]:
+        print("FAIL driver/spi-hid-core.c: restart_discovery lost the ready latch — "
+              "retries flap ready on a live panel")
+        failures += 1
+
     # raw_fallback_on_reset (2026-09-17 triage): declared, published, and
     # consulted by the poller's RESET_RSP branch BEFORE the retry — the knob
     # restores b1f8109's give-up-to-hardcoded-fallback, the one shape the

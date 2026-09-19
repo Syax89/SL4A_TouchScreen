@@ -257,8 +257,13 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 
 	/* DONE means the descriptor exchange concluded — which is when the
 	 * reference configures the stream. Idempotent, no-op outside raw mode. */
-	if (new_state == SPI_HID_SEQ_DONE)
+	if (new_state == SPI_HID_SEQ_DONE) {
+		/* Ready latch (watchdog plan): once DONE is reached, later
+		 * re-discoveries no longer clear `ready` in raw mode — the
+		 * flap left userspace answering -ENODEV on a live panel. */
+		shid->done_latched = true;
 		spi_hid_raw_stream_arm(shid);
+	}
 
 	/* Standard mode has no other timer covering a device that never answers
 	 * power-up or resume with a RESET_RSP. Armed before the unchanged-state
@@ -1730,8 +1735,10 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
 
 	/* Re-discovery means the touchscreen is not usable until it completes:
 	 * leaving `ready` set lets HID clients interleave sync requests with the
-	 * sequencer's DESCREQ and steal its responses. */
-	if (shid->ready) {
+	 * sequencer's DESCREQ and steal its responses. In raw mode after the
+	 * first DONE the latch keeps `ready` (watchdog plan): clearing it on
+	 * every retry flapped userspace on a live panel. */
+	if (shid->ready && !(shid->raw_mode_active && shid->done_latched)) {
 		shid->ready = false;
 		sysfs_notify(&shid->spi->dev.kobj, NULL, "ready");
 	}
@@ -1836,6 +1843,27 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	    !READ_ONCE(shid->seq_enabled) || !shid->raw_mode_active ||
 	    shid->raw_handshake_confirmed)
 		goto out;
+
+	/* Flow beats unconfirmed (watchdog plan): frames advancing without new
+	 * drops since the last firing prove a live panel — re-arm and keep
+	 * polling instead of DESCREQ-aborting a working stream. Only a fully
+	 * silent interval (or a drops-only flood) retries; reset storms show
+	 * neither data nor drops advancing, so recovery still fires for them. */
+	if ((shid->stat_data != shid->wd_handshake_data ||
+	     shid->stat_raw_observed != shid->wd_handshake_observed) &&
+	    shid->stat_frames_dropped == shid->wd_handshake_dropped) {
+		shid->wd_handshake_data = shid->stat_data;
+		shid->wd_handshake_dropped = shid->stat_frames_dropped;
+		shid->wd_handshake_observed = shid->stat_raw_observed;
+		seq_dbg(shid, 1, "SEQ: raw watchdog: flow since last check (data=%u observed=%u), waiting\n",
+			shid->stat_data, shid->stat_raw_observed);
+		schedule_delayed_work(&shid->raw_handshake_watchdog,
+				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+		goto out;
+	}
+	shid->wd_handshake_data = shid->stat_data;
+	shid->wd_handshake_dropped = shid->stat_frames_dropped;
+	shid->wd_handshake_observed = shid->stat_raw_observed;
 
 	if (shid->raw_handshake_retries_left <= 0) {
 		if (shid->raw_probe_attempts < 2) {
@@ -4502,6 +4530,10 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	shid->raw_probe_attempts = 0;
 	shid->transition_done = false;
+	shid->wd_handshake_data = 0;
+	shid->wd_handshake_dropped = 0;
+	shid->wd_handshake_observed = 0;
+	shid->done_latched = false;
 	shid->raw_mode_active = raw_mode; /* false → heatmap/raw code dead; infrastructure stays zeroed for mode switch */
 	shid->seq_dbg_last_state = SPI_HID_SEQ_INVALID;
 
@@ -4762,6 +4794,10 @@ static int spi_hid_resume(struct device *dev)
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	shid->raw_probe_attempts = 0;
 	shid->transition_done = false;
+	shid->wd_handshake_data = 0;
+	shid->wd_handshake_dropped = 0;
+	shid->wd_handshake_observed = 0;
+	shid->done_latched = false;
 	shid->feat_delay_pending = false;
 	shid->std_liveness_recovered = false;
 	mshw0231_raw_reset(shid);
