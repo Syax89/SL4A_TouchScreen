@@ -165,13 +165,48 @@ plateau_host_test: plateau_host_test.c \
 		$(RAW_STAGE_DIR)/plateau_host_test.o $(RAW_STAGE_DIR)/plateau_stubs.o \
 		$(RAW_STAGE_DIR)/plateau_capimg.o -lm
 
-test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test plateau_host_test
+# ── heatmap_pure_test: synthetic + capture-shape regression ──
+#
+# Same host-build shape as raw_pipeline_replay_test (stage the driver
+# .c so the stub spi-hid-core.h shadows the real one, link the real
+# driver/spi-hid-capimg.c). All rasters are generated in-code and the
+# V0 bodies are read from captures/id5-20260718/frames/ — no fixture
+# files. Synthetic only plus already-tracked captures, so it runs in CI.
+heatmap_pure_test: heatmap_pure_test.c \
+		$(RAW_STAGE_DIR)/mshw0231-raw.c \
+		../driver/spi-hid-capimg.c \
+		$(RAW_STUB_DIR)/stubs.c \
+		$(RAW_STUB_DIR)/spi-hid-core.h \
+		$(RAW_STUB_DIR)/mt_record.h \
+		../driver/mshw0231-raw.h ../driver/mshw0231-raw-constants.h ../driver/spi-hid-capimg.h \
+		linux-compat/linux/input.h linux-compat/linux/input/mt.h linux-compat/linux/jiffies.h \
+		linux-compat/linux/slab.h linux-compat/linux/module.h linux-compat/linux/math.h \
+		linux-compat/linux/string.h linux-compat/linux/kernel.h linux-compat/linux/types.h \
+		linux-compat/linux/errno.h linux-compat/linux/unaligned.h
+	$(CC) -std=gnu11 -Wall -Wextra -Werror \
+		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
+		-c -o $(RAW_STAGE_DIR)/heatmap_pure_test.o heatmap_pure_test.c
+	$(CC) -std=gnu11 -Wall -Wextra -Werror \
+		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
+		-c -o $(RAW_STAGE_DIR)/heatmap_pure_stubs.o $(RAW_STUB_DIR)/stubs.c
+	$(CC) -std=gnu11 -Wall -Wno-sign-compare \
+		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
+		-c -o $(RAW_STAGE_DIR)/heatmap_pure_raw.o $(RAW_STAGE_DIR)/mshw0231-raw.c
+	$(CC) -std=gnu11 -Wall -Wextra -Werror \
+		-I$(RAW_STUB_DIR) -Ilinux-compat -I../driver \
+		-c -o $(RAW_STAGE_DIR)/heatmap_pure_capimg.o ../driver/spi-hid-capimg.c
+	$(CC) $(LDFLAGS) -o $@ \
+		$(RAW_STAGE_DIR)/heatmap_pure_test.o $(RAW_STAGE_DIR)/heatmap_pure_stubs.o \
+		$(RAW_STAGE_DIR)/heatmap_pure_raw.o $(RAW_STAGE_DIR)/heatmap_pure_capimg.o -lm
+
+test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test plateau_host_test heatmap_pure_test
 	./protocol_test
 	./wire_frames_test
 	./capimg_decoder_host_test
 	./c590_atan2_host_test
 	./raw_pipeline_math_test
 	./raw_pipeline_replay_test
+	./heatmap_pure_test
 	./plateau_host_test
 	$(PYTHON) boot_binding_safety_test.py
 	$(PYTHON) spi_amd_ownership_safety_test.py
@@ -205,7 +240,7 @@ local-checks: raw_pipeline_replay_test real_frame_replay_test
 replay_fixture_test: fixtures/replay/v1/manifest.json ../tools/decode_v0_capimg.py
 
 clean:
-	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test plateau_host_test
+	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test plateau_host_test heatmap_pure_test
 	rm -rf $(RAW_STAGE_DIR)
 
 .PHONY: all test local-checks replay_fixture_test clean

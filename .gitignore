@@ -25,6 +25,7 @@ tests/raw_pipeline_math_test
 tests/raw_pipeline_replay_test
 tests/real_frame_replay_test
 tests/plateau_host_test
+tests/heatmap_pure_test
 tests/fch-test/*.o
 tests/fch-test/*.ko
 tests/fch-test/*.mod
