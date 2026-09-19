@@ -258,9 +258,9 @@ def check_control_flow_pins():
                 failures += 1
 
     # 0c. Header-read lengths: spi_hid_hdr_len() is the one rule — nine
-    # pre-DONE in both modes, sixteen only for the raw DONE stream (field
-    # bisect 2026-09-19: doubled DESCREQ + hdr16 loops forever, + hdr9 reaches
-    # DONE in 2 resets; v1.5.0/v1.6.3 read nine on every handshake header).
+    # everywhere (field bisect 2026-09-19: doubled DESCREQ + hdr16 loops
+    # forever, + hdr9 reaches DONE in 2 resets; the reference reads stream
+    # headers as nine bytes on 0x0A, sixteen-byte windows caught fragments).
     # All three header sites (descriptor poller, IRQ thread, DONE poller) must
     # go through the helper; a local sixteen at any one of them re-wedges
     # discovery while the others still pass.
@@ -271,9 +271,9 @@ def check_control_flow_pins():
         failures += 1
     else:
         _hlw = "".join(_hl[1].split("\n}", 1)[0].split())
-        if "SPI_HID_SEQ_DONE)?16:9" not in _hlw or "raw_mode_active" not in _hlw:
+        if "return9" not in _hlw:
             print("FAIL driver/spi-hid-core.c: spi_hid_hdr_len() no longer yields "
-                  "sixteen only for the raw DONE stream (nine everywhere else)")
+                  "nine everywhere — a local sixteen re-wedges discovery")
             failures += 1
     for _fn in ("static void spi_hid_seq_descreq_work",
                 "spi_hid_seq_thread",

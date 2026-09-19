@@ -1348,18 +1348,21 @@ static inline u32 spi_hid_resp_reg(struct spi_hid *shid)
 }
 
 /* Header-read length, the one rule for all three header sites (descriptor
- * poller, IRQ thread, DONE poller). Nine pre-DONE in both modes: the
- * handshake answers with bare nine-byte headers, and a sixteen-byte read
- * over-clocks the answer — the extra clocks consume the descriptor body, the
- * body then fails validation, and discovery loops in WAIT_DESC with the panel
- * self-resetting ~9/s (field bisect 2026-09-19: doubled DESCREQ + hdr16 loops
- * forever, + hdr9 reaches DONE in 2 resets; v1.5.0 read 9 bytes on every
- * standard header, v1.6.3 on every header). Sixteen only for the raw DONE
- * stream with its three-byte-prefixed frames. Callers hold seq_lock. */
+ * poller, IRQ thread, DONE poller). Nine everywhere: the handshake answers
+ * with bare nine-byte headers, and a sixteen-byte read over-clocks the
+ * answer — the extra clocks consume the descriptor body, the body then fails
+ * validation, and discovery loops in WAIT_DESC with the panel self-resetting
+ * ~9/s (field bisect 2026-09-19: doubled DESCREQ + hdr16 loops forever, +
+ * hdr9 reaches DONE in 2 resets; v1.5.0 read 9 bytes on every standard
+ * header, v1.6.3 on every header). The raw DONE stream also uses nine: the
+ * reference reads every stream header as nine bytes on 0x0A (boot trace
+ * #0868: `0B 00 00 00 FF 00 03 0A 00` -> type 0x1), and sixteen-byte windows
+ * on 0x0A caught mid-frame fragments plus queued resets (field 2026-09-19:
+ * `0c ff 5b .. 32 10 00 5a`, malformed at offset 7). Callers hold seq_lock. */
 static inline unsigned int spi_hid_hdr_len(struct spi_hid *shid)
 {
-	return (shid->raw_mode_active &&
-		shid->seq_state == SPI_HID_SEQ_DONE) ? 16 : 9;
+	(void)shid;
+	return 9;
 }
 
 static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_len)
