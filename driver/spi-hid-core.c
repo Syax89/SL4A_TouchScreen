@@ -1834,23 +1834,51 @@ out:
 
 /* Watchdog progress formalization: FLOW means data/observed advanced with
  * no new drops since the last firing (a live panel — re-arm and keep
- * polling instead of DESCREQ-aborting a working stream); STALLED means a
- * fully silent interval or a drops-only flood (retry path — reset storms
- * show neither data nor drops advancing, so recovery still fires for
- * them). Classification only: seq_lock held, no sleep, no I/O. */
+ * polling instead of DESCREQ-aborting a working stream); IDLE means every
+ * counter froze including IRQs (nobody touched the screen — wait
+ * patiently without spending retries, or the watchdog evicts a healthy idle
+ * panel to standard HID after ~3x3 firings); STALLED means trouble (drops or
+ * resets advancing, IRQs arriving with no usable data, or a panel that never
+ * showed any life at all — retry path). Classification only: seq_lock
+ * held, no sleep, no I/O. */
 enum raw_wd_progress {
-	RAW_WD_STALLED = 0,
-	RAW_WD_FLOW = 1,
+	RAW_WD_FLOW = 0,
+	RAW_WD_IDLE = 1,
+	RAW_WD_STALLED = 2,
 };
 
 static enum raw_wd_progress raw_watchdog_progress(struct spi_hid *shid)
 {
+	bool data_adv, drops_adv, irqs_adv, resets_adv;
+
 	lockdep_assert_held(&shid->seq_lock);
-	if ((shid->stat_data != shid->wd_handshake_data ||
-	     shid->stat_raw_observed != shid->wd_handshake_observed) &&
-	    shid->stat_frames_dropped == shid->wd_handshake_dropped)
+	data_adv = (shid->stat_data != shid->wd_handshake_data ||
+		    shid->stat_raw_observed != shid->wd_handshake_observed);
+	drops_adv = (shid->stat_frames_dropped != shid->wd_handshake_dropped);
+	irqs_adv = (shid->stat_irq_count != shid->wd_handshake_irqs);
+	resets_adv = (shid->stat_reset_rsp != shid->wd_handshake_resets);
+	if (data_adv && !drops_adv)
 		return RAW_WD_FLOW;
+	if (!data_adv && !drops_adv && !irqs_adv && !resets_adv) {
+		/* Frozen solid. A panel that talked before is just idle (no
+		 * finger, no IRQs — the heatmap only streams on
+		 * activity); a panel that never produced a single IRQ or data
+		 * frame may be dead (issue #4 cold boot) and keeps the
+		 * bounded retry. */
+		if (shid->stat_irq_count > 0 || shid->stat_data > 0)
+			return RAW_WD_IDLE;
+	}
 	return RAW_WD_STALLED;
+}
+
+static void raw_watchdog_snapshot(struct spi_hid *shid)
+{
+	lockdep_assert_held(&shid->seq_lock);
+	shid->wd_handshake_data = shid->stat_data;
+	shid->wd_handshake_dropped = shid->stat_frames_dropped;
+	shid->wd_handshake_observed = shid->stat_raw_observed;
+	shid->wd_handshake_irqs = shid->stat_irq_count;
+	shid->wd_handshake_resets = shid->stat_reset_rsp;
 }
 
 static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
@@ -1865,24 +1893,36 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	    shid->raw_handshake_confirmed)
 		goto out;
 
-	/* Flow beats unconfirmed (watchdog plan): see raw_watchdog_progress(). */
+	/* Flow beats unconfirmed (watchdog plan): see raw_watchdog_progress().
+	 * IDLE (quiet panel, nobody touching) waits the same way but counts
+	 * separately: it must never spend retries, or an untouched panel is
+	 * evicted to standard HID after ~3x3 firings (field 2026-09-19). */
 	shid->watchdog_fires++;
-	if (raw_watchdog_progress(shid) == RAW_WD_FLOW) {
+	switch (raw_watchdog_progress(shid)) {
+	case RAW_WD_FLOW:
 		shid->watchdog_deferred_flow++;
 		shid->storm_resets = 0;
-		shid->wd_handshake_data = shid->stat_data;
-		shid->wd_handshake_dropped = shid->stat_frames_dropped;
-		shid->wd_handshake_observed = shid->stat_raw_observed;
+		raw_watchdog_snapshot(shid);
 		seq_dbg(shid, 1, "SEQ: raw watchdog: flow since last check (data=%u observed=%u), waiting\n",
 			shid->stat_data, shid->stat_raw_observed);
 		schedule_delayed_work(&shid->raw_handshake_watchdog,
 				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 		goto out;
+	case RAW_WD_IDLE:
+		shid->watchdog_deferred_idle++;
+		shid->storm_resets = 0;
+		raw_watchdog_snapshot(shid);
+		seq_dbg(shid, 1, "SEQ: raw watchdog: panel idle (irq=%u data=%u), waiting\n",
+			shid->stat_irq_count, shid->stat_data);
+		schedule_delayed_work(&shid->raw_handshake_watchdog,
+				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+		goto out;
+	case RAW_WD_STALLED:
+	default:
+		break;
 	}
 	shid->storm_resets++;
-	shid->wd_handshake_data = shid->stat_data;
-	shid->wd_handshake_dropped = shid->stat_frames_dropped;
-	shid->wd_handshake_observed = shid->stat_raw_observed;
+	raw_watchdog_snapshot(shid);
 
 	if (shid->raw_handshake_retries_left <= 0) {
 		if (shid->raw_probe_attempts < 2) {
@@ -2582,6 +2622,20 @@ MODULE_PARM_DESC(std_liveness_ms,
 
 /* ── Runtime recovery ──────────────────────────────────────────── */
 
+/* Idle patience also applies to the confirmed stream: a quiet panel
+ * produces no IRQs and no frames, which looks exactly like a broken stream
+ * from the data counter alone. Only count a miss when the panel shows signs
+ * of life without usable data (IRQs or drops advancing); a frozen-solid
+ * panel that talked before is idle, not broken. */
+static void stream_watchdog_mark_live(struct spi_hid *shid)
+{
+	lockdep_assert_held(&shid->seq_lock);
+	shid->stream_watchdog_data = shid->stat_data;
+	shid->stream_watchdog_irqs = shid->stat_irq_count;
+	shid->stream_watchdog_dropped = shid->stat_frames_dropped;
+	shid->stream_watchdog_misses = 0;
+}
+
 static void spi_hid_stream_watchdog_work(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid, stream_watchdog);
@@ -2637,8 +2691,18 @@ static void spi_hid_stream_watchdog_work(struct work_struct *work)
 	}
 
 	if (shid->stat_data != shid->stream_watchdog_data) {
-		shid->stream_watchdog_data = shid->stat_data;
-		shid->stream_watchdog_misses = 0;
+		stream_watchdog_mark_live(shid);
+		goto resched;
+	}
+
+	if (shid->stat_irq_count == shid->stream_watchdog_irqs &&
+	    shid->stat_frames_dropped == shid->stream_watchdog_dropped &&
+	    (shid->stat_irq_count > 0 || shid->stat_data > 0)) {
+		/* Idle, not broken: no IRQs, no drops, no data (field
+		 * 2026-09-19: counting these as misses evicted a healthy
+		 * untouched panel to re-init, then to standard HID). */
+		stream_watchdog_mark_live(shid);
+		seq_dbg(shid, 1, "SEQ: stream watchdog: panel idle, waiting\n");
 		goto resched;
 	}
 
@@ -2784,8 +2848,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 			    shid->touch_input) {
 				if (stream_watchdog_ms > 0 && !shid->stream_watchdog_active) {
 					shid->stream_watchdog_active = true;
-					shid->stream_watchdog_data = shid->stat_data;
-					shid->stream_watchdog_misses = 0;
+					stream_watchdog_mark_live(shid);
 					shid->stream_watchdog_reinits = 0;
 					schedule_delayed_work(&shid->stream_watchdog,
 							      msecs_to_jiffies(stream_watchdog_ms));
@@ -3451,7 +3514,7 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			}
 			spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 			if (std_liveness_ms > 0) {
-				shid->stream_watchdog_data = shid->stat_data;
+				stream_watchdog_mark_live(shid);
 				/* Liveness is judged on IRQs, not on parsed frames:
 				 * stat_data only advances for frames that reach a live
 				 * HID client, so a device that did send frames while the
@@ -3663,8 +3726,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 
 			if (stream_watchdog_ms > 0 && !shid->stream_watchdog_active) {
 				shid->stream_watchdog_active = true;
-				shid->stream_watchdog_data = shid->stat_data;
-				shid->stream_watchdog_misses = 0;
+				stream_watchdog_mark_live(shid);
 				shid->stream_watchdog_reinits = 0;
 				schedule_delayed_work(&shid->stream_watchdog,
 						      msecs_to_jiffies(stream_watchdog_ms));
@@ -4554,8 +4616,11 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->wd_handshake_data = 0;
 	shid->wd_handshake_dropped = 0;
 	shid->wd_handshake_observed = 0;
+	shid->wd_handshake_irqs = 0;
+	shid->wd_handshake_resets = 0;
 	shid->watchdog_fires = 0;
 	shid->watchdog_deferred_flow = 0;
+	shid->watchdog_deferred_idle = 0;
 	shid->storm_resets = 0;
 	shid->done_latched = false;
 	shid->raw_mode_active = raw_mode; /* false → heatmap/raw code dead; infrastructure stays zeroed for mode switch */
@@ -4821,8 +4886,11 @@ static int spi_hid_resume(struct device *dev)
 	shid->wd_handshake_data = 0;
 	shid->wd_handshake_dropped = 0;
 	shid->wd_handshake_observed = 0;
+	shid->wd_handshake_irqs = 0;
+	shid->wd_handshake_resets = 0;
 	shid->watchdog_fires = 0;
 	shid->watchdog_deferred_flow = 0;
+	shid->watchdog_deferred_idle = 0;
 	shid->storm_resets = 0;
 	shid->done_latched = false;
 	shid->feat_delay_pending = false;

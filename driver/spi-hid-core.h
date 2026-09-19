@@ -365,9 +365,12 @@ struct spi_hid {
 	u32 wd_handshake_data;                    /* stat_data at last watchdog firing (progress check) */
 	u32 wd_handshake_dropped;                 /* frames_dropped at last firing */
 	u32 wd_handshake_observed;                /* stat_raw_observed at last firing */
+	u32 wd_handshake_irqs;                    /* stat_irq_count at last firing (idle vs dead) */
+	u32 wd_handshake_resets;                  /* stat_reset_rsp at last firing (storm detect) */
 	u32 watchdog_fires;                       /* watchdog progress decisions taken */
 	u32 watchdog_deferred_flow;               /* FLOW decisions that re-armed instead of retrying */
-	u32 storm_resets;                         /* consecutive non-FLOW decisions (0 on FLOW / confirm) */
+	u32 watchdog_deferred_idle;               /* IDLE decisions: quiet panel, waited without retrying */
+	u32 storm_resets;                         /* consecutive non-FLOW/non-IDLE decisions (0 on FLOW/IDLE/confirm) */
 	bool done_latched;                        /* First DONE reached this probe (ready stability) */
 
 	struct delayed_work feat_delay_work;      /* GET_FEATURE delay work (matches Windows ~3.6 s settle; original doc cited ~5.9 s) */
@@ -375,6 +378,8 @@ struct spi_hid {
 
 	struct delayed_work stream_watchdog;      /* Input stream monitoring watchdog */
 	u32 stream_watchdog_data;                 /* Frames since last data */
+	u32 stream_watchdog_irqs;                 /* IRQ count at last tick (idle vs broken stream) */
+	u32 stream_watchdog_dropped;              /* frames_dropped at last tick */
 	u32 stream_watchdog_misses;               /* Missed frame counter */
 	u32 stream_watchdog_reinits;              /* Stream reinit counter */
 	bool stream_watchdog_active;              /* Watchdog is active */

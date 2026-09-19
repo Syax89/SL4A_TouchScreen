@@ -619,6 +619,14 @@ def check_control_flow_pins():
             failures += 1
         else:
             _hpb = _hp[1].split("\n}", 1)[0]
+            if "RAW_WD_IDLE" not in _hpb or "RAW_WD_STALLED" not in _hpb:
+                print("FAIL driver/spi-hid-core.c: watchdog lost IDLE patience — "
+                      "an untouched panel is evicted to standard HID again")
+                failures += 1
+            if "wd_handshake_irqs" not in _hpb:
+                print("FAIL driver/spi-hid-core.c: watchdog no longer snapshots IRQs — "
+                      "idle and dead look identical again")
+                failures += 1
             if "wd_handshake_data" not in _hpb:
                 print("FAIL driver/spi-hid-core.c: watchdog lost its progress check — "
                       "it DESCREQs a flowing stream every 2 s again")
