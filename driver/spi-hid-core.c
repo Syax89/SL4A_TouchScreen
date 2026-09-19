@@ -740,10 +740,16 @@ static int spi_hid_seq_write_vendor_init(struct spi_hid *shid)
 	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
 }
 
-/* GET_FEATURE Report ID 6 (probe-time calibration read). */
+/* GET_FEATURE Report ID 6 (probe-time calibration read). Single opcode form,
+ * always (preset aside): the July one-shot captured 1616 valid 0x0c bodies
+ * with the single ten-byte vector `02 00 00 03 42 00 04 03 00 06`, and the
+ * doubled eleven-byte form never drew a reply ("no reply after 3 attempts"
+ * in every raw arm). */
 static int spi_hid_seq_write_get_feature6(struct spi_hid *shid)
 {
-	struct spi_hid_wire_frame frame = spi_hid_wire_get_feature6(spi_hid_wire_doubled());
+	struct spi_hid_wire_frame frame =
+		spi_hid_wire_get_feature6(raw_b1f8109_preset ?
+					  true : false);
 
 	shid->read_resp_type = SPI_HID_CONTENT_TYPE_GET_FEATURE;
 	shid->read_resp_content_id = SPI_HID_GETFEAT6_REPORT_ID;
@@ -1269,12 +1275,23 @@ static int spi_hid_raw_enable_stream(struct spi_hid *shid)
  * nothing when no descriptor arrives (there is no stream data either way) and
  * it is the one order nobody has tried. Idempotent, because the descriptor
  * arrives on more than one path. */
+/* Skip the 0x56 vendor-init enable at DONE. SET_FEATURE ID5=1 already
+ * starts the 0x04 heatmap stream (Windows #0222 -> 0x04 stream; July one-shot
+ * 1616 valid bodies); the 0x56 frame moves the stream to 0x0A (boot #0531 ->
+ * 0x0A idle), so sending it after ID5 kills the 0x04 stream this driver
+ * reads. */
+static int raw_no_enable;
+module_param(raw_no_enable, int, 0444);
+MODULE_PARM_DESC(raw_no_enable,
+	"Skip the 0x56 stream enable at DONE (SET_FEATURE ID5 owns the stream)");
+
 static void spi_hid_raw_stream_arm(struct spi_hid *shid)
 {
 	if (shid->raw_stream_armed)
 		return;
 	shid->raw_stream_armed = true;
-	spi_hid_raw_enable_stream(shid);
+	if (!raw_no_enable)
+		spi_hid_raw_enable_stream(shid);
 }
 
 static int spi_hid_get_request(struct spi_hid *shid, u8 content_id)
@@ -1406,20 +1423,27 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 
 	/* The reference names the content id only when it reads a body; a
 	 * nine-byte read (a header) carries none, whatever request it answers.
-	 * Raw DONE on the stream register is the one exception with a fixed
-	 * Windows shape: header `0B 00 00 00 FF 00 03 0A 00` (SET_FEATURE named,
-	 * no id), body `... 56 ...` (id 0x56 named). The global variant stays
-	 * legacy for the handshake — the panel answers descriptors only to the
-	 * five-byte form — so the stream names the reference shape here, not
-	 * through the knob. */
-	if (shid->raw_mode_active && shid->seq_state == SPI_HID_SEQ_DONE &&
-	    (reg == SPI_HID_RAW_STREAM_REGISTER || reg == 0x04))
+	 * Two request families carry a fixed Windows shape regardless of the
+	 * global variant, which stays legacy for the handshake — the panel
+	 * answers descriptors only to the five-byte form:
+	 * - raw DONE on the stream register: header `0B 00 00 00 FF 00 03 0A 00`
+	 *   (SET_FEATURE named, no id), body `... 56 ...` (id 0x56 named);
+	 *   on 0x04 the touch dialect names nothing (`00 00 04 00`).
+	 * - GET_FEATURE reads: the reply lives on register 3 named `04 03`
+	 *   (boot #0220: `0B 00 00 00 FF 00 04 03 00`, body `... 00 06`).
+	 *   With the legacy five-byte form the reply never stages
+	 *   ("no reply after 3 attempts" in every raw arm); the July one-shot
+	 *   captured 1616 valid 0x0c bodies with the single ten-byte GET
+	 *   vector `02 00 00 03 42 00 04 03 00 06`. */
+	if ((shid->raw_mode_active && shid->seq_state == SPI_HID_SEQ_DONE &&
+	     (reg == SPI_HID_RAW_STREAM_REGISTER || reg == 0x04)) ||
+	    shid->read_resp_type == SPI_HID_CONTENT_TYPE_GET_FEATURE)
 		n = spi_hid_wire_read_approval_variant(tx, reg,
 						       reg == 0x04 ? 0 :
-						       SPI_HID_CONTENT_TYPE_SET_FEATURE,
+						       shid->read_resp_type,
 						       (rx_len > SPI_HID_READ_APPROVAL_LEN &&
 						        reg != 0x04) ?
-						       SPI_HID_RAW_STREAM_CONTENT_ID : 0,
+						       shid->read_resp_content_id : 0,
 						       SPI_HID_READ_FRAME_REFERENCE);
 	else
 		n = spi_hid_wire_read_approval_variant(tx, reg, shid->read_resp_type,
