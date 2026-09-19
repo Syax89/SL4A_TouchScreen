@@ -694,32 +694,12 @@ def check_control_flow_pins():
     _pr0_probe = (core_code.rsplit("static int spi_hid_probe(struct spi_device *spi)", 1)[1]
                   .split("\n}", 1)[0]
                   if "static int spi_hid_probe(struct spi_device *spi)" in core_code else "")
-    _pr0_force = _pr0_probe.split(
-        "shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;", 1)
-    if len(_pr0_force) != 2:
-        print("FAIL driver/spi-hid-core.c: the probe's raw stream-register force is gone — "
+    # No 0x0A force at probe (retired): the descriptor's own register stands,
+    # e541dd0 parity. The knob still reroutes pre-DONE reads (phase map).
+    if "shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;" in _pr0_probe:
+        print("FAIL driver/spi-hid-core.c: the probe's raw stream-register force is back — "
               "raw_pre_desc_reg0 has nothing to skip")
         failures += 1
-    else:
-        # The guard is the `if (` immediately before the assignment: a knob
-        # consultation anywhere else in the (huge) probe body would not gate
-        # the force. Whitespace-normalised so the exact spelling of the
-        # condition does not matter, only that the knob is in it — and negated
-        # (skip the force WHEN SET, spec item 1), so a polarity flip that keeps
-        # the knob name but forces 0x0A whenever the knob is set is also red.
-        _pr0_guard = _pr0_force[0].rsplit("if (", 1)
-        _pr0_g = "".join(_pr0_guard[1].split()) if len(_pr0_guard) == 2 else ""
-        if "raw_pre_desc_reg0" not in _pr0_g:
-            print("FAIL driver/spi-hid-core.c: the probe stream-register force no longer "
-                  "consults raw_pre_desc_reg0 — with the knob set input_register is still "
-                  "forced to 0x0A and the H4 sweep can never read register 0")
-            failures += 1
-        elif ("!raw_pre_desc_reg0" not in _pr0_g and
-              "!(raw_pre_desc_reg0" not in _pr0_g):
-            print("FAIL driver/spi-hid-core.c: the probe stream-register force consults "
-                  "raw_pre_desc_reg0 without negating it — the force now fires exactly when "
-                  "the H4 sweep sets the knob, the opposite of spec item 1")
-            failures += 1
     _pr0_rd = (core_code.split("static int spi_hid_seq_read(struct", 1)[1].split("\n}", 1)[0]
                if "static int spi_hid_seq_read(struct" in core_code else "")
     _pr0_raw = _pr0_rd.split("if (shid->raw_mode_active) {", 1)
@@ -798,32 +778,15 @@ def check_control_flow_pins():
         print("FAIL driver/spi-hid-core.c: spi_hid_wire_doubled_setfeat() ignores "
               "raw_b1f8109_preset — b1f8109's SET_FEATURE 5 frame (sf_cmd) was doubled too")
         failures += 1
-    # 2a. The probe-time stream-register force guard must name the preset
-    # (negated with raw_pre_desc_reg0), so with it set the 0x0A force is
-    # skipped and input_register stays 0, b1f8109's pre-DONE read destination.
+    # 2a. No 0x0A force at probe (retired with the STOP): the preset's
+    # pre-DONE reg-0 reads come from the phase map, asserted in 2b.
     _bp_probe = (core_code.rsplit("static int spi_hid_probe(struct spi_device *spi)", 1)[1]
                  .split("\n}", 1)[0]
                  if "static int spi_hid_probe(struct spi_device *spi)" in core_code else "")
-    _bp_force = _bp_probe.split(
-        "shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;", 1)
-    if len(_bp_force) != 2:
-        print("FAIL driver/spi-hid-core.c: the probe's raw stream-register force is gone — "
+    if "shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;" in _bp_probe:
+        print("FAIL driver/spi-hid-core.c: the probe's raw stream-register force is back — "
               "raw_b1f8109_preset has nothing to skip")
         failures += 1
-    else:
-        _bp_fg = _bp_force[0].rsplit("if (", 1)
-        _bp_g = "".join(_bp_fg[1].split()) if len(_bp_fg) == 2 else ""
-        if "raw_b1f8109_preset" not in _bp_g:
-            print("FAIL driver/spi-hid-core.c: the probe stream-register force no longer "
-                  "consults raw_b1f8109_preset — with the preset set input_register is still "
-                  "forced to 0x0A, not b1f8109's register 0")
-            failures += 1
-        elif ("!raw_b1f8109_preset" not in _bp_g and
-              "!(raw_pre_desc_reg0" not in _bp_g):
-            print("FAIL driver/spi-hid-core.c: the probe force consults raw_b1f8109_preset "
-                  "without negating it — the force would fire exactly when the preset is set, "
-                  "inverting the dialect")
-            failures += 1
     # 2b. spi_hid_seq_read()'s raw branch: pre-DONE reads must be routed to
     # input_register when the preset is set, alongside raw_pre_desc_reg0.
     _bp_rd2 = (core_code.split("static int spi_hid_seq_read(struct", 1)[1].split("\n}", 1)[0]

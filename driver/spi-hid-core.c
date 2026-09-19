@@ -59,13 +59,10 @@ static bool skip_getfeat = true;
  * single-opcode frame, non-zero restores the legacy doubled-opcode form. */
 static bool wire_double_opcode = SPI_HID_WIRE_DOUBLE_DEFAULT;
 
-/* Triage knob for the 2026-09-17 regression: the pre-DESCREQ teardown +
- * power preamble (vendor_stop, D2, D0 in spi_hid_vendor_init) postdates the
- * last build this panel answered on, and the device now reset-loops with the
- * handshake otherwise intact. Set to 1 to skip those three frames so one
- * field sweep can tell whether they are what keeps the panel resetting.
- * Default 0: the reference sends them, and the stalled stream they cure is
- * real (tested in the field). */
+/* Triage knob: the pre-DESCREQ power preamble (D2, D0 in
+ * spi_hid_vendor_init) postdates the last build this panel answered on.
+ * Set to 1 to skip both frames so one field sweep can tell whether they
+ * are what keeps the panel resetting. Default 0. */
 static bool skip_vendor_stop;
 /* Triage knob for the 2026-09-17 regression: b1f8109 — the last build this
  * panel answered on — abandoned to the hardcoded fallback on the first
@@ -124,9 +121,7 @@ static bool raw_pre_desc_reg0;
  * consumption site — spi_hid_wire_doubled()/spi_hid_wire_doubled_setfeat() for
  * the doubled flag, the two read destinations in spi_hid_seq_read() and
  * spi_hid_probe(), and the poller RESET_RSP branch — NEVER by overwriting those
- * globals in probe. In spi_hid_vendor_init it skips ONLY the STOP frame: D2/D0
- * still go out exactly as b1f8109 sent them (this is NOT skip_vendor_stop's
- * all-three semantics). Default 0: byte-for-byte the parent at every site. This
+ * globals in probe. Default 0: byte-for-byte the parent at every site. This
  * is the "restore the working dialect" switch for the 2026-09-17 regression. */
 static bool raw_b1f8109_preset;
 /* Deprecated alias: 1 asked for the frame without the doubled opcode, which is
@@ -755,16 +750,6 @@ static int spi_hid_seq_write_get_feature6(struct spi_hid *shid)
 	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
 }
 
-/* Skip the STOP teardown and the D2 sleep, sending D0 alone: the working
- * init trace is exactly one frame (surface_init.csv #0000, single 14B D0)
- * followed 13 ms later by stream headers on 0x04 and heatmaps 70 ms later.
- * No STOP, no D2, no DESCREQ, no GET/SET anywhere near. D2 has no Windows
- * source at all (FRAME-MATRIX: inferred twin). */
-static int vendor_init_d0_only;
-module_param(vendor_init_d0_only, int, 0444);
-MODULE_PARM_DESC(vendor_init_d0_only,
-	"Vendor init sends D0 alone (no STOP, no D2) like surface_init.csv #0000");
-
 /* Windows vendor init: SET_POWER (D2→D0) on command_register 0x0004.
  * Sent on every cold boot / D3→D0 transition before DESCREQ; the device
  * streams DATA type=1 immediately afterward (no DESCREQ needed).
@@ -776,23 +761,13 @@ MODULE_PARM_DESC(vendor_init_d0_only,
  * different internal opcode 0x08 encoding). */
 static int spi_hid_vendor_init(struct spi_hid *shid)
 {
-	struct spi_hid_wire_frame stop = spi_hid_wire_vendor_stop(spi_hid_wire_doubled());
 	struct spi_hid_wire_frame d2 = spi_hid_wire_set_power_d2(spi_hid_wire_doubled());
 	struct spi_hid_wire_frame d0 = spi_hid_wire_set_power_d0(spi_hid_wire_doubled());
 	int ret;
 
-	/* Skip the whole teardown + power preamble when the triage knob is set:
-	 * one sweep answers whether these are the frames the device rejects. */
+	/* Skip the power preamble when the triage knob is set. */
 	if (skip_vendor_stop)
 		return 0;
-
-	if (vendor_init_d0_only) {
-		struct spi_hid_wire_frame d0 = spi_hid_wire_set_power_d0(spi_hid_wire_doubled());
-
-		ret = spi_hid_seq_write(shid, d0.bytes, (int)d0.len, NULL, 0);
-		msleep(100);
-		return ret;
-	}
 
 	/* b1f8109 sent only D2 then D0, and so does everyone now: the STOP
 	 * teardown is retired (e541dd0, last working raw, never sent it, and
@@ -800,7 +775,6 @@ static int spi_hid_vendor_init(struct spi_hid *shid)
 	 * running stream — while several showed the stream never starting
 	 * after a STOP). The preset keeps its other effects (doubled writes,
 	 * pre-DONE reg-0 reads, poller give-up). */
-	(void)stop;
 
 	ret = spi_hid_seq_write(shid, d2.bytes, (int)d2.len, NULL, 0);
 	if (ret)
@@ -1294,18 +1268,6 @@ static void spi_hid_raw_stream_arm(struct spi_hid *shid)
 	if (shid->raw_stream_armed)
 		return;
 	shid->raw_stream_armed = true;
-	/* With vendor_init_d0_only, re-issue D0 here: both Windows orders put
-	 * the trigger immediately before the stream reads (boot: ID5 2 ms
-	 * before; init: D0 13 ms before), while a DESCREQ handshake in between
-	 * (ours: D0 at probe, handshake, then reads) never stages anything. */
-	if (vendor_init_d0_only) {
-		struct spi_hid_wire_frame d0 =
-			spi_hid_wire_set_power_d0(spi_hid_wire_doubled());
-
-		if (spi_hid_seq_write(shid, d0.bytes, (int)d0.len, NULL, 0))
-			dev_warn(&shid->spi->dev, "SEQ: DONE-time D0 failed\n");
-		msleep(100);
-	}
 	if (!raw_no_enable)
 		spi_hid_raw_enable_stream(shid);
 }
@@ -2326,7 +2288,7 @@ MODULE_PARM_DESC(setfeat_speed_hz,
  * trailer, kept for A/B experiments. */
 module_param(skip_vendor_stop, bool, 0444);
 MODULE_PARM_DESC(skip_vendor_stop,
-	"skip the pre-DESCREQ vendor_stop + D2/D0 preamble (default 0)");
+	"skip the pre-DESCREQ D2/D0 power preamble (default 0)");
 module_param(raw_fallback_on_reset, bool, 0444);
 MODULE_PARM_DESC(raw_fallback_on_reset,
 	"poller RESET_RSP gives up to the hardcoded fallback as b1f8109 did (default 0)");
@@ -4606,26 +4568,11 @@ static int spi_hid_probe(struct spi_device *spi)
 	if (ret)
 		goto err1_touch;
 
-	/* The stream register is not in the device descriptor — the 32 bytes of
-	 * the real one (boot trace #0004) do not contain it — while the trace
-	 * reads every stream frame from 0x0A. The raw path is this device's, so
-	 * it sets it here; if the descriptor said something else, say so: that
-	 * difference is worth seeing in a bundle. */
+	/* The descriptor's own input register stands everywhere now: e541dd0
+	 * (last working raw) never forced it — the parse fills it in, and raw
+	 * DONE reads it for the stream. The retired 0x0A force never survived
+	 * the parse anyway. */
 	shid->std_input_register = shid->desc.input_register;
-	if (shid->desc.input_register && shid->desc.input_register != SPI_HID_RAW_STREAM_REGISTER)
-		dev_info(dev, "SEQ: stream register 0x%06x in the descriptor, 0x%02x in the reference\n",
-			 shid->desc.input_register, SPI_HID_RAW_STREAM_REGISTER);
-	/* Only the raw path's: in standard mode the descriptor's own input
-	 * register must stand, because the pre-DESC handshake reads reach registers
-	 * the capture names (0 for the reset, 3 for the descriptor) and this force
-	 * would send every one of them to the stream register instead. A leg found
-	 * the window: probe to first DEVICE_DESC, self-healing on a successful
-	 * parse, with every handshake read misdirected until then. raw_pre_desc_reg0
-	 * skips this force so the H4 falsifier can read register 0 through
-	 * WAIT_DESC: with it set input_register stays 0 until a descriptor parses,
-	 * exactly as v1.5.0 had it. */
-	if (shid->raw_mode_active && !(raw_pre_desc_reg0 || raw_b1f8109_preset))
-		shid->desc.input_register = SPI_HID_RAW_STREAM_REGISTER;
 	/* The enable is NOT sent here any more: it is sent when the sequencer
 	 * reaches DONE, after the descriptor exchange, as the reference does. See
 	 * spi_hid_raw_stream_arm(). */
