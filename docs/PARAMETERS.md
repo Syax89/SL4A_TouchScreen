@@ -62,6 +62,11 @@ only shape this panel answers (field sweep 2026-09-16); `0` = the reference's
 nine-byte shape (register at offset 7), silent on this panel; `2` = both. A
 field-settled default: do not flip it without a labelled run.
 
+Header-read length is separate from the approval shape: pre-DONE header reads
+are nine bytes in both modes (`spi_hid_hdr_len()`), sixteen only for the raw
+DONE stream. A sixteen-byte pre-DONE read over-clocks the bare answers and
+stalls discovery the same way a wrong approval does.
+
 ### Feature reads
 
 `skip_getfeat` (default `1`, and what the installer's raw profile sets) skips the
