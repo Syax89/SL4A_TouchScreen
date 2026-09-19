@@ -11,7 +11,7 @@
 
 All operations live in one tool: `tools/sl4a-touch.sh`
 (subcommands: `install`, `uninstall`, `activate`, `status`, `logs`,
-`rebuild`).
+`rebuild`, `hunt`).
 
 ```bash
 git clone https://github.com/Syax89/SL4A_TouchScreen.git
@@ -77,7 +77,7 @@ Profile parameters live in `/etc/modprobe.d/sl4a-spi-hid.conf`
 |-----------|---------|-------------|
 | `raw_mode` | N | Enable raw heatmap + multi-touch mode |
 | `sync_timeout_ms` | 6000 | Bounds every synchronous request (covers the ~3.6 s device settle) |
-| `stream_watchdog_ms` | 0 | Runtime streaming watchdog (disabled by default; Windows uses 2000) |
+| `stream_watchdog_ms` | 2000 | Runtime streaming watchdog interval (0 disables) |
 | `stream_watchdog_max_retries` | 3 | Re-init retries before giving up |
 | `skip_getfeat` | 0 | Skip the connect-time GET_FEATURE exchange |
 | `getfeat_delay_ms` | 0 | Delay between RPT_DESC and GET_FEATURE |
@@ -166,5 +166,5 @@ Override if your display resolution or DPI scaling requires it.
 2. **4+ finger instability**: Without the Mahalanobis contact classifier
    and per-cycle gain adaptation (both unavailable without device firmware
    access), tracking 4+ simultaneous fingers has partial contact loss.
-3. **Raw mode is experimental**: may fail to activate after a cold boot;
+3. **Raw mode is beta**: may fail to activate after a cold boot;
    reboot and return to `raw_mode=0` after raw experiments.

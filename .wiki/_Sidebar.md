@@ -8,7 +8,7 @@
 - [Config Table](Config-Table)
 - [Hardware](Hardware)
 - [Standard Touch Mode](Standard-Touch-Mode)
-- [Multi-touch (Experimental)](Multi-touch-Experimental)
+- [Multi-touch (Beta)](Multi-touch-Experimental)
 - [Build & Install](Build-and-Install)
 - [Usage & Troubleshooting](Building-Usage-and-Troubleshooting)
 - [Reverse Engineering](Reverse-Engineering)

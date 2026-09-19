@@ -53,8 +53,8 @@ Device (TPD0) {
 }
 ```
 
-The driver uses `_PS0` / `_PS3` for power transitions but NEVER calls `_RST`
-(M010), which physically destroys the device on this hardware.
+The driver uses `_PS0` / `_PS3` for power transitions but NEVER calls `_RST`,
+which physically destroys the device on this hardware.
 
 ## Device: MSHW0162 — Surface Laptop 3 (AMD)
 
@@ -121,7 +121,6 @@ operation. The Linux driver follows this.
 
 For PIO reads, the AMD SPI V2 controller requires TX_COUNT=3
 (not 0) to correctly trigger the full-duplex read phase.
-This matches Windows `amdspi.sys` decompilation at function 0x4bac.
 Without this quirk, the first 3 bytes of received data are corrupted.
 
 TX_COUNT must always leave at least 4 bytes of FIFO space for the
@@ -132,7 +131,4 @@ Larger reads must be split into 64-byte chunks.
 
 - `docs/SPI_REGISTERS.md` — Complete register map and bit definitions
 - `docs/AMDI0060_CONTRACT.md` — SPI controller contract and quirks
-- `docs/decomp/SURFACE_TRACKER_DECOMP.md` — decompilation notes
-- `tools/ghidra/` — Ghidra scripts used for the analysis
 - `docs/acpi/dsdt.dsl` — DSDT with the device and controller declarations
-- AMD Cezanne FCH BIOS Specification (NDA)

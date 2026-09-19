@@ -1,9 +1,8 @@
 # Touch Pipeline (Raw Mode)
 
 The raw multi-touch pipeline converts the device's capacitive sensor grid
-into HID multitouch contacts. It mirrors the Windows
-`TouchPenProcessor0C19.dll` processing chain (~85% functional alignment) and
-is compiled in `driver/mshw0231-raw.c` with every constant in
+into HID multitouch contacts. It follows the reference touch-processing chain
+and is compiled in `driver/mshw0231-raw.c` with every constant in
 `driver/mshw0231-raw-constants.h`.
 
 The input is a **CapImg frame** — 3456 cells (72×48) on SL4 `MSHW0231`,
@@ -36,11 +35,11 @@ Notes that matter when comparing with the Linux chain:
 - the image the detector reads is a 288-byte-row plane where only the first
   72 bytes of each row carry the SL4 image; the raster layout of the frame
   itself is the 72-byte stride documented above;
-- the frame is filled by the transport side, and the DLL publishes its result
-  back into the same object (peak position, flags) — the tracker reads it
-  from there;
+- the frame is filled by the transport side, and the reference publishes its
+  result back into the same object (peak position, flags) — the tracker reads
+  it from there;
 - one peak per frame means multi-contact output comes from the tracker
-  (see [Multi-touch (Experimental)](Multi-touch-Experimental)), never from
+  (see [Multi-touch (Beta)](Multi-touch-Experimental)), never from
   the detector.
 
 | Windows stage | Linux equivalent |
@@ -82,7 +81,7 @@ c590[i] = max(0, 10000 − ( (i·22204 + 500) / 1000 + 6000 ))
 ```
 
 (`C590_BASE=10000`, `C590_STEP_NUM=22204` ≈ 0.00222035428 per step,
-`C590_STEP_DEN=1000`, `C590_OFFSET=6000` — Windows-verified.) The table is
+`C590_STEP_DEN=1000`, `C590_OFFSET=6000`.) The table is
 built once at `mshw0231_raw_init()`.
 
 ## 2. Baseline (asymmetric per-cell EMA)
@@ -96,14 +95,14 @@ After stabilization, tracking is asymmetric:
 
 | Condition | Rule |
 |---|---|
-| `raw ≥ baseline` (finger lifted / resting) | Recover toward raw: `new = (7·base + raw)/8` — the Windows-documented **12.5% recovery rate** (EMA alpha 7) |
+| `raw ≥ baseline` (finger lifted / resting) | Recover toward raw: `new = (7·base + raw)/8` — the **12.5% recovery rate** (EMA alpha 7) |
 | `raw < baseline` (touch) | Do **not** chase the touch down; only a very slow decay tracks downward thermal drift, so a held finger never fades into the baseline |
 
 ## 3. Signal rise and noise floor
 
 - `rise = c590[baseline] − c590[raw]` (touch lowers raw, so rise is positive)
-- Cells with absolute c590 < **400** are suppressed (noise floor, DLL
-  config +0xECC = 0.04)
+- Cells with absolute c590 < **400** are suppressed (noise floor, 0.04 in the
+  reference's fixed-point units)
 - A cell is touched when `rise ≥ 200` (`HEATMAP_TOUCH_MIN_RISE`)
 
 ## 4. Peak detection
@@ -133,7 +132,7 @@ Each connected component becomes a blob candidate, gated by:
 | Pixel count | ≥ 2 (`HEATMAP_MIN_BLOB_PIXELS`) |
 | Max rise | ≥ 200 |
 | Signal weight | ≥ 1000 (`blob_min_weight`, module param) |
-| Velocity rejection | centroid within **6 cells** of a detected peak (`HEATMAP_VELOCITY_REJECT_RADIUS`; the Windows **36.0 = 6²** squared-distance constant sits in its association/coalescing layers — see Config-Table) |
+| Velocity rejection | centroid within **6 cells** of a detected peak (`HEATMAP_VELOCITY_REJECT_RADIUS`; a 6-cell radius corresponds to the reference's **36.0 = 6²** squared-distance constant in its association/coalescing layers) |
 
 ## 6. Blob splitting
 
@@ -154,8 +153,8 @@ density. The merge radius now **scales down** as the finger count rises
 ## 8. Centroid and weight
 
 - Blob centroid from weighted pixel positions (edge penalty: top/side
-  cells ×0.97, bottom ×0.23 — DLL +0x8D0/+0x8D4)
-- Weight EMA is fixed at the Windows-verified value: `weight = (old·7 + new)/8`
+  cells ×0.97, bottom ×0.23)
+- Weight EMA is fixed at the reference value: `weight = (old·7 + new)/8`
   (`HEATMAP_WEIGHT_EMA_ALPHA = 7`, independent of `ema_alpha`)
 
 ## 9. Hungarian assignment
@@ -208,4 +207,4 @@ release slots after `HEATMAP_MISSED_FRAME_TIMEOUT_MS = 60`.
 Everything is host-side signal processing on raw sensor data: no firmware
 calibration, no Mahalanobis classifier, no per-cycle gain adaptation (both
 require device firmware access). See [Config Table](Config-Table) for the
-Windows DLL provenance of these values.
+provenance of these values.

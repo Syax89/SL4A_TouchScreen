@@ -155,13 +155,23 @@ complete rollback and upgrade procedure.
 
 ```
 /etc/modprobe.d/sl4a-spi-hid.conf:
-  options sl4a_spi_hid raw_mode=N wire_double_opcode=1
+  options sl4a_spi_hid raw_mode=N
 ```
 
 The explicit raw profile written by `sl4a-touch.sh install --raw` uses
-`raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1`. Every raw control is experimental
-and load-time-only. The complete release, diagnostic, and experimental contract
-is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
+`raw_mode=Y raw_input_beta=Y skip_getfeat=Y`. Every raw control is experimental
+and load-time-only.
+
+Raw handshake/read knobs (all experimental, load-time only):
+
+- `skip_vendor_stop` (`0`) — omit the pre-`DESCREQ` `vendor_stop` + `D2`/`D0` preamble
+- `raw_fallback_on_reset` (`0`) — first poller `RESET_RSP` gives up to the fallback descriptors
+- `raw_pre_desc_reg0` (`0`) — route pre-`DONE` reads to register 0 (`input_register`)
+- `raw_b1f8109_preset` (`0`) — one switch restoring the `b1f8109` raw dialect
+- `read_frame_variant` (`1`) — read-approval frame shape (`1` = legacy five-byte)
+
+The complete release, diagnostic, and experimental contract — including every
+default — is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
 
 ## What Will Not Work
 

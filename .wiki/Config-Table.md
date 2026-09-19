@@ -156,15 +156,55 @@ not portable without equivalent device communication:
 | +0xD40–0xD78 | Mahalanobis classification matrix (10×11 floats) |
 | +0xEA0–0xEC0 | Background noise tracking |
 
-## Linux parameter mapping
+## Module parameters
 
-| Config value | Linux parameter | Default | Notes |
+Every Linux module parameter, its class and its load-time default. Defaults are
+read from the driver source; the raw controls are load-time only, so every
+profile is a fresh module load. The classes match the parameter contract in
+`docs/PARAMETERS.md`.
+
+| Parameter | Class | Default | Notes |
 |---|---|---|---|
-| +0xC98 | `ghost_dist` | 6 | sqrt(36.0) |
-| +0x8DC–0x8EC | `blob_max_distance` | 3 | base radius (cells) |
-| +0x8D8 | `hold_frames` | 0 | disabled |
-| +0x8C0 | `pre_assoc_ratio` | 0 | disabled |
-| +0x8D0/+0x8D4 | (built-in) | 97/23 | edge penalties |
+| `raw_mode` | Standard safety | `0` | The only normal profile control; `0` selects standard HID and skips the raw activation/pipeline |
+| `sl4a_debug_level` | Diagnostic | `0` | Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex |
+| `debug_trace` | Diagnostic | `0` | Controller-hop trace: 0=off, 1=lifecycle, 2=SPI segments, 3=read data |
+| `std_liveness_ms` | Diagnostic | `0` | Standard-mode startup liveness window (ms); logs only, never recovers |
+| `raw_input_beta` | Experimental activation | `0` | Publish beta multi-touch from raw CapImg frames |
+| `skip_getfeat` | Experimental activation | `1` | Skip the standard-mode feature-read handshake (the raw Report ID 6 read still runs) |
+| `getfeat_delay_ms` | Experimental activation | `0` | Delay (ms) between RPT_DESC and GET_FEATURE |
+| `setfeat_speed_hz` | Experimental activation | `0` | SPI clock (Hz) for the SET_FEATURE write only; 0 = bus default |
+| `wire_double_opcode` | Experimental activation | `0` | `1` sends the legacy doubled leading opcode on every sequencer frame |
+| `setfeat_no_double` | Experimental activation | `0` | Deprecated alias: `1` sends SET_FEATURE without the doubled opcode |
+| `read_frame_variant` | Experimental activation | `1` | Read-approval shape: 0=reference, 1=legacy five-byte, 2=both |
+| `acpi_probe_power_cycle` | Experimental activation | `0` | ACPI `_PS3`→`_PS0` power cycle at probe |
+| `sync_timeout_ms` | Experimental activation | `6000` | Timeout (ms) for synchronous requests; clamped to [100, 60000] |
+| `stream_watchdog_ms` | Experimental activation | `2000` | Runtime streaming watchdog interval (ms); 0=disable |
+| `stream_watchdog_max_retries` | Experimental activation | `3` | Max re-init retries before giving up |
+| `skip_vendor_stop` | Experimental activation | `0` | Omit the pre-`DESCREQ` `vendor_stop` + `D2`/`D0` preamble |
+| `raw_fallback_on_reset` | Experimental activation | `0` | First poller `RESET_RSP` gives up to the hardcoded fallback descriptors |
+| `raw_pre_desc_reg0` | Experimental activation | `0` | Pre-`DONE` reads go to register 0 (`input_register`) instead of the `{3, 0x0A}` selector |
+| `raw_b1f8109_preset` | Experimental activation | `0` | One switch restoring the `b1f8109` raw dialect |
+| `std_liveness_recover` | Experimental standard-mode recovery (issue #4) | `0` | Run ACPI recovery when the liveness check sees no activity after `DONE` (needs `std_liveness_ms`) |
+| `skip_std_getfeat` | Experimental standard-mode recovery (issue #4) | `0` | Answer feature GET_REPORT with `-EOPNOTSUPP` in standard HID |
+| `wait_reset_kick_ms` | Experimental standard-mode recovery (issue #4) | `0` | Kick discovery (one `DESCREQ`) when no IRQ edge since power-up/resume; 0=disable |
+| `blob_min_weight` | Experimental raw pipeline | `1000` | Minimum blob signal rise |
+| `ema_alpha` | Experimental raw pipeline | `2` | Position EMA smoothing |
+| `dfa_data_offset` | Experimental raw pipeline | `0` | DFT antenna frame data offset in bytes (0 = decoded raster) |
+| `ghost_dist` | Experimental raw pipeline | `6` | Coalescence radius (cells) |
+| `grid_cols` | Experimental raw pipeline | `0` | Grid columns; 0 = per-device default |
+| `grid_rows` | Experimental raw pipeline | `0` | Grid rows; 0 = per-device default |
+| `blob_debounce` | Experimental raw pipeline | `3` | New-contact debounce (frames) |
+| `blob_lift_frames` | Experimental raw pipeline | `3` | Missed frames before a contact lifts |
+| `hold_frames` | Experimental raw pipeline | `0` | Contact hold grace frames (disabled) |
+| `pre_assoc_ratio` | Experimental raw pipeline | `0` | Pre-association ratio ×1000 (disabled) |
+| `blob_max_distance` | Experimental raw pipeline | `3` | Slot reassignment distance (cells) |
+| `invert_x` | Experimental raw calibration | `0` | Invert the X axis |
+| `invert_y` | Experimental raw calibration | `0` | Invert the Y axis |
+| `swap_xy` | Experimental raw calibration | `0` | Swap the X/Y axes |
+| `calib_scale_x` | Experimental raw calibration | `0` | X scale ×1000 (0 = derived from the grid) |
+| `calib_scale_y` | Experimental raw calibration | `0` | Y scale ×1000 |
+| `calib_offset_x` | Experimental raw calibration | `0` | X pixel offset |
+| `calib_offset_y` | Experimental raw calibration | `0` | Y pixel offset |
 
 ## Per-device geometry
 

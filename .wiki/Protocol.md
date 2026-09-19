@@ -2,10 +2,9 @@
 
 Both supported panels — `MSHW0231` (Surface Laptop 4 AMD) and `MSHW0162`
 (Surface Laptop 3 AMD) — speak the same **HID-over-SPI Version 0 (V0)** protocol,
-Microsoft's pre-release HidSpiDeviceV0 variant. It differs from the public
+the pre-release variant this panel family uses. It differs from the public
 HID-over-SPI v1.0 spec in framing, descriptor layout and enumeration order.
-This page documents the protocol as implemented by the Linux driver,
-cross-validated against decompiled Windows `hidspi.sys` / `HidSpiCx.sys`.
+This page documents the protocol as implemented by the Linux driver.
 
 ## Discovery via ACPI
 
@@ -32,7 +31,7 @@ Every exchange is host-initiated over one SPI transaction:
    register address, a content ID and a length (see [Wire Protocol](Wire-Protocol)).
 2. The device asserts the data-ready GPIO **IRQ** when a response is available.
 3. Host sends a **read approval** (`0x0B` frame), then reads the response from
-   the FIFO. The driver's default is the field-settled **5-byte legacy shape**
+   the FIFO. The driver's default is the **5-byte legacy shape**
    (`0B <reg3> FF`, register in the address field) — the only shape this panel
    answers; the 9-byte reference shape (register at offset 7) is
    `read_frame_variant=0` and silent on it.
@@ -130,14 +129,14 @@ legacy form (`02 02 …`, zeroed trailer) is emitted only with
 
 After SET_FEATURE the device starts streaming raw **CapImg frames**
 (`content_id=0x0C`, ~4302–4304 bytes) — see
-[Multi-touch (Experimental)](Multi-touch-Experimental).
+[Multi-touch (Beta)](Multi-touch-Experimental).
 
 ## Timing and timeouts
 
 | Parameter | Default | Role |
 |---|---|---|
 | `sync_timeout_ms` | 6000 | Bounds every synchronous request this driver issues (feature queries; clamped to [100, 60000] at probe) |
-| `getfeat_delay_ms` | 0 | Optional delay between RPT_DESC and GET_FEATURE (Windows traces show ~3.6 s device settle; the original doc cited ~5.9 s) |
+| `getfeat_delay_ms` | 0 | Optional delay between RPT_DESC and GET_FEATURE (the device needs ~3.6 s to settle before it answers feature queries) |
 | descreq work delay | 100 ms | Deferred `DESCREQ` re-send on `WAIT_DESC` entry |
 
 A connect-time feature GET_REPORT (e.g. hidraw `HIDIOCGFEATURE`) can take up
