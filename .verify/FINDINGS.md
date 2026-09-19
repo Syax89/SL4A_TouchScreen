@@ -500,3 +500,159 @@ labels and nav/sidebar labels say **"Multi-touch (Beta)"**, satisfying "keep the
 Beta label / the word must disappear from the status prose". If a full rename
 (slug `Multi-touch-Beta`) is wanted, it is a one-step change to the file name
 plus the four link targets.
+
+---
+## M3a — docs second pass
+
+# M3a — docs second pass: completeness + the README status truth
+Docs-only. Touched: `docs/PARAMETERS.md`, `.wiki/Protocol.md`, `README.md` (plus
+this file). No code, test, tool or installer change. `make -C tests test` → exit 0.
+Baseline note: the coordinator's reference commit `ea877ad` is **not** present in
+this checkout (HEAD = `a8c4cc6` = `origin/main`), and **no parameter named
+`std_raw_transition` exists** anywhere (`git log -S std_raw_transition` → empty;
+no matching `module_param`). Everything below is traced to the code at HEAD.
+## Task 1 — `docs/PARAMETERS.md`
+
+### The four parameters that were missing, placed by use site
+
+`grep -rh module_param driver/*.c` gives **40** parameters. Against the doc, these
+four were missing (the task named three plus `std_raw_transition`, which does not
+exist; the full-list cross-check also surfaced `skip_vendor_stop`):
+
+| Parameter | declared | `module_param` | consumed at |
+|---|---|---|---|
+| `skip_vendor_stop` | spi-hid-core.c:69 | :2194 | :761 (`spi_hid_vendor_init()` early return); its only caller is raw-gated (:4499–4505) |
+| `raw_fallback_on_reset` | :79 | :2197 | :1986 (poller `RESET_RSP` → `DONE`/`FALLBACK`) |
+| `raw_pre_desc_reg0` | :93 | :2200 | :1466 (pre-`DONE` read destination), :4288 (probe stream-register force skipped) |
+| `raw_b1f8109_preset` | :131 | :2204 | :688/:696 (doubled wire flag), :1466 (read dest), :1986 (poller give-up), :4288 (probe force), :768 (STOP-only skip) |
+
+All four default to `0`/off and change only raw-mode feature traffic / power
+sequence / recovery, so they went into the **Experimental activation** row (whose
+contract already reads "Never set by the standard profile"). A short
+`### Raw-mode regression triage` subsection was added between the wire-format and
+read-approval sections, giving each knob's effect and default, all read from those
+use sites.
+
+### Extra completeness fixes (same contract: "every parameter appears exactly once")
+
+1. **`debug_level` → `sl4a_debug_level`.** The registered parameter is
+   `sl4a_debug_level` (spi-hid-core.c:2376). The old `debug_level` spelling comes
+   from the pre-release capture `captures/id5-20260718/spi-hid.conf:2`, not from
+   any current `module_param`.
+2. **Removed `touch_signal_mode` and `touch_threshold_pct`** from the raw-pipeline
+   row and deleted the "unused placeholders" sentence. Neither is registered and
+   neither appears in `driver/*.c`; `CHANGELOG.md:1206` records
+   `touch_threshold_pct` was removed as a dead param. They were the only
+   non-parameter names in the table.
+3. **Deduplicated `std_liveness_ms`.** It was listed twice (Diagnostic *and*
+   "Experimental standard-mode recovery (issue #4)"); it now appears once, in the
+   recovery row, where its full behaviour is described (`module_param` at :2410).
+
+Post-edit check: parsing `docs/PARAMETERS.md` as a table, **all 40 `module_param`
+names are classified in exactly one row**, and no non-parameter identifier remains
+in the table.
+
+### Opener
+
+Old: *"No input behavior is release-qualified yet."* New: states the standard
+profile is the qualified profile and the raw pipeline is **beta** (functional on
+hardware, still under field review) and is never set by the standard profile;
+the fail-closed framing is kept. No formal "release-qualified" claim remains.
+---
+## Task 2 — `.wiki/Protocol.md`
+
+### What the code says (the truth the rewrite states)
+
+- write opcode `0x02` — `driver/spi-hid-wire-frames.h:50`.
+- two forms: single `02 …` and doubled `02 02 …` (`doubled[]` arrays), picked by a
+  flag — the same header.
+- the flag is `wire_double_opcode`, default `0`
+  (`SPI_HID_WIRE_DOUBLE_DEFAULT 0`, spi-hid-wire-frames.h:67; spi-hid-core.c:60),
+  and the doubled form is emitted when `wire_double_opcode || raw_b1f8109_preset`
+  (spi-hid-core.c:688).
+- the doubled form is the dialect **this panel answers**: the field battery's only
+  positive shape was `wire_double_opcode=1`, and the single form is called "the
+  failing shape" (CHANGELOG.md:39–45, 53–58).
+
+### Deviation from the task text — flagged
+
+The task says to write *"both installed profiles carry the doubled form
+(`02 02 00 …`)"*. That is **not traceable in this checkout**:
+
+- the installer writes single-opcode profiles —
+  `options sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y` and
+  `options sl4a_spi_hid raw_mode=N` (`tools/sl4a-touch.sh:840/845`);
+- `tests/installer_recovery_contract_test.py:268` pins that exact raw-profile
+  string; and
+- `SPI_HID_WIRE_DOUBLE_DEFAULT` is `0`, and neither profile sets
+  `wire_double_opcode` or `raw_b1f8109_preset`.
+
+Running the task's own method ("from the code and the installer profiles") gives
+the opposite result, so — per the stated rule *"every claim grep-traceable"* — the
+rewrite states the wire-form truth (doubled = the answered dialect; bare default =
+single; a driver option selects the doubled form) and does **not** assert that the
+installer profiles carry the doubled form. This is the one edit to revisit if the
+reference repo's installer differs from this snapshot. (The ask tool returned no
+interactive answer; this is the stated assumption.)
+
+### Edits
+
+- Request-frame sentence (was `.wiki/Protocol.md:31`):
+  *"opcode `0x02` (a single one; a driver option emits a doubled variant)"* →
+  "a write opcode `0x02` … The opcode is written twice (`02 02 …`) in the dialect
+  this panel answers, and once (`02 …`) as the sequencer's bare default; a driver
+  option selects the doubled form."
+- Nearby paragraph (was `:126–129`): drops *"the wire frames the driver sends by
+  default"* and *"emitted only with `wire_double_opcode=1`"*; now the frames are the
+  sequencer's bare default (matching the Windows stack), and the doubled form is
+  the dialect this panel answers, selected by `wire_double_opcode=1` or the
+  `raw_b1f8109_preset` one-switch. No dates, no decompilation, no field-log
+  narration.
+## Task 3 — `README.md`
+
+### 1. Feature Status row (`README.md:47`)
+
+`| Raw CCL and multitouch pipeline | Implemented | Experimental |` →
+`| … | Beta (functional on hardware, under field review) |`. Honest qualification:
+the raw path has host/replay tests and single-contact hardware evidence only.
+
+### 2. "What Will Not Work" (`README.md:166–175`) — code evidence per item
+
+- **Multi-touch in standard mode — KEPT (rewritten).** The MT input device is
+  created only by the raw pipeline (`input_mt_init_slots(…, HEATMAP_MAX_SLOTS, …)`
+  at `mshw0231-raw.c:1921`, `input_register_device` at `:1929`); standard mode
+  registers only a HID device (`hid_add_device`, `spi-hid-core.c:1086`) and the raw
+  path is gated by `raw_mode_active` (`spi-hid-core.c:4152`). No host-side tracker
+  in standard mode.
+- **Pen input — KEPT (rewritten).** No pen handling anywhere in `driver/` (grep);
+  the raw input device sets only `ABS_MT_*` / `ABS_X` / `ABS_Y` / `BTN_TOUCH`
+  (`mshw0231-raw.c:1907–1920`), so pen behaviour is unvalidated.
+- **4-finger tracking — REMOVED.** No source shows a 4-contact limit: the pipeline
+  sizes at `HEATMAP_MAX_SLOTS 47` (`spi-hid-core.h:80`) and carries association
+  radii through "5+ fingers" (`mshw0231-raw.c:1009–1016`); its fixtures include
+  `touch_4finger.bin` / `touch_5finger.bin`. "Unstable at 4 contacts" was a field
+  observation, not a code limit.
+- **Palm rejection — KEPT.** No palm/rejection stage exists in the pipeline
+  (grep `palm` in `driver/` → none).
+- **Other Surface models — KEPT (rewritten).** ACPI match tables accept only
+  `MSHW0231` / `MSHW0162` (`spi-hid-core.c:3703–3705`) and only `AMDI0060`
+  (`spi-amd.c:746–747`).
+
+### 3. Intro line (`README.md:3–5`)
+
+"an experimental raw multitouch pipeline" → "a beta raw-heatmap multitouch
+pipeline". For status consistency the sibling bullets were aligned too
+(`README.md:22–25`): "experimental raw pipeline" → "beta raw pipeline", and
+*"**Raw mode is experimental** and not release-qualified."* → *"**Raw mode is
+beta** — functional on hardware, still under field review."* The same bullet's
+"degrades at 4 contacts" became "is observed to degrade at 4 contacts" so the
+field observation is not read as a pinned code limit (the 4-finger item was
+removed from "What Will Not Work" for exactly that reason).
+## Verification
+
+- `make -C tests test` → exit 0 (full host + python + hunt-sandbox suite).
+- `docs/PARAMETERS.md` table audit (scripted): all 40 `module_param` names
+  classified in exactly one row; no non-parameter identifier left in the table.
+- Independent `review` pass over the diff: "ship as-is"; every checked claim
+  grep-traceable, the 40-param/once table and the beta/qualified wording verified
+  consistent; the only nit (the 4-contact wording) was folded in above.

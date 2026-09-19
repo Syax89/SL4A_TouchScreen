@@ -1,15 +1,17 @@
 # Module Parameter Contract
 
-No input behavior is release-qualified yet. This table classifies the current
-parameter surface so the standard profile remains fail-closed while raw work is
-reviewable and reproducible.
+The standard profile is the qualified profile; the raw pipeline is beta —
+functional on hardware, still under field review — and is never set by the
+standard profile. This table is the fail-closed contract over the whole
+parameter surface: every parameter is listed exactly once, so the standard
+profile stays closed while the raw path remains reviewable and reproducible.
 
 | Class | Parameters | Contract |
 | --- | --- | --- |
 | Standard safety | `raw_mode=0` | The only normal profile control. It selects standard HID and does not run the raw activation/pipeline. |
-| Diagnostic | `sl4a_debug_level`, controller `debug_trace`, `std_liveness_ms` | Logging only. All default to zero. |
-| Experimental activation | `raw_input_beta`, `skip_getfeat`, `getfeat_delay_ms`, `setfeat_speed_hz`, `wire_double_opcode`, `setfeat_no_double`, `read_frame_variant`, `acpi_probe_power_cycle`, `sync_timeout_ms`, `stream_watchdog_ms`, `stream_watchdog_max_retries`, `skip_vendor_stop`, `raw_fallback_on_reset`, `raw_pre_desc_reg0`, `raw_b1f8109_preset` | Can change feature traffic, power sequencing, handshake, recovery, or raw input publication. Never set by the standard profile. |
-| Experimental standard-mode recovery (issue #4) | `std_liveness_recover`, `skip_std_getfeat`, `wait_reset_kick_ms` | Off by default, never set by the installer. The `std_liveness_ms` measurement (Diagnostic above) only logs: it counts controller activity (IRQs) in the window after `DONE`, so a healthy idle device reports silence exactly like a dead one. `std_liveness_recover` additionally runs the existing ACPI recovery when no activity arrives — once per silent episode (observed activity and resume restore the allowance, so a healthy idle device cannot be power-cycled repeatedly); `skip_std_getfeat` answers feature reads with `-EOPNOTSUPP` in standard mode so nothing is written to SPI for a feature query. `wait_reset_kick_ms` only kicks discovery (a `DESCREQ` write, no power sequencing) when the controller has produced no IRQ edge since the timer was armed: at most one successful kick per entry into `WAIT_RESET`, with up to three write attempts and the attempts stopping at the first write that goes out. The clock starts only once the IRQ is armed — after the probe's settle window — so an interval shorter than that window cannot kick a device that was never given the chance to answer. After the kick the descriptor poller keeps reading every 100 ms, so a dead controller is polled rather than left silent. Field-tested before any of these become defaults. |
+| Diagnostic | `sl4a_debug_level`, controller `debug_trace` | Logging only. Both default to zero. |
+| Experimental activation | `raw_input_beta`, `skip_getfeat`, `getfeat_delay_ms`, `setfeat_speed_hz`, `wire_double_opcode`, `setfeat_no_double`, `read_frame_variant`, `skip_vendor_stop`, `raw_fallback_on_reset`, `raw_pre_desc_reg0`, `raw_b1f8109_preset`, `acpi_probe_power_cycle`, `sync_timeout_ms`, `stream_watchdog_ms`, `stream_watchdog_max_retries` | Can change feature traffic, power sequencing, recovery, or raw input publication. Never set by the standard profile. |
+| Experimental standard-mode recovery (issue #4) | `std_liveness_ms`, `std_liveness_recover`, `skip_std_getfeat`, `wait_reset_kick_ms` | Off by default, never set by the installer. `std_liveness_ms` only logs: it counts controller activity (IRQs) in the window after `DONE`, so a healthy idle device reports silence exactly like a dead one. `std_liveness_recover` additionally runs the existing ACPI recovery when no activity arrives — once per silent episode (observed activity and resume restore the allowance, so a healthy idle device cannot be power-cycled repeatedly); `skip_std_getfeat` answers feature reads with `-EOPNOTSUPP` in standard mode so nothing is written to SPI for a feature query. `wait_reset_kick_ms` only kicks discovery (a `DESCREQ` write, no power sequencing) when the controller has produced no IRQ edge since the timer was armed: at most one successful kick per entry into `WAIT_RESET`, with up to three write attempts and the attempts stopping at the first write that goes out. The clock starts only once the IRQ is armed — after the probe's settle window — so an interval shorter than that window cannot kick a device that was never given the chance to answer. After the kick the descriptor poller keeps reading every 100 ms, so a dead controller is polled rather than left silent. Field-tested before any of these become defaults. |
 | Experimental raw pipeline | `blob_min_weight`, `ema_alpha`, `dfa_data_offset`, `ghost_dist`, `grid_cols`, `grid_rows`, `blob_debounce`, `blob_lift_frames`, `hold_frames`, `pre_assoc_ratio`, `blob_max_distance` | Applies only to decoded raw frames. Geometry and tracker behavior are not qualified. |
 | Experimental raw calibration | `invert_x`, `invert_y`, `swap_xy`, `calib_scale_x`, `calib_scale_y`, `calib_offset_x`, `calib_offset_y` | Applies only to raw contact publication. |
 
@@ -34,6 +36,23 @@ keep loading. `setfeat_no_double=1` asks for the SET_FEATURE frame without the
 doubled opcode, which is the default now, so it only takes effect as an override
 of `wire_double_opcode=1` — and then on the SET_FEATURE frame alone. Use
 `wire_double_opcode=1` to experiment with the legacy form.
+
+### Raw-mode regression triage
+
+Four load-time-only knobs restore or bisect the raw dialect the panel last
+answered on. All default to `0` and are set only for a labelled run.
+
+- `skip_vendor_stop` skips the pre-`DESCREQ` teardown and power preamble
+  (`vendor_stop`, D2, D0) in `spi_hid_vendor_init()`.
+- `raw_pre_desc_reg0` skips the probe-time stream-register force and reads every
+  pre-`DONE` frame from the descriptor's input register — still `0` until a
+  descriptor parses, the register the panel answers on — instead of `{3, 0x0A}`.
+- `raw_fallback_on_reset` gives up to the hardcoded fallback descriptors on the
+  first poller `RESET_RSP` instead of draining the reset and retrying.
+- `raw_b1f8109_preset` is the one-switch restore of that whole dialect: doubled
+  writes on every frame (`02 02 ..`), the pre-`DONE` register-0 reads, the poller
+  give-up, and no `STOP` frame (D2/D0 unchanged). It turns those behaviors on
+  regardless of their own knobs, so it is not combined with the three above.
 
 ### Read-approval shape
 
@@ -69,32 +88,6 @@ settle plus the ~5.9 s documented worst case; the pre-fix hardcoded 1000 ms
 timed out on a cold-boot feature query and killed the touchscreen (issue
 #4). A feature-query timeout is non-fatal — the input stream is IRQ-driven
 and independent of feature queries.
-
-### Raw handshake and recovery triage
-
-Four load-time switches cover the raw handshake/recovery shape. All default to
-`0`; they are A/B tools for the 2026-09-17 reset-loop regression, not supported
-settings.
-
-`skip_vendor_stop` drops the pre-`DESCREQ` teardown: the `vendor_stop` frame and
-the `D2`/`D0` power preamble (`spi_hid_vendor_init`) are not sent. `D2`/`D0`
-still go out when it is unset.
-
-`raw_fallback_on_reset` restores the `b1f8109` give-up: the first poller
-`RESET_RSP` abandons the retry and takes the hardcoded fallback descriptors,
-reaching `DONE` instead of re-driving a device that answers every poller read
-with a reset.
-
-`raw_pre_desc_reg0` restores the v1.5.0 pre-`DONE` read destination: the raw
-probe's stream-register force is skipped and every pre-`DONE` read goes to
-register 0 (`input_register`) instead of the `{3, 0x0A}` selector.
-
-`raw_b1f8109_preset` is the one-switch restore of the `b1f8109` (v1.6.3) raw
-dialect: doubled opcode on every write, pre-`DONE` reads on `input_register`, the
-poller `RESET_RSP` giving up to the hardcoded fallback, and vendor init skipping
-the `STOP` frame (`D2`/`D0` unchanged). It ORs the first three behaviours in when
-set and `raw_mode` is active; it does not overwrite those knobs. `0` (the
-default) is byte-for-byte the parent.
 
 ### Frame-age gates (open item)
 

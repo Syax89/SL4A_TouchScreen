@@ -1,8 +1,8 @@
 # SL4A TouchScreen
 
 Linux kernel driver for the Microsoft Surface Laptop 3/4 (AMD) touchscreen,
-implementing the MSHW0231 / MSHW0162 V0 HID-over-SPI transport and an
-experimental raw multitouch pipeline on the AMD Cezanne FCH SPI controller.
+implementing the MSHW0231 / MSHW0162 V0 HID-over-SPI transport and a
+beta raw-heatmap multitouch pipeline on the AMD Cezanne FCH SPI controller.
 
 [![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/Syax89/SL4A_TouchScreen)
 [![Release](https://img.shields.io/badge/release-1.7.0-brightgreen)](VERSION)
@@ -20,9 +20,9 @@ experimental raw multitouch pipeline on the AMD Cezanne FCH SPI controller.
 - A **stylus/pen input node** is published by the HID descriptor but is
   **untested** — pen behavior has not been observed or validated.
 - **No multi-touch** in standard mode. Multi-touch requires the
-  experimental raw pipeline (`raw_mode=1`).
-- **Raw mode is experimental** and not release-qualified. Finger tracking
-  degrades at 4 contacts; pipeline tuning is ongoing.
+  beta raw pipeline (`raw_mode=1`).
+- **Raw mode is beta** — functional on hardware, still under field review.
+  Finger tracking is observed to degrade at 4 contacts; pipeline tuning is ongoing.
 
 See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-step install and
 activation guide.
@@ -44,7 +44,7 @@ activation guide.
 |---------|-----------------------|-----------------------|
 | HID descriptor discovery | Implemented, with a hardcoded fallback | Hardware matrix required |
 | Standard HID report forwarding | Implemented | Contact behavior requires hardware evidence |
-| Raw CCL and multitouch pipeline | Implemented | Experimental |
+| Raw CCL and multitouch pipeline | Implemented | Beta (functional on hardware, under field review) |
 | Cold-boot retry and recovery | Implemented | Hardware matrix required |
 | Candidate classification and per-cycle gain | Not implemented | Not planned for v1.x |
 
@@ -160,27 +160,19 @@ complete rollback and upgrade procedure.
 
 The explicit raw profile written by `sl4a-touch.sh install --raw` uses
 `raw_mode=Y raw_input_beta=Y skip_getfeat=Y`. Every raw control is experimental
-and load-time-only.
-
-Raw handshake/read knobs (all experimental, load-time only):
-
-- `skip_vendor_stop` (`0`) — omit the pre-`DESCREQ` `vendor_stop` + `D2`/`D0` preamble
-- `raw_fallback_on_reset` (`0`) — first poller `RESET_RSP` gives up to the fallback descriptors
-- `raw_pre_desc_reg0` (`0`) — route pre-`DONE` reads to register 0 (`input_register`)
-- `raw_b1f8109_preset` (`0`) — one switch restoring the `b1f8109` raw dialect
-- `read_frame_variant` (`1`) — read-approval frame shape (`1` = legacy five-byte)
-
-The complete release, diagnostic, and experimental contract — including every
-default — is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
+and load-time-only. The complete release, diagnostic, and experimental contract
+is in [`docs/PARAMETERS.md`](docs/PARAMETERS.md).
 
 ## What Will Not Work
 
-- **Multi-touch** in standard mode (`raw_mode=0`)
-- **Pen input** — published node, untested and unqualified
-- **4-finger tracking** — unstable even in raw mode
-- **Palm rejection** — not implemented
-- **Other Surface models** — this driver targets Surface Laptop 3/4
-  (AMD) with `AMDI0060` + `MSHW0231`/`MSHW0162`
+- **Multi-touch** in standard mode (`raw_mode=0`) — the multi-touch input
+  device is registered only by the raw pipeline (`mshw0231-raw.c`); standard
+  mode forwards HID reports with no host-side tracking.
+- **Pen input** — the raw input device publishes touch contacts only and the
+  driver contains no pen-specific handling, so pen behavior is unvalidated.
+- **Palm rejection** — no palm/rejection stage exists in the pipeline.
+- **Other Surface models** — the ACPI match tables accept only `MSHW0231` /
+  `MSHW0162` (touch) and `AMDI0060` (SPI controller).
 
 ## Troubleshooting
 

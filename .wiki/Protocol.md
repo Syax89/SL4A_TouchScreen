@@ -2,9 +2,10 @@
 
 Both supported panels — `MSHW0231` (Surface Laptop 4 AMD) and `MSHW0162`
 (Surface Laptop 3 AMD) — speak the same **HID-over-SPI Version 0 (V0)** protocol,
-the pre-release variant this panel family uses. It differs from the public
+Microsoft's pre-release HidSpiDeviceV0 variant. It differs from the public
 HID-over-SPI v1.0 spec in framing, descriptor layout and enumeration order.
-This page documents the protocol as implemented by the Linux driver.
+This page documents the protocol as implemented by the Linux driver,
+cross-validated against decompiled Windows `hidspi.sys` / `HidSpiCx.sys`.
 
 ## Discovery via ACPI
 
@@ -27,11 +28,13 @@ table selects per-device tuning from the ACPI ID (see [Architecture](Architectur
 
 Every exchange is host-initiated over one SPI transaction:
 
-1. Host writes a **request frame** (TX-only) — opcode `0x02` (a single one; a driver option emits a doubled variant), a 4-byte
-   register address, a content ID and a length (see [Wire Protocol](Wire-Protocol)).
+1. Host writes a **request frame** (TX-only) — a write opcode `0x02`, a 4-byte
+   register address, a content ID and a length (see [Wire Protocol](Wire-Protocol)). The opcode is written twice (`02 02 …`) in the dialect this panel
+   answers, and once (`02 …`) as the sequencer's bare default; a driver option
+   selects the doubled form.
 2. The device asserts the data-ready GPIO **IRQ** when a response is available.
 3. Host sends a **read approval** (`0x0B` frame), then reads the response from
-   the FIFO. The driver's default is the **5-byte legacy shape**
+   the FIFO. The driver's default is the field-settled **5-byte legacy shape**
    (`0B <reg3> FF`, register in the address field) — the only shape this panel
    answers; the 9-byte reference shape (register at offset 7) is
    `read_frame_variant=0` and silent on it.
@@ -122,21 +125,23 @@ Raw mode adds three commands before discovery completes:
 02 00 00 03 42 00 04 03 00 06
 ```
 
-These are the wire frames the driver sends by default: one `0x02` opcode, and
-the `0C EE 5B` device-key trailer on the short commands. The doubled-opcode
-legacy form (`02 02 …`, zeroed trailer) is emitted only with
-`wire_double_opcode=1`; every frame is byte-pinned in `tests/wire_frames_test.c`.
+The frames above are the sequencer's bare default: one `0x02` write opcode, and
+the `0C EE 5B` device-key trailer on the short commands, matching the Windows
+stack. The doubled-opcode form (`02 02 …`, zeroed trailer) is the dialect this
+panel answers, and is selected by `wire_double_opcode=1` (or the
+`raw_b1f8109_preset` one-switch); every frame is byte-pinned in
+`tests/wire_frames_test.c`.
 
 After SET_FEATURE the device starts streaming raw **CapImg frames**
 (`content_id=0x0C`, ~4302–4304 bytes) — see
-[Multi-touch (Beta)](Multi-touch-Experimental).
+[Multi-touch (Experimental)](Multi-touch-Experimental).
 
 ## Timing and timeouts
 
 | Parameter | Default | Role |
 |---|---|---|
 | `sync_timeout_ms` | 6000 | Bounds every synchronous request this driver issues (feature queries; clamped to [100, 60000] at probe) |
-| `getfeat_delay_ms` | 0 | Optional delay between RPT_DESC and GET_FEATURE (the device needs ~3.6 s to settle before it answers feature queries) |
+| `getfeat_delay_ms` | 0 | Optional delay between RPT_DESC and GET_FEATURE (Windows traces show ~3.6 s device settle; the original doc cited ~5.9 s) |
 | descreq work delay | 100 ms | Deferred `DESCREQ` re-send on `WAIT_DESC` entry |
 
 A connect-time feature GET_REPORT (e.g. hidraw `HIDIOCGFEATURE`) can take up
