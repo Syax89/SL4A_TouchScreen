@@ -89,10 +89,10 @@ Profile parameters live in `/etc/modprobe.d/sl4a-spi-hid.conf`
 | `hold_frames` | 0 | Hold grace period (0 = disabled) |
 | `ghost_dist` | 6 | Pre-merge radius in cells |
 | `pre_assoc_ratio` | 0 | Pre-association weight filter (0 = disabled) |
-| `grid_cols` | 72 (SL4) / 78 (SL3) | Heatmap grid columns — per-device default by ACPI ID |
-| `grid_rows` | 48 (SL4) / 52 (SL3) | Heatmap grid rows — per-device default by ACPI ID |
-| `calib_scale_x` | 0 | X scale ×1000 (0 = auto from descriptor) |
-| `calib_scale_y` | 0 | Y scale ×1000 (0 = auto) |
+| `grid_cols` | 0 (= per-device: 72 SL4 / 78 SL3) | Heatmap grid columns — per-device default by ACPI ID |
+| `grid_rows` | 0 (= per-device: 48 SL4 / 52 SL3) | Heatmap grid rows — per-device default by ACPI ID |
+| `calib_scale_x` | 0 | X scale ×1000 (0 = derived from the grid: 32767*1000/(cells-1)); override only for resolution/DPI needs |
+| `calib_scale_y` | 0 | Y scale ×1000 (0 = derived from the grid: 32767*1000/(cells-1)); override only for resolution/DPI needs |
 | `calib_offset_x` | 0 | X offset in screen pixels |
 | `calib_offset_y` | 0 | Y offset in screen pixels |
 | `invert_x` | 0 | Invert X axis |
@@ -155,9 +155,9 @@ SET_FEATURE ID5=01 to activate raw mode.
 
 ### Touch not using full screen
 
-Adjust `calib_scale_x/y` and `calib_offset_x/y`. The driver extracts
-these from the HID report descriptor's logical/physical mapping by default.
-Override if your display resolution or DPI scaling requires it.
+Adjust `calib_scale_x/y` and `calib_offset_x/y`. With the default `0` the
+driver derives the scale from the grid (`32767*1000/(cells-1)`), not from the
+descriptor; override only for resolution/DPI needs.
 
 ## Known Issues
 

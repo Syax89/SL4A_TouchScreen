@@ -718,3 +718,39 @@ cover `docs/` too.
   `hid_desc_addr`/`PNP0C50`.
 - Independent `review` pass over the diff: **"ship as-is"**; the one precision
   nit (the SPI100/SPD7 tier labelling) was folded into `Hardware.md:115-118`.
+
+---
+## M6a — fix M4b F1-F8
+
+
+---
+
+## M6a — second blind review fix list (F1-F8)
+
+Docs-only change. Touched `docs/PARAMETERS.md`, `README.md`, and 5 `.wiki/`
+files (`Wire-Protocol`, `Build-and-Install`, `Config-Table`, `Home`, `Protocol`),
+plus this write-up. No driver change, nothing committed.
+Baseline HEAD = `998fcaa`; `grep -rhoP 'module_param\(\s*\K[A-Za-z0-9_]+' driver/*.c`
+→ **45** params. `make -C tests test` → **exit 0**.
+
+## Per-F result
+
+| # | Result | Change / why (file:line) |
+|---|---|---|
+| F1 | **applied** | `docs/PARAMETERS.md:13` — the Experimental-activation contract now reads "Never set by the standard profile, except `wire_double_opcode=1`, which both installed profiles carry (doubled DESCREQ)." The old flat "Never set by the standard profile." was contradicted by both installer profiles: `options sl4a_spi_hid raw_mode=Y raw_input_beta=Y skip_getfeat=Y wire_double_opcode=1` and `options sl4a_spi_hid raw_mode=N wire_double_opcode=1` (`tools/sl4a-touch.sh:855-863`). |
+| F2 | **applied** | `.wiki/Wire-Protocol.md:129,131,134` — the enumeration example bytes/caption now carry version 2: `72 1C 00 5A` type=7 ver=2, `82 A9 03 5A` type=8 ver=2, and the caption reads `0x72` = type 7 + version 2 / `0x82` = type 8 + version 2. Matches `:39` and the driver: `SPI_HID_PROTOCOL_VERSION` is `2` (`driver/spi-hid-protocol.h:15`), the version is the low nibble (`header->version = raw[0] & 0x0f`, `:98`; the `32 10 00 5A` → type 3 example in the `:199` comment). |
+| F3 | **applied** | `.wiki/Build-and-Install.md:94-95,158-160` — `calib_scale_x`/`calib_scale_y` "0 = auto from descriptor" → "0 = derived from the grid: `32767*1000/(cells-1)`; override only for resolution/DPI needs", and the Troubleshooting paragraph drops the "extracts from the HID report descriptor's logical/physical mapping" claim. Code: `scale_x = (SCREEN_MAX * 1000) / (screen_x_cells - 1)` with `SCREEN_MAX = 32767` (`driver/mshw0231-raw.c:1770-1783`). |
+| F4 | **applied** | `.wiki/Build-and-Install.md:92-93` — `grid_cols`/`grid_rows` default column `72 (SL4) / 78 (SL3)` and `48 (SL4) / 52 (SL3)` → the literal `0 (= per-device: 72 SL4 / 78 SL3)` and `0 (= per-device: 48 SL4 / 52 SL3)`; `grid_cols`/`grid_rows` are `= 0` (`driver/mshw0231-raw.c:68,72`). |
+| F5 | **applied** | `.wiki/Config-Table.md:184` — the `std_liveness_ms` row moved out of the `Diagnostic` group (was `:164`) into the `Experimental standard-mode recovery (issue #4)` group, matching `docs/PARAMETERS.md:14`, which classes it in that recovery row. Both tables now give it exactly one class, and the `:157` "classes match the parameter contract" sentence is now true. |
+| F6 | **applied** | `.wiki/Home.md:3,25` — the intro "single-touch and pen out of the box" → "standard HID single-touch (pen node published, unvalidated)"; the mode table's "Single-touch + pen" → "Single-touch (pen node published, unvalidated), …". `driver/` has no pen handling; `README.md` already rates pen untested. |
+| F7 | **applied** | The wire-default note added in all four spots: `docs/PARAMETERS.md:26-28`, `.wiki/Protocol.md:40-42` and `:146-148`, `.wiki/Wire-Protocol.md:16-17` — "Note: both installer profiles currently set `wire_double_opcode=1`; the single-opcode form is the code default, not the installed default." (`SPI_HID_WIRE_DOUBLE_DEFAULT 0`, `driver/spi-hid-wire-frames.h:67`; the profiles at `tools/sl4a-touch.sh:855-863`). |
+| F8 | **applied** | `README.md:218-219` — `Windows ETW trace format` → `Windows trace format` and `Windows driver decompilation reference` → `Driver reference captures`, per the house rule (no ETW/decompilation tokens). The first word of each cell is capitalised to match the column's sentence-case style; the quoted relabels are otherwise verbatim. |
+
+## Verification
+
+- `make -C tests test` → **exit 0** (full host + python + hunt-sandbox suite; no
+  test references these docs — `rg -l 'std_liveness_ms|Config-Table|PARAMETERS.md|Wire-Protocol' tests/` → no hits).
+- Param parity (scripted): **45** `module_param` names, all classified in exactly
+  one `.wiki/Config-Table.md` row; no extra rows. `std_liveness_ms` class matches
+  in both tables (`Experimental standard-mode recovery (issue #4)`).
+- `git diff --stat`: 7 doc files, +28/−20; no driver/test/tool change.

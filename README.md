@@ -215,8 +215,8 @@ unit that repeats the binding automatically.
 | [`docs/CONFIG_TABLE.md`](docs/CONFIG_TABLE.md) | Config table values |
 | [`docs/ACTIVATION.md`](docs/ACTIVATION.md) | Raw mode activation (SET_FEATURE ID5) |
 | [`docs/CONTACT_ABI.md`](docs/CONTACT_ABI.md) | Contact struct ABI |
-| [`docs/ETW_CSV_FORMAT.md`](docs/ETW_CSV_FORMAT.md) | Windows ETW trace format |
-| [`docs/decomp/`](docs/decomp/) | Windows driver decompilation reference |
+| [`docs/ETW_CSV_FORMAT.md`](docs/ETW_CSV_FORMAT.md) | Windows trace format |
+| [`docs/decomp/`](docs/decomp/) | Driver reference captures |
 | [`docs/SUPPORT.md`](docs/SUPPORT.md) | Supported hardware and release profiles |
 | [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) | Hardware validation matrix |
 | [`docs/TESTING.md`](docs/TESTING.md) | Reproducible validation procedure |

@@ -1,6 +1,6 @@
 # SL4A TouchScreen — Linux Kernel Driver
 
-> A reverse-engineered Linux kernel driver for the **Microsoft Surface Laptop 3/4 (AMD)** touchscreen: standard HID single-touch and pen out of the box, plus a beta raw-heatmap multi-touch pipeline.
+> A reverse-engineered Linux kernel driver for the **Microsoft Surface Laptop 3/4 (AMD)** touchscreen: standard HID single-touch (pen node published, unvalidated) plus a beta raw-heatmap multi-touch pipeline.
 
 The driver speaks the pre-release **HID-over-SPI Version 0 (V0)** protocol that
 these panels use, over the AMD FCH SPI controller (`AMDI0060`). It is a
@@ -22,7 +22,7 @@ baseline length) from the ACPI ID at probe time — see [Architecture](Architect
 
 | Mode | `raw_mode` | What you get | Status |
 |---|---|---|---|
-| **Standard HID** | `0` (default) | Single-touch + pen, firmware-computed coordinates, ~10 ms reports (field observation) | **Qualified profile, recommended** |
+| **Standard HID** | `0` (default) | Single-touch (pen node published, unvalidated), firmware-computed coordinates, ~10 ms reports (field observation) | **Qualified profile, recommended** |
 | **Raw heatmap** | `1` | Sensor-grid data processed host-side into multi-touch | **Beta** |
 
 [Standard Touch Mode](Standard-Touch-Mode) is what you should run day to day.

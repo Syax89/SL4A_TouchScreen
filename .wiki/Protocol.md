@@ -37,7 +37,9 @@ Every exchange is host-initiated over one SPI transaction:
 1. Host writes a **request frame** (TX-only) — a write opcode `0x02`, a 4-byte
    register address, a content ID and a length (see [Wire Protocol](Wire-Protocol)). The opcode is written twice (`02 02 …`) in the dialect this panel
    answers, and once (`02 …`) as the sequencer's bare default; a driver option
-   selects the doubled form.
+   selects the doubled form. Note: both installer profiles currently set
+   `wire_double_opcode=1`; the single-opcode form is the code default, not the
+   installed default.
 2. The device asserts the data-ready GPIO **IRQ** when a response is available.
 3. Host sends a **read approval** (`0x0B` frame), then reads the response from
    the FIFO. The builder decodes the register from **offset 7** in the
@@ -141,7 +143,9 @@ the `0C EE 5B` device-key trailer on the short commands, matching the Windows
 stack. The doubled-opcode form (`02 02 …`, zeroed trailer) is the dialect this
 panel answers, and is selected by `wire_double_opcode=1` (or the
 `raw_b1f8109_preset` one-switch); every frame is byte-pinned in
-`tests/wire_frames_test.c`.
+`tests/wire_frames_test.c`. Note: both installer profiles currently set
+`wire_double_opcode=1`; the single-opcode form is the code default, not the
+installed default.
 
 After SET_FEATURE the device starts streaming raw **CapImg frames**
 (`content_id=0x0C`, ~4302–4304 bytes) — see

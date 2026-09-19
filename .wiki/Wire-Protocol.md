@@ -13,6 +13,8 @@ shapes, header decoding, and the AMD FCH PIO read invariant.
 
 The opcode is a single `0x02` in the frames this device is driven with; a
 driver option (`wire_double_opcode=1`) emits a doubled-opcode variant instead.
+Note: both installer profiles currently set `wire_double_opcode=1`; the
+single-opcode form is the code default, not the installed default.
 The register is the descriptor-relative address (e.g. `0x0001` = DESCREQ
 register, `0x0003` = command register). `content_id` selects the operation
 (`0x00` DESCREQ, `0xC2` vendor init), `len` is the payload length.
@@ -124,10 +126,10 @@ phase — without it the first 3 bytes of received data are corrupted.
 Host  → [02 00 00 01 42 00 00 03 00 00]           DESCREQ (register 0x0001)
 Device→ [IRQ]
 Host  → [0B 00 00 03 FF]                          read approval (legacy 5-byte, register 3)
-Device→ [70 1C 00 5A ... 28-byte DEVICE_DESC]     type=7 ver=0, len 0x001C
+Device→ [72 1C 00 5A ... 28-byte DEVICE_DESC]     type=7 ver=2, len 0x001C
 Host  → [02 00 00 02 42 00 00 03 00 00]           second descriptor request
-Device→ [80 A9 03 5A ... 936-byte RPT_DESC]       type=8 ver=0, len 0x03A9
+Device→ [82 A9 03 5A ... 936-byte RPT_DESC]       type=8 ver=2, len 0x03A9
 ```
 
-`0x70` = type 7 (`DEVICE_DESC`) + version 0; `0x80` = type 8 (`RPT_DESC`) +
-version 0. Full sequence context and timing: [Protocol](Protocol).
+`0x72` = type 7 (`DEVICE_DESC`) + version 2; `0x82` = type 8 (`RPT_DESC`) +
+version 2. Full sequence context and timing: [Protocol](Protocol).

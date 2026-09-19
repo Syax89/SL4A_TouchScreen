@@ -161,7 +161,6 @@ profile is a fresh module load. The classes match the parameter contract in
 | `raw_mode` | Standard safety | `0` | The only normal profile control; `0` selects standard HID and skips the raw activation/pipeline |
 | `sl4a_debug_level` | Diagnostic | `0` | Log verbosity: 0=errors, 1=transitions, 2=per-frame, 3=full hex |
 | `debug_trace` | Diagnostic | `0` | Controller-hop trace: 0=off, 1=lifecycle, 2=SPI segments, 3=read data |
-| `std_liveness_ms` | Diagnostic | `0` | Standard-mode startup liveness window (ms); logs only, never recovers |
 | `raw_input_beta` | Experimental activation | `0` | Publish beta multi-touch from raw CapImg frames |
 | `skip_getfeat` | Experimental activation | `1` | Skip the standard-mode feature-read handshake (the raw Report ID 6 read still runs) |
 | `getfeat_delay_ms` | Experimental activation | `0` | Delay (ms) between RPT_DESC and GET_FEATURE |
@@ -182,6 +181,7 @@ profile is a fresh module load. The classes match the parameter contract in
 | `raw_no_enable` | Experimental activation | `0` | Skip the `0x56` stream enable at `DONE` (SET_FEATURE ID5 owns the stream) |
 | `raw_watchdog_teardown` | Experimental activation | `1` | Raw handshake-watchdog retries send `STOP`+`D2`/`D0` before `DESCREQ` (0 = `DESCREQ` only) |
 | `std_raw_transition` | Experimental activation | `0` | Run the GET ID6 + SET ID5 heatmap transition in standard mode |
+| `std_liveness_ms` | Experimental standard-mode recovery (issue #4) | `0` | Standard-mode startup liveness window (ms); logs only, never recovers |
 | `std_liveness_recover` | Experimental standard-mode recovery (issue #4) | `0` | Run ACPI recovery when the liveness check sees no activity after `DONE` (needs `std_liveness_ms`) |
 | `skip_std_getfeat` | Experimental standard-mode recovery (issue #4) | `0` | Answer feature GET_REPORT with `-EOPNOTSUPP` in standard HID |
 | `wait_reset_kick_ms` | Experimental standard-mode recovery (issue #4) | `0` | Kick discovery (one `DESCREQ`) when no IRQ edge since power-up/resume; 0=disable |
