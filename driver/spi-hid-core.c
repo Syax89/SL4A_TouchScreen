@@ -1832,6 +1832,27 @@ out:
 	mutex_unlock(&shid->seq_lock);
 }
 
+/* Watchdog progress formalization: FLOW means data/observed advanced with
+ * no new drops since the last firing (a live panel — re-arm and keep
+ * polling instead of DESCREQ-aborting a working stream); STALLED means a
+ * fully silent interval or a drops-only flood (retry path — reset storms
+ * show neither data nor drops advancing, so recovery still fires for
+ * them). Classification only: seq_lock held, no sleep, no I/O. */
+enum raw_wd_progress {
+	RAW_WD_STALLED = 0,
+	RAW_WD_FLOW = 1,
+};
+
+static enum raw_wd_progress raw_watchdog_progress(struct spi_hid *shid)
+{
+	lockdep_assert_held(&shid->seq_lock);
+	if ((shid->stat_data != shid->wd_handshake_data ||
+	     shid->stat_raw_observed != shid->wd_handshake_observed) &&
+	    shid->stat_frames_dropped == shid->wd_handshake_dropped)
+		return RAW_WD_FLOW;
+	return RAW_WD_STALLED;
+}
+
 static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 {
 	struct spi_hid *shid = container_of(work, struct spi_hid, raw_handshake_watchdog.work);
@@ -1844,14 +1865,11 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 	    shid->raw_handshake_confirmed)
 		goto out;
 
-	/* Flow beats unconfirmed (watchdog plan): frames advancing without new
-	 * drops since the last firing prove a live panel — re-arm and keep
-	 * polling instead of DESCREQ-aborting a working stream. Only a fully
-	 * silent interval (or a drops-only flood) retries; reset storms show
-	 * neither data nor drops advancing, so recovery still fires for them. */
-	if ((shid->stat_data != shid->wd_handshake_data ||
-	     shid->stat_raw_observed != shid->wd_handshake_observed) &&
-	    shid->stat_frames_dropped == shid->wd_handshake_dropped) {
+	/* Flow beats unconfirmed (watchdog plan): see raw_watchdog_progress(). */
+	shid->watchdog_fires++;
+	if (raw_watchdog_progress(shid) == RAW_WD_FLOW) {
+		shid->watchdog_deferred_flow++;
+		shid->storm_resets = 0;
 		shid->wd_handshake_data = shid->stat_data;
 		shid->wd_handshake_dropped = shid->stat_frames_dropped;
 		shid->wd_handshake_observed = shid->stat_raw_observed;
@@ -1861,6 +1879,7 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
 		goto out;
 	}
+	shid->storm_resets++;
 	shid->wd_handshake_data = shid->stat_data;
 	shid->wd_handshake_dropped = shid->stat_frames_dropped;
 	shid->wd_handshake_observed = shid->stat_raw_observed;
@@ -2750,6 +2769,7 @@ static void spi_hid_poll_work(struct work_struct *work)
 			if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
 			    spi_hid_protocol_raw_confirms_handshake(shid->data_buf[7], rl)) {
 				shid->raw_handshake_confirmed = true;
+				shid->storm_resets = 0;
 				cancel_delayed_work(&shid->raw_handshake_watchdog);
 				cancel_delayed_work(&shid->raw_probe_retry_work);
 				shid->raw_probe_attempts = 0;
@@ -3622,6 +3642,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		if (shid->raw_mode_active && !shid->raw_handshake_confirmed &&
 		    spi_hid_protocol_raw_confirms_handshake(body[7], rl)) {
 			shid->raw_handshake_confirmed = true;
+			shid->storm_resets = 0;
 			cancel_delayed_work(&shid->raw_handshake_watchdog);
 			cancel_delayed_work(&shid->raw_probe_retry_work);
 			/* Confirmation is progress: hand the retry budgets back so a
@@ -4533,6 +4554,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->wd_handshake_data = 0;
 	shid->wd_handshake_dropped = 0;
 	shid->wd_handshake_observed = 0;
+	shid->watchdog_fires = 0;
+	shid->watchdog_deferred_flow = 0;
+	shid->storm_resets = 0;
 	shid->done_latched = false;
 	shid->raw_mode_active = raw_mode; /* false → heatmap/raw code dead; infrastructure stays zeroed for mode switch */
 	shid->seq_dbg_last_state = SPI_HID_SEQ_INVALID;
@@ -4797,6 +4821,9 @@ static int spi_hid_resume(struct device *dev)
 	shid->wd_handshake_data = 0;
 	shid->wd_handshake_dropped = 0;
 	shid->wd_handshake_observed = 0;
+	shid->watchdog_fires = 0;
+	shid->watchdog_deferred_flow = 0;
+	shid->storm_resets = 0;
 	shid->done_latched = false;
 	shid->feat_delay_pending = false;
 	shid->std_liveness_recovered = false;

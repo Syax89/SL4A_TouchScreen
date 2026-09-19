@@ -365,6 +365,9 @@ struct spi_hid {
 	u32 wd_handshake_data;                    /* stat_data at last watchdog firing (progress check) */
 	u32 wd_handshake_dropped;                 /* frames_dropped at last firing */
 	u32 wd_handshake_observed;                /* stat_raw_observed at last firing */
+	u32 watchdog_fires;                       /* watchdog progress decisions taken */
+	u32 watchdog_deferred_flow;               /* FLOW decisions that re-armed instead of retrying */
+	u32 storm_resets;                         /* consecutive non-FLOW decisions (0 on FLOW / confirm) */
 	bool done_latched;                        /* First DONE reached this probe (ready stability) */
 
 	struct delayed_work feat_delay_work;      /* GET_FEATURE delay work (matches Windows ~3.6 s settle; original doc cited ~5.9 s) */

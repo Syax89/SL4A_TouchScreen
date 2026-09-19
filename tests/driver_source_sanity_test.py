@@ -600,16 +600,33 @@ def check_control_flow_pins():
 
     # Watchdog plan: progress (data/observed advance, no new drops) re-arms
     # instead of DESCREQ-aborting a live stream; DONE latches ready.
+    # Formalized: the progress check lives in raw_watchdog_progress()
+    # (returns RAW_WD_FLOW / RAW_WD_STALLED under seq_lock), the watchdog
+    # body calls it and re-arms on FLOW.
     _wd = core_code.split("static void spi_hid_raw_handshake_watchdog", 1)
     if len(_wd) != 2:
         print("FAIL driver/spi-hid-core.c: raw handshake watchdog is gone")
         failures += 1
     else:
         _wdb = _wd[1].split("\n}", 1)[0]
-        if "wd_handshake_data" not in _wdb:
-            print("FAIL driver/spi-hid-core.c: watchdog lost its progress check — "
-                  "it DESCREQs a flowing stream every 2 s again")
+        if "raw_watchdog_progress(shid)" not in "".join(_wdb.split()):
+            print("FAIL driver/spi-hid-core.c: watchdog no longer goes through "
+                  "raw_watchdog_progress() — the progress check is inline again")
             failures += 1
+        _hp = core_code.split("static enum raw_wd_progress raw_watchdog_progress", 1)
+        if len(_hp) != 2:
+            print("FAIL driver/spi-hid-core.c: raw_watchdog_progress() helper is gone")
+            failures += 1
+        else:
+            _hpb = _hp[1].split("\n}", 1)[0]
+            if "wd_handshake_data" not in _hpb:
+                print("FAIL driver/spi-hid-core.c: watchdog lost its progress check — "
+                      "it DESCREQs a flowing stream every 2 s again")
+                failures += 1
+            if "lockdep_assert_held" not in _hpb:
+                print("FAIL driver/spi-hid-core.c: raw_watchdog_progress() lost its "
+                      "seq_lock assertion — it must not run unlocked")
+                failures += 1
     _rd = core_code.rsplit("static int spi_hid_seq_restart_discovery", 1)
     if len(_rd) == 2 and "done_latched" not in _rd[1].split("\n}", 1)[0]:
         print("FAIL driver/spi-hid-core.c: restart_discovery lost the ready latch — "
