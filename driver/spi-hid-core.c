@@ -731,7 +731,7 @@ static int spi_hid_seq_write_descreq(struct spi_hid *shid)
 /* SET_FEATURE Report ID 0x56 (vendor init / device key). */
 static int spi_hid_seq_write_vendor_init(struct spi_hid *shid)
 {
-	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(spi_hid_wire_doubled());
+	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(spi_hid_wire_doubled_setfeat());
 
 	/* The reads that follow name this request, like the reference's do. */
 	shid->read_resp_type = SPI_HID_CONTENT_TYPE_SET_FEATURE;
@@ -740,22 +740,30 @@ static int spi_hid_seq_write_vendor_init(struct spi_hid *shid)
 	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
 }
 
-/* GET_FEATURE Report ID 6 (probe-time calibration read). Single opcode form,
- * always (preset aside): the July one-shot captured 1616 valid 0x0c bodies
- * with the single ten-byte vector `02 00 00 03 42 00 04 03 00 06`, and the
- * doubled eleven-byte form never drew a reply ("no reply after 3 attempts"
- * in every raw arm). */
+/* GET_FEATURE Report ID 6 (probe-time calibration read). Doubled form like
+ * every other sequencer write: the controller consumes the first byte, so
+ * doubled-in-driver is what puts Windows' ten bytes on the wire (July
+ * isolated harness: 1616 valid bodies with the 11-byte vector). */
 static int spi_hid_seq_write_get_feature6(struct spi_hid *shid)
 {
 	struct spi_hid_wire_frame frame =
-		spi_hid_wire_get_feature6(raw_b1f8109_preset ?
-					  true : false);
+		spi_hid_wire_get_feature6(spi_hid_wire_doubled());
 
 	shid->read_resp_type = SPI_HID_CONTENT_TYPE_GET_FEATURE;
 	shid->read_resp_content_id = SPI_HID_GETFEAT6_REPORT_ID;
 
 	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
 }
+
+/* Skip the STOP teardown and the D2 sleep, sending D0 alone: the working
+ * init trace is exactly one frame (surface_init.csv #0000, single 14B D0)
+ * followed 13 ms later by stream headers on 0x04 and heatmaps 70 ms later.
+ * No STOP, no D2, no DESCREQ, no GET/SET anywhere near. D2 has no Windows
+ * source at all (FRAME-MATRIX: inferred twin). */
+static int vendor_init_d0_only;
+module_param(vendor_init_d0_only, int, 0444);
+MODULE_PARM_DESC(vendor_init_d0_only,
+	"Vendor init sends D0 alone (no STOP, no D2) like surface_init.csv #0000");
 
 /* Windows vendor init: SET_POWER (D2→D0) on command_register 0x0004.
  * Sent on every cold boot / D3→D0 transition before DESCREQ; the device
@@ -777,6 +785,14 @@ static int spi_hid_vendor_init(struct spi_hid *shid)
 	 * one sweep answers whether these are the frames the device rejects. */
 	if (skip_vendor_stop)
 		return 0;
+
+	if (vendor_init_d0_only) {
+		struct spi_hid_wire_frame d0 = spi_hid_wire_set_power_d0(spi_hid_wire_doubled());
+
+		ret = spi_hid_seq_write(shid, d0.bytes, (int)d0.len, NULL, 0);
+		msleep(100);
+		return ret;
+	}
 
 	/* b1f8109 — and so the raw_b1f8109_preset restore — sent only D2 then D0,
 	 * with no STOP frame. With the preset set, skip ONLY this teardown; the
@@ -1254,7 +1270,7 @@ static int spi_hid_raw_enable_stream(struct spi_hid *shid)
 	 * and wire_double_opcode=1 reaches the enable too instead of the A/B
 	 * experiment silently skipping this frame (P1 double-blind wave: the
 	 * hardcoded 0 bypassed the knob; both legs found it). */
-	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(spi_hid_wire_doubled());
+	struct spi_hid_wire_frame frame = spi_hid_wire_vendor_init(spi_hid_wire_doubled_setfeat());
 
 	if (!shid->raw_mode_active)
 		return 0;
@@ -1290,6 +1306,18 @@ static void spi_hid_raw_stream_arm(struct spi_hid *shid)
 	if (shid->raw_stream_armed)
 		return;
 	shid->raw_stream_armed = true;
+	/* With vendor_init_d0_only, re-issue D0 here: both Windows orders put
+	 * the trigger immediately before the stream reads (boot: ID5 2 ms
+	 * before; init: D0 13 ms before), while a DESCREQ handshake in between
+	 * (ours: D0 at probe, handshake, then reads) never stages anything. */
+	if (vendor_init_d0_only) {
+		struct spi_hid_wire_frame d0 =
+			spi_hid_wire_set_power_d0(spi_hid_wire_doubled());
+
+		if (spi_hid_seq_write(shid, d0.bytes, (int)d0.len, NULL, 0))
+			dev_warn(&shid->spi->dev, "SEQ: DONE-time D0 failed\n");
+		msleep(100);
+	}
 	if (!raw_no_enable)
 		spi_hid_raw_enable_stream(shid);
 }
@@ -1576,16 +1604,16 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 				reg = spi_hid_resp_reg(shid);
 		}
 	} else if (shid->raw_mode_active && !raw_b1f8109_preset) {
-		/* Raw DONE reads the command register. The probe force to 0x0A is
-		 * overwritten by the DEVICE_DESC parse (real descriptor says
-		 * input 0x0000), so desc.input_register is 0 here and every DONE
-		 * read polled reg 0 until the device reset (field capture
-		 * 2026-09-19). 0x0A answers idle c0 without touch; the
+		/* Raw DONE read destination. Default: the command register — the
 		 * touch-time trace streams heatmaps (216/4304B, CE 10 0C) on
-		 * 0x04 — the descriptor's own command register — right after
-		 * D0 with no enable at all. The preset keeps its legacy
-		 * dialect. */
-		reg = shid->desc.command_register ? shid->desc.command_register : 0x04;
+		 * 0x04 right after D0. With raw_pre_desc_reg0, the input
+		 * register instead (July passive recipe: transition, then reg-0
+		 * legacy reads captured 1616 valid bodies). The probe 0x0A force
+		 * is overwritten by the DEVICE_DESC parse either way. */
+		if (raw_pre_desc_reg0)
+			reg = shid->desc.input_register;
+		else
+			reg = shid->desc.command_register ? shid->desc.command_register : 0x04;
 	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
@@ -2369,6 +2397,10 @@ MODULE_PARM_DESC(setfeat_no_double,
  * seq_lock. */
 static int spi_hid_seq_write_setfeat(struct spi_hid *shid)
 {
+	/* Doubled like every other sequencer write: the controller consumes
+	 * the first byte, so doubled-in-driver is what puts the 14 Windows
+	 * bytes on the wire (July isolated SET, 15-byte vector). Honors
+	 * setfeat_no_double for the A/B override. */
 	struct spi_hid_wire_frame frame =
 		spi_hid_wire_set_feature5(spi_hid_wire_doubled_setfeat());
 
@@ -2458,6 +2490,15 @@ static void spi_hid_getfeat6_retain(struct spi_hid *shid, const u8 *body, u32 bo
  * waiting for an IRQ (the path with no WAIT_FEATURE state to lean on).
  * Best effort and bounded: the probe continues either way. Caller holds
  * seq_lock. */
+/* Skip the GET reply read-back (write-only GET): the July isolated
+ * harness never read the reply — GET, 5 ms, SET, observe — while every
+ * current read-back (127B reference-TX reads on reg 3) returns fragments
+ * and may disturb the device out of staging the stream. */
+static int get_noread;
+module_param(get_noread, int, 0444);
+MODULE_PARM_DESC(get_noread,
+	"GET ID6 write-only: skip the reply read-back (July isolated order)");
+
 static void spi_hid_getfeat6_read(struct spi_hid *shid)
 {
 	struct device *dev = &shid->spi->dev;
@@ -2466,6 +2507,10 @@ static void spi_hid_getfeat6_read(struct spi_hid *shid)
 
 	if (spi_hid_seq_write_get_feature6(shid)) {
 		dev_warn(dev, "SEQ: GET_FEATURE(6) write failed, continuing\n");
+		return;
+	}
+	if (get_noread) {
+		usleep_range(4500, 5500);
 		return;
 	}
 
@@ -2493,6 +2538,14 @@ module_param(skip_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_getfeat,
 	"Skip the standard-mode feature-read handshake (no WAIT_FEATURE state). "
 	"The raw-mode Report ID 6 configuration read still runs");
+
+/* July one-shot transition in standard mode: GET ID6 + SET ID5=1 after RPT,
+ * then passive capture on reg 0 (raw_observed counts). Opt-in; default off
+ * keeps standard HID byte-identical. */
+static int std_raw_transition;
+module_param(std_raw_transition, int, 0444);
+MODULE_PARM_DESC(std_raw_transition,
+	"Run the GET ID6 + SET ID5 heatmap transition in standard mode (0=off)");
 
 module_param(skip_std_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_std_getfeat,
@@ -3361,16 +3414,18 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 					usleep_range(36000, 39000);
 					/* Windows order: the Report ID 6 configuration read sits
 					 * between the report descriptor and the SET_FEATURE that
-					 * enables the heatmap. It belongs to the raw-mode init
-					 * sequence, so it runs even with skip_getfeat=1, is
-					 * best-effort, and never delays the handshake. */
-					spi_hid_getfeat6_read(shid);
-					seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
-					if (spi_hid_seq_write_setfeat(shid)) {
-						dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
-						schedule_delayed_work(&shid->raw_handshake_watchdog,
-							msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
-						return;
+					 * enables the heatmap. Once per probe (July one-shot):
+					 * repeats reset the panel into a DESCREQ loop. */
+					if (!shid->transition_done) {
+						spi_hid_getfeat6_read(shid);
+						seq_dbg(shid, 1, "SEQ: SET_FEATURE -> DONE\n");
+						if (spi_hid_seq_write_setfeat(shid)) {
+							dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE write failed\n");
+							schedule_delayed_work(&shid->raw_handshake_watchdog,
+								msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+							return;
+						}
+						shid->transition_done = true;
 					}
 					spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 				}
@@ -3404,6 +3459,23 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				}
 			}
 		} else {
+			/* July one-shot transition, opt-in: GET ID6 + SET ID5=1,
+			 * then DONE reads reg 0 as usual. raw_mode=N captured
+			 * 1616 valid 4304B bodies this way; the transition sends
+			 * no vendor init, no power frames, and never delays the
+			 * handshake (best-effort, failures fall through). */
+			if (std_raw_transition && !shid->transition_done) {
+				seq_dbg(shid, 1, "SEQ: standard-mode raw transition: GET ID6 + SET ID5\n");
+				spi_hid_getfeat6_read(shid);
+				if (spi_hid_seq_write_setfeat(shid))
+					dev_warn(&shid->spi->dev,
+						 "SEQ: transition SET_FEATURE ID5 failed, continuing\n");
+				shid->transition_done = true;
+				/* Back to unnamed reads: the GET exception shapes
+				 * only the transition's own reads. */
+				shid->read_resp_type = 0;
+				shid->read_resp_content_id = 0;
+			}
 			spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 			if (std_liveness_ms > 0) {
 				shid->stream_watchdog_data = shid->stat_data;
@@ -3632,6 +3704,13 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 				}
 			}
 		} else if (rl >= 3 && rl - 3 <= avail) {
+			if (!shid->raw_mode_active && body[7] == 0x0C) {
+				/* Heatmap body on the standard path (July transition):
+				 * counted by the passive observer above, never
+				 * delivered as HID input. */
+				seq_dbg(shid, 2, "SEQ: standard-path 0x0c body held for capture (len=%u)\n",
+					rl);
+			} else {
 			if (shid->raw_mode_active && body[7] == 0x40 && rl - 2 >= 6) {
 				/* Report 0x40: ID, one TipSwitch byte, then X and Y
 				 * as 16-bit little-endian pairs (see
@@ -3646,6 +3725,7 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 				if (hret)
 					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x)\n",
 						 hret, body[7]);
+			}
 			}
 		} else if (rl < 3) {
 			dev_warn(dev, "SEQ: DATA report too short to contain a report ID (len=%u), dropped\n",
@@ -4496,6 +4576,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	shid->raw_probe_attempts = 0;
+	shid->transition_done = false;
 	shid->raw_mode_active = raw_mode; /* false → heatmap/raw code dead; infrastructure stays zeroed for mode switch */
 	shid->seq_dbg_last_state = SPI_HID_SEQ_INVALID;
 
@@ -4770,6 +4851,7 @@ static int spi_hid_resume(struct device *dev)
 	shid->raw_handshake_confirmed = false;
 	shid->raw_handshake_retries_left = RAW_HANDSHAKE_MAX_RETRIES;
 	shid->raw_probe_attempts = 0;
+	shid->transition_done = false;
 	shid->feat_delay_pending = false;
 	shid->std_liveness_recovered = false;
 	mshw0231_raw_reset(shid);

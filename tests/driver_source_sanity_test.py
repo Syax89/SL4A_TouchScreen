@@ -587,10 +587,23 @@ def check_control_flow_pins():
     # (the last occurrence is the definition): the handshake's identical call
     # up the file must not satisfy it.
     _en = core_code.rsplit("static int spi_hid_raw_enable_stream", 1)[1].split("\n}", 1)[0]
-    if "spi_hid_wire_vendor_init(spi_hid_wire_doubled())" not in _en:
+    if ("spi_hid_wire_vendor_init(spi_hid_wire_doubled())" not in _en and
+            "spi_hid_wire_vendor_init(spi_hid_wire_doubled_setfeat())" not in _en):
         print("FAIL driver/spi-hid-core.c: the stream enable no longer goes through "
-              "the shared vendor-init builder with spi_hid_wire_doubled() — "
+              "the shared vendor-init builder with the wire knob — "
               "wire_double_opcode=1 would apply to the handshake and not to the enable")
+        failures += 1
+    # SET ID5 goes through the shared doubled helper (the controller eats
+    # byte 0, so doubled-in-driver is what puts Windows' bytes on the wire —
+    # July isolated SET, 15-byte vector; honors setfeat_no_double).
+    if "spi_hid_wire_set_feature5(spi_hid_wire_doubled_setfeat())" not in "".join(core_code.split()):
+        print("FAIL driver/spi-hid-core.c: SET ID5 lost its shared doubled form — "
+              "single-in-driver truncates the wire frame")
+        failures += 1
+    # Transition once per probe: repeats reset the panel into a DESCREQ loop.
+    if "transition_done" not in core_code:
+        print("FAIL driver/spi-hid-core.c: transition once-per-probe gate missing — "
+              "GET+ID5 repeats reset the panel")
         failures += 1
 
     # raw_fallback_on_reset (2026-09-17 triage): declared, published, and

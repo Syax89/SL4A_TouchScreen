@@ -275,6 +275,7 @@ struct spi_hid {
 	struct input_dev *touch_input;
 	bool raw_mode_active;           /* Device is in raw heatmap mode */
 	bool raw_stream_armed;          /* stream enable sent — once, after the descriptor (the reference's order) */
+	bool transition_done;           /* GET ID6 + SET ID5 sent — once per probe (July one-shot; repeats reset the panel) */
 	u8 *heatmap_buf;                /* Last captured raw frame buffer, kmalloc'd */
 	u32 heatmap_len;                /* byte length of the last raw frame */
 	u32 heatmap_capacity;           /* allocated byte capacity of heatmap_buf */
