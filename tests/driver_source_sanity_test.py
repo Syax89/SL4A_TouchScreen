@@ -378,6 +378,12 @@ def check_control_flow_pins():
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() lost the Windows "
               "phase map — standard pre-DONE must read reg 3 for descriptors")
         failures += 1
+    # raw DONE reads the stream register (probe 0x0A force is overwritten by
+    # the DEVICE_DESC parse, so desc.input_register is 0 here).
+    if "SPI_HID_RAW_STREAM_REGISTER" not in _sr:
+        print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() lost the raw DONE "
+              "stream register — DONE polled reg 0 until reset (2026-09-19)")
+        failures += 1
 
     # 6. the read approval frame: nine bytes, the register at offset 7, the
     # address field zero. The device decodes the register from that offset; a

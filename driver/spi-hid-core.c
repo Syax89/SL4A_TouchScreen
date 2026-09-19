@@ -1394,11 +1394,25 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 	}
 
 	/* The reference names the content id only when it reads a body; a
-	 * nine-byte read (a header) carries none, whatever request it answers. */
-	n = spi_hid_wire_read_approval_variant(tx, reg, shid->read_resp_type,
-					       rx_len > SPI_HID_READ_APPROVAL_LEN ?
-					       shid->read_resp_content_id : 0,
-					       read_frame_variant);
+	 * nine-byte read (a header) carries none, whatever request it answers.
+	 * Raw DONE on the stream register is the one exception with a fixed
+	 * Windows shape: header `0B 00 00 00 FF 00 03 0A 00` (SET_FEATURE named,
+	 * no id), body `... 56 ...` (id 0x56 named). The global variant stays
+	 * legacy for the handshake — the panel answers descriptors only to the
+	 * five-byte form — so the stream names the reference shape here, not
+	 * through the knob. */
+	if (shid->raw_mode_active && shid->seq_state == SPI_HID_SEQ_DONE &&
+	    reg == SPI_HID_RAW_STREAM_REGISTER)
+		n = spi_hid_wire_read_approval_variant(tx, reg,
+						       SPI_HID_CONTENT_TYPE_SET_FEATURE,
+						       rx_len > SPI_HID_READ_APPROVAL_LEN ?
+						       SPI_HID_RAW_STREAM_CONTENT_ID : 0,
+						       SPI_HID_READ_FRAME_REFERENCE);
+	else
+		n = spi_hid_wire_read_approval_variant(tx, reg, shid->read_resp_type,
+						       rx_len > SPI_HID_READ_APPROVAL_LEN ?
+						       shid->read_resp_content_id : 0,
+						       read_frame_variant);
 	/* The request is the frame and nothing more: `tx_len = n`, the padded form
 	 * removed for reasons of THIS transport, not because the reference's own
 	 * behaviour was established. Two adversarial legs read the same capture and
@@ -1524,6 +1538,15 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 			else
 				reg = spi_hid_resp_reg(shid);
 		}
+	} else if (shid->raw_mode_active && !raw_b1f8109_preset) {
+		/* Raw DONE reads the stream register. The probe force to 0x0A is
+		 * overwritten by the DEVICE_DESC parse (real descriptor says
+		 * input 0x0000), so desc.input_register is 0 here and every DONE
+		 * read polled reg 0 until the device reset (field capture
+		 * 2026-09-19: sixteen ff reads on reg 0, then RESET_RSP). The
+		 * reference reads every stream frame from 0x0A (boot trace
+		 * #0004-#0873); the preset keeps its legacy dialect. */
+		reg = SPI_HID_RAW_STREAM_REGISTER;
 	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
