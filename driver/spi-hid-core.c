@@ -1943,7 +1943,17 @@ static void spi_hid_raw_handshake_watchdog(struct work_struct *work)
 			sysfs_notify(&dev->kobj, NULL, "ready");
 		}
 		dev_info(dev, "SEQ: raw handshake failed; using standard HID\n");
-		spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_WATCHDOG);
+		/* Parking in DONE assumes the panel is ready to stream, but the
+		 * raw cycling (STOP/DESCREQ every 2 s) leaves it mid-confusion:
+		 * it answers nothing until a fresh RESET→DESCREQ handshake, so
+		 * the fallback published a bound-but-silent HID (field 2026-09-19:
+		 * bound .0055, data=0 through taps). Re-run standard discovery
+		 * instead: DESCREQ now, WAIT_DESC arms the 100 ms poller as
+		 * backstop, and the normal RESET/DESC/RPT path reaches a
+		 * streaming DONE. The published device (if any) is kept; the
+		 * RPT handler skips re-creation while shid->hid stands. */
+		if (spi_hid_seq_restart_discovery(shid, SPI_HID_SEQ_WATCHDOG))
+			spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_WATCHDOG);
 		shid->raw_handshake_wait_feature_defers = 0;
 		goto out;
 	}
