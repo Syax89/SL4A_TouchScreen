@@ -387,6 +387,9 @@ struct spi_hid {
 	u32 stat_frames_dropped;
 	u32 stat_irq_count;
 	u32 stat_irq_edges;                       /* Hard-IRQ edges seen (top half) */
+	u32 stat_raw_observed; /* V0 0x0c heatmap bodies seen on any path
+				 * (envelope ce 10 0c, 4304B). Passive only:
+				 * never triggers retries or state changes. */
 	u32 stat_wire_patches; /* report descriptors copied from the wire; the DEVICE_DESC has its own
  * counter above. 0 while the hardcoded copy is in use. */
 	ktime_t seq_dbg_last_irq;

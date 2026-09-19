@@ -3561,6 +3561,17 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		}
 		rl = body[5] | (body[6] << 8);
 		seq_dbg(shid, 2, "SEQ: DONE cid=0x%02x len=%u\n", body[7], rl);
+		/* Passive heatmap observer (July one-shot provenance): a V0 0x0c
+		 * body (envelope ce 10 0c, 4304B aligned) is counted on ANY path,
+		 * standard included. Observation only — no retries, no state
+		 * changes, no handshake confirmation. */
+		if (body[7] == 0x0C && rl >= 4300 && rl <= 4310) {
+			if (!shid->stat_raw_observed)
+				dev_info(dev,
+					 "SEQ: first V0 0x0c heatmap body observed (len=%u, %s)\n",
+					 rl, shid->raw_mode_active ? "raw" : "standard");
+			shid->stat_raw_observed++;
+		}
 		if (rl >= 3 && rl - 3 > avail) {
 			dev_warn_ratelimited(dev,
 				"SEQ: DATA report len=%u exceeds buffer (avail=%u), dropped\n",
@@ -3998,12 +4009,12 @@ static ssize_t protocol_stats_show(struct device *dev, struct device_attribute *
 {
 	struct spi_hid *shid = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "reset_rsp=%u\ndevice_desc=%u\nrpt_desc=%u\ndata=%u\ngetfeat_resp=%u\nframes_dropped=%u\nirq_count=%u\nwire_patches=%u\npoll_missed=%u\n",
+	return sysfs_emit(buf, "reset_rsp=%u\ndevice_desc=%u\nrpt_desc=%u\ndata=%u\ngetfeat_resp=%u\nframes_dropped=%u\nirq_count=%u\nwire_patches=%u\npoll_missed=%u\nraw_observed=%u\n",
 		shid->stat_reset_rsp, shid->stat_device_desc, shid->stat_rpt_desc,
 		shid->stat_data, shid->stat_getfeat_resp,
 		shid->stat_frames_dropped, shid->stat_irq_count,
 		shid->stat_wire_patches,
-		shid->poll_missed);
+		shid->poll_missed, shid->stat_raw_observed);
 }
 static DEVICE_ATTR_RO(protocol_stats);
 
