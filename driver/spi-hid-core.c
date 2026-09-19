@@ -223,6 +223,17 @@ static const char *spi_hid_seq_state_name(enum spi_hid_seq_state state)
 #define RAW_HANDSHAKE_MAX_RETRIES 3
 #define RAW_HANDSHAKE_COLD_BOOT_RETRY_DELAY_MS 5000
 
+/* First post-DONE wait before the raw handshake watchdog decides there is no
+ * heatmap data. The reference leaves ~2.9 s undisturbed between the enable
+ * (#0531) and the first 0x0A header (#0868); the default 2000 ms abandons
+ * DONE (DESCREQ + WAIT_DESC) before a slow-but-live stream can stage its
+ * first header. Raise for measurement (e.g. 8000); retries after the first
+ * keep the default. */
+static int raw_handshake_first_ms = RAW_HANDSHAKE_TIMEOUT_MS;
+module_param(raw_handshake_first_ms, int, 0444);
+MODULE_PARM_DESC(raw_handshake_first_ms,
+	"First raw post-DONE heatmap wait in ms (default 2000, Windows leaves ~2900)");
+
 /* Standard-mode backstop for a device that says nothing at all after power-up
  * or a D2->D0 transition. Opt-in through wait_reset_kick_ms (0 = off): see the
  * comment on the watchdog itself for why the default is off. */
@@ -316,7 +327,7 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 		 * no-op once raw_handshake_confirmed is set. */
 		if (!shid->raw_handshake_confirmed)
 			schedule_delayed_work(&shid->raw_handshake_watchdog,
-					      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+					      msecs_to_jiffies(raw_handshake_first_ms));
 	}
 }
 
@@ -1348,17 +1359,14 @@ static inline u32 spi_hid_resp_reg(struct spi_hid *shid)
 }
 
 /* Header-read length, the one rule for all three header sites (descriptor
- * poller, IRQ thread, DONE poller). Nine everywhere: the handshake answers
- * with bare nine-byte headers, and a sixteen-byte read over-clocks the
- * answer — the extra clocks consume the descriptor body, the body then fails
- * validation, and discovery loops in WAIT_DESC with the panel self-resetting
- * ~9/s (field bisect 2026-09-19: doubled DESCREQ + hdr16 loops forever, +
- * hdr9 reaches DONE in 2 resets; v1.5.0 read 9 bytes on every standard
- * header, v1.6.3 on every header). The raw DONE stream also uses nine: the
- * reference reads every stream header as nine bytes on 0x0A (boot trace
- * #0868: `0B 00 00 00 FF 00 03 0A 00` -> type 0x1), and sixteen-byte windows
- * on 0x0A caught mid-frame fragments plus queued resets (field 2026-09-19:
- * `0c ff 5b .. 32 10 00 5a`, malformed at offset 7). Callers hold seq_lock. */
+ * poller, IRQ thread, DONE poller). Nine everywhere for now: the handshake
+ * answers with bare nine-byte headers (field bisect 2026-09-19), and the
+ * reference stages stream headers at offset 5 in nine bytes on both 0x04
+ * (touch trace) and 0x0A (boot #0868). Sixteen-byte windows on 0x04 staged
+ * only prefixed resets at offset 8, one per DONE entry — so the panel's
+ * three-byte native prefix (`01 <status> EE`) is not recovered by a longer
+ * window; nine first, sixteen again only with a staged header to show.
+ * Callers hold seq_lock. */
 static inline unsigned int spi_hid_hdr_len(struct spi_hid *shid)
 {
 	(void)shid;
@@ -1405,10 +1413,12 @@ static int spi_hid_seq_read_reg(struct spi_hid *shid, u32 reg, u8 *rx, int rx_le
 	 * five-byte form — so the stream names the reference shape here, not
 	 * through the knob. */
 	if (shid->raw_mode_active && shid->seq_state == SPI_HID_SEQ_DONE &&
-	    reg == SPI_HID_RAW_STREAM_REGISTER)
+	    (reg == SPI_HID_RAW_STREAM_REGISTER || reg == 0x04))
 		n = spi_hid_wire_read_approval_variant(tx, reg,
+						       reg == 0x04 ? 0 :
 						       SPI_HID_CONTENT_TYPE_SET_FEATURE,
-						       rx_len > SPI_HID_READ_APPROVAL_LEN ?
+						       (rx_len > SPI_HID_READ_APPROVAL_LEN &&
+						        reg != 0x04) ?
 						       SPI_HID_RAW_STREAM_CONTENT_ID : 0,
 						       SPI_HID_READ_FRAME_REFERENCE);
 	else
@@ -1542,14 +1552,16 @@ static int spi_hid_seq_read(struct spi_hid *shid, u8 *rx, int rx_len)
 				reg = spi_hid_resp_reg(shid);
 		}
 	} else if (shid->raw_mode_active && !raw_b1f8109_preset) {
-		/* Raw DONE reads the stream register. The probe force to 0x0A is
+		/* Raw DONE reads the command register. The probe force to 0x0A is
 		 * overwritten by the DEVICE_DESC parse (real descriptor says
 		 * input 0x0000), so desc.input_register is 0 here and every DONE
 		 * read polled reg 0 until the device reset (field capture
-		 * 2026-09-19: sixteen ff reads on reg 0, then RESET_RSP). The
-		 * reference reads every stream frame from 0x0A (boot trace
-		 * #0004-#0873); the preset keeps its legacy dialect. */
-		reg = SPI_HID_RAW_STREAM_REGISTER;
+		 * 2026-09-19). 0x0A answers idle c0 without touch; the
+		 * touch-time trace streams heatmaps (216/4304B, CE 10 0C) on
+		 * 0x04 — the descriptor's own command register — right after
+		 * D0 with no enable at all. The preset keeps its legacy
+		 * dialect. */
+		reg = shid->desc.command_register ? shid->desc.command_register : 0x04;
 	}
 	return spi_hid_seq_read_reg(shid, reg, rx, rx_len);
 }
@@ -1772,6 +1784,18 @@ static int spi_hid_seq_restart_discovery(struct spi_hid *shid, int reason)
  *
  * Caller holds seq_lock and has already confirmed removing/suspended/
  * seq_enabled/raw_mode_active are still valid. */
+/* Watchdog retries re-run discovery; by default with the full vendor
+ * teardown (STOP + D2/D0). The teardown is required at probe when the device
+ * is still streaming from an earlier session, but on a retry it destroys a
+ * nascent stream: the reference waits ~2.9 s undisturbed between the enable
+ * (#0531) and the first 0x0A header (#0868), while the default 2000 ms
+ * watchdog re-tore-down every cycle — a self-inflicted livelock. Set to 0 so
+ * retries send DESCREQ only and the post-enable window survives. */
+static int raw_watchdog_teardown = 1;
+module_param(raw_watchdog_teardown, int, 0444);
+MODULE_PARM_DESC(raw_watchdog_teardown,
+	"Raw handshake watchdog retries send STOP+D2/D0 before DESCREQ (1=default, 0=DESCREQ only)");
+
 static void raw_handshake_restart_discovery(struct spi_hid *shid)
 {
 	struct device *dev = &shid->spi->dev;
@@ -1783,7 +1807,7 @@ static void raw_handshake_restart_discovery(struct spi_hid *shid)
 		sysfs_notify(&dev->kobj, NULL, "ready");
 	}
 
-	if (spi_hid_vendor_init(shid)) {
+	if (raw_watchdog_teardown && spi_hid_vendor_init(shid)) {
 		dev_warn(dev, "SEQ: raw watchdog vendor recovery failed\n");
 		schedule_delayed_work(&shid->raw_handshake_watchdog,
 				      msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));

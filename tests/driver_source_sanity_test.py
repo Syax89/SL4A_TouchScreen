@@ -258,9 +258,8 @@ def check_control_flow_pins():
                 failures += 1
 
     # 0c. Header-read lengths: spi_hid_hdr_len() is the one rule — nine
-    # everywhere (field bisect 2026-09-19: doubled DESCREQ + hdr16 loops
-    # forever, + hdr9 reaches DONE in 2 resets; the reference reads stream
-    # headers as nine bytes on 0x0A, sixteen-byte windows caught fragments).
+    # everywhere (the reference stages stream headers at offset 5 in nine
+    # bytes; sixteen-byte windows on 0x04 staged only resets).
     # All three header sites (descriptor poller, IRQ thread, DONE poller) must
     # go through the helper; a local sixteen at any one of them re-wedges
     # discovery while the others still pass.
@@ -273,7 +272,7 @@ def check_control_flow_pins():
         _hlw = "".join(_hl[1].split("\n}", 1)[0].split())
         if "return9" not in _hlw:
             print("FAIL driver/spi-hid-core.c: spi_hid_hdr_len() no longer yields "
-                  "nine everywhere — a local sixteen re-wedges discovery")
+                  "nine everywhere")
             failures += 1
     for _fn in ("static void spi_hid_seq_descreq_work",
                 "spi_hid_seq_thread",
@@ -378,9 +377,9 @@ def check_control_flow_pins():
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() lost the Windows "
               "phase map — standard pre-DONE must read reg 3 for descriptors")
         failures += 1
-    # raw DONE reads the stream register (probe 0x0A force is overwritten by
-    # the DEVICE_DESC parse, so desc.input_register is 0 here).
-    if "SPI_HID_RAW_STREAM_REGISTER" not in _sr:
+    # raw DONE reads the command register (0x04 touch dialect; the probe
+    # 0x0A force is overwritten by the DEVICE_DESC parse and 0x0A idles).
+    if "command_register" not in _sr:
         print("FAIL driver/spi-hid-core.c: spi_hid_seq_read() lost the raw DONE "
               "stream register — DONE polled reg 0 until reset (2026-09-19)")
         failures += 1
