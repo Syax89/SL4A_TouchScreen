@@ -292,6 +292,14 @@ static int amd_spi_exec_segment(struct amd_spi *amd_spi, u8 opcode,
 	u16 saved_0x22;
 	int i, ret;
 
+	/* This FCH controller also hosts the BIOS flash. amdspi.sys only ever
+	 * programs the two HID-over-SPI opcodes (0x02 write, 0x0B read) as
+	 * constants, so refuse anything else before touching a register. */
+	if (opcode != 0x02 && opcode != 0x0B) {
+		pr_err("spi-amd: refusing opcode 0x%02x\n", opcode);
+		return -EINVAL;
+	}
+
 	ret = amd_spi_check_psp_ownership(amd_spi);
 	if (ret)
 		return ret;

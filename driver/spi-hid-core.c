@@ -229,6 +229,35 @@ module_param(raw_handshake_first_ms, int, 0444);
 MODULE_PARM_DESC(raw_handshake_first_ms,
 	"First raw post-DONE heatmap wait in ms (default 2000, Windows leaves ~2900)");
 
+/* Enable the heatmap the way Windows does and nothing more. HeatCore.dll sends
+ * GET_FEATURE report 6 (heat map device parameters), then SET_FEATURE report 5
+ * (input mode) = 1, and repeats that after every device reset; this runs after
+ * every report descriptor. Report 0x56 goes out first as FF x6 (see
+ * win_host_addr). The vendor-init 0x56 key and D2/D0 are not sent. The panel
+ * streams heatmaps only while it is touched, so silence after the enable is
+ * normal: no post-DONE handshake watchdog and no IRQ-less poller, neither of
+ * which hidspi.sys has. Pair with stream_watchdog_ms=0. */
+static bool win_handshake;
+module_param(win_handshake, bool, 0444);
+MODULE_PARM_DESC(win_handshake,
+	"Raw mode: Windows HeatCore enable (GET 6 + SET 5=1), no idle watchdog/poller");
+
+/* Send HeatCore's GET 6 before SET 5. On a Surface Laptop 4 AMD 13.5" (MSHW0231)
+ * the panel resets itself ~110 ms after a SET 5 that follows GET 6 under Linux,
+ * and streams when SET 5 goes out right after 0x56: use win_get6=0 there. */
+static bool win_get6 = true;
+module_param(win_get6, bool, 0444);
+MODULE_PARM_DESC(win_get6, "win_handshake: send GET_FEATURE 6 before SET 5 (default Y)");
+
+/* Payload of report 0x56. On Windows this report carries the host Bluetooth
+ * address, written by a user-mode process outside the touch stack; it is not
+ * a stream key. FF:FF:FF:FF:FF:FF is the "no address" value Windows itself
+ * writes and the default here, so nobody else's MAC is replayed. */
+static char *win_host_addr;
+module_param(win_host_addr, charp, 0444);
+MODULE_PARM_DESC(win_host_addr,
+	"win_handshake: host BT address for report 0x56 (aa:bb:cc:dd:ee:ff), default FF:FF:FF:FF:FF:FF");
+
 /* Standard-mode backstop for a device that says nothing at all after power-up
  * or a D2->D0 transition. Opt-in through wait_reset_kick_ms (0 = off): see the
  * comment on the watchdog itself for why the default is off. */
@@ -312,7 +341,12 @@ static void spi_hid_seq_set_state(struct spi_hid *shid,
 	 * arrives and the stream stalls forever with zero data. Arm a periodic
 	 * poller alongside the IRQ path as a backstop; whichever one observes
 	 * data first confirms the handshake and the other stays a no-op. */
-	if (new_state == SPI_HID_SEQ_DONE && shid->raw_mode_active) {
+	if (new_state == SPI_HID_SEQ_DONE && shid->raw_mode_active && win_handshake) {
+		/* The pre-DONE handshake watchdog may still be pending from
+		 * WAIT_DESC/WAIT_RPT; it would read the touch-free silence as a
+		 * dead stream and reset the panel out of heat mode. */
+		cancel_delayed_work(&shid->raw_handshake_watchdog);
+	} else if (new_state == SPI_HID_SEQ_DONE && shid->raw_mode_active) {
 		if (!shid->poll_interval_ms)
 			shid->poll_interval_ms = 20;
 		shid->poll_active = true;
@@ -738,6 +772,31 @@ static int spi_hid_seq_write_vendor_init(struct spi_hid *shid)
 	shid->read_resp_content_id = SPI_HID_RAW_STREAM_CONTENT_ID;
 
 	return spi_hid_seq_write(shid, frame.bytes, (int)frame.len, NULL, 0);
+}
+
+/* win_handshake: SET_FEATURE report 0x56 = host BT address (LSB first) or
+ * FF x6, built from the FF x6 frame so the framing stays the reference's. */
+static int spi_hid_seq_write_host_addr(struct spi_hid *shid)
+{
+	struct spi_hid_wire_frame none = spi_hid_wire_vendor_stop(spi_hid_wire_doubled_setfeat());
+	unsigned int a[6], off;
+	u8 frame[32];
+	int i;
+
+	if (none.len > sizeof(frame))
+		return -EINVAL;
+	memcpy(frame, none.bytes, none.len);
+	for (off = 0; off < none.len && frame[off] != 0x56; off++)
+		;
+	if (off + 7 > none.len)
+		return -EINVAL;
+	if (win_host_addr && *win_host_addr &&
+	    sscanf(win_host_addr, "%x:%x:%x:%x:%x:%x",
+		   &a[0], &a[1], &a[2], &a[3], &a[4], &a[5]) == 6) {
+		for (i = 0; i < 6; i++)
+			frame[off + 1 + i] = (u8)a[5 - i];
+	}
+	return spi_hid_seq_write(shid, frame, (int)none.len, NULL, 0);
 }
 
 /* GET_FEATURE Report ID 6 (probe-time calibration read). Doubled form like
@@ -1273,7 +1332,7 @@ static void spi_hid_raw_stream_arm(struct spi_hid *shid)
 	if (shid->raw_stream_armed)
 		return;
 	shid->raw_stream_armed = true;
-	if (!raw_no_enable)
+	if (!raw_no_enable && !win_handshake)
 		spi_hid_raw_enable_stream(shid);
 }
 
@@ -3430,7 +3489,31 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 			seq_dbg(shid, 1, "SEQ: scheduled create_device_work, queued=%d\n", queued);
 		}
 		if (shid->raw_mode_active) {
-			if (skip_getfeat) {
+			if (win_handshake) {
+				/* Report 0x56 first, as in the reference trace.
+				 * Then GET 6; SET 5 = 1 and DONE follow in
+				 * seq_handle_feat() once its reply has been read
+				 * on the reply's own IRQ (hidspi never reads
+				 * without one). With win_get6=0, SET 5 = 1 and
+				 * DONE follow 0x56 directly. */
+				seq_dbg(shid, 1, "SEQ: Windows enable: 0x56 host addr, GET ID6, SET ID5=1 on its reply\n");
+				if (spi_hid_seq_write_host_addr(shid))
+					dev_warn(&shid->spi->dev, "SEQ: report 0x56 write failed, continuing\n");
+				usleep_range(37000, 40000);
+				if (!win_get6) {
+					if (spi_hid_seq_write_setfeat(shid))
+						dev_warn(&shid->spi->dev, "SEQ: SET_FEATURE ID5 write failed\n");
+					spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
+					return;
+				}
+				if (spi_hid_seq_write_get_feature6(shid)) {
+					dev_warn(&shid->spi->dev, "SEQ: GET_FEATURE(6) write failed\n");
+					schedule_delayed_work(&shid->raw_handshake_watchdog,
+						msecs_to_jiffies(RAW_HANDSHAKE_TIMEOUT_MS));
+					return;
+				}
+				spi_hid_seq_set_state(shid, SPI_HID_SEQ_WAIT_FEATURE, SPI_HID_SEQ_FEATURE_REQUEST);
+			} else if (skip_getfeat) {
 				if (getfeat_delay_ms > 0) {
 					/* Defer vendor init path too — same delayed-work
 					 * pattern: waits the configured delay then sends
