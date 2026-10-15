@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## 1.7.1 — SL4 13.5" support, Windows-order heatmap enable, issue #4 fixed (2026-10-15)
+
+### Issue #4 fixed: standard-mode dead stream on cold boot
+
+Root-caused on real SL4 AMD (MSHW0231) hardware by community testing (write-only
+isolation: the controller's stream stops the instant standard-mode feature
+report 6 is written on SPI, even mid-stream, with no response wait needed).
+`skip_std_getfeat` is narrowed to report 6 alone (every other feature report is
+unaffected) and now defaults to Y, so a stock installation streams touch input
+on cold boot without any manual parameter. Set `skip_std_getfeat=0` to restore
+the previous wire behavior.
+
+### SL4 AMD 13.5" support (MSHW0230)
+
+Merged community PR: the ACPI ID used by the 13.5" Surface Laptop 4 AMD panel
+(`MSHW0230`, distinct from the 15" `MSHW0231`) is now matched alongside the
+existing IDs, in the installer's hardware checks and in the kernel driver's
+ACPI match table. SL4 defaults are unchanged. Hardware-tested: standard HID
+touch works; stylus (DFT heatmap decode) does not, tracked separately.
+
+### Raw mode: opt-in Windows-order heatmap enable (`win_handshake`)
+
+Merged community PR, hardware-tested on SL4 AMD 13.5" (MSHW0231): `win_handshake`
+replays the Windows HeatCore enable sequence (SET_FEATURE 0x56 = host BT
+address, then GET_FEATURE 6 and SET_FEATURE 5 = 1 on its reply, or SET 5 = 1
+directly with `win_get6=0`) with no post-DONE handshake watchdog and no
+IRQ-less poller. Off by default. `spi-amd` also gained an opcode allowlist
+(0x02/0x0B only, matching what `amdspi.sys` ever programs on this shared
+BIOS-flash controller).
+
 ### HID-mode cleanup: probe decomposition, one header-length rule, kernel-doc
 
 Readability pass over the standard path, no behaviour change (live-verified:

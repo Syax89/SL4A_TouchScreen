@@ -128,10 +128,16 @@ static bool raw_b1f8109_preset;
  * the default now, so it only matters as an override of wire_double_opcode=1.
  * Kept declared so existing modprobe.d drop-ins keep loading. */
 static bool setfeat_no_double;
-/* Experimental: never write a feature GET_REPORT on the wire while running
- * standard HID. Issue #4 suspects the connect-time feature query is what keeps
- * the controller from ever starting to stream. */
-static bool skip_std_getfeat;
+/* Issue #4, root-caused on real SL4 AMD (MSHW0231) hardware: the standard
+ * feature GET_REPORT for report 6 (read by iptsd-check-dev's hidraw probe,
+ * which also runs on AMD systems where it serves no purpose) silences the
+ * controller's stream the moment the write goes out on SPI, even while a
+ * touch stream is already active (write-only A/B, no response wait needed).
+ * Narrowed to report 6 alone: every other standard feature report keeps
+ * working normally. On by default since nothing legitimate depends on
+ * report 6 in standard mode and the alternative is a touchscreen that never
+ * streams out of the box. */
+static bool skip_std_getfeat = true;
 /* Experimental: when the standard-mode startup liveness check sees no input
  * data after DONE, run the existing ACPI recovery instead of only logging. */
 static bool std_liveness_recover;
@@ -2622,8 +2628,9 @@ MODULE_PARM_DESC(std_raw_transition,
 
 module_param(skip_std_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_std_getfeat,
-	"Experimental: answer feature GET_REPORT with -EOPNOTSUPP in standard HID, "
-	"so nothing is written to SPI for a feature query (issue #4 A/B switch)");
+	"Answer standard-mode feature report 6 (HeatCore/iptsd probe) with "
+	"-EOPNOTSUPP instead of writing it on SPI; other feature reports are "
+	"unaffected (default Y, fixes issue #4's dead stream, 0 to revert)");
 
 module_param(std_liveness_recover, bool, 0444);
 MODULE_PARM_DESC(std_liveness_recover,
@@ -4008,13 +4015,14 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
 		ret = len;
 		break;
 	case HID_REQ_GET_REPORT:
-		/* Experimental A/B switch (issue #4): with skip_std_getfeat the
-		 * standard profile answers feature reads without touching SPI at
-		 * all, so the connect-time feature query cannot leave the
-		 * controller in a non-streaming state. Feature reports only:
-		 * input-report reads are untouched. */
+		/* Issue #4 fix, confirmed on real SL4 AMD (MSHW0231) hardware:
+		 * standard-mode feature report 6 silences the controller's
+		 * stream the instant it is written, so answer it without
+		 * touching SPI. Report 6 only: every other standard feature
+		 * report still goes to the wire, and input-report reads are
+		 * untouched. */
 		if (skip_std_getfeat && !shid->raw_mode_active &&
-		    rtype == HID_FEATURE_REPORT) {
+		    rtype == HID_FEATURE_REPORT && reportnum == 6) {
 			ret = -EOPNOTSUPP;
 			break;
 		}
@@ -4239,7 +4247,7 @@ static DEVICE_ATTR_RO(baseline_status);
 
 /* Single source for what bug reports say about the build. The suite checks this
  * string against VERSION: it reported "v1.0" for nine releases (review R17c). */
-#define SL4A_DRIVER_VERSION "1.7.0"
+#define SL4A_DRIVER_VERSION "1.7.1"
 
 static ssize_t build_info_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
