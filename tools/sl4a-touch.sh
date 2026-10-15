@@ -110,7 +110,7 @@ acpi_device_present() {
 # or nothing (and non-zero) if neither is present.
 touchscreen_acpi_id() {
 	local id
-	for id in MSHW0231 MSHW0162; do
+	for id in MSHW0230 MSHW0231 MSHW0162; do
 		if acpi_device_present "$id"; then
 			echo "$id"
 			return 0
@@ -502,9 +502,9 @@ cmd_install() {
 
 	info "Step 1: Checking hardware..."
 	local missing_hardware=""
-	# SL4 uses MSHW0231, SL3 (AMD) uses MSHW0162 — either is fine, AMDI0060 is required.
-	if ! acpi_device_present "MSHW0231" && ! acpi_device_present "MSHW0162"; then
-		missing_hardware="MSHW0231/MSHW0162"
+	# SL4 uses MSHW0230 / MSHW0231, SL3 (AMD) uses MSHW0162 — either is fine, AMDI0060 is required.
+	if ! acpi_device_present "MSHW0230" && ! acpi_device_present "MSHW0231" && ! acpi_device_present "MSHW0162"; then
+		missing_hardware="MSHW0230/MSHW0231/MSHW0162"
 	fi
 	if ! acpi_device_present "AMDI0060"; then missing_hardware="${missing_hardware:+$missing_hardware, }AMDI0060"; fi
 	if [ -n "$missing_hardware" ]; then
@@ -1232,7 +1232,7 @@ cmd_activate() {
 	# Touchscreen node: MSHW0231 (SL4) or MSHW0162 (SL3 AMD) — exactly one of the two.
 	local touches=()
 	local mshw
-	for mshw in MSHW0231 MSHW0162; do
+	for mshw in MSHW0230 MSHW0231 MSHW0162; do
 		local matches=("$SYSFS_ROOT"/bus/acpi/devices/${mshw}:*)
 		[ -e "${matches[0]}" ] && touches+=("${matches[@]}")
 	done

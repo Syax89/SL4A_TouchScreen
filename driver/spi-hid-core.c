@@ -4066,7 +4066,8 @@ static const struct of_device_id spi_hid_of_match[] = {
 };
 
 static const struct acpi_device_id spi_hid_acpi_match[] = {
-	{ "MSHW0231", (kernel_ulong_t)&spi_hid_cfg_sl4 }, /* Surface Laptop 4 (AMD) touch controller */
+	{ "MSHW0230", (kernel_ulong_t)&spi_hid_cfg_sl4 }, /* Surface Laptop 4 (AMD 13.5") touch controller */
+	{ "MSHW0231", (kernel_ulong_t)&spi_hid_cfg_sl4 }, /* Surface Laptop 4 (AMD 15") touch controller */
 	{ "MSHW0162", (kernel_ulong_t)&spi_hid_cfg_sl3 }, /* Surface Laptop 3 (AMD) touch controller */
 	{},
 };
