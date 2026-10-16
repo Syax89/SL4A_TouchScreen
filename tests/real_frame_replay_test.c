@@ -29,7 +29,7 @@
  *                           with the slot state from before the frame
  *
  * Nothing in driver/ is modified and no pipeline DECISION is reimplemented:
- * the peaks, the connected components, the merge and the published contacts
+ * the peaks, the connected components, the post-association coalescing decision and the published contacts
  * all come out of the driver's own functions. What this file does compute
  * itself is (a) the REFERENCE blob count (an independent 4-connected CCL at
  * Windows' 0.1 per-cell threshold = byte < 135 over the decoded raster) and
@@ -348,8 +348,8 @@ static struct {
 	struct blob_entry pre[HEATMAP_MAX_BLOBS];
 	int n_post;                /* assigned candidates kept after coalescing */
 	struct blob_entry post[HEATMAP_MAX_BLOBS];
-	int merge_loser[HEATMAP_MAX_BLOBS];   /* pre[] index zeroed by the merge */
-	int merge_winner[HEATMAP_MAX_BLOBS];  /* pre[] index it was merged into */
+	int merge_loser[HEATMAP_MAX_BLOBS];   /* pre[] index suppressed by post-association coalescing */
+	int merge_winner[HEATMAP_MAX_BLOBS];  /* surviving pre[] index used for attribution */
 	int n_merges;
 	int row_of_blob[HEATMAP_MAX_BLOBS];   /* pre[] row for a driver blob index */
 	u8 assigned[HEATMAP_MAX_BLOBS];       /* raw_hungarian_match() result, re-run */
@@ -1028,7 +1028,7 @@ int main(int argc, char **argv)
 	if (sl4a_stub_verbose)
 		sl4a_debug_level = 2;   /* --trace: the driver's own per-frame trace */
 	printf("%-6s %-4s %-6s %-5s %-4s %-7s %-7s %s\n",
-	       "frame", "ref", "touch", "peaks", "ccl", "sorted", "merged", "pub");
+	       "frame", "ref", "touch", "peaks", "ccl", "sorted", "kept", "pub");
 
 	for (i = 0; i < n_frames; i++) {
 		memcpy(&pre_state, &shid, sizeof(pre_state));
