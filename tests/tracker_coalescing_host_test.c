@@ -319,6 +319,8 @@ static void provisional_full_pipeline_regression(void)
 	      "surviving contact must retain provisional duration instead of restarting debounce");
 
 	input_free_device(shid.touch_input);
+	/* Production remove frees this; the isolated test fixture must too. */
+	kfree(shid.heatmap_buf);
 }
 
 int main(void)
