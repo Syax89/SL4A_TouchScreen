@@ -15,15 +15,15 @@ end = core.find("\nstatic irqreturn_t spi_hid_dev_irq", start)
 check(start >= 0 and end > start, "cannot isolate seq_handle_data")
 if start >= 0 and end > start:
     block = core[start:end]
-    check("if (shid->hid_creating ||" not in block,
-          "DATA still returns before body drain during HID creation")
-    check("!shid->hid && !shid->hid_creating" in block,
-          "early DATA drain eligibility missing")
+    check("spi_hid_protocol_data_should_drain" in block,
+          "DATA handler does not use lifecycle drain policy")
+    check("!!shid->touch_input" in block,
+          "registered CapImg tracker does not keep DATA drain active")
     drain_pos = block.find("spi_hid_seq_read(shid, body, rblen)")
-    publish_pos = block.find("if (shid->hid && !shid->hid_creating) {")
+    publish_pos = block.find("spi_hid_protocol_hid_publish_ready")
     check(drain_pos >= 0, "DATA body read missing")
     check(publish_pos > drain_pos,
-          "HID publication must remain suppressed until after drain")
+          "HID publication gate must occur after DATA body drain")
 
 if errors:
     for e in errors:
