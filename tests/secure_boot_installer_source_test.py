@@ -25,7 +25,7 @@ required = {
     "backup directory": "/var/lib/dkms/sl4a-mok-backup-",
     "existing pair reuse": "Reusing the existing DKMS signing key pair",
     "actual-path assertion": "paths DKMS will use",
-    "system-wide rotation warning": "affects every DKMS module on the system",
+    "system-wide rotation warning": "can affect every DKMS module on the system",
     "alternate pair import": "Use another existing key pair",
     "incomplete material refusal": "MOK material is incomplete/invalid",
     "final pair invariant": "signing identity is not a complete matching key pair after setup",
@@ -108,12 +108,10 @@ with tempfile.TemporaryDirectory(prefix="sl4a-mok-resolver-") as td:
         encoding="utf-8",
     )
 
+    # Replace the common prefix once; replacing the glob first then the
+    # prefix nested the fixture directory twice, silently bypassing drop-ins.
     probe_resolver = resolver.replace(
-        "/etc/dkms/framework.conf.d/*.conf",
-        str(drop / "*.conf"),
-    ).replace(
-        "/etc/dkms/framework.conf",
-        str(framework),
+        "/etc/dkms/framework.conf", str(framework),
     )
 
     common = f"""
@@ -173,6 +171,28 @@ MOK_CERT=
             "matching override/configured DKMS identity was not accepted: "
             f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}"
         )
+
+    # DKMS sources drop-ins in lexical order after framework.conf.
+    # A real drop-in overrides the base B paths with pair C.
+    override = drop / "90-identity.conf"
+    override.write_text(
+        'mok_signing_key="/tmp/pairC.key"\n'
+        'mok_certificate="/tmp/pairC.der"\n', encoding="utf-8"
+    )
+
+    # Last sourced drop-in must take precedence; explicitly assert C.
+    p = subprocess.run(
+        ["bash", "-c",
+         common + '\nresolve_dkms_mok_paths\n'
+                  'printf "%s|%s\\n" "$MOK_KEY" "$MOK_CERT"\n'],
+        text=True, capture_output=True,
+    )
+    if p.returncode != 0 or p.stdout.strip() != "/tmp/pairC.key|/tmp/pairC.der":
+        raise SystemExit(
+            "DKMS drop-in precedence regression: "
+            f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}"
+        )
+
 
 subprocess.run(["bash", "-n", str(INSTALLER)], check=True)
 print("secure boot installer source/behavior test: PASS")
