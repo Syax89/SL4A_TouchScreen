@@ -51,7 +51,7 @@ capture from live hardware testing.
 | `baseline_00.bin` .. `baseline_29.bin` | 30 | Resting frames (uniform ~0xB4 + tiny deterministic dither) to feed first and establish the driver's per-cell baseline. `HEATMAP_BASELINE_FRAMES=30`, `content_id=0x0C`, cell_count=3456 (>=1000) — exactly what `raw_compute_signal()` requires before `heatmap_have_baseline` flips true. |
 | `touch_1finger.bin` | 1 | One isolated blob at grid (20,15). |
 | `touch_2finger_far.bin` | 1 | Two blobs at opposite corners: (5,5) and (65,42). Key fixture for the "does the pipeline see 2 well-separated fingers" question. |
-| `touch_2finger_close.bin` | 1 | Two blobs ~8.9 grid cells apart: (30,20) and (38,24) — typical adjacent-finger spread-gesture distance. Probes ghost-merge (`raw_ghost_merge()`) without tripping it: default `ghost_dist=6` cells is smaller than 8.9, so on frame 1 (0 claimed slots, unscaled merge radius) these must NOT be merged into one blob. |
+| `touch_2finger_close.bin` | 1 | Two blobs ~8.9 grid cells apart: (30,20) and (38,24) — typical adjacent-finger spread-gesture distance. Probes post-association close-contact coalescing without tripping it: default `ghost_dist=6` cells is smaller than 8.9, so on frame 1 (0 claimed slots, unscaled coalescing radius) these must remain two candidates. |
 | `touch_3finger.bin` | 1 | Three blobs, diagonally spread: (15,10), (36,24), (57,38). |
 | `touch_4finger.bin` | 1 | Four blobs: (10,8), (28,20), (46,32), (64,44). |
 | `touch_5finger.bin` | 1 | Five blobs: (8,6), (22,15), (36,24), (50,33), (64,42). |
