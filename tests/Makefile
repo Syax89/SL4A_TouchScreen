@@ -221,6 +221,9 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 	$(PYTHON) installer_recovery_contract_test.py
 	$(PYTHON) tools_contract_test.py
 	$(PYTHON) hardcoded_descriptor_pin_test.py
+	$(PYTHON) std_capimg_activation_source_test.py
+	$(PYTHON) std_capimg_input_source_test.py
+	$(PYTHON) std_capimg_data_drain_source_test.py
 	$(SHELL) hunt_sandbox_test.sh
 
 # Checks that need something this repository does not ship: the Windows touch
