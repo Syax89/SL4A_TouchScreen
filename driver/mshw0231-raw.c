@@ -1034,7 +1034,7 @@ static void raw_post_assoc_coalesce(struct spi_hid *shid,
 	}
 }
 
-/* ── Pipeline stage 7: Hungarian matching ─────────────────────────── */
+/* ── Pipeline stage 6: Hungarian matching ─────────────────────────── */
 
 /*
  * Hungarian global assignment (matching Windows TouchPenProcessor0C19).
@@ -1615,8 +1615,8 @@ static bool raw_emit_mt(struct spi_hid *shid, struct input_dev *input,
  *   3. CCL flood-fill (4-connected BFS)
  *   4. Velocity rejection + edge penalty + blob splitting
  *   5. Centroid + eigenvalues computation
- *   6. Pre-merge (ghost rejection)
- *   7. Hungarian assignment with multi-finger radii
+ *   6. Hungarian assignment with multi-finger radii
+ *   7. Post-association close-contact coalescing / duplicate rejection
  *   8. Slot state machine + EMA + deadband + stationary lock
  *   9. MT protocol emission
  *
