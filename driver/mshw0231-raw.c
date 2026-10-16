@@ -897,40 +897,39 @@ static u16 raw_ccl_flood_fill(struct spi_hid *shid, u32 cell_count,
 	return *nlabels;
 }
 
-/* ── Pipeline stage 6: ghost merge / pre-association coalescence ─── */
+/* ── Post-association duplicate/coalescing policy ─────────────────── */
 
 /*
- * Ghost rejection (GROUND_TRUTH.md §22.7 step 3):
- * Merge blobs closer than ghost_dist threshold (grid cells).
- * Windows uses Euclidean squared distance (dx²+dy² < ghost_dist²),
- * not axis-aligned box. If two blobs are within radius, keep the one
- * with the larger PRE-PENALTY weight (raw_w): this is a tracker-stage
- * decision, and the bottom-edge penalty (x0.23) can otherwise make a
- * real bottom-edge finger lose the merge to a lighter interior
- * artifact — the same contract the recovery guard already follows.
- * The loser is zapped via its `w` field, the discard marker.
+ * Candidate/track association must happen before proximity suppression.
  *
- * Modifies sorted[] in-place; updates *sorted_count. */
-static void raw_ghost_merge(struct spi_hid *shid, struct blob_entry *sorted,
-			    u8 *sorted_count, u32 ghost_dist)
+ * The previous pipeline destructively merged close blobs before Hungarian
+ * assignment, so it could not know whether two nearby candidates belonged to
+ * two already-established contacts. A real MSHW0231 pinch capture showed that
+ * this ordering collapses legitimate close two-finger frames.
+ *
+ * Preserve the existing ghost-distance scaling and conservative duplicate
+ * policy, but apply it after assignment:
+ *
+ *   - two candidates assigned to two different established tracks (state 2
+ *     active or state 3 lift-pending) both survive;
+ *   - if only one candidate has established-track continuity, that candidate
+ *     wins even when the other blob is heavier;
+ *   - otherwise the higher pre-penalty raw weight wins, matching the old
+ *     duplicate-rejection rule.
+ *
+ * This is intentionally narrower than a full Windows classification model.
+ */
+static u32 raw_scaled_ghost_dist(struct spi_hid *shid, u32 ghost_dist)
 {
-	u8 a, b, j, col;
+	u8 col;
 	u8 active_slots = 0;
-	u32 gd;
-	u32 gdsq;
+	u32 gd = ghost_dist;
 
-	/* Count claimed slots, same definition raw_hungarian_match() uses. */
 	for (col = 0; col < HEATMAP_MAX_SLOTS; col++)
 		if (shid->blob_slot_state[col] >= 2)
 			active_slots++;
 
-	/* Scale merge radius by finger count. Direction is opposite of
-	 * raw_hungarian_match()'s ASSOC_RADIUS_*: here we tighten as
-	 * finger count rises, since real distinct fingers get physically
-	 * closer together in multi-finger gestures and a radius sized
-	 * for 1-2 fingers starts falsely merging them. See constants
-	 * header for the (not yet hardware-validated) reasoning. */
-	gd = ghost_dist; /* baseline: 0/2 active slots, unscaled */
+	/* Preserve the old per-finger-count radius scaling exactly. */
 	if (active_slots == 1)
 		gd = ghost_dist * GHOST_RADIUS_1_FINGER / 10;
 	else if (active_slots == 3)
@@ -942,39 +941,64 @@ static void raw_ghost_merge(struct spi_hid *shid, struct blob_entry *sorted,
 	if (gd < 1)
 		gd = 1;
 
-	gdsq = gd * gd * 10000; /* ×100 scale */
+	return gd;
+}
 
-	for (a = 0; a < *sorted_count; a++) {
-		if (sorted[a].w == 0)
+static void raw_post_assoc_coalesce(struct spi_hid *shid,
+				    struct blob_entry *sorted, u8 sorted_count,
+				    u8 *assigned_slot, u32 ghost_dist)
+{
+	u8 a, b;
+	u32 gd = raw_scaled_ghost_dist(shid, ghost_dist);
+	u32 gdsq = gd * gd * 10000; /* fixed-point grid ×100 */
+
+	for (a = 0; a < sorted_count; a++) {
+		if (assigned_slot[a] == 0xff || sorted[a].w == 0)
 			continue;
-		for (b = a + 1; b < *sorted_count; b++) {
+
+		for (b = a + 1; b < sorted_count; b++) {
+			u8 sa, sb, state_a, state_b;
+			bool established_a, established_b;
+			u8 loser;
 			s32 dx, dy;
 
-			if (sorted[b].w == 0)
+			if (assigned_slot[b] == 0xff || sorted[b].w == 0)
 				continue;
+
 			dx = (s32)sorted[a].gx - (s32)sorted[b].gx;
 			dy = (s32)sorted[a].gy - (s32)sorted[b].gy;
-			/* Strict, as in Windows and the in-tree oracle test: a
-			 * distance of exactly ghost_dist does not merge. */
-			if ((u32)(dx * dx) + (u32)(dy * dy) < gdsq) {
-				if (sorted[b].raw_w > sorted[a].raw_w) {
-					sorted[a].w = 0;
-					break;
-				} else {
-					sorted[b].w = 0;
-				}
-			}
+
+			/* Strict boundary, preserving the existing policy: exactly
+			 * ghost_dist is not coalesced. */
+			if ((u32)(dx * dx) + (u32)(dy * dy) >= gdsq)
+				continue;
+
+			sa = assigned_slot[a];
+			sb = assigned_slot[b];
+			state_a = shid->blob_slot_state[sa];
+			state_b = shid->blob_slot_state[sb];
+			established_a = state_a == 2 || state_a == 3;
+			established_b = state_b == 2 || state_b == 3;
+
+			/* The key ordering fix: once association explains the close
+			 * candidates as two different established contacts, proximity
+			 * alone must not delete either one. */
+			if (sa != sb && established_a && established_b)
+				continue;
+
+			if (established_a != established_b)
+				loser = established_a ? b : a;
+			else if (sorted[b].raw_w > sorted[a].raw_w)
+				loser = a;
+			else
+				loser = b;
+
+			assigned_slot[loser] = 0xff;
+			sorted[loser].w = 0;
+			if (loser == a)
+				break;
 		}
 	}
-	j = 0;
-	for (a = 0; a < *sorted_count; a++) {
-		if (sorted[a].w > 0) {
-			if (a != j)
-				sorted[j] = sorted[a];
-			j++;
-		}
-	}
-	*sorted_count = j;
 }
 
 /* ── Pipeline stage 7: Hungarian matching ─────────────────────────── */
@@ -1839,11 +1863,7 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 			seq_dbg(shid, 2, "CALIB: blobs=%u cells_touched=%d\n",
 				 sorted_count, touched_count);
 
-		/* ── Stage 6: ghost merge ── */
-		raw_ghost_merge(shid, sorted, &sorted_count,
-				(u32)READ_ONCE(ghost_dist));
-
-		/* ── Stage 7: Hungarian global assignment ── */
+		/* ── Stage 6: Hungarian global assignment ── */
 		{
 			u8 assigned_slot[HEATMAP_MAX_BLOBS];
 			u32 new_gx[HEATMAP_MAX_SLOTS], new_gy[HEATMAP_MAX_SLOTS];
@@ -1853,6 +1873,11 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 			bmd = raw_hungarian_match(shid, sorted, sorted_count,
 						 assigned_slot,
 						 (u32)READ_ONCE(blob_max_distance));
+
+			/* ── Stage 7: post-association duplicate/coalescing policy ── */
+			raw_post_assoc_coalesce(shid, sorted, sorted_count,
+						assigned_slot,
+						(u32)READ_ONCE(ghost_dist));
 
 			/* ── Stage 8: slot state machine ── */
 			raw_update_slots(shid, sorted, sorted_count,
