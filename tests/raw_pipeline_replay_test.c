@@ -289,7 +289,7 @@ static void test_two_finger_close(void)
 
 	int n = mt_record_active_count();
 	CHECK(n == 2, "close-together 2-finger fixture: expected 2 active MT slots "
-	      "(ghost-merge must NOT collapse a realistic adjacent-finger gesture), got %d", n);
+	      "(post-association coalescing must NOT collapse a realistic adjacent-finger gesture), got %d", n);
 	printf("  two-finger (close, ~9 cells): %d active slot(s)\n", n);
 	for (int i = 0; i < MT_RECORD_MAX_SLOTS; i++)
 		if (mt_slots[i].active)
@@ -504,22 +504,22 @@ static void test_recovery_guard_real_pipeline(void)
 	teardown_device(&shid);
 }
 
-/* ── Real-pipeline check: ghost merge decides on the PRE-PENALTY weight ── */
+/* ── Real-pipeline check: post-association coalescing uses PRE-PENALTY weight ── */
 
-/* raw_ghost_merge() is a tracker-stage decision, so it must compare the
+/* raw_post_assoc_coalesce() is a tracker-stage decision, so it must compare the
  * pre-penalty weights (the blob_entry contract: `w` is "what the input layer
  * gets", `raw_w` is "what the tracker decides on"). Comparing the penalised
- * `w` lets a real bottom-edge contact (x0.23) lose the merge to a lighter
+ * `w` lets a real bottom-edge contact (x0.23) lose the coalescing decision to a lighter
  * interior artifact sitting within ghost_dist — the finger disappears for
  * the frame and re-presses the next (gestures see a new touch).
  *
  * The pair below is separated by a one-cell gap (so CCL finds two blobs) and
- * 5 cells between centroids (< ghost_dist 6, so the merge fires): a 3x3
+ * 5 cells between centroids (< ghost_dist 6, so coalescing applies): a 3x3
  * bottom cone (rows 45-47: raw 15308, penalised 3520) and a 5x5 interior
  * artifact (rows 39-43: raw = penalised = 14965). The artifact is the
  * heavier one AFTER the penalty but the lighter one BEFORE it, so this test
  * fails against a `w` comparison and passes on `raw_w`. */
-static void build_merge_pair(unsigned char *buf)
+static void build_coalesce_pair(unsigned char *buf)
 {
 	int r, c;
 
@@ -550,7 +550,7 @@ static void build_merge_pair(unsigned char *buf)
 	}
 }
 
-static void test_ghost_merge_prepenalty_weight(void)
+static void test_post_assoc_coalesce_prepenalty_weight(void)
 {
 	struct spi_hid shid;
 	struct spi_device spidev;
@@ -564,27 +564,27 @@ static void test_ghost_merge_prepenalty_weight(void)
 	memset(buf, 200, sizeof(buf));
 	for (i = 0; i < 30; i++)
 		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
-	CHECK(shid.heatmap_have_baseline, "ghost merge: baseline established");
+	CHECK(shid.heatmap_have_baseline, "post-association coalescing: baseline established");
 
-	build_merge_pair(buf);
+	build_coalesce_pair(buf);
 	for (i = 0; i < 4; i++)
 		mshw0231_raw_consume_samples(&shid, buf, FRAME_BYTES, 0x0C);
 
 	CHECK(mt_record_active_count() == 1,
-	      "ghost merge: the pair collapses to one contact, got %d",
+	      "post-association coalescing: the pair reduces to one contact, got %d",
 	      mt_record_active_count());
 	/* Bottom cone centroid is grid row ~46 (screen y ~32000), the interior
 	 * artifact row ~41 (screen y ~28600): the survivor identifies which
-	 * side of the merge won. */
+	 * side of the coalescing decision won. */
 	for (s = 0; s < MT_RECORD_MAX_SLOTS; s++) {
 		if (!mt_slots[s].active)
 			continue;
 		seen++;
 		CHECK(mt_slots[s].y > 30000,
-		      "ghost merge: survivor is the bottom-edge contact (slot %d y=%d)",
+		      "post-association coalescing: survivor is the bottom-edge contact (slot %d y=%d)",
 		      s, mt_slots[s].y);
 	}
-	CHECK(seen == 1, "ghost merge: exactly one active slot carries the contact, got %d", seen);
+	CHECK(seen == 1, "post-association coalescing: exactly one active slot carries the contact, got %d", seen);
 
 	teardown_device(&shid);
 }
@@ -680,8 +680,8 @@ int main(void)
 	printf("-- recovery guard uses the pre-penalty weight --\n");
 	test_recovery_guard_real_pipeline();
 
-	printf("-- ghost merge uses the pre-penalty weight --\n");
-	test_ghost_merge_prepenalty_weight();
+	printf("-- post-association coalescing uses the pre-penalty weight --\n");
+	test_post_assoc_coalesce_prepenalty_weight();
 
 	printf("-- flat-top plateau does not eat the peak budget --\n");
 	test_plateau_peak_budget();
