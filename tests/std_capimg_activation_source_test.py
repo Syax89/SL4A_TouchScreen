@@ -4,6 +4,7 @@ import sys
 
 root = Path(__file__).resolve().parent.parent
 core = (root / "driver/spi-hid-core.c").read_text()
+hdr = (root / "driver/spi-hid-core.h").read_text()
 errors = []
 
 def check(cond, msg):
@@ -30,8 +31,19 @@ if marker in core:
         p2 = block.find("usleep_range(4500, 5500)")
         p3 = block.find("spi_hid_seq_write_setfeat(shid)")
         check(0 <= p1 < p2 < p3, "activation ordering changed")
+        check("spi_hid_std_capimg_enabled(shid)" in block,
+              "activation is not gated through qualified standard CapImg policy")
 
-check('std_raw_transition' in core, "std_raw_transition parameter missing")
+helper = """\
+return std_raw_transition == 1 &&
+\t       raw_input_beta &&
+\t       shid->std_capimg_qualified;"""
+check(helper in core,
+      "standard CapImg policy must require mode 1, raw_input_beta and qualification")
+check('match && !strcmp(match->id, "MSHW0231")' in core,
+      "hardware qualification is not pinned to exact MSHW0231 ACPI ID")
+check("bool std_capimg_qualified;" in hdr,
+      "per-device standard CapImg qualification state missing")
 
 if errors:
     for e in errors:
