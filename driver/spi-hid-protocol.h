@@ -59,9 +59,10 @@ static inline int spi_hid_protocol_output_length_valid(unsigned int output_lengt
 	return output_length <= SPI_HID_PROTOCOL_MAX_OUTPUT_LENGTH;
 }
 
-/* DATA lifecycle policy. Once a DATA header has been consumed, its body must
- * be drained whenever there is a live HID client, HID registration is in
- * progress, or the CapImg tracker device has already been registered. */
+/* DATA lifecycle policy. Once a DATA header has been consumed, its body is
+ * owned by a completed HID client or by the explicitly registered CapImg
+ * tracker. The tracker is what extends draining across HID registration; plain
+ * standard HID keeps the upstream creation-time behavior. */
 static inline int spi_hid_protocol_data_should_drain(int hid_present,
 		int hid_creating, int touch_input_present)
 {
