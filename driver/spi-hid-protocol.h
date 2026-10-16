@@ -59,6 +59,22 @@ static inline int spi_hid_protocol_output_length_valid(unsigned int output_lengt
 	return output_length <= SPI_HID_PROTOCOL_MAX_OUTPUT_LENGTH;
 }
 
+/* DATA lifecycle policy. Once a DATA header has been consumed, its body must
+ * be drained whenever there is a live HID client, HID registration is in
+ * progress, or the CapImg tracker device has already been registered. */
+static inline int spi_hid_protocol_data_should_drain(int hid_present,
+		int hid_creating, int touch_input_present)
+{
+	return hid_present || hid_creating || touch_input_present;
+}
+
+/* hid_input_report() must not run until hid_add_device() has completed. */
+static inline int spi_hid_protocol_hid_publish_ready(int hid_present,
+		int hid_creating)
+{
+	return hid_present && !hid_creating;
+}
+
 /* The only raw frame shape accepted by the passive capture path.
  *
  * Two numbers, two layers, not interchangeable: TOTAL_LENGTH is the V0
