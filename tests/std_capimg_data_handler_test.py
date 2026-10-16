@@ -7,6 +7,33 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = (ROOT / "driver" / "spi-hid-core.c").read_text(encoding="utf-8")
+PROTOCOL = (ROOT / "driver" / "spi-hid-protocol.h").read_text(encoding="utf-8")
+
+def extract_c_function(source: str, signature: str) -> str:
+    start = source.find(signature)
+    if start < 0:
+        raise SystemExit(f"cannot locate {signature}")
+    brace = source.find("{", start)
+    if brace < 0:
+        raise SystemExit(f"cannot locate body for {signature}")
+    depth = 0
+    for i in range(brace, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    raise SystemExit(f"cannot isolate {signature}")
+
+data_policy = extract_c_function(
+    PROTOCOL,
+    "static inline int spi_hid_protocol_data_should_drain",
+)
+publish_policy = extract_c_function(
+    PROTOCOL,
+    "static inline int spi_hid_protocol_hid_publish_ready",
+)
 
 needle = "static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)"
 start = CORE.rfind(needle)
@@ -106,16 +133,8 @@ static void spi_hid_seq_handle_sync_response(struct spi_hid *s, int t, u16 b)
 static int spi_hid_seq_restart_discovery(struct spi_hid *s, int r)
 { (void)s; (void)r; return 0; }
 
-static int spi_hid_protocol_data_should_drain(int hid_present,
-                                              int hid_creating,
-                                              int touch_input_present)
-{
-    return hid_present || hid_creating || touch_input_present;
-}
-static int spi_hid_protocol_hid_publish_ready(int hid_present, int hid_creating)
-{
-    return hid_present && !hid_creating;
-}
+__DATA_POLICY__
+__PUBLISH_POLICY__
 static int spi_hid_protocol_raw_confirms_handshake(u8 cid, u16 rl)
 {
     return cid == 0x0c && rl >= 4300 && rl <= 4310;
@@ -262,7 +281,12 @@ with tempfile.TemporaryDirectory(prefix="sl4a-data-handler-") as td:
     td = Path(td)
     src = td / "probe.c"
     exe = td / "probe"
-    src.write_text(prelude + "\n" + handler + "\n" + main, encoding="utf-8")
+    exact_prelude = (
+        prelude
+        .replace("__DATA_POLICY__", data_policy)
+        .replace("__PUBLISH_POLICY__", publish_policy)
+    )
+    src.write_text(exact_prelude + "\n" + handler + "\n" + main, encoding="utf-8")
     subprocess.run(
         ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
          "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
