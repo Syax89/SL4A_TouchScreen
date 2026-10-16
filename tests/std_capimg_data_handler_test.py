@@ -109,6 +109,7 @@ struct spi_hid {
 static int stream_watchdog_ms = 2000;
 static bool raw_input_beta = true;
 static int std_bridge_enabled = 1;
+static u8 mock_report_id = 0x0c;
 static u32 last_read_len;
 static int read_calls;
 static int consume_calls;
@@ -161,7 +162,7 @@ static int spi_hid_seq_read(struct spi_hid *s, u8 *buf, u32 len)
          * tracker receives 4304 bytes starting at body[5]. */
         buf[5] = 0xce;
         buf[6] = 0x10;
-        buf[7] = 0x0c;
+        buf[7] = mock_report_id;
     }
     return 0;
 }
@@ -255,10 +256,45 @@ int main(void)
     seq_handle_data(&s, 1, 4304);
     CHECK(last_read_len == 4309 && consume_calls == 1 && consume_len == 4304,
           "post-create DATA path did not read and track the full frame");
-    CHECK(hid_publish_calls == 1,
-          "post-create normal HID publication did not occur");
+    CHECK(hid_publish_calls == 0,
+          "post-create CapImg 0x0c must remain held for tracker, not HID-dispatched");
     CHECK(schedule_calls == 0,
           "standard bridge armed raw runtime recovery after HID creation");
+
+    /* Syax89 review: default standard (NO transition, NO tracker) must
+     * still HOLD 0x0c after HID creation, exactly as upstream did.
+     * The real descriptor includes report 12 but that does not
+     * authorize a change to unsolicited HID publication policy. */
+    init(&s, &spi, buf);
+    s.touch_input = NULL;
+    s.hid = (void *)0x1;
+    std_bridge_enabled = 0;
+    mock_report_id = 0x0c;
+    reset_counts();
+    seq_handle_data(&s, 1, 4304);
+    CHECK(read_calls == 1 && consume_calls == 0,
+          "default standard mode no longer reads/holds report 0x0c");
+    CHECK(hid_publish_calls == 0,
+          "REGRESSION: default standard 0x0c was forwarded to HID");
+
+    /* HID publication is unchanged for a different standard report. */
+    mock_report_id = 0x40;
+    reset_counts();
+    seq_handle_data(&s, 1, 4304);
+    CHECK(read_calls == 1 && hid_publish_calls == 1,
+          "default standard report 0x40 should still be HID-dispatched");
+
+    /* The active CapImg bridge must consume 0x0c through its own
+     * tracker and NOT duplicate it through HID report dispatch. */
+    init(&s, &spi, buf);
+    s.hid = (void *)0x1;
+    mock_report_id = 0x0c;
+    std_bridge_enabled = 1;
+    reset_counts();
+    seq_handle_data(&s, 1, 4304);
+    CHECK(read_calls == 1 && consume_calls == 1 &&
+          hid_publish_calls == 0,
+          "opt-in bridge must route 0x0c only to CapImg tracker");
 
     /* Raw mode keeps its inherited runtime watchdog behavior. */
     init(&s, &spi, buf);
@@ -269,6 +305,15 @@ int main(void)
     seq_handle_data(&s, 1, 4304);
     CHECK(schedule_calls == 1 && mark_live_calls == 1,
           "raw mode no longer arms its runtime watchdog");
+    CHECK(consume_calls == 1 && hid_publish_calls == 0,
+          "raw tracker must retain upstream 0x0c HID hold semantics");
+
+    /* Raw mode without a tracker historically still dispatches to HID. */
+    s.touch_input = NULL;
+    reset_counts();
+    seq_handle_data(&s, 1, 4304);
+    CHECK(hid_publish_calls == 1 && consume_calls == 0,
+          "raw mode without tracker lost base HID publication behavior");
 
     if (failures)
         return 1;
