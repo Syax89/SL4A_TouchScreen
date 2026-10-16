@@ -3832,7 +3832,11 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 		    body[7] == 0x0C && shid->touch_input) {
 			int cret;
 
-			if (stream_watchdog_ms > 0 && !shid->stream_watchdog_active) {
+			/* This runtime watchdog is a raw-transport recovery policy.
+			 * Standard-transport CapImg must not accidentally arm the
+			 * standard startup-liveness logger when std_liveness_ms=0. */
+			if (shid->raw_mode_active && stream_watchdog_ms > 0 &&
+			    !shid->stream_watchdog_active) {
 				shid->stream_watchdog_active = true;
 				stream_watchdog_mark_live(shid);
 				shid->stream_watchdog_reinits = 0;
