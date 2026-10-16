@@ -16,8 +16,8 @@ check(probe_marker in core, "standard-transport input registration block missing
 if probe_marker in core:
     p = core.index(probe_marker)
     block = core[p:core.find("mshw0231_raw_init(shid);", p)]
-    check("std_raw_transition && raw_input_beta" in block,
-          "probe does not register tracker for standard CapImg")
+    check("spi_hid_std_capimg_enabled(shid)" in block,
+          "probe does not use qualified standard CapImg policy")
     check("mshw0231_raw_input_register(shid)" in block,
           "tracker registration call missing")
 
@@ -25,9 +25,9 @@ data_marker = "body[7] == 0x0C && shid->touch_input"
 check(data_marker in core, "CapImg consume gate missing")
 if data_marker in core:
     p = core.index(data_marker)
-    block = core[max(0, p - 350):p + 100]
-    check("std_raw_transition && raw_input_beta" in block,
-          "standard CapImg frames do not reach tracker")
+    block = core[max(0, p - 300):p + 100]
+    check("spi_hid_std_capimg_enabled(shid)" in block,
+          "standard CapImg frames do not use qualified policy")
     check("shid->raw_mode_active" in block,
           "raw-mode tracker path was lost")
 
