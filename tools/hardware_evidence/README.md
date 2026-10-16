@@ -7,9 +7,14 @@ paths. It does not install, load, unload, bind, configure, or otherwise alter
 drivers or hardware.
 
 `capture_direct_touch.sh` records a bounded `evtest` trace for the standard HID
-direct-touch device. It identifies the node from its `MSHW0231 Touchscreen`
-name, HID `045E:0C19` ancestry, and direct-touch/absolute/touch capabilities;
-it never assumes an `eventN` number.
+direct-touch device. It identifies the HID-core node from `045E:0C19` ancestry
+and direct-touch/absolute/touch capabilities; it never assumes an `eventN`
+number.
+
+`capture_beta_multitouch.sh` records the driver-owned heatmap multitouch bridge.
+It requires the exact `MSHW0231 Touchscreen` input name plus multitouch
+tracking capability (`ABS_MT_TRACKING_ID`), so a qualification run cannot
+silently capture the standard HID node instead of the beta bridge.
 
 `capture_stylus.sh` records a bounded `evtest` trace for the standard HID
 stylus. It requires HID `045E:0C19` ancestry, an input name containing `Stylus`,
@@ -36,12 +41,16 @@ for the normal collection:
 ./tools/hardware_evidence/collect.sh --output /tmp/sl4a-evidence
 ./tools/hardware_evidence/capture_direct_touch.sh --duration 20 \
   --output evidence/run-1/p1-one-touch.evtest.txt
+./tools/hardware_evidence/capture_beta_multitouch.sh --duration 20 \
+  --output evidence/run-1/p1-beta-multitouch.evtest.txt
 ./tools/hardware_evidence/capture_stylus.sh --duration 20 \
   --output evidence/run-1/p1-pen.evtest.txt
 ./tools/hardware_evidence/capture_linux_trace_bundle.sh --duration 20 \
-  --capture-direct-touch --capture-stylus --output evidence/run-1/p1-input-session
+  --capture-direct-touch --capture-beta-multitouch --capture-stylus \
+  --output evidence/run-1/p1-input-session
 ./tools/hardware_evidence/run_blinded_session.sh --period p1 --case one-touch \
-  --duration 20 --capture-direct-touch --capture-stylus --output evidence/run-1/p1-one-touch
+  --duration 20 --capture-direct-touch --capture-beta-multitouch --capture-stylus \
+  --output evidence/run-1/p1-one-touch
 ```
 
 The blinded-session output directory must be new. Its `collection/` and
@@ -61,7 +70,9 @@ The capture output must be a new file in an existing directory. It contains
 the selected sysfs identity and capabilities followed by raw `evtest` output.
 `evtest` is used only when already installed; the helper neither installs it
 nor changes drivers. The caller may need existing permission to read
-`/dev/input/eventN`; no privilege escalation is attempted.
+`/dev/input/eventN`; no privilege escalation is attempted. If a requested
+input capture fails, the trace bundle now exits non-zero so the parent session
+records `trace-failed` rather than reporting a misleading completed session.
 
 The trace bundle directory must also be new. Its duration is limited to 1-3600
 seconds and defaults to 20. `journalctl` and `/dev/input` can require privilege;
