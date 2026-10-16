@@ -29,6 +29,14 @@ check("established_a && established_b" in raw,
       "two-established-track preservation rule missing")
 check("established_a != established_b" in raw,
       "established-vs-new continuity rule missing")
+check("shid->blob_slot_state[loser_slot] == 1" in raw,
+      "provisional state-1 survivor reconciliation missing")
+check("shid->blob_slot_state[winner_slot] == 0" in raw,
+      "provisional reconciliation is not limited to a fresh winner slot")
+check("(u32)pdx <= bmd && (u32)pdy <= bmd" in raw,
+      "provisional reconciliation is not bounded by Hungarian range")
+check("assigned_slot[winner] = loser_slot" in raw,
+      "survivor does not inherit valid provisional history")
 
 if errors:
     for e in errors:
