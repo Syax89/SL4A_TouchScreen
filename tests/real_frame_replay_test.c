@@ -400,12 +400,20 @@ static int build_sorted_list(struct blob_entry *sorted)
 	return count;
 }
 
-/* Post-association coalescing uses the recovered strict six-cell threshold
- * directly; there is no longer a pre-association finger-count radius guess. */
+/* Mirror raw_scaled_ghost_dist() in the production tracker, solely for
+ * diagnostic attribution; actual coalescing already calls production code. */
 static int ghost_radius_cells(int dist, int active_slots)
 {
-	(void)active_slots;
-	return dist < 1 ? 1 : dist;
+	int gd = dist;
+	if (active_slots == 1)
+		gd = dist * GHOST_RADIUS_1_FINGER / 10;
+	else if (active_slots == 3)
+		gd = dist * GHOST_RADIUS_3_FINGERS / 10;
+	else if (active_slots == 4)
+		gd = dist * GHOST_RADIUS_4_FINGERS / 10;
+	else if (active_slots >= 5)
+		gd = dist * GHOST_RADIUS_5_FINGERS / 10;
+	return gd < 1 ? 1 : gd;
 }
 
 /*
