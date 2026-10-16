@@ -65,7 +65,11 @@ static inline int spi_hid_protocol_output_length_valid(unsigned int output_lengt
 static inline int spi_hid_protocol_data_should_drain(int hid_present,
 		int hid_creating, int touch_input_present)
 {
-	return hid_present || hid_creating || touch_input_present;
+	/* Preserve upstream standard-HID creation behavior unless the CapImg
+	 * tracker has explicitly taken ownership of DATA. The bridge registers
+	 * touch_input before HID publication, so it can drain the early body
+	 * without broadening the lifecycle change to default standard mode. */
+	return touch_input_present || (hid_present && !hid_creating);
 }
 
 /* hid_input_report() must not run until hid_add_device() has completed. */
