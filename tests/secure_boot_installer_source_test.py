@@ -118,6 +118,7 @@ with tempfile.TemporaryDirectory(prefix="sl4a-mok-resolver-") as td:
 
     common = f"""
 set -e
+unset SL4A_MOK_KEY SL4A_MOK_CERT
 fail() {{ echo "FAIL:$*" >&2; exit 97; }}
 info() {{ :; }}
 ID=debian
