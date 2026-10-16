@@ -23,8 +23,7 @@ absolute X/Y, and pen-tool capability; it never assumes an `eventN` number.
 `capture_linux_trace_bundle.sh` is the Phase 4 session collector. It provides a
 bounded Linux counterpart to the Windows transaction evidence: a UTC-bounded
 session window, host provenance, dynamically discovered ACPI/SPI/input state,
-and a timestamped journal slice filtered to SL4A/SPI/HID/touch lines. Direct
- touch and stylus `evtest` captures are opt-in.
+and a timestamped journal slice filtered to SL4A/SPI/HID/touch lines. Direct touch, beta multitouch, and stylus `evtest` captures are opt-in.
 
 `run_blinded_session.sh` is the operator-facing wrapper for one opaque blinded
 period and case. It calls the existing read-only collector and trace bundle
