@@ -228,7 +228,7 @@ heatmap_pure_test: heatmap_pure_test.c \
 		$(RAW_STAGE_DIR)/heatmap_pure_test.o $(RAW_STAGE_DIR)/heatmap_pure_stubs.o \
 		$(RAW_STAGE_DIR)/heatmap_pure_raw.o $(RAW_STAGE_DIR)/heatmap_pure_capimg.o -lm
 
-test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test std_capimg_data_policy_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test plateau_host_test tracker_coalescing_host_test heatmap_pure_test
+test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test std_capimg_data_policy_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test replay_fixture_test plateau_host_test tracker_coalescing_host_test heatmap_pure_test
 	./protocol_test
 	./std_capimg_data_policy_test
 	./wire_frames_test
