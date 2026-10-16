@@ -44,6 +44,13 @@ int main(void)
 	CHECK(spi_hid_protocol_data_should_drain(0, 0, 1),
 	      "registered tracker must keep DATA body drain active");
 
+	/* Default standard HID must retain upstream creation semantics: an HID
+	 * object that is still being created does not by itself take ownership of
+	 * a DATA body. Only the explicitly registered CapImg tracker broadens the
+	 * drain window. */
+	CHECK(!spi_hid_protocol_data_should_drain(1, 1, 0),
+	      "default standard HID creation must not acquire early-DATA ownership");
+
 	/* With neither HID lifecycle nor tracker ownership, the handler may ignore
 	 * DATA, preserving the default standard-mode behavior. */
 	CHECK(!spi_hid_protocol_data_should_drain(0, 0, 0),
