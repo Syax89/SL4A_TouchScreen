@@ -251,6 +251,7 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 	$(PYTHON) diagnostic_bundle_contract_test.py
 	$(PYTHON) diagnostic_bundle_frame_test.py
 	$(PYTHON) installer_recovery_contract_test.py
+	$(PYTHON) secure_boot_installer_source_test.py
 	$(PYTHON) tools_contract_test.py
 	$(PYTHON) hardcoded_descriptor_pin_test.py
 	$(PYTHON) std_capimg_activation_source_test.py
