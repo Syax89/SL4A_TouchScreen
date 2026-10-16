@@ -24,9 +24,9 @@
  *                           scratch; the caller zeroes it first, as the real
  *                           pipeline does)
  *   raw_ccl_flood_fill()  - the blob/CCL counter, on a COPY of shid
- *   raw_ghost_merge()     - the merge stage, on the blob list rebuilt from
- *                           shid->blob_* the way mshw0231_raw_process_samples()
- *                           builds it, with the slot state from before the frame
+ *   raw_hungarian_match() - candidate→persistent-slot association
+ *   raw_post_assoc_coalesce() - close-candidate policy after association,
+ *                           with the slot state from before the frame
  *
  * Nothing in driver/ is modified and no pipeline DECISION is reimplemented:
  * the peaks, the connected components, the merge and the published contacts
@@ -46,8 +46,8 @@
  *
  * Output: one line per frame
  *   f<idx> ref=<reference blobs> touch=<touched cells> peaks=<peaks>
- *          ccl=<blobs committed by CCL> sorted=<pre-merge list>
- *          merged=<post-ghost-merge list> pub=<published MT slots>
+ *          ccl=<blobs committed by CCL> sorted=<candidate list>
+ *          kept=<post-association candidates> pub=<published MT slots>
  * a detail block for every frame that publishes fewer contacts than the
  * reference has blobs (the stage that dropped each one, with values), and a
  * summary.
@@ -326,7 +326,7 @@ struct component {
 	int min_r, max_r, min_c, max_c;
 	int gx100, gy100;
 	int blob_idx;              /* driver blob index, -1 when rejected */
-	int merge_loser;           /* pre-merge list index when the merge ate it, else -1 */
+	int merge_loser;           /* candidate-list index suppressed post-association, else -1 */
 	const char *drop;          /* NULL when the component cleared every CCL gate */
 	char why[200];             /* the exact comparison that rejected it */
 };
@@ -343,10 +343,10 @@ static struct {
 	struct component comp[MAX_COMPONENTS];
 	u16 label_raster[GRID_CELLS];
 	int active_slots_before;
-	int ghost_radius;          /* cells, after the per-finger-count scaling */
-	int n_pre;                 /* blob list handed to the ghost merge */
+	int ghost_radius;          /* cells; post-association coalescing threshold */
+	int n_pre;                 /* candidate list handed to Hungarian */
 	struct blob_entry pre[HEATMAP_MAX_BLOBS];
-	int n_post;                /* list after the ghost merge */
+	int n_post;                /* assigned candidates kept after coalescing */
 	struct blob_entry post[HEATMAP_MAX_BLOBS];
 	int merge_loser[HEATMAP_MAX_BLOBS];   /* pre[] index zeroed by the merge */
 	int merge_winner[HEATMAP_MAX_BLOBS];  /* pre[] index it was merged into */
@@ -369,10 +369,9 @@ static int count_touched(void)
 
 /*
  * Rebuild the blob list mshw0231_raw_process_samples() hands to
- * raw_ghost_merge(): every committed blob whose raw (pre-edge-penalty) weight
- * is at least blob_min_weight, sorted by penalised weight descending, capped
- * at HEATMAP_MAX_SLOTS. Only used to call the driver's own merge function
- * again from the outside.
+ * raw_hungarian_match(): every committed blob whose raw (pre-edge-penalty)
+ * weight is at least blob_min_weight, sorted by penalised weight descending,
+ * capped at HEATMAP_MAX_SLOTS.
  */
 static int build_sorted_list(struct blob_entry *sorted)
 {
@@ -401,22 +400,12 @@ static int build_sorted_list(struct blob_entry *sorted)
 	return count;
 }
 
-/* The merge radius raw_ghost_merge() derives from the finger count it sees
- * (mirror of those eight lines, so the detail line can quote the value that
- * was actually compared against). */
+/* Post-association coalescing uses the recovered strict six-cell threshold
+ * directly; there is no longer a pre-association finger-count radius guess. */
 static int ghost_radius_cells(int dist, int active_slots)
 {
-	int gd = dist;
-
-	if (active_slots == 1)
-		gd = dist * GHOST_RADIUS_1_FINGER / 10;
-	else if (active_slots == 3)
-		gd = dist * GHOST_RADIUS_3_FINGERS / 10;
-	else if (active_slots == 4)
-		gd = dist * GHOST_RADIUS_4_FINGERS / 10;
-	else if (active_slots >= 5)
-		gd = dist * GHOST_RADIUS_5_FINGERS / 10;
-	return gd < 1 ? 1 : gd;
+	(void)active_slots;
+	return dist < 1 ? 1 : dist;
 }
 
 /*
@@ -559,7 +548,6 @@ static void analyse_frame(void)
 	static struct spi_hid ccl_state;
 	static struct spi_hid merge_state;
 	u16 nlabels = 0;
-	u8 post_count;
 	int i, j;
 
 	ff.touched_cells = count_touched();
@@ -586,9 +574,12 @@ static void analyse_frame(void)
 	analyse_components((u8)ff.peaks);
 	assign_blob_indices();
 
-	/* Ghost merge: the driver's own function, on the list its caller builds,
-	 * with the slot state from before this frame as the radius selector (it
-	 * runs before raw_update_slots(), exactly as in the driver). */
+	/*
+	 * Re-run the driver's current ordering on the pre-frame slot state:
+	 * Hungarian first, then post-association coalescing.  Keep a copy of the
+	 * original assignment so a candidate suppressed by coalescing can be
+	 * attributed to that stage instead of looking like a matcher failure.
+	 */
 	ff.active_slots_before = 0;
 	for (i = 0; i < HEATMAP_MAX_SLOTS; i++)
 		if (pre_state.blob_slot_state[i] >= 2)
@@ -597,35 +588,42 @@ static void analyse_frame(void)
 
 	ff.n_pre = build_sorted_list(ff.pre);
 	memcpy(ff.post, ff.pre, sizeof(ff.post));
-	post_count = (u8)ff.n_pre;
-	ff.n_post = ff.n_pre;
+	ff.n_post = 0;
 	ff.n_merges = 0;
-	if (ff.n_pre > 1) {
-		memcpy(&merge_state, &pre_state, sizeof(merge_state));
-		raw_ghost_merge(&merge_state, ff.post, &post_count, (u32)ghost_dist);
-		ff.n_post = post_count;
-		/* The merge zeroes a loser's weight and the caller's compaction then
-		 * drops it. Loser and winner are identified by blob index, which is
-		 * unique, so the compaction cannot confuse them. */
-		for (i = 0; i < ff.n_pre; i++) {
-			int found = 0, best = -1, best_d = 1 << 30;
+	for (i = 0; i < HEATMAP_MAX_BLOBS; i++) {
+		ff.assigned[i] = 0xFF;
+		ff.row_of_blob[i] = -1;
+	}
+	ff.bmd = 0;
 
-			if (ff.pre[i].w == 0)
+	if (ff.n_pre > 0) {
+		u8 assigned_before[HEATMAP_MAX_BLOBS];
+
+		memcpy(&merge_state, &pre_state, sizeof(merge_state));
+		ff.bmd = raw_hungarian_match(&merge_state, ff.post, (u8)ff.n_pre,
+					     ff.assigned, (u32)blob_max_distance);
+		memcpy(assigned_before, ff.assigned, sizeof(assigned_before));
+
+		raw_post_assoc_coalesce(&merge_state, ff.post, (u8)ff.n_pre,
+					ff.assigned, ff.bmd, (u32)ghost_dist);
+
+		for (i = 0; i < ff.n_pre; i++) {
+			int best = -1, best_d = 1 << 30;
+
+			ff.row_of_blob[ff.pre[i].idx] = i;
+			if (ff.assigned[i] != 0xFF)
+				ff.n_post++;
+
+			if (assigned_before[i] == 0xFF || ff.assigned[i] != 0xFF)
 				continue;
-			for (j = 0; j < ff.n_post; j++)
-				if (ff.post[j].w > 0 && ff.post[j].idx == ff.pre[i].idx) {
-					found = 1;
-					break;
-				}
-			if (found)
-				continue;
-			for (j = 0; j < ff.n_post; j++) {
+
+			for (j = 0; j < ff.n_pre; j++) {
 				int dx, dy, d;
 
-				if (ff.post[j].w == 0)
+				if (i == j || ff.assigned[j] == 0xFF)
 					continue;
-				dx = (int)ff.pre[i].gx - (int)ff.post[j].gx;
-				dy = (int)ff.pre[i].gy - (int)ff.post[j].gy;
+				dx = (int)ff.pre[i].gx - (int)ff.pre[j].gx;
+				dy = (int)ff.pre[i].gy - (int)ff.pre[j].gy;
 				d = dx * dx + dy * dy;
 				if (d < best_d) {
 					best_d = d;
@@ -642,25 +640,6 @@ static void analyse_frame(void)
 					ff.comp[j].merge_loser = i;
 		}
 	}
-	/*
-	 * The driver's own matcher, re-run on the same inputs (the post-merge list
-	 * and the slot state from before the frame), so a blob that never reached
-	 * a slot can be traced to the assignment and the radius that rejected it.
-	 * raw_hungarian_match() only reads blob_slot_* and writes cost[][], so a
-	 * copy of the pre-frame state is enough.
-	 */
-	for (i = 0; i < HEATMAP_MAX_BLOBS; i++)
-		ff.row_of_blob[i] = -1;
-	for (i = 0; i < ff.n_post; i++)
-		if (ff.post[i].w > 0)
-			ff.row_of_blob[ff.post[i].idx] = i;
-	memcpy(&merge_state, &pre_state, sizeof(merge_state));
-	for (i = 0; i < HEATMAP_MAX_BLOBS; i++)
-		ff.assigned[i] = 0xFF;
-	ff.bmd = 0;
-	if (ff.n_post > 0)
-		ff.bmd = raw_hungarian_match(&merge_state, ff.post, (u8)ff.n_post,
-					     ff.assigned, (u32)blob_max_distance);
 	ff.published = mt_record_active_count();
 }
 
@@ -668,7 +647,7 @@ static void analyse_frame(void)
 
 static void print_frame_line(int idx)
 {
-	printf("f%03d ref=%d touch=%4d peaks=%2d ccl=%d sorted=%d merged=%d pub=%d%s\n",
+	printf("f%03d ref=%d touch=%4d peaks=%2d ccl=%d sorted=%d kept=%d pub=%d%s\n",
 	       idx, frames[idx].ref_count, ff.touched_cells, ff.peaks, ff.ccl_blobs,
 	       ff.n_pre, ff.n_post, ff.published,
 	       ff.truncated ? " (components truncated)" : "");
@@ -789,7 +768,7 @@ static const char *verdict_for_ref_blob(int idx, int r, char *why, size_t why_le
 			int dy = (int)ff.pre[loser].gy - (int)ff.post[winner].gy;
 
 			snprintf(why, why_len,
-				 "blob at (%d,%d) weight %u: dx %d, dy %d (grid x100) -> dx^2+dy^2 = %d < ghost_dist^2*10000 = %d, so raw_ghost_merge() zeroed it in favour of the blob at (%d,%d) weight %u (ghost_dist %d scaled to %d cell(s) with %d claimed slot(s) before this frame)",
+				 "blob at (%d,%d) weight %u: dx %d, dy %d (grid x100) -> dx^2+dy^2 = %d < ghost_dist^2*10000 = %d, so raw_post_assoc_coalesce() suppressed it after Hungarian in favour of the candidate at (%d,%d) weight %u (ghost_dist %d; %d cell threshold; %d claimed slot(s) before this frame)",
 				 (int)ff.pre[loser].gx / 100, (int)ff.pre[loser].gy / 100,
 				 ff.pre[loser].w, dx, dy, dx * dx + dy * dy,
 				 ff.ghost_radius * ff.ghost_radius * 10000,
@@ -797,9 +776,9 @@ static const char *verdict_for_ref_blob(int idx, int r, char *why, size_t why_le
 				 (int)ff.post[winner].gy / 100, ff.post[winner].w,
 				 ghost_dist, ff.ghost_radius, ff.active_slots_before);
 		} else {
-			snprintf(why, why_len, "merged away by raw_ghost_merge()");
+			snprintf(why, why_len, "suppressed by raw_post_assoc_coalesce()");
 		}
-		return "ghost merge";
+		return "post-association coalescing";
 	}
 	if (c->blob_idx < 0) {
 		snprintf(why, why_len, "component cleared every gate but has no committed blob index");
