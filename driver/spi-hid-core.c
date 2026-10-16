@@ -3861,8 +3861,19 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 				u16 hy = body[11] | (body[12] << 8);
 				seq_dbg(shid, 2, "CALIB_REF: hid=(%u,%u)\n", hx, hy);
 			}
-			if (spi_hid_protocol_hid_publish_ready(!!shid->hid,
-									 shid->hid_creating)) {
+			/* Preserve upstream Report 0x0c dispatch policy in BOTH
+			 * default standard mode and the opt-in CapImg bridge.
+			 * Report 12 (SurfaceSwitch + constant bytes) exists in
+			 * the HID descriptor, but a heatmap body is NOT a touch
+			 * contact report. The registered tracker consumes it.
+			 * Raw mode likewise retained it when a tracker existed.
+			 * Only other reports proceed to the HID dispatcher. */
+			if (body[7] == 0x0C &&
+			    (!shid->raw_mode_active || shid->touch_input)) {
+				seq_dbg(shid, 2, "SEQ: CapImg report 0x0c held for tracker/capture (len=%u)\n",
+					rl);
+			} else if (spi_hid_protocol_hid_publish_ready(!!shid->hid,
+									  shid->hid_creating)) {
 				int hret = hid_input_report(shid->hid, HID_INPUT_REPORT,
 							    &body[7], rl - 2, 1);
 				if (hret)
