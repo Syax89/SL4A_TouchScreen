@@ -7,7 +7,8 @@ set -o pipefail
 usage() {
 	cat <<'EOF'
 Usage: tools/hardware_evidence/run_blinded_session.sh --period p1|p2|p3 --case CASE \
-        --duration SECONDS --output NEW_DIRECTORY [--capture-direct-touch] [--capture-stylus]
+        --duration SECONDS --output NEW_DIRECTORY [--capture-direct-touch] \
+        [--capture-beta-multitouch] [--capture-stylus]
 
 Create one blinded hardware-session evidence directory. PERIOD is an opaque
 label; this runner never accepts, selects, installs, loads, unloads, or records
@@ -24,6 +25,7 @@ case_name=""
 duration=""
 output=""
 capture_direct_touch=0
+capture_beta_multitouch=0
 capture_stylus=0
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -49,6 +51,10 @@ while [ "$#" -gt 0 ]; do
 			;;
 		--capture-direct-touch)
 			capture_direct_touch=1
+			shift
+			;;
+		--capture-beta-multitouch)
+			capture_beta_multitouch=1
 			shift
 			;;
 		--capture-stylus)
@@ -97,6 +103,9 @@ trace_args=(--duration "$duration" --output "$output/trace")
 if [ "$capture_direct_touch" -eq 1 ]; then
 	trace_args+=(--capture-direct-touch)
 fi
+if [ "$capture_beta_multitouch" -eq 1 ]; then
+	trace_args+=(--capture-beta-multitouch)
+fi
 if [ "$capture_stylus" -eq 1 ]; then
 	trace_args+=(--capture-stylus)
 fi
@@ -117,6 +126,7 @@ period_label=$period
 case_name=$case_name
 requested_duration_seconds=$duration
 direct_touch_capture_requested=$capture_direct_touch
+beta_multitouch_capture_requested=$capture_beta_multitouch
 stylus_capture_requested=$capture_stylus
 runner=${BASH_SOURCE[0]}
 runner_uid=$(id -u)
@@ -131,6 +141,7 @@ Period label: $period
 Case name: $case_name
 Requested duration (seconds): $duration
 Direct-touch capture requested: $capture_direct_touch
+Beta-multitouch capture requested: $capture_beta_multitouch
 Stylus capture requested: $capture_stylus
 Session start (UTC): ____________________
 Session end (UTC): ____________________
@@ -147,6 +158,9 @@ Kernel warnings/errors observed:
 
 
 Direct-touch capture result (if requested):
+
+
+Beta-multitouch capture result (if requested):
 
 
 Stylus capture result (if requested):
@@ -167,7 +181,7 @@ records observations in `operator/worksheet.txt`, and does not inspect or
 request profile selection, installation, module changes, or an assignment key.
 
 ```sh
-./tools/hardware_evidence/run_blinded_session.sh --period p1 --case CASE --duration 20 --output evidence/RUN/p1-CASE [--capture-direct-touch] [--capture-stylus]
+./tools/hardware_evidence/run_blinded_session.sh --period p1 --case CASE --duration 20 --output evidence/RUN/p1-CASE [--capture-direct-touch] [--capture-beta-multitouch] [--capture-stylus]
 ```
 
 The runner and its helpers are read-only. They do not invoke `sudo`, choose,
