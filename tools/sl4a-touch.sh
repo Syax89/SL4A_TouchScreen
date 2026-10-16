@@ -274,7 +274,7 @@ sl4a-touch.sh — SL4A_TouchScreen driver management tool
 Usage: tools/sl4a-touch.sh <command> [options]
 
 Commands:
-  install [--standard|--raw] [--check|--dry-run] [--force]
+  install [--standard|--raw] [--check|--dry-run] [--force] [--rotate-mok]
                     Build, install via DKMS, enable automatic activation on
                     every future boot (a systemd unit gated on
                     multi-user.target — after the base system is up, not
@@ -289,6 +289,11 @@ Commands:
                       --dry-run   Validate and print the selected profile.
                       --force     Continue even if expected hardware/DMI is
                                   not detected.
+                      --rotate-mok
+                                  Deliberately replace the DKMS signing key pair
+                                  after backing up the existing material. This
+                                  changes the shared DKMS signing identity and
+                                  can affect every DKMS module on the system.
                       --repair    If a file at one of the tool's own paths
                                   (the modprobe conf, the boot unit) is not
                                   ours, move it aside to <path>.unowned-<time>
@@ -447,40 +452,51 @@ resolve_dkms_mok_paths() {
 	local kernelver cfg mok_signing_key mok_certificate
 	kernelver="$(uname -r)"
 
-	if { [ -n "${SL4A_MOK_KEY:-}" ] && [ -z "${SL4A_MOK_CERT:-}" ]; } || 	   { [ -z "${SL4A_MOK_KEY:-}" ] && [ -n "${SL4A_MOK_CERT:-}" ]; }; then
+	case "$ID" in
+		ubuntu|linuxmint|pop|neon)
+			mok_signing_key="/var/lib/shim-signed/mok/MOK.priv"
+			mok_certificate="/var/lib/shim-signed/mok/MOK.der"
+			;;
+		*)
+			mok_signing_key="/var/lib/dkms/mok.key"
+			mok_certificate="/var/lib/dkms/mok.pub"
+			;;
+	esac
+
+	if [ -r /etc/dkms/framework.conf ]; then
+		# Trusted root-owned DKMS configuration; DKMS itself sources this
+		# file on every invocation.
+		# shellcheck disable=SC1091
+		. /etc/dkms/framework.conf
+	fi
+	for cfg in /etc/dkms/framework.conf.d/*.conf; do
+		[ -r "$cfg" ] || continue
+		# shellcheck disable=SC1090
+		. "$cfg"
+	done
+
+	[ -n "$mok_signing_key" ] && [ -n "$mok_certificate" ] ||
+		fail "Could not resolve DKMS mok_signing_key/mok_certificate paths."
+
+	if { [ -n "${SL4A_MOK_KEY:-}" ] && [ -z "${SL4A_MOK_CERT:-}" ]; } ||
+	   { [ -z "${SL4A_MOK_KEY:-}" ] && [ -n "${SL4A_MOK_CERT:-}" ]; }; then
 		fail "SL4A_MOK_KEY and SL4A_MOK_CERT must be supplied together."
 	fi
-	if [ -n "${SL4A_MOK_KEY:-}" ]; then
-		MOK_KEY="$SL4A_MOK_KEY"
-		MOK_CERT="$SL4A_MOK_CERT"
-	else
-		case "$ID" in
-			ubuntu|linuxmint|pop|neon)
-				mok_signing_key="/var/lib/shim-signed/mok/MOK.priv"
-				mok_certificate="/var/lib/shim-signed/mok/MOK.der"
-				;;
-			*)
-				mok_signing_key="/var/lib/dkms/mok.key"
-				mok_certificate="/var/lib/dkms/mok.pub"
-				;;
-		esac
 
-		if [ -r /etc/dkms/framework.conf ]; then
-			# Trusted root-owned DKMS configuration; DKMS itself sources this
-			# file on every invocation.
-			# shellcheck disable=SC1091
-			. /etc/dkms/framework.conf
+	# DKMS, not this installer, chooses the signing identity used by build/install.
+	# Environment overrides are therefore accepted only when they name that same
+	# configured pair. Pointing the installer at pair A while DKMS signs with
+	# pair B would validate/enroll the wrong key and produce unloadable modules.
+	if [ -n "${SL4A_MOK_KEY:-}" ]; then
+		if [ "$SL4A_MOK_KEY" != "$mok_signing_key" ] ||
+		   [ "$SL4A_MOK_CERT" != "$mok_certificate" ]; then
+			fail "SL4A_MOK_KEY/SL4A_MOK_CERT differ from DKMS mok_signing_key/mok_certificate. Configure DKMS itself (framework.conf or framework.conf.d) so the identity used for signing matches the identity being validated/enrolled."
 		fi
-		for cfg in /etc/dkms/framework.conf.d/*.conf; do
-			[ -r "$cfg" ] || continue
-			# shellcheck disable=SC1090
-			. "$cfg"
-		done
-		MOK_KEY="$mok_signing_key"
-		MOK_CERT="$mok_certificate"
 	fi
 
-	[ -n "$MOK_KEY" ] && [ -n "$MOK_CERT" ] || 		fail "Could not resolve DKMS mok_signing_key/mok_certificate paths."
+	MOK_KEY="$mok_signing_key"
+	MOK_CERT="$mok_certificate"
+
 	case "$MOK_KEY" in
 		pkcs11:*)
 			fail "This installer does not manage PKCS#11 DKMS signing keys yet. Keep the existing DKMS configuration and sign/enroll that identity outside this installer."
