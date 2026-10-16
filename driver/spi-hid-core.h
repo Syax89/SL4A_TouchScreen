@@ -274,6 +274,7 @@ struct spi_hid {
 	/* Multi-touch input device created for raw heatmap mode. */
 	struct input_dev *touch_input;
 	bool raw_mode_active;           /* Device is in raw heatmap mode */
+	bool std_capimg_qualified;      /* exact ACPI ID is hardware-qualified for standard-transport CapImg */
 	bool raw_stream_armed;          /* stream enable sent — once, after the descriptor (the reference's order) */
 	bool transition_done;           /* GET ID6 + SET ID5 sent — once per probe (July one-shot; repeats reset the panel) */
 	u8 *heatmap_buf;                /* Last captured raw frame buffer, kmalloc'd */
