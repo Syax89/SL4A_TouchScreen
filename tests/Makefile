@@ -8,7 +8,7 @@ ifeq ($(SANITIZE),1)
   LDFLAGS += -fsanitize=address,undefined
 endif
 
-all: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test
+all: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test std_capimg_data_policy_test
 
 # Real Windows touch-session corpus: 537 SPB wire frames extracted from the
 # recovered surface_touch.csv capture (~/sl4a-analysis/raw-corpus). It is
@@ -19,6 +19,9 @@ REAL_FRAMES ?= $(HOME)/sl4a-analysis/raw-corpus/surface_touch-frames.txt
 
 protocol_test: protocol_test.c ../driver/spi-hid-protocol.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ protocol_test.c
+
+std_capimg_data_policy_test: std_capimg_data_policy_test.c ../driver/spi-hid-protocol.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ std_capimg_data_policy_test.c
 
 # wire_frames_test compiles the exact header the driver builds its host->device
 # frames from, so it asserts the bytes that go on the wire without needing the
@@ -199,8 +202,9 @@ heatmap_pure_test: heatmap_pure_test.c \
 		$(RAW_STAGE_DIR)/heatmap_pure_test.o $(RAW_STAGE_DIR)/heatmap_pure_stubs.o \
 		$(RAW_STAGE_DIR)/heatmap_pure_raw.o $(RAW_STAGE_DIR)/heatmap_pure_capimg.o -lm
 
-test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test plateau_host_test heatmap_pure_test
+test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test std_capimg_data_policy_test raw_pipeline_math_test raw_pipeline_replay_test replay_fixture_test plateau_host_test heatmap_pure_test
 	./protocol_test
+	./std_capimg_data_policy_test
 	./wire_frames_test
 	./capimg_decoder_host_test
 	./c590_atan2_host_test
@@ -221,6 +225,10 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 	$(PYTHON) installer_recovery_contract_test.py
 	$(PYTHON) tools_contract_test.py
 	$(PYTHON) hardcoded_descriptor_pin_test.py
+	$(PYTHON) std_capimg_activation_source_test.py
+	$(PYTHON) std_capimg_input_source_test.py
+	$(PYTHON) std_capimg_data_drain_source_test.py
+	$(PYTHON) std_capimg_data_handler_test.py
 	$(SHELL) hunt_sandbox_test.sh
 
 # Checks that need something this repository does not ship: the Windows touch
@@ -240,7 +248,7 @@ local-checks: raw_pipeline_replay_test real_frame_replay_test
 replay_fixture_test: fixtures/replay/v1/manifest.json ../tools/decode_v0_capimg.py
 
 clean:
-	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test plateau_host_test heatmap_pure_test
+	rm -f protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_test std_capimg_data_policy_test raw_pipeline_math_test raw_pipeline_replay_test real_frame_replay_test plateau_host_test heatmap_pure_test
 	rm -rf $(RAW_STAGE_DIR)
 
 .PHONY: all test local-checks replay_fixture_test clean

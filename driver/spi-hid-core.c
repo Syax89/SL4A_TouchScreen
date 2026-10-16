@@ -2618,13 +2618,20 @@ MODULE_PARM_DESC(skip_getfeat,
 	"Skip the standard-mode feature-read handshake (no WAIT_FEATURE state). "
 	"The raw-mode Report ID 6 configuration read still runs");
 
-/* July one-shot transition in standard mode: GET ID6 + SET ID5=1 after RPT,
- * then passive capture on reg 0 (raw_observed counts). Opt-in; default off
- * keeps standard HID byte-identical. */
+/* Opt-in standard-transport CapImg bridge.  Keep normal HID discovery and
+ * registration, then use the hardware-qualified write-only GET6 -> ~5 ms ->
+ * SET5 sequence to enter the CapImg stream.  Default off. */
 static int std_raw_transition;
 module_param(std_raw_transition, int, 0444);
 MODULE_PARM_DESC(std_raw_transition,
-	"Run the GET ID6 + SET ID5 heatmap transition in standard mode (0=off)");
+	"Enable standard-transport CapImg multitouch (0=off, 1=write-only GET6 + SET5)");
+
+static bool spi_hid_std_capimg_enabled(const struct spi_hid *shid)
+{
+	return std_raw_transition == 1 &&
+	       raw_input_beta &&
+	       shid->std_capimg_qualified;
+}
 
 module_param(skip_std_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_std_getfeat,
@@ -3585,22 +3592,27 @@ static void seq_handle_rpt(struct spi_hid *shid, int type, u16 blen)
 				}
 			}
 		} else {
-			/* July one-shot transition, opt-in: GET ID6 + SET ID5=1,
-			 * then DONE reads reg 0 as usual. raw_mode=N captured
-			 * 1616 valid 4304B bodies this way; the transition sends
-			 * no vendor init, no power frames, and never delays the
-			 * handshake (best-effort, failures fall through). */
-			if (std_raw_transition && !shid->transition_done) {
-				seq_dbg(shid, 1, "SEQ: standard-mode raw transition: GET ID6 + SET ID5\n");
-				spi_hid_getfeat6_read(shid);
+			/* Opt-in standard-transport CapImg activation.
+			 *
+			 * Hardware result on MSHW0231:
+			 *   SET5 only                   -> CapImg
+			 *   GET6 write + ~5 ms + SET5   -> CapImg
+			 *   GET6 full reply read + SET5 -> controller reset
+			 *
+			 * Do not consume the GET6 reply here.  This is distinct
+			 * from the normal HID GET_REPORT path, where report 6 is
+			 * suppressed by skip_std_getfeat after issue #4. */
+			if (spi_hid_std_capimg_enabled(shid) && !shid->transition_done) {
+				seq_dbg(shid, 1,
+					"SEQ: standard-transport CapImg: write-only GET6 + SET5\n");
+				if (spi_hid_seq_write_get_feature6(shid))
+					dev_warn(&shid->spi->dev,
+						 "SEQ: activation GET_FEATURE(6) write failed, continuing\n");
+				usleep_range(4500, 5500);
 				if (spi_hid_seq_write_setfeat(shid))
 					dev_warn(&shid->spi->dev,
 						 "SEQ: transition SET_FEATURE ID5 failed, continuing\n");
 				shid->transition_done = true;
-				/* Back to unnamed reads: the GET exception shapes
-				 * only the transition's own reads. */
-				shid->read_resp_type = 0;
-				shid->read_resp_content_id = 0;
 			}
 			spi_hid_seq_set_state(shid, SPI_HID_SEQ_DONE, SPI_HID_SEQ_REPORT_DESCRIPTOR);
 			if (std_liveness_ms > 0) {
@@ -3741,8 +3753,13 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 	}
 	if (type != 1)
 		return;
-	if (shid->hid_creating ||
-	    (!shid->hid && !(shid->raw_mode_active && shid->touch_input)))
+	/* A DATA header may arrive while hid_add_device() is still running.
+	 * Once the header is consumed, drain its body even during HID creation;
+	 * leaving a ~4.3 KB CapImg body queued caused a repeatable reset on warm
+	 * reload.  HID publication remains suppressed until creation completes. */
+	if (!spi_hid_protocol_data_should_drain(!!shid->hid,
+						 shid->hid_creating,
+						 !!shid->touch_input))
 		return;
 
 	shid->stat_data++;
@@ -3811,10 +3828,15 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 				body[7]);
 		}
 
-		if (shid->raw_mode_active && body[7] == 0x0C && shid->touch_input) {
+		if ((shid->raw_mode_active || spi_hid_std_capimg_enabled(shid)) &&
+		    body[7] == 0x0C && shid->touch_input) {
 			int cret;
 
-			if (stream_watchdog_ms > 0 && !shid->stream_watchdog_active) {
+			/* This runtime watchdog is a raw-transport recovery policy.
+			 * Standard-transport CapImg must not accidentally arm the
+			 * standard startup-liveness logger when std_liveness_ms=0. */
+			if (shid->raw_mode_active && stream_watchdog_ms > 0 &&
+			    !shid->stream_watchdog_active) {
 				shid->stream_watchdog_active = true;
 				stream_watchdog_mark_live(shid);
 				shid->stream_watchdog_reinits = 0;
@@ -3829,14 +3851,8 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 					return;
 				}
 			}
-		} else if (rl >= 3 && rl - 3 <= avail) {
-			if (!shid->raw_mode_active && body[7] == 0x0C) {
-				/* Heatmap body on the standard path (July transition):
-				 * counted by the passive observer above, never
-				 * delivered as HID input. */
-				seq_dbg(shid, 2, "SEQ: standard-path 0x0c body held for capture (len=%u)\n",
-					rl);
-			} else {
+		}
+		if (rl >= 3 && rl - 3 <= avail) {
 			if (shid->raw_mode_active && body[7] == 0x40 && rl - 2 >= 6) {
 				/* Report 0x40: ID, one TipSwitch byte, then X and Y
 				 * as 16-bit little-endian pairs (see
@@ -3845,13 +3861,24 @@ static void seq_handle_data(struct spi_hid *shid, int type, u16 blen)
 				u16 hy = body[11] | (body[12] << 8);
 				seq_dbg(shid, 2, "CALIB_REF: hid=(%u,%u)\n", hx, hy);
 			}
-			if (shid->hid) {
+			/* Preserve upstream Report 0x0c dispatch policy in BOTH
+			 * default standard mode and the opt-in CapImg bridge.
+			 * Report 12 (SurfaceSwitch + constant bytes) exists in
+			 * the HID descriptor, but a heatmap body is NOT a touch
+			 * contact report. The registered tracker consumes it.
+			 * Raw mode likewise retained it when a tracker existed.
+			 * Only other reports proceed to the HID dispatcher. */
+			if (body[7] == 0x0C &&
+			    (!shid->raw_mode_active || shid->touch_input)) {
+				seq_dbg(shid, 2, "SEQ: CapImg report 0x0c held for tracker/capture (len=%u)\n",
+					rl);
+			} else if (spi_hid_protocol_hid_publish_ready(!!shid->hid,
+									  shid->hid_creating)) {
 				int hret = hid_input_report(shid->hid, HID_INPUT_REPORT,
 							    &body[7], rl - 2, 1);
 				if (hret)
 					dev_warn(dev, "SEQ: hid_input_report failed: %d (content_id=0x%02x)\n",
 						 hret, body[7]);
-			}
 			}
 		} else if (rl < 3) {
 			dev_warn(dev, "SEQ: DATA report too short to contain a report ID (len=%u), dropped\n",
@@ -4642,6 +4669,13 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->cfg = device_get_match_data(dev);
 	if (!shid->cfg)
 		shid->cfg = &spi_hid_cfg_sl4;
+	if (!dev->of_node) {
+		const struct acpi_device_id *match =
+			acpi_match_device(spi_hid_acpi_match, dev);
+
+		shid->std_capimg_qualified =
+			match && !strcmp(match->id, "MSHW0231");
+	}
 	dev_info(dev, "device config: grid %ux%u, %u capimg samples, baseline %u frames, EMA alpha %u\n",
 		 shid->cfg->grid_cols, shid->cfg->grid_rows,
 		 shid->cfg->capimg_raster_samples, shid->cfg->heatmap_baseline_needed,
@@ -4767,19 +4801,23 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	dev_info(dev, "SEQ: device powered by ACPI _INI, arming IRQ\n");
 
-	/* Create multitouch input device for heatmap-to-touch pipeline.
-	 * Bug fix: this was created unconditionally,
-	 * even in the default raw_mode=0 configuration where it never receives
-	 * a single event (only heatmap_process_frame() feeds it, and that's
-	 * only called when raw_mode is set) — exposing a second, permanently
-	 * dead "MSHW0231 Touchscreen" input device alongside the real
-	 * hid-core one and risking userspace picking the wrong one. Switching
-	 * raw_mode 0->1 always goes through a fresh probe (module
-	 * reload/rebind), so gating creation on raw_mode here loses no
-	 * capability. */
-	ret = mshw0231_raw_input_register(shid);
-	if (ret)
-		goto err1_touch;
+	/* Create the heatmap-backed MT input device only when it can receive
+	 * frames: native raw mode, or the opt-in standard-transport CapImg
+	 * bridge on the exact hardware ID qualified by the field campaign.
+	 * Standard HID discovery/registration remains intact. */
+	if (!shid->raw_mode_active && std_raw_transition &&
+	    !spi_hid_std_capimg_enabled(shid))
+		dev_warn(dev,
+			 "standard-transport CapImg ignored: requires MSHW0231, std_raw_transition=1 and raw_input_beta=1\n");
+
+	if (shid->raw_mode_active || spi_hid_std_capimg_enabled(shid)) {
+		ret = mshw0231_raw_input_register(shid);
+		if (ret)
+			goto err1_touch;
+
+		if (!shid->raw_mode_active)
+			dev_info(dev, "HEATMAP: standard-transport MT bridge registered\n");
+	}
 
 	/* The descriptor's own input register stands everywhere now: e541dd0
 	 * (last working raw) never forced it — the parse fills it in, and raw

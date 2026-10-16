@@ -11,7 +11,8 @@ profile stays closed while the raw path remains reviewable and reproducible.
 | Standard safety | `raw_mode=0` | The only normal profile control. It selects standard HID and does not run the raw activation/pipeline. |
 | Standard-mode fix (issue #4) | `skip_std_getfeat` | Default Y. Confirmed on real SL4 AMD (MSHW0231) hardware: writing standard-mode feature report 6 silences an already-streaming controller; answered with `-EOPNOTSUPP` instead, every other feature report unaffected. Set to 0 to restore the pre-fix wire behavior. |
 | Diagnostic | `sl4a_debug_level`, controller `debug_trace` | Logging only. Both default to zero. |
-| Experimental activation | `raw_input_beta`, `skip_getfeat`, `getfeat_delay_ms`, `setfeat_speed_hz`, `wire_double_opcode`, `setfeat_no_double`, `read_frame_variant`, `skip_vendor_stop`, `raw_fallback_on_reset`, `raw_pre_desc_reg0`, `raw_b1f8109_preset`, `acpi_probe_power_cycle`, `sync_timeout_ms`, `stream_watchdog_ms`, `stream_watchdog_max_retries`, `get_noread`, `raw_handshake_first_ms`, `raw_no_enable`, `raw_watchdog_teardown`, `std_raw_transition` | Can change feature traffic, power sequencing, recovery, or raw input publication. Never set by the standard profile, except `wire_double_opcode=1`, which both installed profiles carry (doubled DESCREQ). |
+| Experimental activation | `raw_input_beta`, `skip_getfeat`, `getfeat_delay_ms`, `setfeat_speed_hz`, `wire_double_opcode`, `setfeat_no_double`, `read_frame_variant`, `skip_vendor_stop`, `raw_fallback_on_reset`, `raw_pre_desc_reg0`, `raw_b1f8109_preset`, `acpi_probe_power_cycle`, `sync_timeout_ms`, `stream_watchdog_ms`, `stream_watchdog_max_retries`, `get_noread`, `raw_handshake_first_ms`, `raw_no_enable`, `raw_watchdog_teardown` | Can change feature traffic, power sequencing, recovery, or raw input publication. Never set by the standard profile, except `wire_double_opcode=1`, which both installed profiles carry (doubled DESCREQ). |
+| Experimental standard-transport CapImg | `std_raw_transition=1` + `raw_input_beta=1` | Opt-in/default-off. Enabled only when the probed ACPI ID is exactly `MSHW0231`. Keeps standard HID discovery/registration, then uses write-only GET_FEATURE(6) -> ~5 ms -> SET_FEATURE(5)=1 and feeds 0x0c CapImg frames into the existing kernel tracker. Requests on `MSHW0230`, `MSHW0162`, DT/unknown matches, or without `raw_input_beta=1` are ignored with a warning. Hardware evidence is from one MSHW0231 SL4 AMD unit; no broader compatibility claim is made. |
 | Experimental standard-mode recovery (issue #4) | `std_liveness_ms`, `std_liveness_recover`, `wait_reset_kick_ms` | Off by default, never set by the installer. `std_liveness_ms` only logs: it counts controller activity (IRQs) in the window after `DONE`, so a healthy idle device reports silence exactly like a dead one. `std_liveness_recover` additionally runs the existing ACPI recovery when no activity arrives — once per silent episode (observed activity and resume restore the allowance, so a healthy idle device cannot be power-cycled repeatedly). `wait_reset_kick_ms` only kicks discovery (a `DESCREQ` write, no power sequencing) when the controller has produced no IRQ edge since the timer was armed: at most one successful kick per entry into `WAIT_RESET`, with up to three write attempts and the attempts stopping at the first write that goes out. The clock starts only once the IRQ is armed — after the probe's settle window — so an interval shorter than that window cannot kick a device that was never given the chance to answer. After the kick the descriptor poller keeps reading every 100 ms, so a dead controller is polled rather than left silent. None of these becomes a default before it is field-tested. |
 | Experimental Windows-order activation (SL4 AMD) | `win_handshake`, `win_get6`, `win_host_addr` | Off by default (`win_handshake=0`); `win_get6` and `win_host_addr` only act with `win_handshake=1`. With it, raw mode enables the heatmap in the Windows order after every report descriptor: SET_FEATURE 0x56 = `win_host_addr` (default `FF:FF:FF:FF:FF:FF`, the "no address" value), then GET_FEATURE 6 and, on its reply, SET_FEATURE 5 = 1 — or SET 5 = 1 directly with `win_get6=0`. No post-DONE handshake watchdog and no IRQ-less poller; pair with `stream_watchdog_ms=0`. Field result on a Surface Laptop 4 AMD 13.5" (MSHW0231): `win_get6=0` streams heatmaps and multitouch works; with GET 6 the panel resets itself ~110 ms after SET 5 (issue #85). |
 | Experimental raw pipeline | `blob_min_weight`, `ema_alpha`, `dfa_data_offset`, `ghost_dist`, `grid_cols`, `grid_rows`, `blob_debounce`, `blob_lift_frames`, `hold_frames`, `pre_assoc_ratio`, `blob_max_distance` | Applies only to decoded raw frames. Geometry and tracker behavior are not qualified. |
@@ -115,9 +116,21 @@ The probe logs a `device config:` line in dmesg with the active geometry.
 
 | Device | ACPI ID | Grid | CapImg raster samples | Baseline frames | Baseline recovery EMA alpha |
 | --- | --- | --- | --- | --- | --- |
+| Surface Laptop 4 AMD | `MSHW0230` | 72×48 | 3456 | 30 | 7 |
 | Surface Laptop 4 AMD | `MSHW0231` | 72×48 | 3456 | 30 | 7 |
 | Surface Laptop 3 AMD | `MSHW0162` | 78×52 | 4056 | 33 | 7 |
 
 The baseline recovery alpha (7 on both devices) is the Windows-documented
 12.5% recovery rate: `new = (7·base + raw)/8`. The `ema_alpha` parameter is
 position smoothing only and is unrelated (default 2).
+
+
+### Standard-transport CapImg qualification scope
+
+The standard-transport CapImg bridge is intentionally narrower than the
+general SL4 device match. It is enabled only for the exact `MSHW0231` ACPI ID
+when both `std_raw_transition=1` and `raw_input_beta=1` are set. `MSHW0230`
+uses the same current geometry table but is **not** automatically opted into
+this activation path. The qualification evidence for the bridge comes from one
+physical MSHW0231 Surface Laptop 4 AMD unit; other panels and firmware remain
+unqualified.
