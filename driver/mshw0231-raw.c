@@ -946,7 +946,7 @@ static u32 raw_scaled_ghost_dist(struct spi_hid *shid, u32 ghost_dist)
 
 static void raw_post_assoc_coalesce(struct spi_hid *shid,
 				    struct blob_entry *sorted, u8 sorted_count,
-				    u8 *assigned_slot, u32 ghost_dist)
+				    u8 *assigned_slot, u32 bmd, u32 ghost_dist)
 {
 	u8 a, b;
 	u32 gd = raw_scaled_ghost_dist(shid, ghost_dist);
@@ -959,7 +959,7 @@ static void raw_post_assoc_coalesce(struct spi_hid *shid,
 		for (b = a + 1; b < sorted_count; b++) {
 			u8 sa, sb, state_a, state_b;
 			bool established_a, established_b;
-			u8 loser;
+			u8 loser, winner, loser_slot, winner_slot;
 			s32 dx, dy;
 
 			if (assigned_slot[b] == 0xff || sorted[b].w == 0)
@@ -992,6 +992,39 @@ static void raw_post_assoc_coalesce(struct spi_hid *shid,
 				loser = a;
 			else
 				loser = b;
+
+			winner = loser == a ? b : a;
+			loser_slot = assigned_slot[loser];
+			winner_slot = assigned_slot[winner];
+
+			/*
+			 * Preserve the history of the single surviving contact. Hungarian
+			 * can legitimately assign a weaker duplicate to an existing
+			 * state-1 provisional slot because it is closest, while assigning
+			 * the stronger candidate to an empty slot. If coalescing then
+			 * keeps the stronger candidate but simply drops the provisional
+			 * assignment, debounce restarts forever as the pair moves.
+			 *
+			 * Re-home the survivor onto that provisional slot only when the
+			 * survivor itself satisfies the same per-axis Hungarian range.
+			 * This does not preserve two close new contacts; it preserves the
+			 * continuity of the one contact that coalescing already chose.
+			 */
+			if (loser_slot != 0xff && winner_slot != 0xff &&
+			    shid->blob_slot_state[loser_slot] == 1 &&
+			    shid->blob_slot_state[winner_slot] == 0) {
+				s32 pdx = (s32)sorted[winner].gx -
+					  (s32)shid->blob_slot_gx[loser_slot];
+				s32 pdy = (s32)sorted[winner].gy -
+					  (s32)shid->blob_slot_gy[loser_slot];
+
+				if (pdx < 0)
+					pdx = -pdx;
+				if (pdy < 0)
+					pdy = -pdy;
+				if ((u32)pdx <= bmd && (u32)pdy <= bmd)
+					assigned_slot[winner] = loser_slot;
+			}
 
 			assigned_slot[loser] = 0xff;
 			sorted[loser].w = 0;
@@ -1876,7 +1909,7 @@ static void mshw0231_raw_process_samples(struct spi_hid *shid, const u8 *data,
 
 			/* ── Stage 7: post-association duplicate/coalescing policy ── */
 			raw_post_assoc_coalesce(shid, sorted, sorted_count,
-						assigned_slot,
+						assigned_slot, bmd,
 						(u32)READ_ONCE(ghost_dist));
 
 			/* ── Stage 8: slot state machine ── */
