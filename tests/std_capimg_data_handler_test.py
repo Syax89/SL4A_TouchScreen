@@ -289,6 +289,11 @@ with tempfile.TemporaryDirectory(prefix="sl4a-data-handler-") as td:
     src.write_text(exact_prelude + "\n" + handler + "\n" + main, encoding="utf-8")
     subprocess.run(
         ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+          # Extracted kernel code meets simplified host mocks; retain Werror
+          # for everything except diagnostics caused by stubbed loggers and
+          # kernel u16/unsigned comparisons.
+          "-Wno-unused-parameter", "-Wno-unused-variable",
+          "-Wno-sign-compare",
          "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
          str(src), "-o", str(exe)],
         check=True,
