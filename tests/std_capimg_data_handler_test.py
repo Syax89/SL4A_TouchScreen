@@ -213,6 +213,21 @@ int main(void)
     CHECK(schedule_calls == 0,
           "pre-HID standard bridge scheduled standard-liveness/runtime watchdog work");
 
+    /* Default standard mode remains upstream-equivalent: hid_creating alone
+     * does not acquire early DATA ownership when no CapImg tracker exists. */
+    init(&s, &spi, buf);
+    s.touch_input = NULL;
+    s.hid = (void *)0x1;
+    s.hid_creating = true;
+    std_bridge_enabled = 0;
+    reset_counts();
+    seq_handle_data(&s, 1, 4304);
+    CHECK(read_calls == 0 && consume_calls == 0 && hid_publish_calls == 0,
+          "default standard HID creation unexpectedly drained/published DATA");
+    CHECK(schedule_calls == 0,
+          "default standard HID creation scheduled runtime watchdog work");
+    std_bridge_enabled = 1;
+
     /* Once HID creation completes, normal HID publication still occurs. */
     init(&s, &spi, buf);
     s.hid = (void *)0x1;
