@@ -74,14 +74,17 @@ stalls discovery the same way a wrong approval does.
 
 ### Feature reads
 
-`skip_getfeat` (default `1`, and what the installer's raw profile sets) skips the
-standard-mode feature-read handshake: with it set, nothing parks in `WAIT_FEATURE`
-waiting for a GET_FEATURE reply before the heatmap is enabled. It does **not**
-suppress the raw-mode Report ID 6 configuration read, which is part of the
-activation sequence (Windows reads it between the report descriptor and the
-SET_FEATURE that enables the heatmap) and runs either way. That reply is kept in
-`struct spi_hid_getfeat6` and logged as hex plus IEEE-754 values at debug level 2;
-nothing acts on the values yet and a failed read never delays the handshake.
+`skip_getfeat` (default `1`, and what the installer's raw profile sets) only
+matters outside `win_handshake=1`: with it set, raw activation never parks in
+`WAIT_FEATURE` waiting for a GET_FEATURE reply. Whether a GET ID6 goes out then
+depends on `getfeat_delay_ms`. The default immediate path (`getfeat_delay_ms=0`)
+sends inline vendor-init plus SET ID5=1 and **no** GET6 at all. The delayed path
+(`getfeat_delay_ms>0`) runs `spi_hid_getfeat6_read()`, which writes GET6 and
+reads the reply back unless `get_noread=1`; that reply is kept in
+`struct spi_hid_getfeat6` and logged as hex plus IEEE-754 values at debug level 2,
+and nothing acts on the values. With `skip_getfeat=0` both paths keep the GET6
+followed by `WAIT_FEATURE`. `win_handshake=1` has its own flow (0x56 first, then
+GET6) and ignores the parameter.
 
 `getfeat_delay_ms` defaults to `0` (immediate). Windows traces measure a
 ~3.6 s device settle before it answers feature queries (the original
