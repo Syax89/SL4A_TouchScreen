@@ -15,7 +15,12 @@
 #   sudo ./tools/sl4a-touch.sh activate
 #   ./tools/sl4a-touch.sh status
 #   sudo ./tools/sl4a-touch.sh logs [-o FILE]
+#   sudo ./tools/sl4a-touch.sh test [qualifier options]
 #   ./tools/sl4a-touch.sh rebuild            (developer use only, see --help)
+#
+# test delegates to tools/qualify-touch.py --guided by its absolute path
+# (never relative to $PWD), passes the arguments it was given through
+# unchanged, and exits with the qualifier's own status.
 #
 # install builds, installs via DKMS, enables a systemd unit that
 # auto-activates on every future boot (after multi-user.target — i.e.
@@ -29,6 +34,9 @@ shopt -s nullglob
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRIVER_DIR="$REPO_DIR/driver"
+# The guided qualifier, resolved once from BASH_SOURCE (absolute): 'test'
+# must work from any current directory, so the path is never built from $PWD.
+QUALIFY_TOOL="$REPO_DIR/tools/qualify-touch.py"
 PKG_NAME="sl4a-touch"
 PKG_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo "1.0.0~beta1")"
 SRC_DEST="/usr/src/${PKG_NAME}-${PKG_VERSION}"
@@ -321,6 +329,26 @@ Commands:
                     matches this checkout, the active profile, and whether
                     the driver is currently loaded and bound.
 
+  test [options]    Guided, automatic qualification of the touchscreen:
+                    one typed BRIDGE consent, then only touch the screen.
+                    Runs tools/qualify-touch.py --guided through its
+                    absolute path (the current directory does not matter)
+                    with the arguments given here passed through UNCHANGED,
+                    and exits with the qualifier's own status. Options are
+                    the qualifier's, not this script's:
+                      --phase initial|coldboot|resume
+                      --output DIR            (default: next to the driver)
+                      --gesture-timeout SECONDS
+                      --idle-gap SECONDS
+                      --knob NAME=VALUE       (repeatable)
+                    Needs root (/dev/input and modprobe) and python3. The
+                    standard->bridge reload is temporary and restored on
+                    success, failure, Ctrl-C and SIGTERM; no persistent file
+                    is written, nothing is force-unloaded. Exit codes:
+                    0 qualified, 2 preflight/root, 3 transition, 4 a gesture
+                    failed, 5 incomplete, 7 restore failed. -h shows this
+                    text without asking for root.
+
   logs [-o FILE]    Collect a diagnostic bundle (versions, dkms/modprobe
                     state, driver sysfs stats, the last captured frame as raw
                     bytes, filtered dmesg) into a single text file for bug
@@ -370,8 +398,8 @@ EOF
 # chosen command name on stdout; caller captures it. Falls back to plain
 # usage text when stdin isn't a tty (piped/scripted invocation).
 menu_pick_command() {
-	local labels=("Install" "Uninstall" "Activate" "Status" "Collect diagnostics (logs)" "Frame hunt battery (touch the panel)" "Quit")
-	local cmds=("install" "uninstall" "activate" "status" "logs" "hunt" "")
+	local labels=("Install" "Uninstall" "Activate" "Status" "Collect diagnostics (logs)" "Frame hunt battery (touch the panel)" "Qualify touchscreen (guided test)" "Quit")
+	local cmds=("install" "uninstall" "activate" "status" "logs" "hunt" "test" "")
 	local selected=0 n=${#labels[@]} key rest
 	# draw() below prints exactly this many lines every time: title +
 	# subtitle + one blank line + one line per option. Cursor-up must
@@ -2830,6 +2858,39 @@ cmd_soak() {
 	echo "Send that file: it already contains every sample with its deltas, the verdict and the summary table."
 }
 
+# ── test (guided qualification) ──────────────────────────────────────────
+# Delegation, not reimplementation: tools/qualify-touch.py --guided owns the
+# consent prompt, the option parsing, the bundle and the exit codes. This
+# wrapper only answers -h, checks what it needs, escalates once and hands the
+# arguments over unchanged with exec, so no wrapper code can swallow, reorder
+# or reinterpret the qualifier's status.
+cmd_test() {
+	local arg
+	# Help is answered HERE, before elevate: asking what a command does must
+	# never cost a sudo prompt.
+	for arg in "$@"; do
+		case "$arg" in
+			-h|--help) usage; exit 0 ;;
+		esac
+	done
+
+	# Dependencies before elevation, so a missing interpreter or a broken
+	# checkout is reported as such — not as a sudo failure or a python
+	# traceback about a file that is not there.
+	command -v python3 >/dev/null 2>&1 \
+		|| fail "the guided qualification needs python3, which is not on PATH. Install python3 (3.8 or newer) and re-run."
+	[ -f "$QUALIFY_TOOL" ] \
+		|| fail "guided runner not found at $QUALIFY_TOOL — this checkout is incomplete (use a full clone of the repository, do not copy this script on its own)."
+
+	elevate "run the guided touchscreen qualification (/dev/input and modprobe)" test "$@"
+
+	header "Guided touchscreen qualification"
+	info "runner: $QUALIFY_TOOL (absolute — the current directory does not matter)"
+	info "one typed BRIDGE consent, then only touch the screen; the driver is restored on success, failure, Ctrl-C and SIGTERM"
+	echo ""
+	exec python3 "$QUALIFY_TOOL" --guided "$@"
+}
+
 case "$CMD" in
 	install)   cmd_install "$@" ;;
 	uninstall) cmd_uninstall "$@" ;;
@@ -2838,6 +2899,7 @@ case "$CMD" in
 	logs)      cmd_logs "$@" ;;
 	hunt)      cmd_hunt "$@" ;;
 	soak)      cmd_soak "$@" ;;
+	test)      cmd_test "$@" ;;
 	rebuild)   cmd_rebuild "$@" ;;
 	*) echo "Unknown command: $CMD"; echo ""; usage; exit 1 ;;
 esac
