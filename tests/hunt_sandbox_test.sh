@@ -103,9 +103,11 @@ chmod +x "$SB/bin/dkms"
 # debug_trace to sl4a_spi_amd, or the peek line — the one that answers the
 # RX-region question — can never appear in the artifact. A load of the driver
 # also emits a realistic level-3 burst: the FIRST control write the sweep's
-# evidence line looks for, then a hundred-plus per-frame lines. The write is
-# deliberately far from the tail — a window that greps only the last 60 lines
-# must lose it (that was the P3 wave's finding).
+# evidence line looks for, then thousands of per-frame lines (~300 KiB, well
+# past a pipe buffer). The write is deliberately far from the tail — a window
+# that greps only the last 60 lines must lose it (that was the P3 wave's
+# finding) — and far enough ahead that a reader which exits at the match
+# SIGPIPEs the writer mid-slice.
 cat > "$SB/bin/modprobe" <<'EOS'
 #!/bin/bash
 echo "$*" >> "__SB__/modprobe.log"
@@ -123,11 +125,7 @@ fi
 if [ "${1:-}" != "-r" ] && [[ " $* " == *" sl4a_spi_hid "* ]] && [ ! -f "__SB__/quiet" ]; then
 	{
 		printf '[999.0] sl4a_spi_hid: SEQ: write op=0x02 reg=1 raw=[02 00 00 01 42 00 00 03 00 00]\n'
-		i=0
-		while [ "$i" -lt 120 ]; do
-			printf '[999.1] sl4a_spi_hid: read begin op=0x0b tx=8 rx=16\n'
-			i=$((i + 1))
-		done
+		awk 'BEGIN { for (i = 0; i < 6000; i++) print "[999.1] sl4a_spi_hid: read begin op=0x0b tx=8 rx=16" }'
 	} >> "__SB__/dmesg.txt"
 fi
 exit 0
