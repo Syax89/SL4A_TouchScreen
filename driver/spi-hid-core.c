@@ -2625,8 +2625,8 @@ static void spi_hid_getfeat6_read(struct spi_hid *shid)
 
 module_param(skip_getfeat, bool, 0444);
 MODULE_PARM_DESC(skip_getfeat,
-	"Skip the standard-mode feature-read handshake (no WAIT_FEATURE state). "
-	"The raw-mode Report ID 6 configuration read still runs");
+	"Skip WAIT_FEATURE in the non-Windows raw handshake; the default "
+	"immediate path omits GET6. Delayed raw activation may still read GET6.");
 
 /* Opt-in standard-transport CapImg bridge.  Keep normal HID discovery and
  * registration, then use the hardware-qualified write-only GET6 -> ~5 ms ->
