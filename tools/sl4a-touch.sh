@@ -2400,12 +2400,16 @@ cmd_hunt() {
 			# logs hundreds of frame lines after the first control write,
 			# and the tail-only grep lost this line exactly when the load
 			# worked (P3 wave). Absence is stated, not silent.
-			wr="$(printf '%s\n' "$all" | grep -m1 'write op=0x02')" || wr=""
+			# The reader must consume the WHOLE slice: `grep -m1` exits at the
+			# match, so printf dies of SIGPIPE under pipefail and the `|| wr=""`
+			# guard then clears a match grep had already found.
+			wr="$(printf '%s\n' "$all" | grep 'write op=0x02' | sed -n 1p)" || wr=""
 			if [ -z "$wr" ] && [ -n "$fb" ]; then
 				# The slice was empty (ring wrapped): the write may sit in the
 				# fallback lines shown above. Report it from there — labelled,
-				# because those lines can span loads (P14 wave, F7).
-				wr_fb="$(printf '%s\n' "$fb" | grep -m1 'write op=0x02')" || wr_fb=""
+				# because those lines can span loads (P14 wave, F7). Same
+				# full-slice reader: no early exit.
+				wr_fb="$(printf '%s\n' "$fb" | grep 'write op=0x02' | sed -n 1p)" || wr_fb=""
 			fi
 			if [ -n "$wr" ]; then
 				echo "first write on the wire: $wr"
