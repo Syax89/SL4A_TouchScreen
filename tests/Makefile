@@ -261,6 +261,7 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 	$(PYTHON) std_capimg_data_drain_source_test.py
 	$(PYTHON) std_capimg_data_handler_test.py
 	$(SHELL) hunt_sandbox_test.sh
+	$(PYTHON) touch_qualification_test.py
 
 # Checks that need something this repository does not ship: the Windows touch
 # corpus, the offline analyzers, the capture harnesses. They skip (and therefore

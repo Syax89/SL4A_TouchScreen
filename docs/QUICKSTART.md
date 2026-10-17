@@ -94,6 +94,31 @@ sudo reboot
 The system boots with the in-tree `spi-amd` driver and no SL4A module loaded.
 Force-reboot if the unload fails.
 
+## Qualifying your machine (Italian guide)
+
+To produce one coherent, repeatable hardware-qualification bundle instead of
+ad-hoc captures, use the guided runner `tools/qualify-touch.py`. It is
+read-only, needs no new install step, and writes its artifacts outside the
+repository:
+
+```bash
+./tools/qualify-touch.py --phase initial \
+  --output ~/sl4a-qual/$(date -u +%Y%m%dT%H%M%SZ)-initial
+```
+
+It re-checks the recorded build evidence against this exact clean checkout
+before it lets a run be called qualified: the installer's stamp, module
+`vermagic` and `srcversion`. Those are consistency checks — they show the
+stamp, the module on disk and the loaded module agree, not which source the
+running code was compiled from. Then it snapshots config/service/kernel state
+and drives one bounded, guided gesture capture through the existing evidence
+helpers. Run it as the owner of the checkout: under `sudo` git refuses the
+user-owned tree ("dubious ownership") and the `repo-clean` gate fails on
+purpose. The step-by-step guide, including the opt-in `--bridge` variant, the
+`initial|coldboot|resume` declarations, the exact-clone `safe.directory`
+exception, the rollback order and the exit-code table, is in Italian:
+[QUALIFICAZIONE-TOUCH.md](QUALIFICAZIONE-TOUCH.md).
+
 ## What to Expect
 
 - **Single-touch only** in standard HID mode (the default). Multi-touch
