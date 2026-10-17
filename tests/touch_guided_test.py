@@ -856,6 +856,236 @@ class GuidedSandbox(unittest.TestCase):
         self.assertEqual(log, [], f"the driver was reloaded without consent: {log}")
         self.assertEqual(self.live_param("raw_mode"), "N")
 
+    def test_failed_preflight_prints_the_gate_why_and_the_reports(self):
+        # A stale installer stamp fails build-identity. The closing report has
+        # to say WHICH gate failed and why, and where the two reports are — a
+        # bare "failed gates: build-identity" sends the operator to the bundle
+        # with no idea what to look for. Nothing is reloaded on this path.
+        write(self.world["host"] / "var/lib/sl4a-touch/installed-head", "0" * 40 + "\n")
+        code, output, problem = self.run_tool(stdin="")
+        self.assertEqual(code, 2, output)
+        self.assertEqual(self.status()["status"], "preflight-failed")
+        self.assertIn("preflight fail: build-identity:", output)
+        self.assertIn("installed_head_stamp", output, "the failing gate's detail is missing")
+        self.assertIn("detail: failed gates: build-identity", output)
+        for label, name in (("preflight report", "preflight.txt"), ("status report", "status.json")):
+            lines = [line for line in output.splitlines() if line.startswith(label + ":")]
+            self.assertEqual(len(lines), 1, f"no single '{label}' line in:\n{output}")
+            self.assertTrue(lines[0].endswith(name), lines[0])
+            self.assertTrue(Path(lines[0].split(": ", 1)[1]).is_file(),
+                            f"'{label}' points at a file that is not there: {lines[0]}")
+        log = self.modprobe_log() if (self.world["host"] / "modprobe.log").exists() else []
+        self.assertEqual(log, [], f"a failed preflight reloaded the driver: {log}")
+
+    def test_closing_report_of_a_gesture_failure_names_its_detail(self):
+        code, output, problem = self.run_tool(mode="bad_bridge")
+        self.assertEqual(problem, "", problem)
+        self.assertEqual(code, 4, output)
+        self.assertIn("gesture-fail (exit 4)", output)
+        lines = [line for line in output.splitlines() if line.startswith("status report:")]
+        self.assertEqual(len(lines), 1, output)
+        self.assertTrue(lines[0].endswith("status.json"), lines[0])
+        self.assertNotIn("preflight fail:", output, "a passing preflight was reported as failed")
+
+
+# ── half 3: tools/sl4a-touch.sh 'test' delegates, it does not reimplement ───
+#
+# The wrapper has exactly four jobs: answer -h before any sudo prompt, check
+# that the runner and python3 are there, escalate once, then hand `--guided`
+# plus the caller's arguments to tools/qualify-touch.py BY ABSOLUTE PATH and let
+# its exit status stand. Each contract below is asserted against a throwaway
+# copy of the real script, with a stub python3 that records what it was given
+# and a stub sudo that re-executes without privileges, run from a working
+# directory that is not the repository.
+
+# EUID is read-only inside bash, so no stub can make `exec sudo "$0" ...` come
+# back as root: a stub that merely re-executes re-enters elevate() and loops
+# forever, prompt-free and silent. The harness therefore simulates root WITHOUT
+# touching the real script and WITHOUT real sudo: the throwaway copy of the
+# wrapper gets one extra clause in elevate()'s guard, the stub sudo exports the
+# marker for exactly one re-exec, and that child treats itself as already root.
+# Nothing else in the copy differs from the repository's script.
+SIM_ROOT_VAR = "SL4A_TEST_SIM_ROOT"
+ELEVATE_GUARD = ('\tif [ "$EUID" -ne 0 ]; then\n'
+                 '\t\tinfo "Root is required to $reason. Re-running with sudo..."')
+ELEVATE_GUARD_SIM = ('\tif [ "$EUID" -ne 0 ] && [ -z "${%s:-}" ]; then\n'
+                     '\t\tinfo "Root is required to $reason. Re-running with sudo..."'
+                     % SIM_ROOT_VAR)
+
+SUDO_STUB = '''#!/bin/bash
+# Stub sudo: records the elevation, then simulates the privileged child by
+# re-executing with the marker set. A SECOND elevation is a bug in the wrapper
+# (or in the harness), so it fails loudly instead of recursing.
+if [ -n "${%s:-}" ]; then
+	printf 'RE-ELEVATED: %%s\\n' "$*" >> "$STUB_SUDO_LOG"
+	echo 'stub sudo: elevation asked for again while already simulated root' >&2
+	exit 1
+fi
+printf '%%s\\n' "$*" >> "$STUB_SUDO_LOG"
+%s=1 exec "$@"
+''' % (SIM_ROOT_VAR, SIM_ROOT_VAR)
+
+PYTHON_STUB = '''#!/bin/bash
+{
+	printf 'cwd=%s\\n' "$PWD"
+	for arg in "$@"; do printf 'arg=%s\\n' "$arg"; done
+} > "$STUB_ARGV"
+exit "${STUB_EXIT:-0}"
+'''
+
+
+class WrapperDelegationTest(unittest.TestCase):
+    """`sl4a-touch.sh test` is a pass-through; these are the contracts it owes."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="sl4a-wrapper-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = self.tmp / "repo"
+        (self.repo / "tools").mkdir(parents=True)
+        self.script = self.repo / "tools/sl4a-touch.sh"
+        shutil.copy2(ROOT / "tools" / "sl4a-touch.sh", self.script)
+        self.simulate_root()
+        self.runner = self.repo / "tools/qualify-touch.py"
+        self.runner.write_text("# stand-in for the guided runner (a stub python3 runs instead)\n")
+        (self.repo / "VERSION").write_text("1.7.1\n")
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.argv_file = self.tmp / "argv.txt"
+        self.sudo_log = self.tmp / "sudo.log"
+        self.write_stub(self.bin, "python3", PYTHON_STUB)
+        self.write_stub(self.bin, "sudo", SUDO_STUB)
+        # Absolute bash: the bare-PATH test below hands the wrapper a PATH with
+        # no bash in it, and subprocess resolves the interpreter from the very
+        # PATH it is given — a bare "bash" would raise FileNotFoundError here
+        # instead of exercising the wrapper's own python3 check.
+        self.bash = shutil.which("bash")
+        self.assertIsNotNone(self.bash, "bash is required to run the wrapper")
+        self.cwd = self.tmp / "elsewhere"  # neither the repo nor a parent of it
+        self.cwd.mkdir()
+
+    def simulate_root(self):
+        """Add the isolated root seam to the COPY of the wrapper (see SUDO_STUB)."""
+        text = self.script.read_text()
+        self.assertEqual(text.count(ELEVATE_GUARD), 1,
+                         "elevate()'s guard is not where this harness expects it — fix "
+                         "the HARNESS (never the wrapper) or the root simulation stops "
+                         "working and the suite hangs on re-elevation")
+        self.script.write_text(text.replace(ELEVATE_GUARD, ELEVATE_GUARD_SIM))
+        self.assertIn(ELEVATE_GUARD_SIM, self.script.read_text())
+
+    def write_stub(self, where, name, body):
+        path = where / name
+        path.write_text(body)
+        path.chmod(0o755)
+
+    def run_wrapper(self, *args, exit_code=0, path=None):
+        env = dict(os.environ, PATH=path or f"{self.bin}:{os.environ['PATH']}",
+                   STUB_ARGV=str(self.argv_file), STUB_SUDO_LOG=str(self.sudo_log),
+                   STUB_EXIT=str(exit_code))
+        env.pop(SIM_ROOT_VAR, None)  # only the stub sudo may set the marker
+        return subprocess.run([self.bash, str(self.script), *args], cwd=self.cwd,
+                              capture_output=True, text=True, env=env, timeout=120)
+
+    def delegated(self):
+        """(cwd, argv) as recorded by the stub python3."""
+        self.assertTrue(self.argv_file.is_file(), "the runner was never executed")
+        cwd, argv = None, []
+        for line in self.argv_file.read_text().splitlines():
+            key, _, value = line.partition("=")
+            if key == "cwd":
+                cwd = value
+            elif key == "arg":
+                argv.append(value)
+        return cwd, argv
+
+    def sudo_called(self):
+        return self.sudo_log.is_file() and bool(self.sudo_log.read_text().strip())
+
+    def elevations(self):
+        """Every elevation the wrapper asked for (the stub's log lines)."""
+        if not self.sudo_log.is_file():
+            return []
+        return self.sudo_log.read_text().splitlines()
+
+    def test_delegates_guided_by_absolute_path_with_the_arguments_unchanged(self):
+        bundle = self.tmp / "bundle dir" / "with space"
+        done = self.run_wrapper("test", "--output", str(bundle), "--knob", "tap_max_ms=500",
+                                "--phase", "coldboot", exit_code=0)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        cwd, argv = self.delegated()
+        self.assertEqual(argv, [str(self.runner), "--guided", "--output", str(bundle),
+                                "--knob", "tap_max_ms=500", "--phase", "coldboot"],
+                         "the wrapper rewrote, reordered or dropped an argument")
+        self.assertTrue(os.path.isabs(argv[0]), f"the runner path is not absolute: {argv[0]!r}")
+        self.assertNotIn(str(self.cwd), argv[0],
+                         "the runner path was built from the current directory")
+        self.assertEqual(Path(cwd).resolve(), self.cwd.resolve(),
+                         "the delegated process did not inherit the caller's cwd")
+        if os.geteuid() != 0:  # root needs no elevation, so there is nothing to check
+            self.assertTrue(self.sudo_called(), "the wrapper never escalated")
+            self.assertEqual(len(self.elevations()), 1,
+                             f"elevation was asked for more than once: {self.elevations()}")
+            self.assertIn(str(self.script), self.sudo_log.read_text(),
+                          "sudo was handed something other than this script")
+
+    def test_guided_is_the_only_flag_the_wrapper_adds(self):
+        done = self.run_wrapper("test", exit_code=0)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.delegated()[1], [str(self.runner), "--guided"],
+                         "a bare 'test' must forward nothing but --guided")
+
+    def test_exit_status_is_the_qualifier_status(self):
+        for code in (0, 4):  # 0 qualified, 4 a gesture failed: never swallowed
+            self.argv_file.unlink(missing_ok=True)
+            done = self.run_wrapper("test", "--output", str(self.tmp / "b"), exit_code=code)
+            self.assertEqual(done.returncode, code,
+                             f"exit {code} was not passed through:\n{done.stdout}{done.stderr}")
+            self.assertTrue(self.argv_file.is_file(), f"the runner did not run for exit {code}")
+
+    def test_missing_runner_fails_before_elevating_or_running_anything(self):
+        self.runner.unlink()
+        done = self.run_wrapper("test", exit_code=0)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn(str(self.runner), done.stderr,
+                      "the error does not name the runner it could not find")
+        self.assertIn("not found", done.stderr)
+        self.assertFalse(self.argv_file.exists(), "python3 ran without a runner")
+        self.assertFalse(self.sudo_called(), "a missing runner still asked for root")
+
+    def test_missing_python3_is_reported_without_escalating(self):
+        # A PATH with the externals the wrapper's own preamble needs and no
+        # python3 at all: the report must be about the interpreter, not a sudo
+        # prompt and not a traceback.
+        bare = self.tmp / "bare"
+        bare.mkdir()
+        for name in ("dirname", "cat"):
+            target = shutil.which(name)
+            self.assertIsNotNone(target, f"{name} is missing on this system")
+            (bare / name).symlink_to(target)
+        shutil.copy2(self.bin / "sudo", bare / "sudo")
+        done = self.run_wrapper("test", path=str(bare))
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("python3", done.stderr)
+        self.assertFalse(self.argv_file.exists())
+        self.assertFalse(self.sudo_called(), "a missing interpreter still asked for root")
+
+    def test_help_is_printed_before_any_elevation(self):
+        for flag in ("-h", "--help"):
+            done = self.run_wrapper("test", flag, exit_code=0)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertIn("Usage: tools/sl4a-touch.sh <command>", done.stdout)
+            self.assertIn("test [options]", done.stdout)
+            self.assertIn("qualify-touch.py --guided", done.stdout)
+        self.assertFalse(self.sudo_called(), "asking for help asked for root")
+        self.assertFalse(self.argv_file.exists(), "asking for help ran the qualifier")
+
+    def test_menu_offers_the_guided_test_without_duplicating_it(self):
+        text = self.script.read_text()
+        self.assertIn('"Qualify touchscreen (guided test)"', text)
+        self.assertIn('local cmds=("install" "uninstall" "activate" "status" "logs" "hunt" "test" "")',
+                      text, "the menu entry has no command behind it")
+        self.assertIn("test)      cmd_test \"$@\" ;;", text, "no dispatch for the test command")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

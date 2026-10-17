@@ -1128,6 +1128,7 @@ def guided(args):
                        "no install, no MOK change, no reboot, no suspend, no force unload",
                        "the persistent modprobe.d config is never written"]}
     log, results = [], []
+    gates = []  # preflight results, so the closing report can name the failures
 
     def _interrupt(signum, _frame):
         if state.get("restoring"):
@@ -1257,7 +1258,21 @@ def guided(args):
         state["ended_utc"] = utc()
         (out / "status.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
         write_checksums(out)
+    # The closing report is the operator's whole story on one screen: what the
+    # run decided, WHY (state detail), which preflight gates failed instead of
+    # a bare "failed gates: a, b", and where the two machine-readable reports
+    # are. A report path is printed only when that file was actually written,
+    # so a run that stopped before preflight does not point at a missing file.
     print(f"{state['status']} (exit {state['exit_code']}) -> {out}")
+    if state.get("detail"):
+        print(f"detail: {state['detail']}")
+    for gate in gates:
+        if gate["result"] != "pass":
+            print(f"preflight {gate['result']}: {gate['name']}: {gate['detail']}")
+    for label, path in (("preflight report", out / "preflight.txt"),
+                        ("status report", out / "status.json")):
+        if path.is_file():
+            print(f"{label}: {path}")
     return state["exit_code"]
 
 
