@@ -457,6 +457,20 @@ resolve_dkms_mok_paths() {
 			mok_signing_key="/var/lib/shim-signed/mok/MOK.priv"
 			mok_certificate="/var/lib/shim-signed/mok/MOK.der"
 			;;
+		zorin)
+			# Zorin is deliberately NOT given an implicit default here.
+			# I can't verify every packaged/version default, and Zorin
+			# packages can disagree with this allowlist: Noble's DKMS
+			# (3.0.11-1ubuntu13) resolves its distro through
+			# ID_LIKE='ubuntu debian' and therefore signs with the
+			# shim-signed (MOK.priv/MOK.der) pair, while the fallthrough
+			# below would have this installer validate/enroll
+			# /var/lib/dkms — a silent pair-A/pair-B split. Start empty and
+			# require the DKMS configuration itself (framework.conf or a
+			# framework.conf.d drop-in, sourced below) to name both paths.
+			mok_signing_key=""
+			mok_certificate=""
+			;;
 		*)
 			mok_signing_key="/var/lib/dkms/mok.key"
 			mok_certificate="/var/lib/dkms/mok.pub"
@@ -474,6 +488,14 @@ resolve_dkms_mok_paths() {
 		# shellcheck disable=SC1090
 		. "$cfg"
 	done
+
+	if [ "$ID" = zorin ] &&
+	   { [ -z "$mok_signing_key" ] || [ -z "$mok_certificate" ]; }; then
+		# Fail closed: refuse rather than guess a Zorin default, because a
+		# guessed pair is exactly how the installer ends up validating one
+		# identity while DKMS signs with another.
+		fail "Refusing to assume DKMS MOK signing paths on Zorin: packaged Zorin DKMS may resolve its distro through ID_LIKE='ubuntu debian' and sign with the shim-signed MOK pair, which this installer cannot verify. Set BOTH mok_signing_key and mok_certificate explicitly in /etc/dkms/framework.conf (or a framework.conf.d/*.conf drop-in) so DKMS and this installer use the same signing identity, then re-run."
+	fi
 
 	[ -n "$mok_signing_key" ] && [ -n "$mok_certificate" ] ||
 		fail "Could not resolve DKMS mok_signing_key/mok_certificate paths."
