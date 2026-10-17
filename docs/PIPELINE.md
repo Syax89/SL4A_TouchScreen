@@ -90,16 +90,26 @@ Extracted from DLL `DAT_1808e0460` (file offset `0x8DF060`):
 | +0xC98 | 36.0 | Coalescing threshold (distance²) |
 | +0xECC | 0.04 | Noise floor |
 | +0x8C0 | 0.611209 | Pre-assoc ratio (disabled) |
-| +0x958 | 0.17 | Touch detect pct (not used standalone) |
+| +0x958 | 0.17 | Touch detect pct (not used by this pipeline) |
 
 ## Module Parameters
 
+Two raw-capable load profiles are supported by this code: native raw
+(`raw_mode=1 raw_input_beta=1 skip_getfeat=1`, the installer's raw profile) and
+the opt-in standard-transport CapImg bridge (`raw_mode=0 std_raw_transition=1
+raw_input_beta=1`, exact `MSHW0231` ACPI match only). The default standard
+profile (`raw_mode=0`, bridge off) stays plain HID single-touch. Neither
+installer profile writes the bridge, and no hardware qualification is claimed
+for this combined tree; see `docs/PARAMETERS.md` for the parameter contract.
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `raw_mode` | 0 | Transport selector (`raw_mode_active`). Multitouch publication is raw-only: `mshw0231_raw_input_register()` returns early unless the raw transport is active, and CapImg consumption is gated the same way. This tree has no standard-HID bridge for the heatmap MT device — that work belongs to a separate PR87 — so no row here carries a qualified production claim. |
-| `raw_input_beta` | 0 | Gates publication of the CapImg-decoded `MSHW0231 Touchscreen` MT device (`mshw0231_raw_consume_v0()`), and only on the raw transport; it changes nothing on the standard HID path. |
-| `std_raw_transition` | 0 | Any nonzero value runs the same one-shot transition after RPT: GET ID6, then SET ID5=1, then back to unnamed reads. There is no mode numbering — mode 3 (SET5-only) is not implemented — and the pair is not inherently write-only: `get_noread=1` skips the GET6 reply read-back, default `0` reads it. |
-| `skip_getfeat` | 1 | Skips the standard-mode feature-read handshake, so nothing parks in `WAIT_FEATURE`. It does not suppress the Report ID 6 configuration read, which runs on either setting. |
+| `raw_mode` | 0 | Selects the native raw transport (`raw_mode_active`). With 1, probe registers the `MSHW0231 Touchscreen` MT device and runs the raw activation; frames reach input only with `raw_input_beta=1`. Registration is not raw-only: this integrated tree also carries the opt-in standard-transport bridge below (standalone PR88 had no bridge). |
+| `raw_input_beta` | 0 | Gates publication of CapImg-decoded frames to the `MSHW0231 Touchscreen` MT device (`mshw0231_raw_consume_v0()` on the IRQ, poller and thread paths), and is required for the standard-transport bridge. In raw mode the MT device is registered either way; with 0 no heatmap frame is published. |
+| `std_raw_transition` | 0 | Opt-in standard-transport CapImg bridge. Only the value 1 enables it, and only with `raw_input_beta=1` on an exact `MSHW0231` ACPI match; 0 disables it, and in standard mode any other value is refused with a probe warning. It keeps standard HID discovery/registration, then after RPT_DESC runs one one-shot activation: write-only GET ID6, ~5 ms, SET ID5=1, then DONE. No mode numbering — mode 3 (SET5-only) is not implemented. |
+| `skip_getfeat` | 1 | Skips the standard-mode feature-read handshake in raw activation, so nothing parks in `WAIT_FEATURE`; the Report ID 6 request is still sent on either setting (with 1 the reply is read back inline unless `get_noread=1`; with 0 the handshake waits for it). It does not affect the bridge, which sends its own write-only GET6. |
+| `getfeat_delay_ms` | 0 | Raw-mode delay between RPT_DESC and GET_FEATURE; 0 = immediate (code default). Does not affect the bridge. |
+| `get_noread` | 0 | Raw GET ID6 write-only: 1 skips the reply read-back, 0 reads it. Does not affect the bridge. |
 | `wire_double_opcode` | 0 | 0 = Windows-identical frames, 1 = legacy doubled opcode (see `docs/PARAMETERS.md`) |
 | `ema_alpha` | 2 | Position-smoothing EMA weight (baseline recovery uses its own fixed alpha 7) |
 | `blob_max_distance` | 3 | Hungarian base radius (cells) |
