@@ -26,12 +26,28 @@ The installer handles everything automatically — if Secure Boot is enabled,
 it generates the DKMS signing key and walks you through enrolling it. You just
 need a temporary password (used once at the next boot).
 
+When you enroll by hand, use the certificate the installer actually resolved —
+the path it prints as `DKMS MOK certificate path:`. That is **not** always
+`/var/lib/dkms/mok.pub`: Ubuntu-family DKMS signs with the shim-signed
+certificate, and a `mok_certificate` set in `/etc/dkms/framework.conf` (or in a
+`framework.conf.d/*.conf` drop-in) moves it again.
+
 If you skipped the enrollment prompt during installation:
 ```bash
-sudo dkms generate_mok
-sudo mokutil --import /var/lib/dkms/mok.pub
+# Replace this with the absolute path install printed after
+# "DKMS MOK certificate path:" — do not substitute a guessed path.
+MOK_CERT=/absolute/path/printed/by/installer
+sudo mokutil --import "$MOK_CERT"
 sudo reboot
 ```
+
+Enrolling a certificate that is not the one DKMS signs with leaves the kernel
+rejecting the modules, so never copy `/var/lib/dkms/mok.pub` out of habit.
+If `install` instead refused with `DKMS configuration sets only one of
+mok_signing_key/mok_certificate`, fix the DKMS configuration itself: set **both**
+options in `/etc/dkms/framework.conf` (or a drop-in), or remove both to keep the
+distro default pair, then re-run `install`. `--rotate-mok` does not help there —
+it only replaces the material at the resolved paths.
 
 At the blue MOK Manager screen: **Enroll MOK → Continue → Yes → enter password → Reboot**.
 After login the driver activates automatically.

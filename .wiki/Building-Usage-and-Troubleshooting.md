@@ -28,8 +28,17 @@ install.
 
 The installer chooses the compiler required by the running kernel. With
 Secure Boot enabled it generates/re-encodes the DKMS MOK signing key
-(DER-encoded, required by `mokutil`); enroll it once with
-`sudo mokutil --import /var/lib/dkms/mok.pub` and reboot.
+(DER-encoded, required by `mokutil`); enroll the certificate path it
+printed as `DKMS MOK certificate path:` once with
+`sudo mokutil --import "$MOK_CERT"` and reboot. That path is not always
+`/var/lib/dkms/mok.pub` — Ubuntu-family DKMS signs with the shim-signed
+certificate, and `/etc/dkms/framework.conf` or a `framework.conf.d/*.conf`
+drop-in can set `mok_certificate` to something else.
+
+```bash
+MOK_CERT=/absolute/path/printed/by/installer
+sudo mokutil --import "$MOK_CERT"
+```
 
 ## Uninstall
 
@@ -80,8 +89,10 @@ only supported recovery after a controller freeze or a raw-mode test.
   non-fatal and `sync_timeout_ms` (default 6000) bounds every synchronous
   request; recovery uses an ACPI `_PS3`→`_PS0` power cycle.
 - **Secure Boot rejects modules:** the installer generates a DER MOK key —
-  enroll it with `sudo mokutil --import /var/lib/dkms/mok.pub`, reboot, then
-  run `sudo ./tools/sl4a-touch.sh activate`.
+  enroll the certificate path it printed as `DKMS MOK certificate path:`
+  (`MOK_CERT=/absolute/path/printed/by/installer; sudo mokutil --import
+  "$MOK_CERT"`), reboot, then run `sudo ./tools/sl4a-touch.sh activate`.
+  Do not assume `/var/lib/dkms/mok.pub`.
 - **`raw_mode=1` does not stream or leaves touch unusable:** this is the
   expected failure shape of the beta raw path; reboot and return to the
   default `raw_mode=0`.

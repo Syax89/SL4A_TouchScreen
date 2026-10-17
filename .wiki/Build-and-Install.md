@@ -58,8 +58,16 @@ last 300 driver dmesg lines — which include the per-blob lines when
 If Secure Boot is enabled the installer generates the DKMS MOK signing
 key automatically (`dkms generate_mok`, or an openssl fallback that
 writes a **DER**-encoded certificate — `mokutil` requires DER). An
-existing PEM key is re-encoded in place. Enroll it with
-`sudo mokutil --import /var/lib/dkms/mok.pub` and reboot once.
+existing PEM key is re-encoded in place. Enroll the certificate path the
+installer resolved and printed as `DKMS MOK certificate path:` — it is
+not always `/var/lib/dkms/mok.pub` (Ubuntu-family DKMS uses the
+shim-signed `MOK.der`, and DKMS config can move it again) — then reboot
+once:
+
+```bash
+MOK_CERT=/absolute/path/printed/by/installer
+sudo mokutil --import "$MOK_CERT"
+```
 
 ## Manual Build
 
@@ -139,8 +147,14 @@ discovery and state `DONE`.
 ### Secure Boot rejects the modules
 
 The installer auto-generates and re-encodes the MOK key as DER. Enroll
-it with `sudo mokutil --import /var/lib/dkms/mok.pub`, reboot, confirm
-the enrollment, then `sudo ./tools/sl4a-touch.sh activate`.
+the certificate path it printed as `DKMS MOK certificate path:` (not a
+hard-coded `/var/lib/dkms/mok.pub`), reboot, confirm the enrollment, then
+`sudo ./tools/sl4a-touch.sh activate`.
+
+```bash
+MOK_CERT=/absolute/path/printed/by/installer
+sudo mokutil --import "$MOK_CERT"
+```
 
 ### No multi-touch, no contact
 

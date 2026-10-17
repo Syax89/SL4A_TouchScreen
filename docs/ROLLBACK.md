@@ -61,8 +61,17 @@ tells you exactly what to do, and prompts you to enroll it right away.
 
 ### Enroll the DKMS MOK key manually
 
+The certificate is wherever DKMS resolves `mok_certificate`: `/var/lib/dkms/`
+on upstream/Debian DKMS, the shim-signed `MOK.der` on Ubuntu-family DKMS, and
+whatever `/etc/dkms/framework.conf` (or a `framework.conf.d/*.conf` drop-in)
+sets. Enroll the path `install` printed — it logs both resolved paths as
+`DKMS signing key path:` and `DKMS MOK certificate path:`:
+
 ```sh
-sudo mokutil --import /var/lib/dkms/mok.pub
+# Replace with the absolute path install printed after
+# "DKMS MOK certificate path:"; do not guess /var/lib/dkms/mok.pub.
+MOK_CERT=/absolute/path/printed/by/installer
+sudo mokutil --import "$MOK_CERT"
 ```
 
 Set a temporary one-time password when prompted. Reboot; the MOK Manager
@@ -73,12 +82,22 @@ password. Boot normally after enrollment.
 
 ```sh
 mokutil --sb-state        # prints "SecureBoot enabled"
-mokutil --test-key /var/lib/dkms/mok.pub
+# Same resolved certificate path as above, not a hard-coded default.
+MOK_CERT=/absolute/path/printed/by/installer
+mokutil --test-key "$MOK_CERT"
 ```
 
-`install` generates and enrolls the signing key itself on every distro: when
-`/var/lib/dkms/mok.pub` is missing it runs `dkms generate_mok` (falling back to
-an `openssl`-generated key pair), and when the existing key is not DER-encoded
-(mokutil cannot import it) it re-encodes it. If no key is present at all,
-re-run `install` (or `sudo dkms generate_mok`) before consulting any
-distro-specific DKMS signing configuration.
+`install` generates and enrolls the signing key itself on every distro, at the
+paths it resolved from DKMS's own configuration: when both are missing it tries
+`dkms generate_mok`, and if that does not leave a complete matching pair at
+those paths it generates a DER-encoded pair with `openssl`. An existing PEM
+certificate is re-encoded in place. If no key is present at all, re-run
+`install`.
+
+If the installer refuses with `DKMS configuration sets only one of
+mok_signing_key/mok_certificate`, DKMS's own configuration is incomplete: edit
+`/etc/dkms/framework.conf` (or a drop-in) to set **both** options, or remove
+both to fall back to the distro default pair, then re-run `install`.
+`--rotate-mok` does not work around that refusal — it only replaces the key
+material at the resolved paths, and the installer cannot tell which pair DKMS
+would sign with while the configuration names half an identity.
