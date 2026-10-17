@@ -6,6 +6,8 @@ Un comando raccoglie un bundle di qualificazione **onesto e ripetibile**: prefli
 `tools/qualify-touch.py` è in sola lettura: non installa, non carica o scarica moduli,
 non riavvia, non sospende, non tocca chiavi o MOK, non fa upload e non scala privilegi.
 Se servono `/dev/input` e i log del kernel lo avvii tu: lo script non usa mai `sudo`.
+L'unica eccezione è `--guided` (§11): dopo **un** consenso digitato ricarica il modulo a
+runtime per la variante bridge, senza mai scrivere la configurazione persistente.
 
 ## 0. Prima di iniziare
 
@@ -88,6 +90,7 @@ sempre, quindi il bundle parziale resta anche se un passo fallisce.
 | `srcversion-<mod>` | srcversion caricata = srcversion su disco |
 | `params-standard` | `raw_mode=N` **e** `std_raw_transition=0` |
 | `params-bridge`, `acpi-mshw0231` | `raw_mode=N`, `std_raw_transition=1`, `raw_input_beta=Y`, nodo touch **esattamente** `MSHW0231` |
+| `bound-panel`, `bound-controller` | solo `--guided`: pannello su `sl4a_spi_hid`, controller su `sl4a_spi_amd_v2_multi`; un altro driver non viene mai scalzato |
 
 `installed-head`, `vermagic` e `srcversion` sono **controlli di coerenza**, non
 un'attestazione: dicono che stamp, modulo su disco e modulo caricato concordano, non da
@@ -109,6 +112,8 @@ sudo python3 tools/qualify-touch.py --bridge --phase initial --output "$HOME/sl4
 
 Non forzare unload se occupato o bloccato: STOP e rollback. Il runner legge i
 parametri caricati davvero; modificare il solo file non basta.
+Il percorso **automatico** equivalente è `--guided` (§11): fa lui il cambio a runtime e
+poi il ripristino, senza toccare `/etc/modprobe.d`.
 
 Accettata solo con nodo ACPI **esattamente** `MSHW0231`: il tool cerca gli ID esatti del
 driver (`MSHW0162`, `MSHW0230`, `MSHW0231`) e rifiuta sia un ripiego sia una macchina
@@ -120,12 +125,16 @@ input lo identifica l'helper di cattura, mai "il primo dispositivo touch disponi
 
 | exit | stato | significato |
 | --- | --- | --- |
-| 0 | `qualified` | gate ok, cattura ok, gesti dichiarati `pass` |
+| 0 | `qualified` | percorso a verdetto unico: gate ok, cattura ok, gesti dichiarati `pass` |
+| 0 | `guided-qualified` | `--guided`: tutte le finestre valutate `pass`, ripristino ok |
 | 2 | `preflight-failed` | identità, albero, versione, modulo o parametri non corrispondono |
 | 3 | `capture-failed` | helper di cattura fallito o fuori tempo massimo |
-| 4 | `operator-fail` | hai dichiarato `fail` |
-| 5 | `incomplete` | `not observed`, oppure EOF a un prompt |
+| 3 | `transition-failed` | `--guided`: unload/load del bridge o rebind fallito (nessun parametro forzato) |
+| 4 | `operator-fail` | hai dichiarato `fail` (percorso con un solo verdetto) |
+| 4 | `gesture-fail` | `--guided`: almeno un gesto non è passato (motivo in `machine-results.json`) |
+| 5 | `incomplete` | `not observed`, EOF a un prompt, o consenso `--guided` non dato |
 | 6 | `collection-failed` | `collect.sh` è fallito: nessuna evidenza host, nessuna cattura |
+| 7 | `restore-failed` | `--guided`: ripristino di parametri/binding non riuscito — `recovery.txt` e istruzioni a video |
 | 130 | `interrupted` | Ctrl-C/SIGTERM: gruppo di cattura terminato (TERM, pausa, poi KILL) |
 
 ## 8. Limiti da leggere
@@ -157,3 +166,81 @@ La suite crea un repo usa-e-getta (git vero), un albero host finto sotto
 trattini che nessun kernel crea), helper finti e stub in `PATH`. Copre successo standard
 e bridge, ogni gate di identità, DKMS e git anomali, raccolta fallita, i tre verdetti,
 cattura fallita, interruzione e pulizia con figlio che ignora TERM, rifiuto dei percorsi.
+
+## 11. Percorso automatico: `--guided` (un comando, un consenso digitato)
+
+```bash
+sudo python3 tools/qualify-touch.py --guided
+```
+
+Fa tutto da solo, con un solo prompt digitato e poi **solo tocchi sullo schermo**:
+
+1. preflight identico a §5, più i gate di binding (`bound-panel`, `bound-controller`);
+2. sceglie **il** nodo touch: solo un event node discendente dal pannello `MSHW0231` **e**
+   con `INPUT_PROP_DIRECT` — mai tastiera, touchpad o altri dispositivi; se i candidati
+   sono ambigui si ferma e li elenca;
+3. chiede **prima dei gesti** il consenso digitato `BRIDGE`, con comandi e backup
+   dei parametri/binding; qualunque altra risposta annulla senza reload;
+4. tre finestre standard: tap, movimento continuo, bordi/angoli normalizzati
+   su ABS min/max letti dal dispositivo; se standard fallisce non passa al bridge;
+5. passa al bridge **a runtime**, senza scrivere alcun file persistente:
+   `modprobe -r sl4a-spi-hid` + `modprobe sl4a-spi-hid raw_mode=0 std_raw_transition=1
+   raw_input_beta=1` (gli altri parametri restano quelli letti dal modulo vivo), poi
+   attende il rebind e **rilegge** i parametri caricati;
+6. sei finestre bridge: tap, movimento, bordi, hold a cinque dita con rilascio simultaneo,
+   pinch fuori/dentro, recontact con tracking ID **nuovo** (riuso slot registrato);
+7. ripristina binding e **tutti** i parametri originali sempre: successo, eccezione,
+   Ctrl-C, SIGTERM. Se il ripristino non riesce: exit 7, `recovery.txt` con i comandi e
+   messaggio a video.
+
+Ogni finestra è limitata da `--gesture-timeout` (default 12 s). Il flusso evdev viene
+letto con `select`/`os.read` e valutato ai confini `SYN_REPORT`; `SYN_DROPPED`, record
+parziale, EOF, timeout, contatti già attivi all'apertura e contatti ancora giù alla fine
+**fanno fallire** la finestra (fail closed).
+
+### Soglie numeriche (taratura per pannello)
+
+```bash
+sudo python3 tools/qualify-touch.py --guided \
+  --knob tap_max_ms=500 --knob min_span_pct=40 --knob span_out_pct=20
+```
+
+`tap_max_ms`, `tap_move_pct`, `min_span_pct`, `min_frames`, `max_gap_ms`, `edge_pct`,
+`fingers`, `release_skew_frames`, `span_out_pct`, `span_in_pct`, `recontact_ms`,
+`recontact_pct`, `hold_min_ms`. I valori usati sono scritti in `machine-results.json`.
+
+### Bundle
+
+`raw/<profilo>-<gesto>.evdev` (byte grezzi del **solo** nodo scelto), `machine-results.json`
+(metriche, soglie, provenienza del range ABS), `verdicts.txt`, `transition.txt` (comandi
+eseguiti e ripristino), `secureboot.txt` (stato Secure Boot, firmatario, certificati
+enrolled **contati**: nessuna chiave letta), `recovery.txt` solo se serve, `checksums.txt`.
+
+### Verdetto onesto (PR 87–91)
+
+`verdicts.txt` contiene voci volutamente ristrette: `standard_evdev_gestures`,
+`bridge_evdev_gestures`, `pr87_bridge_standard_transport`, `persistence_after_release`; sempre
+`NOT_TESTED` per `coldboot_<fase>`, `resume_<fase>` e `secureboot_enrollment`; sempre
+`full_pr_pass: NOT_APPLICABLE`. Un subtest di gesti sul flusso evdev **non** è
+l'accettazione di un PR, **non** è l'accettazione di un gesto da parte di desktop o
+applicazione (quella è politica sopra evdev) e non dice nulla su cold boot, resume o
+enrollment. PR87 riporta soltanto il subtest bridge; PR90 soltanto la raccolta
+`collect.sh`. PR88 (coalescing), PR89 (identità firma) e PR91 (bounds del trasporto)
+restano NOT_TESTED: i gesti non provano quei contratti. Il protocollo Type A non è
+valutato; sono supportati single-touch standard e multitouch Type B.
+
+Il ripristino è tentato e verificato, non garantito in caso di crash kernel,
+SIGKILL o perdita di alimentazione: in quei casi nessun finally può eseguire.
+La configurazione persistente non viene modificata.
+
+### Cosa resta manuale
+
+- **Cold boot e resume**: fai tu il power-on o il suspend/resume e rilancia lo stesso
+  comando con `--phase coldboot|resume` e `--output` nuovo; ogni bundle porta `boot_id` e
+  `uptime_seconds` da confrontare.
+- **Enrollment MOK e Secure Boot**: restano una procedura separata e consapevole. Il
+  percorso automatico non fa `mokutil --import`, non riavvia e non sospende: nessun
+  automatismo di reboot/resume esiste qui.
+- Se `modprobe -r` fallisce (modulo occupato) non si forza niente: exit 3 e nessun
+  parametro cambiato. Non c'è `--force` né `rmmod -f` da nessuna parte.
+- Serve `sudo` (lettura `/dev/input`, `modprobe`), ma **nessuna GUI come root**.
