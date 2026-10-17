@@ -96,10 +96,10 @@ Extracted from DLL `DAT_1808e0460` (file offset `0x8DF060`):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `raw_mode` | 0 | Legacy transport selector. Production SL4 multitouch remains on standard HID discovery/transport; the `1` setting is a separate diagnostic/research transport and is not the production multitouch path. |
-| `raw_input_beta` | 0 | **Legacy parameter name.** Enables publication of the heatmap-backed `MSHW0231 Touchscreen` MT device. In the production SL4 profile this operates on the standard HID transport. |
-| `std_raw_transition` | 0 | **Legacy parameter name.** Standard-transport CapImg transition selector. Mode 1 (write-only GET6 -> 4.5-5.5 ms -> SET5) is the Gate5-qualified MSHW0231 installer path; mode 3 is the earlier SET5-only historical experiment. |
-| `skip_getfeat` | 1 | Skip the older feature-read handshake (no `WAIT_FEATURE`). This is separate from the dedicated Gate5 write-only GET6 transition. |
+| `raw_mode` | 0 | Transport selector (`raw_mode_active`). Multitouch publication is raw-only: `mshw0231_raw_input_register()` returns early unless the raw transport is active, and CapImg consumption is gated the same way. This tree has no standard-HID bridge for the heatmap MT device — that work belongs to a separate PR87 — so no row here carries a qualified production claim. |
+| `raw_input_beta` | 0 | Gates publication of the CapImg-decoded `MSHW0231 Touchscreen` MT device (`mshw0231_raw_consume_v0()`), and only on the raw transport; it changes nothing on the standard HID path. |
+| `std_raw_transition` | 0 | Any nonzero value runs the same one-shot transition after RPT: GET ID6, then SET ID5=1, then back to unnamed reads. There is no mode numbering — mode 3 (SET5-only) is not implemented — and the pair is not inherently write-only: `get_noread=1` skips the GET6 reply read-back, default `0` reads it. |
+| `skip_getfeat` | 1 | Skips the standard-mode feature-read handshake, so nothing parks in `WAIT_FEATURE`. It does not suppress the Report ID 6 configuration read, which runs on either setting. |
 | `wire_double_opcode` | 0 | 0 = Windows-identical frames, 1 = legacy doubled opcode (see `docs/PARAMETERS.md`) |
 | `ema_alpha` | 2 | Position-smoothing EMA weight (baseline recovery uses its own fixed alpha 7) |
 | `blob_max_distance` | 3 | Hungarian base radius (cells) |
