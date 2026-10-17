@@ -33,6 +33,7 @@ required = {
     "installed signature verification": 'modinfo -F signer "$signed_module"',
     "override mismatch refusal": "differ from DKMS mok_signing_key/mok_certificate",
     "Zorin fail-closed refusal": "Refusing to assume DKMS MOK signing paths on Zorin",
+    "incomplete-pair refusal": "DKMS configuration sets only one of",
 }
 
 missing = [name for name, needle in required.items() if needle not in src]
@@ -335,6 +336,129 @@ expect_pair(
     "unchanged shim-signed default",
     "/var/lib/shim-signed/mok/MOK.priv|/var/lib/shim-signed/mok/MOK.der",
     ident="ubuntu",
+)
+
+
+# ── Partial DKMS configuration (Noble DKMS 3.0.11 framework.conf) ────────────
+# A framework.conf (or drop-in) that sets only ONE of mok_signing_key /
+# mok_certificate is not a resolved identity: DKMS keeps the configured half and
+# works out the other one itself, by rules that differ between DKMS versions and
+# packagings. The resolver used to seed the distro defaults BEFORE sourcing the
+# config, so a partial config produced a hybrid pair (one configured half plus
+# one distro-default half) that DKMS may never sign with — the installer would
+# then validate/enroll a certificate that does not match the modules. Both paths
+# must therefore start empty, and an incomplete pair must be refused instead of
+# completed by either a distro default or an SL4A_* override.
+
+PARTIAL_REFUSAL = "DKMS configuration sets only one of"
+SHIM_PAIR = "/var/lib/shim-signed/mok/MOK.priv|/var/lib/shim-signed/mok/MOK.der"
+UBUNTU_A = (
+    'mok_signing_key="/tmp/ubuntuA.key"\nmok_certificate="/tmp/ubuntuA.der"\n'
+)
+
+
+def expect_partial_refusal(case, **kwargs):
+    p = run_resolver(**kwargs)
+    if p.returncode != 97 or PARTIAL_REFUSAL not in p.stderr:
+        raise SystemExit(
+            f"partial DKMS config was not refused for {case}: "
+            f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}"
+        )
+
+
+# Ubuntu is the distro whose packaged default is the shim-signed pair, so a
+# partial config there used to yield half shim-signed + half configured.
+expect_partial_refusal(
+    "ubuntu framework.conf with only mok_signing_key",
+    ident="ubuntu",
+    framework_text='mok_signing_key="/tmp/ubuntuA.key"\n',
+)
+expect_partial_refusal(
+    "ubuntu framework.conf with only mok_certificate",
+    ident="ubuntu",
+    framework_text='mok_certificate="/tmp/ubuntuA.der"\n',
+)
+# Explicitly emptying the other half is still a one-half config, not a request
+# for the distro default pair.
+expect_partial_refusal(
+    "ubuntu framework.conf with key set and certificate explicitly emptied",
+    ident="ubuntu",
+    framework_text='mok_signing_key="/tmp/ubuntuA.key"\nmok_certificate=""\n',
+)
+expect_partial_refusal(
+    "ubuntu framework.conf with certificate set and key explicitly emptied",
+    ident="ubuntu",
+    framework_text='mok_certificate="/tmp/ubuntuA.der"\nmok_signing_key=""\n',
+)
+# Same failure through a drop-in, with no framework.conf content at all.
+expect_partial_refusal(
+    "ubuntu drop-in with only mok_signing_key",
+    ident="ubuntu",
+    dropin_text='mok_signing_key="/tmp/ubuntuA.key"\n',
+)
+expect_partial_refusal(
+    "ubuntu drop-in with only mok_certificate",
+    ident="ubuntu",
+    dropin_text='mok_certificate="/tmp/ubuntuA.der"\n',
+)
+# A drop-in that empties one half of an otherwise complete framework.conf is
+# also incomplete once sourced, in lexical order.
+expect_partial_refusal(
+    "ubuntu complete framework.conf emptied by a later drop-in",
+    ident="ubuntu",
+    framework_text=UBUNTU_A,
+    dropin_text='mok_certificate=""\n',
+)
+# Installer-side overrides cannot complete an incomplete DKMS configuration:
+# DKMS does not read SL4A_MOK_KEY/SL4A_MOK_CERT, so supplying both here would
+# only make the installer validate a pair DKMS is not signing with.
+expect_partial_refusal(
+    "ubuntu partial config completed only by an SL4A override",
+    ident="ubuntu",
+    framework_text='mok_signing_key="/tmp/ubuntuA.key"\n',
+    env={"SL4A_MOK_KEY": "/tmp/ubuntuA.key", "SL4A_MOK_CERT": "/tmp/ubuntuA.der"},
+)
+# Debian/upstream default is /var/lib/dkms, but a partial config is just as
+# unresolved there.
+expect_partial_refusal(
+    "debian framework.conf with only mok_certificate",
+    ident="debian",
+    framework_text='mok_certificate="/tmp/pairA.der"\n',
+)
+
+# Controls: a COMPLETE pair from the configuration is honored unchanged,
+# including a drop-in that supplies the pair and one that supplies the half
+# framework.conf omitted (both halves configured => resolved).
+expect_pair(
+    "ubuntu complete framework.conf pair",
+    "/tmp/ubuntuA.key|/tmp/ubuntuA.der",
+    ident="ubuntu", framework_text=UBUNTU_A,
+)
+expect_pair(
+    "ubuntu complete drop-in pair",
+    "/tmp/ubuntuA.key|/tmp/ubuntuA.der",
+    ident="ubuntu", dropin_text=UBUNTU_A,
+)
+expect_pair(
+    "ubuntu pair split across framework.conf and drop-in",
+    "/tmp/ubuntuA.key|/tmp/ubuntuA.der",
+    ident="ubuntu",
+    framework_text='mok_signing_key="/tmp/ubuntuA.key"\n',
+    dropin_text='mok_certificate="/tmp/ubuntuA.der"\n',
+)
+# Both options explicitly empty is "nothing configured", so the distro default
+# still applies (the pre-existing behavior must not regress into a refusal).
+expect_pair(
+    "ubuntu both options explicitly empty uses distro default",
+    SHIM_PAIR,
+    ident="ubuntu",
+    framework_text='mok_signing_key=""\nmok_certificate=""\n',
+)
+expect_pair(
+    "debian both options explicitly empty uses distro default",
+    "/var/lib/dkms/mok.key|/var/lib/dkms/mok.pub",
+    ident="debian",
+    dropin_text='mok_signing_key=""\nmok_certificate=""\n',
 )
 
 

@@ -448,34 +448,20 @@ quarantine_unowned() {
 # framework.conf.d/*.conf. Ubuntu's packaged default is the shim-signed MOK
 # pair, while upstream/Debian default to /var/lib/dkms. Never validate one pair
 # and then let DKMS sign with another.
+#
+# Order matters, and it is the reason both paths start EMPTY: DKMS's own
+# configuration is sourced first, and the distro defaults below only fill in a
+# pair that the configuration left entirely unset. Seeding the defaults before
+# sourcing (as this used to) turned a *partial* framework.conf — one of the two
+# options set, the other absent or explicitly emptied — into a hybrid identity:
+# the installer validated one configured half plus one distro-default half,
+# while DKMS resolves the missing half by its own packaged rules. That is the
+# pair-A/pair-B split again, so an incomplete pair is refused outright instead
+# of being completed by guesswork. Emulating every DKMS version's rule for
+# deriving a missing half is deliberately not attempted.
 resolve_dkms_mok_paths() {
-	local kernelver cfg mok_signing_key mok_certificate
+	local kernelver cfg mok_signing_key="" mok_certificate=""
 	kernelver="$(uname -r)"
-
-	case "$ID" in
-		ubuntu|linuxmint|pop|neon)
-			mok_signing_key="/var/lib/shim-signed/mok/MOK.priv"
-			mok_certificate="/var/lib/shim-signed/mok/MOK.der"
-			;;
-		zorin)
-			# Zorin is deliberately NOT given an implicit default here.
-			# I can't verify every packaged/version default, and Zorin
-			# packages can disagree with this allowlist: Noble's DKMS
-			# (3.0.11-1ubuntu13) resolves its distro through
-			# ID_LIKE='ubuntu debian' and therefore signs with the
-			# shim-signed (MOK.priv/MOK.der) pair, while the fallthrough
-			# below would have this installer validate/enroll
-			# /var/lib/dkms — a silent pair-A/pair-B split. Start empty and
-			# require the DKMS configuration itself (framework.conf or a
-			# framework.conf.d drop-in, sourced below) to name both paths.
-			mok_signing_key=""
-			mok_certificate=""
-			;;
-		*)
-			mok_signing_key="/var/lib/dkms/mok.key"
-			mok_certificate="/var/lib/dkms/mok.pub"
-			;;
-	esac
 
 	if [ -r /etc/dkms/framework.conf ]; then
 		# Trusted root-owned DKMS configuration; DKMS itself sources this
@@ -495,6 +481,32 @@ resolve_dkms_mok_paths() {
 		# guessed pair is exactly how the installer ends up validating one
 		# identity while DKMS signs with another.
 		fail "Refusing to assume DKMS MOK signing paths on Zorin: packaged Zorin DKMS may resolve its distro through ID_LIKE='ubuntu debian' and sign with the shim-signed MOK pair, which this installer cannot verify. Set BOTH mok_signing_key and mok_certificate explicitly in /etc/dkms/framework.conf (or a framework.conf.d/*.conf drop-in) so DKMS and this installer use the same signing identity, then re-run."
+	fi
+
+	# Half a pair is not an identity this installer can honor. DKMS would keep
+	# the configured half and resolve the other one by its own packaged rules
+	# (version- and distro-dependent), so validating the configured half plus an
+	# assumed half means validating a pair DKMS may not sign with. This runs
+	# before the SL4A override checks on purpose: installer-side overrides must
+	# not be able to complete an incomplete DKMS configuration either.
+	if { [ -n "$mok_signing_key" ] && [ -z "$mok_certificate" ]; } ||
+	   { [ -z "$mok_signing_key" ] && [ -n "$mok_certificate" ]; }; then
+		fail "DKMS configuration sets only one of mok_signing_key/mok_certificate (key='${mok_signing_key}', certificate='${mok_certificate}'). DKMS resolves the missing half itself, so this installer cannot know which pair will actually sign the modules. Set BOTH options in /etc/dkms/framework.conf (or a framework.conf.d/*.conf drop-in), or neither of them to use this distro's default pair, then re-run."
+	fi
+
+	if [ -z "$mok_signing_key" ] && [ -z "$mok_certificate" ]; then
+		# Neither option configured: fall back to the distro default pair. This
+		# is the common case on a stock Ubuntu/Debian install and is unchanged.
+		case "$ID" in
+			ubuntu|linuxmint|pop|neon)
+				mok_signing_key="/var/lib/shim-signed/mok/MOK.priv"
+				mok_certificate="/var/lib/shim-signed/mok/MOK.der"
+				;;
+			*)
+				mok_signing_key="/var/lib/dkms/mok.key"
+				mok_certificate="/var/lib/dkms/mok.pub"
+				;;
+		esac
 	fi
 
 	[ -n "$mok_signing_key" ] && [ -n "$mok_certificate" ] ||
