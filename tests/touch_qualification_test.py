@@ -86,7 +86,8 @@ def build(root, stamp="HEAD", acpi=("MSHW0231",), params=("N", "0", "Y"), srcver
     repo, host, stubs = root / "repo", root / "host", root / "bin"
     helpers = repo / "tools/hardware_evidence"
     helpers.mkdir(parents=True)
-    shutil.copy2(TOOL, repo / "tools/qualify-touch.py")
+    for name in ("qualify-touch.py", "touch_evdev.py"):  # the runner imports its sibling
+        shutil.copy2(TOOL.parent / name, repo / "tools" / name)
     write(repo / "VERSION", VERSION + "\n")
     write(helpers / "collect.sh", COLLECT_FAIL if collect_fail else COLLECT_OK)
     write(helpers / "capture_linux_trace_bundle.sh", CAPTURE)

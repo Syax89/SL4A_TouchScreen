@@ -106,6 +106,18 @@ repository:
   --output ~/sl4a-qual/$(date -u +%Y%m%dT%H%M%SZ)-initial
 ```
 
+For a fully automatic run — three standard gestures, one typed `BRIDGE` consent, four
+bridge gestures, automatic restore of the original parameters and binding — use:
+
+```bash
+sudo python3 tools/qualify-touch.py --guided
+```
+
+It reloads the driver at runtime (never writing `/etc/modprobe.d`) and evaluates the
+evdev stream of the single selected touch node per gesture, with `SYN_DROPPED`, EOF,
+timeouts and leftover contacts failing closed. Cold boot, resume and Secure Boot
+enrollment stay `NOT_TESTED`: they need their own evidence.
+
 It re-checks the recorded build evidence against this exact clean checkout
 before it lets a run be called qualified: the installer's stamp, module
 `vermagic` and `srcversion`. Those are consistency checks — they show the
