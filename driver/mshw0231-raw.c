@@ -1891,9 +1891,9 @@ int mshw0231_raw_input_register(struct spi_hid *shid)
 	struct device *dev = &shid->spi->dev;
 	int ret;
 
-	if (!shid->raw_mode_active)
-		return 0;
-
+	/* The caller decides whether the heatmap-backed MT device is needed.
+	 * This lets the normal HID-over-SPI transport reuse the CapImg tracker
+	 * after an explicit standard-transport activation. */
 	{
 		shid->touch_input = input_allocate_device();
 		if (shid->touch_input) {
