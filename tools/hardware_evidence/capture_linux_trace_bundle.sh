@@ -15,7 +15,8 @@ drivers.
 Options:
   --output DIRECTORY       New bundle directory (default: sl4a-linux-trace-<UTC>)
   --duration SECONDS       Session duration, from 1 through 3600 (default: 20)
-   --capture-direct-touch   Capture an optional bounded direct-touch evtest trace
+   --capture-direct-touch   Capture an optional bounded standard-HID direct-touch evtest trace
+   --capture-beta-multitouch Capture the SL4A heatmap-backed multitouch bridge
    --capture-stylus         Capture an optional bounded stylus evtest trace
   --help                   Show this help
 EOF
@@ -24,6 +25,7 @@ EOF
 output=""
 duration=20
 capture_direct_touch=0
+capture_beta_multitouch=0
 capture_stylus=0
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -39,6 +41,10 @@ while [ "$#" -gt 0 ]; do
 			;;
 		--capture-direct-touch)
 			capture_direct_touch=1
+			shift
+			;;
+		--capture-beta-multitouch)
+			capture_beta_multitouch=1
 			shift
 			;;
 		--capture-stylus)
@@ -119,6 +125,7 @@ printf 'bundle_type=sl4a-linux-trace\n' >> "$manifest"
 printf 'session_start_utc=%s\n' "$start_utc" >> "$manifest"
 printf 'requested_duration_seconds=%s\n' "$duration" >> "$manifest"
 printf 'direct_touch_capture_requested=%s\n' "$capture_direct_touch" >> "$manifest"
+printf 'beta_multitouch_capture_requested=%s\n' "$capture_beta_multitouch" >> "$manifest"
 printf 'stylus_capture_requested=%s\n' "$capture_stylus" >> "$manifest"
 printf 'collector=%s\n' "${BASH_SOURCE[0]}" >> "$manifest"
 printf 'collector_uid=%s\n' "$(id -u)" >> "$manifest"
@@ -211,6 +218,15 @@ else
 	evtest_pid=""
 	evtest_status="not-requested"
 fi
+if [ "$capture_beta_multitouch" -eq 1 ]; then
+	bash "$(dirname "${BASH_SOURCE[0]}")/capture_beta_multitouch.sh" --duration "$duration" \
+		--output "$output/input/beta-multitouch.evtest.txt" &
+	beta_multitouch_pid=$!
+	beta_multitouch_status="running"
+else
+	beta_multitouch_pid=""
+	beta_multitouch_status="not-requested"
+fi
 if [ "$capture_stylus" -eq 1 ]; then
 	"$(dirname "${BASH_SOURCE[0]}")/capture_stylus.sh" --duration "$duration" \
 		--output "$output/input/stylus.evtest.txt" &
@@ -226,6 +242,10 @@ sleep "$duration"
 if [ -n "$evtest_pid" ]; then
 	wait "$evtest_pid"
 	evtest_status=$?
+fi
+if [ -n "$beta_multitouch_pid" ]; then
+	wait "$beta_multitouch_pid"
+	beta_multitouch_status=$?
 fi
 if [ -n "$stylus_pid" ]; then
 	wait "$stylus_pid"
@@ -256,6 +276,7 @@ fi
 printf 'session_end_utc=%s\n' "$end_utc" >> "$manifest"
 printf 'journal_exit_status=%s\n' "$journal_status" >> "$manifest"
 printf 'direct_touch_capture_exit_status=%s\n' "$evtest_status" >> "$manifest"
+printf 'beta_multitouch_capture_exit_status=%s\n' "$beta_multitouch_status" >> "$manifest"
 printf 'stylus_capture_exit_status=%s\n' "$stylus_status" >> "$manifest"
 printf 'artifacts_sha256=\n' >> "$manifest"
 while IFS= read -r artifact; do
@@ -269,3 +290,15 @@ if [ -n "${SUDO_USER:-}" ]; then
 fi
 
 printf 'Linux trace bundle collected in %s\n' "$output"
+
+capture_failed=0
+if [ "$capture_direct_touch" -eq 1 ] && [ "$evtest_status" -ne 0 ]; then
+	capture_failed=1
+fi
+if [ "$capture_beta_multitouch" -eq 1 ] && [ "$beta_multitouch_status" -ne 0 ]; then
+	capture_failed=1
+fi
+if [ "$capture_stylus" -eq 1 ] && [ "$stylus_status" -ne 0 ]; then
+	capture_failed=1
+fi
+[ "$capture_failed" -eq 0 ] || exit 1
