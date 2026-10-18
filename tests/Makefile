@@ -215,6 +215,7 @@ test: protocol_test capimg_decoder_host_test c590_atan2_host_test wire_frames_te
 	$(PYTHON) surface_tracker_oracle_test.py
 	$(PYTHON) raw_consumer_boundary_test.py
 	$(PYTHON) driver_source_sanity_test.py
+	$(PYTHON) header_read_bounds_test.py
 	$(PYTHON) binattr_signature_test.py
 	$(PYTHON) diagnostic_bundle_contract_test.py
 	$(PYTHON) diagnostic_bundle_frame_test.py

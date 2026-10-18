@@ -2171,6 +2171,16 @@ static void spi_hid_seq_descreq_work(struct work_struct *work)
 	const unsigned int hdr_len = spi_hid_hdr_len(shid);
 
 	mutex_lock(&shid->seq_lock);
+
+	/* hdr[] is a fixed-size stack buffer. Keep experimental header-length
+	 * changes fail-closed instead of allowing an oversized SPI read to
+	 * overwrite the stack. */
+	if (WARN_ON_ONCE(hdr_len > sizeof(hdr))) {
+		dev_err(&shid->spi->dev,
+			"SEQ: refusing oversized descriptor header read %u > %zu\n",
+			hdr_len, sizeof(hdr));
+		goto out;
+	}
 	if (READ_ONCE(shid->removing) || READ_ONCE(shid->suspended) ||
 	    !READ_ONCE(shid->seq_enabled) ||
 	    (shid->seq_state != SPI_HID_SEQ_WAIT_DESC &&
@@ -2838,6 +2848,11 @@ static void spi_hid_poll_work(struct work_struct *work)
 	/* Nine pre-DONE (this poller only runs at DONE, so the helper selects on
 	 * raw_mode_active: sixteen for the raw stream, nine standard). */
 	hdr_len = spi_hid_hdr_len(shid);
+	if (WARN_ON_ONCE(hdr_len > sizeof(hdr))) {
+		dev_err(dev, "SEQ: refusing oversized header read %u > %zu\n",
+			hdr_len, sizeof(hdr));
+		goto out;
+	}
 	ret = spi_hid_seq_read(shid, hdr, hdr_len);
 	if (ret)
 		goto resched;
@@ -3151,6 +3166,12 @@ static irqreturn_t spi_hid_seq_thread(int irq, void *_shid)
 	 *
 	 * Nine pre-DONE, sixteen for the raw DONE stream: spi_hid_hdr_len(). */
 	hdr_len = spi_hid_hdr_len(shid);
+	if (WARN_ON_ONCE(hdr_len > sizeof(hdr))) {
+		dev_err(dev, "SEQ: refusing oversized IRQ header read %u > %zu\n",
+			hdr_len, sizeof(hdr));
+		shid->seq_storm_count++;
+		goto out;
+	}
 	if (spi_hid_seq_read(shid, hdr, hdr_len)) {
 		dev_dbg(dev, "sequencer header read failed\n");
 		shid->seq_storm_count++;
